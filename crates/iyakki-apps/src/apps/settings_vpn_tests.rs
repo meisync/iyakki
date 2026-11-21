@@ -286,3 +286,27 @@ fn the_page_switches_the_privileged_helper_on_and_off_and_says_it_adds_no_protec
     // the page draws with the helper line in the empty state too
     let _ = draw(&mut r, 1280, 720);
 }
+
+#[test]
+fn an_openvpn_login_is_typed_on_the_page_into_a_secret_field_and_lands_only_in_the_vault() {
+    let mut r = rig("vpn-login");
+    // a WireGuard profile has no login to type
+    import_clip(&mut r, "Office");
+    press(&mut r, Key::Char('l'));
+    assert!(status(&r).contains("does not ask for a user name"), "{}", status(&r));
+    assert!(r.a.modal.is_none());
+    r.mgr.remove("v1").unwrap();
+    let text = "client\ndev tun\nproto udp\nremote vpn.example.com 1194\nnobind\nauth-user-pass\n<ca>\n-----BEGIN CERTIFICATE-----\nFAKECA\n-----END CERTIFICATE-----\n</ca>\n";
+    let id = r.mgr.import("Home", text.as_bytes()).unwrap().profile.id;
+    assert!(r.vault.get(&format!("vpn.{id}.auth")).is_err());
+    press(&mut r, Key::Char('l'));
+    let Some(Modal::Form(FormKind::Vpn(VpnForm::Login(who)), f)) = &r.a.modal else { panic!("the login form is open") };
+    assert_eq!((who.as_str(), f.fields.len()), (id.as_str(), 2));
+    let said = submit(&mut r, &[(0, "mara"), (1, "PASS-CANARY")], &[]).unwrap();
+    assert!(said.contains("vault") && !said.contains("PASS-CANARY"), "{said}");
+    assert_eq!(r.vault.get(&format!("vpn.{id}.auth")).unwrap().as_str(), "mara\nPASS-CANARY");
+    assert!(!format!("{:?}", r.mgr.rows()).contains("PASS-CANARY"));
+    // an empty password is refused in words and nothing changes
+    press(&mut r, Key::Char('l'));
+    assert!(submit(&mut r, &[(0, "mara"), (1, "")], &[]).is_err());
+}

@@ -41,3 +41,13 @@ fn the_in_process_feature_is_the_one_way_the_agent_comes_in() {
     let t = tree("iyakki-ui-bin", &["in-process"]);
     assert!(!agent_side(&t).is_empty(), "the check sees the agent side when the feature asks for it");
 }
+
+/// The program with the whole shell in it (`socket-shell`) still has no agent, no core and no composition root: every service of the shell comes over
+/// the socket. `iyakki-core-local` (the machine facts the UI reads itself) comes with the shell and is the one crate of that list that is allowed.
+#[test]
+fn the_shell_over_the_socket_is_built_without_the_agent_and_the_core() {
+    let t = tree("iyakki-ui-bin", &["socket-shell"]);
+    assert!(t.iter().any(|n| n == "iyakki-shell"), "the shell is in the tree with the feature on ({} crates)", t.len());
+    let found: Vec<&str> = agent_side(&t).into_iter().filter(|n| *n != "iyakki-core-local").collect();
+    assert!(found.is_empty(), "the shell over the socket must not depend on the agent side, found {found:?}");
+}

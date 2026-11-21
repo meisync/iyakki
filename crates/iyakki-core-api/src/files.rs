@@ -93,6 +93,9 @@ pub enum FileChange {
     Trash { path: String },
     /// The text file `path` gets `text` (a new file, or the old one replaced).
     Save { path: String, text: String },
+    /// The file `path` gets `bytes` (a file a connected client device sent, at most [`MAX_UPLOAD`]; a new file, or the old one replaced). Added for the
+    /// client page's file transfer (F-CLIENT-01); it asks like every other change.
+    SaveBytes { path: String, bytes: Vec<u8> },
 }
 
 /// What the core says to a change: it waits for the person.
@@ -106,6 +109,8 @@ pub struct ChangeAsk {
 /// The most changes one person may have waiting at once, and the biggest text a save carries.
 pub const MAX_PENDING: usize = 4;
 pub const MAX_SAVE: usize = MAX_READ;
+/// The biggest file a client device may send, and the biggest the core hands to one (the client page's file transfer).
+pub const MAX_UPLOAD: usize = 8 * 1024 * 1024;
 
 /// A plain name for a new or renamed entry: 1 to [`MAX_NAME`] characters, no `/`, no control characters, not `.` or `..`, not hidden.
 pub fn check_name(name: &str) -> Result<(), String> {
@@ -148,6 +153,17 @@ pub fn check_change(c: &FileChange) -> Result<(), String> {
             }
             Ok(())
         }
+        FileChange::SaveBytes { path, bytes } => {
+            let names = check_rel(path)?;
+            match names.last() {
+                None => return Err("name a file to save".into()),
+                Some(n) => check_name(n)?,
+            }
+            if bytes.len() > MAX_UPLOAD {
+                return Err(format!("a file from a client is at most {} MB", MAX_UPLOAD / (1024 * 1024)));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -159,6 +175,7 @@ pub fn describe(c: &FileChange) -> String {
         FileChange::Rename { path, new_name } => format!("Rename `{path}` to `{new_name}`"),
         FileChange::Trash { path } => format!("Move `{path}` to the trash"),
         FileChange::Save { path, text } => format!("Save `{path}` ({} bytes), replacing it if it is there", text.len()),
+        FileChange::SaveBytes { path, bytes } => format!("Save `{path}` ({} bytes sent from a connected device), replacing it if it is there", bytes.len()),
     }
 }
 
@@ -204,6 +221,11 @@ pub trait Files: Send + Sync {
     /// The text of the file `path` (at most `max` bytes, never more than [`MAX_READ`]; valid UTF-8 only). A larger file is refused with a
     /// sentence, never cut.
     fn read_text(&self, _user: &str, _path: &str, _max: usize) -> Result<String, String> {
+        Err(NO_FILES.into())
+    }
+    /// The bytes of the file `path` (at most `max`, never more than [`MAX_UPLOAD`]), by the same walk as [`Files::read_text`]: no link, nothing hidden,
+    /// inside the home. A larger file is refused with a sentence, never cut.
+    fn read_bytes(&self, _user: &str, _path: &str, _max: usize) -> Result<Vec<u8>, String> {
         Err(NO_FILES.into())
     }
     /// The book of waiting changes of this core (`None`: this core changes no files).
@@ -289,5 +311,22 @@ mod tests {
         }
         assert!(book.ask("ann", &save).unwrap_err().contains("already waiting"));
         assert!(book.ask("bob", &save).is_ok());
+    }
+
+    #[test]
+    fn a_file_from_a_client_is_a_change_like_any_other_with_its_own_limit_and_a_card_that_names_only_the_name_and_the_size() {
+        let ok = FileChange::SaveBytes { path: "in/photo.jpg".into(), bytes: vec![0xFF; 100] };
+        assert!(check_change(&ok).is_ok());
+        assert_eq!(describe(&ok), "Save `in/photo.jpg` (100 bytes sent from a connected device), replacing it if it is there");
+        assert!(check_change(&FileChange::SaveBytes { path: "a".into(), bytes: vec![0; MAX_UPLOAD + 1] }).is_err());
+        assert!(check_change(&FileChange::SaveBytes { path: "a".into(), bytes: vec![0; MAX_UPLOAD] }).is_ok());
+        for bad in ["", "../x", "/etc/x", "d/.hidden", "a//b"] {
+            assert!(check_change(&FileChange::SaveBytes { path: bad.into(), bytes: vec![1] }).is_err(), "{bad}");
+        }
+        // the old text save keeps its smaller limit
+        assert!(check_change(&FileChange::Save { path: "a.txt".into(), text: "x".repeat(MAX_SAVE + 1) }).is_err());
+        // a core that has no files hands out no bytes
+        assert!(NoFiles.read_bytes("u", "a", 10).is_err());
+        assert_eq!(serde_json::from_str::<FileChange>(&serde_json::to_string(&ok).unwrap()).unwrap(), ok);
     }
 }

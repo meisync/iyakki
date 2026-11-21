@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::apps::tests::{cx_with_admin_store, services_in, temp_dir};
-use iyakki_devctl::mac::{MacEnv, MacMode, MacStore};
-use iyakki_devctl::Control;
+use iyakki_core_api::device_types::devctl::mac::{MacEnv, MacMode, MacStore};
+use iyakki_core_api::device_types::devctl::Control;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -78,13 +78,13 @@ impl Control for Nic {
     fn ipv4(&self) -> Vec<(String, String)> {
         vec![("eno1".into(), "192.168.1.100".into())]
     }
-    fn volume(&self, _: u32) -> Option<iyakki_devctl::Volume> {
+    fn volume(&self, _: u32) -> Option<iyakki_core_api::device_types::devctl::Volume> {
         None
     }
-    fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_devctl::Volume, String> {
+    fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
         Err("no".into())
     }
-    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_devctl::Volume, String> {
+    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
         Err("no".into())
     }
     fn dhcp(&self, n: &str) -> Result<(), String> {
@@ -132,7 +132,7 @@ fn world(tag: &str, refuse: bool, ssh: bool) -> World {
     }
     std::fs::create_dir_all(d.join("etc")).unwrap();
     let nic = Arc::new(Nic { sys: d.join("sys"), calls: Mutex::new(vec![]), refuse });
-    let roots = iyakki_devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") };
+    let roots = iyakki_core_api::device_types::devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") };
     let mac = MacEnv {
         store: MacStore { primary: d.join("etc/net.conf"), fallback: d.join("var/net-mac.conf") },
         secret_path: d.join("var/mac-secret"),
@@ -157,7 +157,7 @@ fn world(tag: &str, refuse: bool, ssh: bool) -> World {
     script("wpa_cli", "exit 1");
     script("wpa_supplicant", "exit 0");
     script("udhcpc", "exit 0");
-    let wifi = WifiEnv { wifi: Arc::new(iyakki_devctl::wifi::Wifi { run_dir: d.join("run"), path: Some(bin) }), known: Arc::new(iyakki_devctl::wifi::KnownStore::new(&d.join("var/wifi.json"))), roots: roots.clone() };
+    let wifi = WifiEnv { wifi: Arc::new(iyakki_core_api::device_types::devctl::wifi::Wifi { run_dir: d.join("run"), path: Some(bin) }), known: Arc::new(iyakki_core_api::device_types::devctl::wifi::KnownStore::new(&d.join("var/wifi.json"))), roots: roots.clone() };
     World { env: DeviceEnv { roots, ctl: nic.clone() }, mac, nic, dir: d, wifi, rec }
 }
 
@@ -232,7 +232,7 @@ fn an_administrator_chooses_a_mode_with_the_button_and_the_list_and_it_is_saved_
 fn apply_now_asks_first_then_changes_the_address_with_the_link_down_and_reconnects() {
     let cx = admin("mac3");
     let w = world("mac3", false, false);
-    w.mac.set_mode(Some(iyakki_devctl::LinkKind::Ethernet), None, MacMode::PerNetwork).unwrap();
+    w.mac.set_mode(Some(iyakki_core_api::device_types::devctl::LinkKind::Ethernet), None, MacMode::PerNetwork).unwrap();
     let mut a = app(&cx, &w);
     let g = draw(&mut a, &cx, 1280, 720);
     click(&mut a, &cx, &g, "Apply MAC now");
@@ -251,8 +251,8 @@ fn apply_now_asks_first_then_changes_the_address_with_the_link_down_and_reconnec
     assert!(status(&a).contains("00:11:22:33:44:55 ->") && status(&a).contains("Reconnecting"), "{}", status(&a));
     assert!(cx.audit.recent(10).iter().any(|l| l.contains("settings.network.mac.apply") && l.contains("eno1")));
     let now = std::fs::read_to_string(w.dir.join("sys/class/net/eno1/address")).unwrap();
-    let m = iyakki_devctl::mac::parse_mac(&now).unwrap();
-    assert!(iyakki_devctl::mac::valid_unicast(&m) && iyakki_devctl::mac::locally_administered(&m));
+    let m = iyakki_core_api::device_types::devctl::mac::parse_mac(&now).unwrap();
+    assert!(iyakki_core_api::device_types::devctl::mac::valid_unicast(&m) && iyakki_core_api::device_types::devctl::mac::locally_administered(&m));
     assert!(a.dev_rows()[2].chips.iter().any(|c| c.0 == "private"));
     let log = std::fs::read_to_string(&w.rec).unwrap();
     assert!(log.contains("udhcpc -b -R -i eno1 -p") && !log.contains(" -x") && !log.contains(" -F") && !log.contains(" -H"), "a new DHCP request, no host name: {log}");
@@ -272,26 +272,26 @@ fn applying_to_wifi_sets_the_address_for_the_network_it_is_on_and_the_supplicant
     key(&mut a, &cx, Key::Char('y'));
     settle(&mut a, &cx);
     let now = std::fs::read_to_string(w.dir.join("sys/class/net/wlan0/address")).unwrap();
-    let (secret, _) = iyakki_devctl::mac::load_secret(&w.mac.secret_path);
-    let want = iyakki_devctl::mac::derive(&secret, iyakki_devctl::LinkKind::Wifi, "aa:bb:cc:dd:ee:ff", "ssid:Home Net");
-    assert_eq!(now.trim(), iyakki_devctl::mac::fmt_mac(&want), "made for the network the adapter is on, as `iw dev wlan0 link` says");
+    let (secret, _) = iyakki_core_api::device_types::devctl::mac::load_secret(&w.mac.secret_path);
+    let want = iyakki_core_api::device_types::devctl::mac::derive(&secret, iyakki_core_api::device_types::devctl::LinkKind::Wifi, "aa:bb:cc:dd:ee:ff", "ssid:Home Net");
+    assert_eq!(now.trim(), iyakki_core_api::device_types::devctl::mac::fmt_mac(&want), "made for the network the adapter is on, as `iw dev wlan0 link` says");
     let conf = std::fs::read_to_string(w.dir.join("run/wpa_supplicant-wlan0.conf")).unwrap();
     assert!(conf.contains("preassoc_mac_addr=1"), "{conf}");
     let log = std::fs::read_to_string(&w.rec).unwrap();
     assert!(log.contains("iw dev wlan0 link") && log.contains("wpa_supplicant -B -i wlan0") && log.contains("udhcpc -b -R -i wlan0"), "{log}");
     // joining another network sets that network's address first
-    let k = iyakki_devctl::wifi::Known::new("Cafe", "", iyakki_devctl::wifi::Security::Open, false, 5).unwrap();
+    let k = iyakki_core_api::device_types::devctl::wifi::Known::new("Cafe", "", iyakki_core_api::device_types::devctl::wifi::Security::Open, false, 5).unwrap();
     a.join_wifi(&cx, k);
     settle(&mut a, &cx);
     let after = std::fs::read_to_string(w.dir.join("sys/class/net/wlan0/address")).unwrap();
-    let cafe = iyakki_devctl::mac::derive(&secret, iyakki_devctl::LinkKind::Wifi, "aa:bb:cc:dd:ee:ff", "ssid:Cafe");
-    assert_eq!(after.trim(), iyakki_devctl::mac::fmt_mac(&cafe), "{}", status(&a));
+    let cafe = iyakki_core_api::device_types::devctl::mac::derive(&secret, iyakki_core_api::device_types::devctl::LinkKind::Wifi, "aa:bb:cc:dd:ee:ff", "ssid:Cafe");
+    assert_eq!(after.trim(), iyakki_core_api::device_types::devctl::mac::fmt_mac(&cafe), "{}", status(&a));
     assert_ne!(after, now);
     // a network chosen as Off gets the hardware address back
     let mut cfg = w.mac.config();
     cfg.ssids.insert("Home Net".into(), MacMode::Off);
     w.mac.store.save(&cfg).unwrap();
-    let k = iyakki_devctl::wifi::Known::new("Home Net", "", iyakki_devctl::wifi::Security::Open, false, 6).unwrap();
+    let k = iyakki_core_api::device_types::devctl::wifi::Known::new("Home Net", "", iyakki_core_api::device_types::devctl::wifi::Security::Open, false, 6).unwrap();
     a.join_wifi(&cx, k);
     settle(&mut a, &cx);
     assert_eq!(std::fs::read_to_string(w.dir.join("sys/class/net/wlan0/address")).unwrap().trim(), "aa:bb:cc:dd:ee:ff", "{}", status(&a));
@@ -319,7 +319,7 @@ fn the_adapter_that_carries_the_session_in_use_is_named_in_the_warning() {
 fn a_driver_that_refuses_is_reported_clearly_and_the_adapter_is_left_as_it_was() {
     let cx = admin("mac5");
     let w = world("mac5", true, false);
-    w.mac.set_mode(Some(iyakki_devctl::LinkKind::Ethernet), None, MacMode::Random).unwrap();
+    w.mac.set_mode(Some(iyakki_core_api::device_types::devctl::LinkKind::Ethernet), None, MacMode::Random).unwrap();
     let mut a = app(&cx, &w);
     key(&mut a, &cx, Key::Char('a'));
     key(&mut a, &cx, Key::Char('y'));
@@ -335,7 +335,7 @@ fn a_driver_that_refuses_is_reported_clearly_and_the_adapter_is_left_as_it_was()
 fn switching_ethernet_on_sets_the_private_address_before_the_link_and_dhcp() {
     let cx = admin("mac6");
     let w = world("mac6", false, false);
-    w.mac.set_mode(Some(iyakki_devctl::LinkKind::Ethernet), None, MacMode::PerNetwork).unwrap();
+    w.mac.set_mode(Some(iyakki_core_api::device_types::devctl::LinkKind::Ethernet), None, MacMode::PerNetwork).unwrap();
     put(w.dir.join("sys/class/net/eno1/flags"), "0x1002\n"); // off
     let mut a = app(&cx, &w);
     key(&mut a, &cx, Key::Enter);
@@ -350,7 +350,7 @@ fn a_window_on_another_computer_only_shows_the_address_and_says_the_host_manages
     let cx = admin("mac7");
     let w = world("mac7", false, false);
     let d = temp_dir("mac7-virt");
-    let Ok(v) = iyakki_storage::virt::VirtualDisks::open(&d) else { return };
+    let Ok(v) = iyakki_core_api::device_types::storage::virt::VirtualDisks::open(&d) else { return };
     let env = StorageEnv { roots: v.roots(), mounter: Arc::new(v.mounter()), mke2fs: "/usr/sbin/mke2fs".into(), scratch: d.clone(), data_dir: d.clone(), virtual_disks: Some(v) };
     let mut a = app(&cx, &w).with_storage(env);
     let rows = a.dev_rows();

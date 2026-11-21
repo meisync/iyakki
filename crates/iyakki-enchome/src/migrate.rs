@@ -23,6 +23,7 @@ use crate::{human, EncHome, HomeError, RecoveryText, FREE_MARGIN, MIN_PAYLOAD, S
 pub const FLASH_NOTE: &str = "Deleting the old copy on a USB stick, SSD or other flash storage does not erase its old blocks: the drive may keep the plain data readable until it overwrites or trims it. If this computer or drive was already lost or stolen, encrypting afterwards protects nothing. The strong form is to copy to a freshly formatted drive and then erase the old one completely.";
 
 const MAX_DEPTH: u32 = 64;
+const CANCELLED: &str = "\u{0}cancelled";
 
 /// What a migration would do, found without changing anything.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,6 +143,8 @@ pub enum Step {
     StagingUnmounted,
     PlainRenamed,
     Switched,
+    /// The big copy reached this many percent (1 to 99), reported when the number changes.
+    CopyProgress(u8),
 }
 
 #[derive(Debug)]
@@ -173,7 +176,34 @@ fn sha_of(p: &Path) -> std::io::Result<[u8; 32]> {
     Ok(h.finalize().into())
 }
 
-fn copy_tree(src: &Path, dst: &Path, depth: u32, n: &mut u64) -> Result<(), HomeError> {
+/// What the copy tells and asks: the bytes done of the total (percent changes are reported, `false` stops like a power cut) and whether the person
+/// cancelled.
+struct Ctl<'a> {
+    cancel: &'a dyn Fn() -> bool,
+    notify: &'a mut dyn FnMut(u8) -> bool,
+    bytes: u64,
+    total: u64,
+    last: u8,
+}
+
+impl Ctl<'_> {
+    fn after_file(&mut self, len: u64) -> Result<(), HomeError> {
+        if (self.cancel)() {
+            return Err(HomeError::Cancelled);
+        }
+        self.bytes += len;
+        let pct = (self.bytes.saturating_mul(100) / self.total.max(1)).min(99) as u8;
+        if pct > self.last {
+            self.last = pct;
+            if !(self.notify)(pct) {
+                return Err(HomeError::Io("stopped".into()));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn copy_tree(src: &Path, dst: &Path, depth: u32, n: &mut u64, ctl: &mut Ctl) -> Result<(), HomeError> {
     if depth > MAX_DEPTH {
         return Err(HomeError::Io("a folder is nested too deeply".into()));
     }
@@ -184,7 +214,7 @@ fn copy_tree(src: &Path, dst: &Path, depth: u32, n: &mut u64) -> Result<(), Home
         let ft = md.file_type();
         if ft.is_dir() {
             fs::create_dir(&to).map_err(|e2| HomeError::Io(format!("{}: {e2}", to.display())))?;
-            copy_tree(&from, &to, depth + 1, n)?;
+            copy_tree(&from, &to, depth + 1, n, ctl)?;
             let _ = fs::set_permissions(&to, fs::Permissions::from_mode(md.mode() & 0o7777));
             let _ = std::os::unix::fs::lchown(&to, Some(md.uid()), Some(md.gid()));
         } else if ft.is_symlink() {
@@ -202,6 +232,7 @@ fn copy_tree(src: &Path, dst: &Path, depth: u32, n: &mut u64) -> Result<(), Home
                 let _ = w.set_times(fs::FileTimes::new().set_modified(t));
             }
             *n += 1;
+            ctl.after_file(md.len())?;
         }
     }
     Ok(())
@@ -209,7 +240,12 @@ fn copy_tree(src: &Path, dst: &Path, depth: u32, n: &mut u64) -> Result<(), Home
 
 /// Compare the copy with the original, file by file, reading both again. Returns the number of files checked.
 pub fn verify(src: &Path, dst: &Path) -> Result<u64, HomeError> {
-    fn go(src: &Path, dst: &Path, depth: u32, n: &mut u64) -> Result<(), String> {
+    verify_cancellable(src, dst, &|| false)
+}
+
+/// [`verify`] that stops with [`HomeError::Cancelled`] between two files when `cancel` says so.
+pub fn verify_cancellable(src: &Path, dst: &Path, cancel: &dyn Fn() -> bool) -> Result<u64, HomeError> {
+    fn go(src: &Path, dst: &Path, depth: u32, n: &mut u64, cancel: &dyn Fn() -> bool) -> Result<(), String> {
         if depth > MAX_DEPTH {
             return Err("nested too deeply".into());
         }
@@ -236,7 +272,7 @@ pub fn verify(src: &Path, dst: &Path) -> Result<u64, HomeError> {
                 if !mb.file_type().is_dir() || ma.mode() & 0o7777 != mb.mode() & 0o7777 {
                     return Err(format!("folder differs: {}", b.display()));
                 }
-                go(&a, &b, depth + 1, n)?;
+                go(&a, &b, depth + 1, n, cancel)?;
             } else if ft.is_symlink() {
                 if !mb.file_type().is_symlink() || fs::read_link(&a).ok() != fs::read_link(&b).ok() {
                     return Err(format!("link differs: {}", b.display()));
@@ -244,6 +280,9 @@ pub fn verify(src: &Path, dst: &Path) -> Result<u64, HomeError> {
             } else {
                 if !mb.file_type().is_file() || ma.len() != mb.len() || ma.mode() & 0o7777 != mb.mode() & 0o7777 {
                     return Err(format!("file differs in size or mode: {}", b.display()));
+                }
+                if cancel() {
+                    return Err(CANCELLED.into());
                 }
                 let (ha, hb) = (sha_of(&a).map_err(|e| format!("{}: {e}", a.display()))?, sha_of(&b).map_err(|e| format!("{}: {e}", b.display()))?);
                 if ha != hb {
@@ -255,7 +294,7 @@ pub fn verify(src: &Path, dst: &Path) -> Result<u64, HomeError> {
         Ok(())
     }
     let mut n = 0;
-    go(src, dst, 0, &mut n).map_err(|e| HomeError::Io(format!("verification failed: {e}")))?;
+    go(src, dst, 0, &mut n, cancel).map_err(|e| if e == CANCELLED { HomeError::Cancelled } else { HomeError::Io(format!("verification failed: {e}")) })?;
     Ok(n)
 }
 
@@ -275,6 +314,13 @@ fn undo(env: &EncHome, user: &str) {
 /// Run the migration. `password` is the sign-in password. `step` is told each step as it is reached; returning `false` stops dead there
 /// (a test's power cut; real callers always return true).
 pub fn run(env: &EncHome, user: &str, password: &str, step: &mut dyn FnMut(Step) -> bool) -> Result<Report, HomeError> {
+    run_cancellable(env, user, password, step, &|| false)
+}
+
+/// [`run`] that the person can cancel (`cancel` is asked between files and between steps): up to the moment the old home is put aside a
+/// cancel undoes everything built (the plain home was never touched) and ends with [`HomeError::Cancelled`]; from that moment (the switch, a
+/// few quick renames) it is no longer asked, because half a switch is worse than a finished one.
+pub fn run_cancellable(env: &EncHome, user: &str, password: &str, step: &mut dyn FnMut(Step) -> bool, cancel: &dyn Fn() -> bool) -> Result<Report, HomeError> {
     let p = plan(env, user)?;
     if !p.ok() {
         return Err(HomeError::NotConfirmed(p.problems.join(" ")));
@@ -285,9 +331,15 @@ pub fn run(env: &EncHome, user: &str, password: &str, step: &mut dyn FnMut(Step)
     fs::create_dir_all(env.dir()).map_err(|e| HomeError::Io(e.to_string()))?;
     fs::write(building_marker(env, user), b"migration in progress").map_err(|e| HomeError::Io(e.to_string()))?;
     let result = (|| -> Result<Report, HomeError> {
+        if cancel() {
+            return Err(HomeError::Cancelled);
+        }
         let recovery = env.make_container(user, password, p.payload, false)?;
         if !step(Step::ContainerMade) {
             return Err(HomeError::Io("stopped".into()));
+        }
+        if cancel() {
+            return Err(HomeError::Cancelled);
         }
         let st = staging(env, user);
         fs::create_dir_all(&st).map_err(|e| HomeError::Io(e.to_string()))?;
@@ -298,17 +350,22 @@ pub fn run(env: &EncHome, user: &str, password: &str, step: &mut dyn FnMut(Step)
         let src = env.mount_point(user);
         let mut copied = 0;
         if src.is_dir() {
-            copy_tree(&src, &st, 0, &mut copied)?;
+            let mut notify = |pct: u8| step(Step::CopyProgress(pct));
+            let mut ctl = Ctl { cancel, notify: &mut notify, bytes: 0, total: p.bytes, last: 0 };
+            copy_tree(&src, &st, 0, &mut copied, &mut ctl)?;
         }
         if !step(Step::Copied) {
             return Err(HomeError::Io("stopped".into()));
         }
-        let checked = if src.is_dir() { verify(&src, &st)? } else { 0 };
+        let checked = if src.is_dir() { verify_cancellable(&src, &st, cancel)? } else { 0 };
         if checked != copied {
             return Err(HomeError::Io(format!("verification failed: {copied} files copied but {checked} checked")));
         }
         if !step(Step::Verified) {
             return Err(HomeError::Io("stopped".into()));
+        }
+        if cancel() {
+            return Err(HomeError::Cancelled);
         }
         // ---- the switch: from here the plain home is only renamed, never deleted ----
         env.kernel.umount(&st).map_err(|e| HomeError::Kernel(e.to_string()))?;

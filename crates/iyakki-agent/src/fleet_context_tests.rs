@@ -14,7 +14,7 @@ fn tmp(tag: &str) -> PathBuf {
 }
 
 fn hb() -> Heartbeat {
-    Heartbeat { disk_free_mb: 5000, disk_total_mb: 9000, cpu_load_pct: 10, cpus: 4, mem_used_pct: 20, mem_total_mb: 8000, tasks_running: 0, models: vec![] }
+    Heartbeat { disk_free_mb: 5000, disk_total_mb: 9000, cpu_load_pct: 10, cpus: 4, mem_used_pct: 20, mem_total_mb: 8000, tasks_running: 0, models: vec![], battery_pct: None }
 }
 
 struct Side {

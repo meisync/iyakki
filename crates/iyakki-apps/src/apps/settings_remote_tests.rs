@@ -81,7 +81,7 @@ fn it_is_off_by_default_turns_on_with_the_exposure_said_and_off_again_and_is_aud
 #[test]
 fn it_refuses_to_turn_on_without_an_administrator_with_a_password_and_for_ordinary_accounts() {
     let mut cx = admin("remote2");
-    cx.store = Arc::new(std::sync::Mutex::new(crate::accounts::UserStore::open(&temp_dir("remote2-users").join("users.json")).unwrap()));
+    cx.store = crate::accounts::UsersRef::of_store(&Arc::new(std::sync::Mutex::new(crate::accounts::UserStore::open(&temp_dir("remote2-users").join("users.json")).unwrap())));
     let mut a = page(&cx);
     a.handle(&Event::Key(Key::Char('e')), &cx);
     assert!(!cx.services.web_access_on());

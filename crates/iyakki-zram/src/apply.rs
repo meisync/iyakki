@@ -35,6 +35,7 @@ pub trait Swapper {
 
 pub struct KernelSwap;
 
+#[cfg(unix)]
 fn cpath(p: &Path) -> Result<std::ffi::CString, String> {
     use std::os::unix::ffi::OsStrExt;
     std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|e| e.to_string())
@@ -310,6 +311,14 @@ fn active_zram_from(s: &MemStats) -> Option<&str> {
 }
 
 /// Free bytes where `path` lives.
+#[cfg(not(unix))]
+fn free_bytes(_dir: &Path) -> Option<u64> {
+    // swap files are a Linux feature; a build for another system (the installer's planner) never asks
+    None
+}
+
+/// Free bytes where `path` lives.
+#[cfg(unix)]
 fn free_bytes(dir: &Path) -> Option<u64> {
     let c = cpath(dir).ok()?;
     // SAFETY: valid path and a writable, correctly sized statvfs.
@@ -371,10 +380,16 @@ pub fn apply_swapfile(sw: &dyn Swapper, env: &Env, path: &Path, bytes: Option<u6
 
 fn write_zero_file(path: &Path, bytes: u64) -> Result<(), String> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension("tmp");
     let _ = std::fs::remove_file(&tmp);
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
     let chunk = vec![0u8; MIB as usize];
     let mut left = bytes;
     while left > 0 {

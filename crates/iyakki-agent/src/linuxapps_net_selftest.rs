@@ -5,7 +5,7 @@ use iyakki_shared::linuxapps_net::*;
 use crate::qprintln;
 
     use std::io::{BufRead, BufReader, Write};
-    use std::process::{Command, Stdio};
+    use iyakki_core_local::starters_launch::{Launch, Stream};
     use std::time::Duration;
 
     pub const SUBCOMMAND: &str = "selftest-netprobe";
@@ -64,7 +64,7 @@ use crate::qprintln;
         spec.net_resolv = "/run/iyakki-selftest-resolv".into();
 
         let targets = [format!("allowed=10.0.2.2:{allow}"), format!("denied=10.0.2.2:{deny}"), format!("host={}:{lport}", veth.host_ip)];
-        let child = Command::new(exe).arg(SUBCOMMAND).args(&targets).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
+        let child = Launch::new(exe).arg(SUBCOMMAND).args(&targets).stdin(Stream::Piped).stdout(Stream::Piped).stderr(Stream::Null).spawn();
         let Ok(mut child) = child else { return vec![("probe-start".into(), false, "could not start the probe".into())] };
         let mut reader = BufReader::new(child.stdout.take().expect("piped"));
         let mut first = String::new();

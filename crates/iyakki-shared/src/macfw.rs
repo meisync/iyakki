@@ -13,7 +13,7 @@ pub const CHAT_PROMPT: &str = include_str!("macfw_prompt.txt");
 pub const NOTICE: &str = "These files are Apple's. They stay on this machine, are never uploaded and are not part of IYAKKI.";
 
 /// Where the files come from.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Source {
     Download,
     /// A disk image file.

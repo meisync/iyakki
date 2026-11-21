@@ -67,6 +67,14 @@ done
 install -m 0644 "$SAMPLES_SRC/README.md" "$SAMPLES_SRC/LICENSE" "$SAMPLES_DST/"
 # (kept writable by mode so that Buildroot can clean its copy as a normal user; "read-only" is what MEDIA does with the folder)
 
+# Manual-test checklists for people (dist/manual/*.chk), read by the Doctor app's "Manual tests" tab through its port; read-only data.
+MANUAL_SRC="${BR2_EXTERNAL_IYAKKI_PATH}/../manual"
+if [ -d "$MANUAL_SRC" ]; then
+  for f in "$MANUAL_SRC"/*.chk; do
+    [ -f "$f" ] && install -D -m 0644 "$f" "$TARGET_DIR/usr/share/iyakki/manual/$(basename "$f")"
+  done
+fi
+
 # Attribution: our license, notices, and the licenses of the statically linked Rust crates.
 DOC="$TARGET_DIR/usr/share/doc/iyakki"
 REPO="${BR2_EXTERNAL_IYAKKI_PATH}/../.."

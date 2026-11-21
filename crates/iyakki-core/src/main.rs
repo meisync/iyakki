@@ -61,7 +61,7 @@ USAGE:
   iyakki swarm-run <module> [--entry n] [--wait <secs>]
                                       run a module on a discovered LAN peer
   iyakki ledger-verify <file>           verify a replay ledger's hash chain
-  iyakki pkg <keygen|build|sign|verify|catalog-add|cert-issue|revoke-sign|license-issue|validate|pack|publish>
+  iyakki pkg <keygen|build|sign|verify|catalog-add|root-line|root-pin|roots-check|host-check|cert-issue|revoke-sign|license-issue|validate|pack|publish>
                                       make and check signed app-store packages, catalogs and licences, offline; publish to a private store
                                       (docs/STORE.md, docs/APP-AUTHORING.md)
   iyakki store-server --data DIR [--listen 0.0.0.0:8080] [--publish-token-file F] [--catalog-key-file F | --catalog-seed-file F]
@@ -195,7 +195,7 @@ fn real_main() -> ExitCode {
         "mem" => mem_cmd(&args[1..]),
         // the kernel log kept on the data volume across crashes, and the list of sessions (docs/TROUBLESHOOTING.md)
         "log" => {
-            let boot = iyakki_core::crashlog::current_session().map(|s| s.boot_id).unwrap_or_else(|| std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default().trim().replace('-', "").chars().take(8).collect());
+            let boot = iyakki_core::crashlog::current_session().map(|s| s.boot_id).unwrap_or_else(|| iyakki_core_local::kernelfacts::boot_id_compact().chars().take(8).collect());
             let (text, ok) = iyakki_core::crashlog::cli(&args[1..], std::path::Path::new(iyakki_core::boot::DATA_DIR), &boot);
             print!("{text}");
             if ok { ExitCode::SUCCESS } else { ExitCode::from(1) }
@@ -304,6 +304,7 @@ fn real_main() -> ExitCode {
         }
         #[cfg(feature = "shell")]
         "quick-install" => ExitCode::from(iyakki_agent::quickinstall::cli_main(&args[1..]).clamp(0, 255) as u8),
+        "browser-package" => ExitCode::from(iyakki_agent::browserpkg_build::cli_main(&args[1..]).clamp(0, 255) as u8),
         "dlmanifest" => ExitCode::from(iyakki_agent::dlmanifest::cli_main(&args[1..]).clamp(0, 255) as u8),
         "firmware" => ExitCode::from(iyakki_agent::fwextra_cli::firmware_main(&args[1..]).clamp(0, 255) as u8),
         "new-app" => ExitCode::from(iyakki_agent::newapp::cli(&args[1..]).clamp(0, 255) as u8),
@@ -345,6 +346,11 @@ fn real_main() -> ExitCode {
             }
             // a build without the shell has nothing else to serve
             if !cfg!(feature = "shell") {
+                // the headless image: the kernel started this program as the init with no arguments; what to serve comes from the kernel line or
+                // the image's service file (headlessboot.rs), and the machine is booted first (F-WEBSVC-15)
+                #[cfg(all(feature = "headless", not(feature = "shell")))]
+                return serve_image(serve_args(&args));
+                #[cfg(not(all(feature = "headless", not(feature = "shell"))))]
                 return fail("this build is the headless web service only: use `iyakki serve --profile NAME` (or set IYAKKI_PROFILE)".into());
             }
             // Real boot = we are PID 1 *and* nothing has mounted /proc yet. A container's PID 1 (docker, k3s)
@@ -673,6 +679,8 @@ fn real_main() -> ExitCode {
             // (tests/live_restart_start.rs reads this file to make sure).
             if pid1 || restarted {
                 let cmdline = iyakki_storage::cmdline_text();
+                #[cfg(not(feature = "shell"))]
+                let _ = &cmdline;
                 // the new program of a live restart: if it does not report healthy in time the watchdog starts the old program again
                 if let Some(st) = live_start.as_ref().filter(|s| !s.rolled_back) {
                     let _ = st;
@@ -697,6 +705,7 @@ fn real_main() -> ExitCode {
                                 }
                             }
                         }
+                        #[cfg(feature = "shell")]
                         SHELL_STOP.store(true, std::sync::atomic::Ordering::SeqCst);
                         std::thread::sleep(std::time::Duration::from_millis(600));
                         // SAFETY: sync(2) takes no arguments and cannot fail in a way that matters here
@@ -736,7 +745,7 @@ fn real_main() -> ExitCode {
                     let _ = std::thread::Builder::new().name("iyakki-webtest".into()).spawn(move || {
                         // wait for a default route (DHCP) so real sites can load
                         for _ in 0..240 {
-                            if std::fs::read_to_string("/proc/net/route").is_ok_and(|r| r.lines().skip(1).any(|l| l.split_whitespace().nth(1) == Some("00000000"))) {
+                            if iyakki_core_local::kernelfacts::has_default_route() {
                                 break;
                             }
                             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -1022,19 +1031,19 @@ fn mem_report(stage: &str) {
     let experiment = iyakki_zram::compressed::resolve_experiment(&iyakki_storage::cmdline_text(), &rd(iyakki_zram::CONF_PATH)).0 == iyakki_zram::compressed::Experiment::On;
     if experiment || wants_file(&rd(iyakki_zram::CONF_PATH)) || iyakki_core::boot::cmdline_param(&iyakki_storage::cmdline_text(), "iyakki.swapfile").is_some_and(|v| v != "off" && v != "0") {
         for _ in 0..80 {
-            if rd("/proc/swaps").contains(iyakki_zram::SWAPFILE_PATH) {
+            if iyakki_storage::swaps_text().contains(iyakki_zram::SWAPFILE_PATH) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
     }
-    for l in rd("/proc/swaps").lines() {
+    for l in iyakki_storage::swaps_text().lines() {
         out!("IYAKKI-SELFTEST {stage} swaps {l}");
     }
-    out!("IYAKKI-SELFTEST {stage} zram algo {}", rd("/sys/block/zram0/comp_algorithm").trim());
-    out!("IYAKKI-SELFTEST {stage} zram disksize {}", rd("/sys/block/zram0/disksize").trim());
-    out!("IYAKKI-SELFTEST {stage} swappiness {}", rd("/proc/sys/vm/swappiness").trim());
-    out!("IYAKKI-SELFTEST {stage} page-cluster {}", rd("/proc/sys/vm/page-cluster").trim());
+    out!("IYAKKI-SELFTEST {stage} zram algo {}", iyakki_core_local::kernelfacts::zram_attr("comp_algorithm").trim());
+    out!("IYAKKI-SELFTEST {stage} zram disksize {}", iyakki_core_local::kernelfacts::zram_attr("disksize").trim());
+    out!("IYAKKI-SELFTEST {stage} swappiness {}", iyakki_core_local::kernelfacts::vm_setting("swappiness").trim());
+    out!("IYAKKI-SELFTEST {stage} page-cluster {}", iyakki_core_local::kernelfacts::vm_setting("page-cluster").trim());
     for l in rd(iyakki_zram::CONF_PATH).lines() {
         out!("IYAKKI-SELFTEST {stage} system.conf {l}");
     }
@@ -1234,7 +1243,8 @@ static SHARED_ENV: std::sync::Mutex<Option<iyakki_shell::shell::ShellEnv>> = std
 /// The root objects the UI socket serves when its `rpc` switch is on (F-SPLIT-03): the composition root knows which real object answers each trait.
 #[cfg(feature = "shell")]
 fn rpc_factory(env: &iyakki_shell::shell::ShellEnv) -> Option<iyakki_agent::contract_local::uiserve::RpcFactory> {
-    Some(iyakki_compose::rpc::RpcRoots::new().with_audit(env.audit.clone()).factory())
+    let os = iyakki_compose::rpc::ui_os(std::sync::Arc::new(iyakki_core_local::LocalOs::system()), env.data_dir());
+    Some(iyakki_compose::rpc::RpcRoots::new().with_audit(env.audit.clone()).with_users(env.store.clone()).with_env(os, env.store.clone()).with_file_scope(std::sync::Arc::new(iyakki_agent::corehandle::LocalFileScope)).with_host(env.host.clone()).with_core(std::sync::Arc::new(iyakki_agent::corehandle::AgentCore::new(iyakki_compose::real_services(&env.services)))).with_runs(iyakki_shell::shell::core_run_starter(env)).factory())
 }
 
 #[cfg(feature = "shell")]
@@ -1343,8 +1353,15 @@ fn start_ui(cmdline: &str) {
         return;
     }
     log::info!("boot: the UI runs as its own program (iyakki-ui), supervised");
+    // the program connects to the core's UI socket: switch it on with the program's scopes and the objects before the program starts (it waits for the
+    // watcher to open the socket); an administrator's wider grant stays
+    match iyakki_agent::contract_local::uiserve::hand_over(std::path::Path::new(iyakki_core::boot::DATA_DIR)) {
+        Ok(true) => log::info!("ui program: the UI socket was switched on for it"),
+        Ok(false) => {}
+        Err(e) => log::warn!("ui program: the UI socket could not be set up: {e}"),
+    }
     let audit: iyakki_core::helpers::Audit = std::sync::Arc::new(|event, detail| log::info!("ui program: {event} {detail}"));
-    let handle = iyakki_core::uiprocess::start(exe, "/dev/fb0", audit);
+    let handle = iyakki_core::uiprocess::start(exe, iyakki_core_local::kernelfacts::DEFAULT_FB, audit);
     let _ = std::thread::Builder::new().name("iyakki-ui-watch".into()).spawn(move || {
         while !iyakki_core::uiprocess::give_up_falls_back(&handle.state()) {
             std::thread::sleep(std::time::Duration::from_secs(2));
@@ -1355,6 +1372,7 @@ fn start_ui(cmdline: &str) {
     });
 }
 
+#[cfg(feature = "shell")]
 fn start_shell_thread() {
     // a big stack (the renderer and the apps are stack hungry) and a guard: if the shell panics the message is
     // printed (panic hook) and the shell starts again, instead of the whole system going down with it
@@ -1650,9 +1668,9 @@ fn start_devmode_watch() {
         let accounts = env.store.clone();
         let policy_of: std::sync::Arc<dyn Fn(&str) -> Option<iyakki_sec::policy::Policy> + Send + Sync> = std::sync::Arc::new(move |user: &str| accounts.lock().ok().and_then(|s| s.get(user).map(|r| r.policy())));
         let agent = iyakki_agent::corehandle::AgentCore::new(iyakki_agent::services::Services::from_handle(&env.services))
-            .with_embedded_assistant(env.chat.clone(), policy_of.clone(), std::sync::Arc::new(iyakki_core::svc::ShellAudit(env.audit.clone())))
+            .with_embedded_assistant(env.chat.clone(), policy_of.clone(), std::sync::Arc::new(iyakki_core::svc::ShellAudit({ let a = env.audit.clone(); std::sync::Arc::new(move |u: &str, e: &str, d: &str| a.record(u, e, d)) })))
             .with_embedded_cameras(policy_of);
-        let facets = iyakki_agent::contract_local::uiserve::Facets { assistant: Some(agent.shared_assistant()), cameras: Some(agent.shared_cameras()), rpc: rpc_factory(&env) };
+        let facets = iyakki_agent::contract_local::uiserve::Facets { assistant: Some(agent.shared_assistant()), cameras: Some(agent.shared_cameras()), rpc: rpc_factory(&env), bulk: Some(std::sync::Arc::new(iyakki_compose::frames::FrameBulk::new().with_cameras(agent.shared_cameras()))) };
         let _ = iyakki_agent::contract_local::uiserve::watch_with(core, env.hostname.clone(), std::path::PathBuf::from("/run/iyakki/ui/ui.sock"), facets);
     }
     // "Serve this desktop to browsers" (Settings -> Remote access) follows its switch, in its own thread
@@ -1689,6 +1707,38 @@ fn serve_profile(ask: &iyakki_core::svc::Ask) -> ExitCode {
     }
 }
 
+/// The headless image's start (no shell in this build): as the init of a real boot, mount the pseudo file systems, bring the machine up (drivers,
+/// data volume, network, firewall) and only then serve what `headlessboot::image_ask` says; as an ordinary process (a container, a test) just serve.
+/// A service that ends as process 1 powers the machine off.
+#[cfg(all(feature = "headless", not(feature = "shell")))]
+fn serve_image(args: &[String]) -> ExitCode {
+    let real = iyakki_core::headlessboot::is_real_boot(std::process::id(), std::path::Path::new("/proc/self").exists());
+    if real {
+        std::env::set_var("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
+        iyakki_core::boot::mount_pseudo_filesystems();
+        iyakki_core::boot::early_boot();
+        // process 1 reaps the children nobody waits for
+        let _ = std::thread::Builder::new().name("iyakki-reaper".into()).spawn(|| loop {
+            iyakki_core::reap_children();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
+    }
+    let cmdline = if real { iyakki_storage::cmdline_text() } else { String::new() };
+    let config_present = std::path::Path::new(iyakki_agent::webservice::config::DEFAULT_PATH).exists();
+    let code = match iyakki_core::headlessboot::image_ask(args, &|k| std::env::var(k).ok(), &cmdline, config_present) {
+        Ok(Some(ask)) => serve_profile(&ask),
+        Ok(None) => fail("nothing to serve: use `iyakki serve --profile NAME`, set IYAKKI_PROFILE, add iyakki.profile=NAME to the kernel line, or provide /etc/iyakki/service.json".into()),
+        Err(e) => fail(e),
+    };
+    if iyakki_core::headlessboot::after_service_ends(real) == iyakki_core::headlessboot::AfterService::PowerOff {
+        iyakki_core::boot::power_off();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+    }
+    code
+}
+
 /// The accounts, audit log, services and host the service works over: the shell's own set on a build with the shell (one set per
 /// machine), else a set made without the desktop.
 #[cfg(feature = "shell")]
@@ -1721,8 +1771,8 @@ fn run_web(a: &[String]) -> ExitCode {
 fn run_shell(a: &[String]) -> ExitCode {
     let fb = match (a.first().map(String::as_str), a.get(1)) {
         (Some("--fb"), Some(p)) => p.clone(),
-        (None, _) => "/dev/fb0".to_string(),
-        _ => return fail("usage: iyakki shell [--fb /dev/fb0]".into()),
+        (None, _) => iyakki_core_local::kernelfacts::DEFAULT_FB.to_string(),
+        _ => return fail("usage: iyakki shell [--fb DEVICE]".into()),
     };
     let env = match shell_env() {
         Ok(e) => e,

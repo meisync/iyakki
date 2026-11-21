@@ -369,7 +369,20 @@ fn publish_from_the_ide_end_to_end_with_the_real_store_server_and_a_tile_that_co
     assert_eq!(tiles.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), vec!["office-clock"]);
 
     // 7. publishing the same version again: refused with the way out, and after a bump the header shows the update and the key is no longer new
-    app.handle(&Event::Tab(T_TOP + 14), &cx);
+    // (the header follows the install on the next beats, in the background: press again until the form opens, on the wall clock)
+    let header_wall = std::time::Instant::now();
+    loop {
+        app.handle(&Event::Tab(T_TOP + 14), &cx);
+        if matches!(&app.modal, Some(Modal::Form(FormKind::Publish, _))) {
+            break;
+        }
+        assert!(header_wall.elapsed() < std::time::Duration::from_secs(60), "the publish form never opened: {:?} {:?}", app.modal.is_some(), app.notice);
+        if app.modal.is_some() {
+            key(&mut app, &cx, Key::Esc);
+        }
+        ticks(&mut app, &cx, 3);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     let Some(Modal::Form(FormKind::Publish, f)) = &mut app.modal else { panic!() };
     f.set_choice(1, 0);
     key(&mut app, &cx, Key::Ctrl('s'));

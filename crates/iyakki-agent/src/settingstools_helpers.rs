@@ -5,18 +5,19 @@
 
 use std::path::{Path, PathBuf};
 
-use iyakki_drivers::fanservice::{self, Setting};
+use iyakki_core_local::fanctl::{Fan, Setting};
 use serde_json::{json, Value};
 
 use crate::settingstools::{no_args, Entry, Env};
 
-pub const TOOLS: [&str; 5] = ["fan_control_status", "fan_control_set", "vpn_helper_status", "vpn_helper_set", "firewall_outgoing_plan"];
+pub const TOOLS: [&str; 7] = ["fan_control_status", "fan_control_set", "vpn_helper_status", "vpn_helper_set", "firewall_outgoing_plan", "download_source_status", "download_source_set"];
 
 
 fn fan_line(sys: &Path, dir: &Path) -> String {
-    let s = fanservice::load(dir);
-    let hw = if fanservice::supported(sys) { "this computer has fans IYAKKI can control" } else { "this computer has no applesmc fan with a temperature input, so nothing can be controlled" };
-    format!("Fan control is {}. {hw}. Service report: {}", s.describe(), fanservice::status(dir))
+    let fan = Fan::in_dir(dir);
+    let s = fan.setting();
+    let hw = if Fan::supported(sys) { "this computer has fans IYAKKI can control" } else { "this computer has no applesmc fan with a temperature input, so nothing can be controlled" };
+    format!("Fan control is {}. {hw}. Service report: {}", s.describe(), fan.report())
 }
 
 fn next_setting(cur: Setting, a: &Value) -> Result<Setting, String> {
@@ -58,6 +59,11 @@ fn helper_line(dir: &Path) -> String {
     )
 }
 
+fn source_lines(root: &Path) -> String {
+    let keys = crate::clis::setting_keys();
+    keys.iter().map(|k| match crate::clis_sources::get(root, k) { Ok(e) => format!("{k}: {} (host {}, SHA-256 {}...)", e.url, e.host(), &e.sha256[..12]), Err(why) => format!("{k}: not usable ({why})") }).collect::<Vec<_>>().join("\n")
+}
+
 /// The outgoing-connection and forwarding rules a person describes, checked and written out as the nft rules they would become.
 /// Nothing is applied: the kernel writer cannot yet apply the output and forward hooks or NAT (F-FW-10).
 fn outgoing_plan(a: &Value) -> Result<String, String> {
@@ -84,16 +90,16 @@ pub fn entries(env: &Env, sys: PathBuf) -> Vec<Entry> {
             "hysteresis": {"type": "integer", "description": "Degrees the temperature must fall before the speed is lowered (0 to 10)."}}});
         v.push(
             Entry::change("Power", "fan_control_set", "Turn fan control on or off and set its curve. Only the fields you give change. The person approves a card first.", schema, |_| "Change fan control".into(), move |a| {
-                let next = next_setting(fanservice::load(&e1.dir), a)?;
-                fanservice::save(&e1.dir, &next)?;
+                let next = next_setting(Fan::in_dir(&e1.dir).setting(), a)?;
+                Fan::in_dir(&e1.dir).save(&next)?;
                 e1.audit("settings.fan", &next.describe());
                 Ok(format!("Saved: {}. Init applies it within a few seconds; fan_control_status shows what the service reports.", next.describe()))
             })
-            .with_preview(move |a| match next_setting(fanservice::load(&e2.dir), a) {
-                Ok(n) => format!("Now: {}\nAfter: {}", fanservice::load(&e2.dir).describe(), n.describe()),
+            .with_preview(move |a| match next_setting(Fan::in_dir(&e2.dir).setting(), a) {
+                Ok(n) => format!("Now: {}\nAfter: {}", Fan::in_dir(&e2.dir).setting().describe(), n.describe()),
                 Err(m) => format!("Cannot change it: {m}"),
             })
-            .with_refusal(move |a| next_setting(fanservice::load(&e3.dir), a).err())
+            .with_refusal(move |a| next_setting(Fan::in_dir(&e3.dir).setting(), a).err())
             .admin(),
         );
     }
@@ -112,6 +118,24 @@ pub fn entries(env: &Env, sys: PathBuf) -> Vec<Entry> {
                 crate::vpn_helper::write_setting(&dir, &s)?;
                 e.audit("settings.vpn-helper", if on { "on" } else { "off" });
                 Ok(format!("Saved. {}", helper_line(&dir)))
+            })
+            .admin(),
+        );
+    }
+    {
+        let e = env.clone();
+        v.push(Entry::read("Vpn", "download_source_status", "Show the download address (and SHA-256) the person gave for programs whose vendor publishes no build for IYAKKI's images, such as OpenVPN (key `vpn.openvpn_download`). Empty means nothing can be downloaded.", no_args(), move |_| Ok(source_lines(&e.dir.join("cli")))));
+    }
+    {
+        let e = env.clone();
+        v.push(
+            Entry::change("Vpn", "download_source_set", "Set (or with an empty `value`, clear) the download address of a program for the person's click in Settings -> Downloads: `key` is `vpn.openvpn_download`, `value` is `https://address SHA256` (https only, 64 hex digits). The file is kept only if its SHA-256 matches. Nothing is downloaded by this tool. The person approves a card first.", json!({"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}), |a| format!("Set the download address {}", a["key"].as_str().unwrap_or("?")), move |a| {
+                let key = a.get("key").and_then(Value::as_str).ok_or("`key` is the name of the address, e.g. vpn.openvpn_download")?;
+                let value = a.get("value").and_then(Value::as_str).ok_or("`value` is `https://address SHA256` (empty clears it)")?;
+                let root = e.dir.join("cli");
+                crate::clis_sources::set(&root, key, value)?;
+                e.audit("settings.download-source", &format!("{key} {}", if value.trim().is_empty() { "cleared" } else { "set" }));
+                Ok(format!("Saved. {}", source_lines(&root)))
             })
             .admin(),
         );

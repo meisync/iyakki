@@ -72,6 +72,8 @@ pub enum Note {
     OutOfScope(String),
     /// The page's manifest address and text and its icon address (`PageMeta`).
     PageMeta { manifest_url: String, manifest: String, icon: String },
+    /// The page's headings, links, controls, pictures and landmarks on screen (`PageAccess`, JSON; `browser_full_access.rs` reads it).
+    PageAccess(String),
     /// One developer-tools line from the page (the helper's `DevEvent`); stored only when the person turned developer tools for the chat agent on.
     Dev(String),
     /// The response headers the engine received for the page that just committed (the helper's `ResponseHeaders`); kept only like `Dev`.
@@ -144,6 +146,7 @@ pub struct Full {
     cache_gen: u64,
     /// The media policy last sent to the helper (tallest video, decoders allowed).
     media_sent: Option<(u32, bool)>,
+    cache_limit_sent: Option<u32>,
     zoom_pct: u32,
     /// The part of a wheel unit not yet sent.
     wheel_carry: f32,
@@ -164,6 +167,8 @@ pub struct Full {
     next_script: u32,
     /// The sound doctor: is the page playing, and is the sound connected (see `browser_sound.rs`).
     sound: super::browser_sound::SoundWatch,
+    /// The kernel facts the sound doctor reads (the core's `audio_route`; the machine's own when the page was not given it).
+    audio_route: std::sync::Arc<dyn iyakki_core_api::AudioRoute>,
     /// What the page's focused element is, as the last probe found it (see [`TextFocus`], [`PROBE_JS`]).
     pub text_focus: TextFocus,
     /// When the next probe of the focused element is due, the probe in flight, and how many quick re-probes follow a tap.
@@ -259,6 +264,7 @@ impl Full {
             ext_gen: 0,
             cache_gen: iyakki_web::fetch::cache_clear_generation(),
             media_sent: None,
+            cache_limit_sent: None,
             zoom_pct: (st.zoom * 100.0).round() as u32,
             wheel_carry: 0.0,
             zoom_sent: 100,
@@ -278,6 +284,7 @@ impl Full {
             lift_next: false,
             next_script: 1,
             sound: super::browser_sound::SoundWatch::new(),
+            audio_route: crate::agent().sound_probe().system_audio_route(),
         };
         f.send_zoom(st.scale);
         f.view.send(ToHelper::Focus(true));
@@ -310,6 +317,11 @@ impl Full {
             self.zoom_sent = pct;
             self.view.send(ToHelper::Zoom(pct));
         }
+    }
+
+    /// Screen pixels of one CSS pixel of the page (the zoom the person set times the tile's scale; the engine's own stretch is on top of both).
+    pub fn css_scale(&self) -> f32 {
+        (self.zoom_pct as f32 / 100.0) * self.scale_now / self.scale_hello
     }
 
     pub fn send(&mut self, m: ToHelper) -> bool {
@@ -360,6 +372,15 @@ impl Full {
         if self.media_sent != Some((max_height, codecs)) {
             self.media_sent = Some((max_height, codecs));
             self.view.send(ToHelper::MediaPolicy { max_height, codecs });
+        }
+    }
+
+    /// Tell the helper how much disk its own page cache may hold (the person's Speed and memory choice) when it differs from what it was
+    /// last told (F-BROX-17). 0 means no limit.
+    pub fn sync_cache_limit(&mut self, disk_mb: u32) {
+        if self.cache_limit_sent != Some(disk_mb) {
+            self.cache_limit_sent = Some(disk_mb);
+            self.view.send(ToHelper::CacheLimit { disk_mb });
         }
     }
 
@@ -619,6 +640,7 @@ impl Full {
                 WvEvent::KeySystem(k) => self.notes.push(Note::KeySystem(k)),
                 WvEvent::NavigationBlocked(u) => self.notes.push(Note::OutOfScope(u)),
                 WvEvent::PageMeta { manifest_url, manifest, icon } => self.notes.push(Note::PageMeta { manifest_url, manifest, icon }),
+                WvEvent::PageAccess(j) => self.notes.push(Note::PageAccess(j)),
                 WvEvent::DevEvent(l) => self.notes.push(Note::Dev(l)),
                 WvEvent::ResponseHeaders { url, status, headers } => self.notes.push(Note::Headers { url, status, headers }),
                 WvEvent::PermissionRequest { id, kinds, origin } => self.notes.push(Note::Media { id, kinds, origin }),
@@ -660,10 +682,15 @@ impl Full {
         }
     }
 
+    /// Read the sound doctor's facts through this route (`Core::audio_route`) from now on.
+    pub fn set_audio_route(&mut self, route: std::sync::Arc<dyn iyakki_core_api::AudioRoute>) {
+        self.audio_route = route;
+    }
+
     /// The sound doctor: while the page plays audio, compare it with the kernel's playback streams and recover (see `browser_sound.rs`).
     fn sound_tick(&mut self) {
         let Some(helper) = self.view.pid() else { return };
-        let actions = self.sound.tick(helper, std::path::Path::new(iyakki_shared::quiet::ASOUND), crate::host().proc_root().as_path(), std::process::id());
+        let actions = self.sound.tick(helper, &*self.audio_route, std::process::id());
         for a in actions {
             match a {
                 iyakki_shared::sounddoctor::Action::Note(n) => self.notes.push(Note::Sound(Some(n))),
@@ -766,9 +793,9 @@ impl Full {
         self.drawn_size = (pw, ph);
         self.up = up;
         if up == 2 {
-            blit_region_x2(pm.data(), pw, ph, g.pm.data_mut(), gw, gh, (vx, vy, vw, vh), (0, 0, pw, ph));
+            blit_region_x2(pm.data(), pw, ph, g.pm_mut().data_mut(), gw, gh, (vx, vy, vw, vh), (0, 0, pw, ph));
         } else {
-            blit_region(pm.data(), pw, ph, g.pm.data_mut(), gw, gh, (vx, vy, vw, vh), (0, 0, pw, ph));
+            blit_region(pm.data(), pw, ph, g.pm_mut().data_mut(), gw, gh, (vx, vy, vw, vh), (0, 0, pw, ph));
         }
     }
 
@@ -795,9 +822,9 @@ impl Full {
             return Some((0, 0, 0, 0));
         }
         if self.up == 2 {
-            blit_region_x2(pm.data(), pw, ph, g.pm.data_mut(), gw, gh, (vx, vy, vw, vh), region)
+            blit_region_x2(pm.data(), pw, ph, g.pm_mut().data_mut(), gw, gh, (vx, vy, vw, vh), region)
         } else {
-            blit_region(pm.data(), pw, ph, g.pm.data_mut(), gw, gh, (vx, vy, vw, vh), region)
+            blit_region(pm.data(), pw, ph, g.pm_mut().data_mut(), gw, gh, (vx, vy, vw, vh), region)
         }
     }
 

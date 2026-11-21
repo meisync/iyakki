@@ -11,13 +11,13 @@ use crate::devmode::{apiscopes, DevMode};
 use crate::settingstools::{arg_bool, arg_str, no_args, Entry, Env};
 pub use iyakki_shared::settingstools_net::{MEDIA_RULE, PROMPT_RULE};
 
-pub const TOOLS: [&str; 21] = ["usb_link_check", "usb_link_watch", "firewall_vpn_local_status", "firewall_vpn_local_set", "firewall_counters", "firewall_outgoing_status", "firewall_outgoing_set", "devmode_api_scopes", "devmode_api_scope_set", "core_contract_status", "core_contract_switch", "core_contract_scope_set", "media_server_status", "media_server_set", "relay_status", "relay_switch", "relay_approve_computer", "ui_socket_status", "ui_socket_set", "install_shrink_plan", "install_shrink"];
+pub const TOOLS: [&str; 28] = ["usb_link_check", "usb_link_watch", "firewall_vpn_local_status", "firewall_vpn_local_set", "firewall_counters", "firewall_outgoing_status", "firewall_outgoing_set", "devmode_api_scopes", "devmode_api_scope_set", "core_contract_status", "core_contract_switch", "core_contract_scope_set", "media_server_status", "media_server_set", "relay_status", "relay_switch", "webpush_public_name", "relay_approve_computer", "ui_socket_status", "ui_socket_set", "install_shrink_plan", "install_shrink", "install_bios_plan", "install_bios", "install_disk_plan", "install_to_disk", "secureboot_enroll_status", "secureboot_enroll"];
 
 
 
 /// The relay transport as plain text (F-CORE-17): the switch, the computers approved for it and what the owner still has to provide.
 pub fn relay_status_text(dm: &DevMode) -> String {
-    format!("{} The relay itself is run by the owner and no relay address is set up yet, so nothing can connect through it today; the machine's side is built and tested against an in-memory relay.", dm.relay_summary())
+    format!("{} The relay itself is run by the owner and no relay address is set up yet, so nothing can connect through it today; the machine's side connects out over TLS to the relay's own certificate only.", dm.relay_summary())
 }
 
 /// The core contract channel as plain text: the switch, the scopes that can be granted and what each paired computer holds.
@@ -78,7 +78,9 @@ pub fn counters_text(blocked: Option<(u64, u64)>, counts: &[iyakki_fw::ruleset::
 pub fn entries(env: &Env, fw: Handle) -> Vec<Entry> {
     let mut v = Vec::new();
     v.extend(crate::settingstools_usblink::entries(env, crate::settingstools_usblink::real_env(env)));
-    v.extend(crate::settingstools_install::entries(env, crate::settingstools_install::real_source(), Arc::new(iyakki_usb::resize::HostTools)));
+    v.extend(crate::settingstools_install::entries(env, crate::settingstools_install::real_source(), Arc::new(iyakki_core_api::installer::HostTools)));
+    v.extend(crate::settingstools_installdisk::entries(env, crate::settingstools_installdisk::real_installer()));
+    v.extend(crate::settingstools_sbenroll::entries(env, crate::settingstools_sbenroll::real_open()));
     {
         let h = fw.clone();
         v.push(Entry::read("Firewall", "firewall_vpn_local_status", "Say whether the networks of a connected VPN count as the local network for the firewall presets, ping and remote diagnostics.", no_args(), move |_| Ok(status_of(&h.lock()))).admin());
@@ -206,13 +208,29 @@ pub fn entries(env: &Env, fw: Handle) -> Vec<Entry> {
     }
     {
         let e = env.clone();
-        let schema = json!({"type": "object", "properties": {"on": {"type": "boolean"}, "address": {"type": "string", "description": "where the relay is, https://HOST or https://HOST:PORT; empty takes it away; leave out to keep it"}}, "required": ["on"]});
+        let schema = json!({"type": "object", "properties": {"name": {"type": "string", "description": "the public host name this computer is reached under over HTTPS, for example notify.example.org (a plain host name with a dot, an optional :port); empty takes it away, so the Web Push pages are not served"}}, "required": ["name"]});
+        v.push(
+            Entry::change("Developer", "webpush_public_name", "Set the public HTTPS name the Web Push pages (the service worker and the subscribe page a browser opens) are reached under. Unset by default: with no name nothing is served. The person approves a card first; administrators only.", schema, |a| format!("Serve the Web Push pages under the public name \"{}\"", a.get("name").and_then(serde_json::Value::as_str).unwrap_or("")), move |a| {
+                let name = a.get("name").and_then(serde_json::Value::as_str).ok_or("name is needed (empty takes it away)")?;
+                let said = crate::webpush_page::set_public_name(&e.dir, name)?;
+                e.audit("settings.developer", if name.trim().is_empty() { "web push public name removed" } else { "web push public name set" });
+                Ok(said)
+            })
+            .admin(),
+        );
+    }
+    {
+        let e = env.clone();
+        let schema = json!({"type": "object", "properties": {"on": {"type": "boolean"}, "address": {"type": "string", "description": "where the relay is, https://HOST or https://HOST:PORT; empty takes it away; leave out to keep it"}, "certificate_fingerprint": {"type": "string", "description": "the SHA-256 fingerprint (64 hex digits) of the relay's certificate; an https relay is trusted for that certificate only and is not used without it; empty takes it away; leave out to keep it"}}, "required": ["on"]});
         v.push(
             Entry::change("Developer", "relay_switch", "Allow or stop connections to this machine through the relay (the third switch beside developer mode and the core contract channel; off by default). The person approves a card first.", schema, |a| format!("Relay connections {}{}", if a["on"].as_bool().unwrap_or(false) { "on" } else { "off" }, a.get("address").and_then(serde_json::Value::as_str).map(|x| format!(" at {x}")).unwrap_or_default()), move |a| {
                 let on = arg_bool(a, "on")?;
                 let dm = DevMode::open(&e.dir);
                 if let Some(addr) = a.get("address").and_then(serde_json::Value::as_str) {
                     dm.set_relay_url(&iyakki_sec::policy::Role::Admin.template(), &e.user, addr)?;
+                }
+                if let Some(pin) = a.get("certificate_fingerprint").and_then(serde_json::Value::as_str) {
+                    dm.set_relay_pin(&iyakki_sec::policy::Role::Admin.template(), &e.user, pin)?;
                 }
                 dm.set_relay_enabled(&iyakki_sec::policy::Role::Admin.template(), &e.user, on)?;
                 e.audit("settings.developer", &format!("relay {}", if on { "on" } else { "off" }));
@@ -287,7 +305,7 @@ pub fn entries(env: &Env, fw: Handle) -> Vec<Entry> {
         let (e, e2) = (env.clone(), env.clone());
         v.push(Entry::read("Shares", "media_server_status", "Say whether the person's media server (UPnP/DLNA) is on, its port and how many audio and video files of the shared folders it offers.", no_args(), move |_| {
             Ok(match crate::upnp_serve::status_for(&e.user) {
-                Some((port, n)) => format!("The media server is on (port {port}), offering {n} audio and video files of your shared folders to players on the local network. {}", crate::upnp_serve::subscribers_text(&crate::upnp_serve::subscriptions_for(&e.user))),
+                Some((port, n)) => format!("The media server is on (port {port}), offering {n} audio and video files of your shared folders to players on the local network. {} {}", crate::upnp_serve::subscribers_text(&crate::upnp_serve::subscriptions_for(&e.user)), crate::upnp_serve::firewall_note(port).unwrap_or_default()).trim_end().to_string(),
                 None => format!("The media server is off. Shared folders it would offer: {}.", crate::upnp_serve::share_folders(&e.dir, &e.user).len()),
             })
         }));
@@ -381,7 +399,7 @@ mod tests {
         let audits = Arc::new(Mutex::new(Vec::new()));
         let a2 = audits.clone();
         let settings = Arc::new(Mutex::new(crate::settings::SettingsStore::open(&dir.join("settings.json")).unwrap()));
-        let env = Env { dir, user: "root".into(), admin, settings, audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
+        let env = Env { dir, user: "root".into(), admin, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         (SettingsTools::new(Arc::new(NoTools), admin, entries(&env, Handle::Own(eng.clone()))), eng, env, audits)
     }
 

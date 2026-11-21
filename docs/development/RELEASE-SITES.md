@@ -27,10 +27,29 @@ them (change the list, with the date, in the commit).
 `sh release-sites.sh --dry-run` writes the specs and checks that they are valid JSON; it needs only `sh` and `python3`. The test
 `iyakki-agent/tests/release_sites.rs` runs it and reads every spec with the real browser-test parser.
 
+## The signed-in pass (written 2026-11-19, never run)
+
+`sh release-sites.sh --signed-in DIR` is the "usable" half of the row. `DIR/<slug>.json` (for example `gmail.json`) holds the steps after the
+goto, in the spec format of `docs/BROWSER-AGENT.md`, and a text that only a signed-in page shows:
+
+```json
+{"steps": [{"fill": {"label": "Email", "value_env": "IYAKKI_TEST_GMAIL_USER"}},
+           {"click": {"role": "button", "name": "Next"}},
+           {"fill": {"label": "Password", "value_env": "IYAKKI_TEST_GMAIL_PASSWORD"}},
+           {"click": {"role": "button", "name": "Next"}}],
+ "ok_text": "Inbox"}
+```
+
+A secret is never in a file: a `fill` step names an environment variable (`value_env`, only names that start with `IYAKKI_TEST_`, so a spec cannot
+read any other variable) and the runner reads it when the step runs; a report and the script's table name the variable and never the value. A site
+with no steps file, or whose variables are not set, is `skip` with the reason. The test accounts and the steps files (the selectors differ per site
+and change) are the owner's: nothing in this repository creates or holds an account. Test: `iyakki-agent/tests/release_sites.rs` builds the specs
+from a fixture, reads them with the real parser, and checks that a run with secrets leaves them in no file and in no printed line.
+
 ## What is not done (KI-791)
 
 * The script has never been run against the real sites in the full engine (no machine with the engine was reachable from the build
   host); the texts to wait for are unverified.
-* No sign-in: whether Gmail, Docs, Sheets, Outlook, Notion and Slack are *usable* is the manual part. A person with test accounts steps
+* No sign-in has been run: the signed-in pass above is written, but the accounts and the per-site steps files are the owner's, so whether Gmail, Docs, Sheets, Outlook, Notion and Slack are *usable* is the manual part. A person with test accounts steps
   through `docs/project/test-plans/browser-real-sites.md` for each.
 * Sites change; the list is reviewed every release.

@@ -510,6 +510,49 @@ fn captioned_speech_gives_native_word_times() {
 }
 
 #[test]
+fn a_speech_durations_engine_is_asked_for_durations_and_its_pieces_give_native_word_times() {
+    let _turn = turn();
+    clear_cache();
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        if let Some(Ok(mut s)) = l.incoming().next() {
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut len = 0usize;
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).unwrap_or(0) == 0 || h.trim().is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = h.split_once(':') {
+                    if k.eq_ignore_ascii_case("content-length") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+            let mut body = vec![0u8; len];
+            let _ = std::io::Read::read_exact(&mut r, &mut body);
+            let _ = tx.send(String::from_utf8_lossy(&body).into_owned());
+            let out = json!({"audio": iyakki_flow::report::base64(&speech_wav()), "audio_format": "wav", "pieces": [
+                {"piece": "\u{2581}Hel", "ms": 200}, {"piece": "lo", "ms": 200}, {"piece": "\u{2581}world", "ms": 300}]})
+            .to_string();
+            let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}", out.len()).as_bytes());
+        }
+    });
+    let (svc, d) = services("durations");
+    svc.settings.lock().unwrap().update(|s| s.voice.tts = Some(SpeechEngine::Http { url: format!("http://127.0.0.1:{port}/v1/speech_durations"), model: "fastpitch".into(), key_ref: None, voice: None, language: None })).unwrap();
+    let (wav, t) = svc.synthesize_timed("Hello world", &SpeakOpts::default()).unwrap();
+    assert!(wav.starts_with(b"RIFF"));
+    let sent = rx.recv().unwrap();
+    assert!(sent.contains("\"return_durations\":true"), "{sent}");
+    let t = t.unwrap();
+    assert_eq!(t.source, TimingSource::Native);
+    assert_eq!((t.begin[0], t.begin[1]), (0.0, 400.0));
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
 fn a_reader_synth_without_times_needs_nothing_new() {
     struct Plain;
     impl Synth for Plain {

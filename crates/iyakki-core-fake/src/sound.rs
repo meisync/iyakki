@@ -10,12 +10,16 @@ fn lk<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 type Scan = Arc<dyn Fn(&Path) -> Vec<Output> + Send + Sync>;
+type ViaScan = Arc<dyn Fn(&dyn iyakki_core_api::AudioRoute) -> Vec<Output> + Send + Sync>;
+type ViaStart = Arc<dyn Fn(&dyn iyakki_core_api::AudioRoute) -> Option<u32> + Send + Sync>;
 type StartScan = Arc<dyn Fn(&Path, &Path) -> Option<u32> + Send + Sync>;
 
 #[derive(Default)]
 pub struct FakeSound {
     scan: Mutex<Option<Scan>>,
     start_scan: Mutex<Option<StartScan>>,
+    via_scan: Mutex<Option<ViaScan>>,
+    via_start: Mutex<Option<ViaStart>>,
     state: Mutex<SoundState>,
     prefs: Mutex<SoundSettings>,
     outputs: Mutex<Vec<Output>>,
@@ -52,6 +56,14 @@ impl FakeSound {
     pub fn set_starting_scanner(&self, f: impl Fn(&Path, &Path) -> Option<u32> + Send + Sync + 'static) {
         *lk(&self.start_scan) = Some(Arc::new(f));
     }
+    /// Answer `outputs_via` by deciding over the route's facts with `f` (the agent's own decision code in a page test).
+    pub fn set_route_scanner(&self, f: impl Fn(&dyn iyakki_core_api::AudioRoute) -> Vec<Output> + Send + Sync + 'static) {
+        *lk(&self.via_scan) = Some(Arc::new(f));
+    }
+    /// The same for `card_starting_via`.
+    pub fn set_route_starting_scanner(&self, f: impl Fn(&dyn iyakki_core_api::AudioRoute) -> Option<u32> + Send + Sync + 'static) {
+        *lk(&self.via_start) = Some(Arc::new(f));
+    }
     pub fn set_server(&self, on: bool) {
         *lk(&self.server) = on;
     }
@@ -77,6 +89,18 @@ impl SoundControl for FakeSound {
     fn card_starting(&self, proc_root: &Path, sys: &Path) -> Option<u32> {
         if let Some(f) = lk(&self.start_scan).clone() {
             return f(proc_root, sys);
+        }
+        *lk(&self.starting_card)
+    }
+    fn outputs_via(&self, route: &dyn iyakki_core_api::AudioRoute) -> Vec<Output> {
+        if let Some(f) = lk(&self.via_scan).clone() {
+            return f(route);
+        }
+        lk(&self.outputs).clone()
+    }
+    fn card_starting_via(&self, route: &dyn iyakki_core_api::AudioRoute) -> Option<u32> {
+        if let Some(f) = lk(&self.via_start).clone() {
+            return f(route);
         }
         *lk(&self.starting_card)
     }
@@ -159,6 +183,16 @@ mod tests {
         assert!(s.outputs_at(Path::new("/x/there")).is_empty());
         s.set_starting_scanner(|_, _| Some(2));
         assert_eq!(s.card_starting(Path::new("/p"), Path::new("/s")), Some(2));
+        // the route forms: canned answers, or the decision code over the route's facts
+        s.set_outputs(vec![Output::system_default()]);
+        let route = crate::audioroute::FakeAudioRoute::default();
+        route.put("cards", " 0 [PCH]: HDA-Intel - HDA Intel PCH\n");
+        assert_eq!(s.outputs_via(&route).len(), 1);
+        s.set_route_scanner(|r| if r.card_count() == 1 { vec![Output::system_default(), Output::system_default()] } else { vec![] });
+        assert_eq!(s.outputs_via(&route).len(), 2);
+        s.set_route_starting_scanner(|r| r.asound_has("cards").then_some(0));
+        assert_eq!(s.card_starting_via(&route), Some(0));
+        assert!(route.calls().iter().any(|c| c == "text:cards"), "the facts were asked of the route");
     }
 
     #[test]

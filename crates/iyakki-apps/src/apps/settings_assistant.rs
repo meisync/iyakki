@@ -27,6 +27,8 @@ pub(super) enum Row {
     Workspace(WorkspaceMemory),
     Chat { workspace: String, chat: String, entries: usize },
     Limits(Option<String>),
+    /// The assistant preset (a bundle's `agent` member) the person picks: `None` is the assistant as it is, `Some(name)` an installed preset.
+    Preset(Option<String>),
     /// One of the "Waiting" settings (auto-continue, wakes per day, longest wait, follow-up thread): the key of the row.
     Waiting(&'static str),
 }
@@ -50,14 +52,19 @@ pub(super) fn secs_words(v: u32) -> String {
 impl SettingsApp {
     pub(super) fn asst_rows(&self, cx: &AppCx) -> Vec<Row> {
         let mut rows = vec![Row::Switch];
-        for w in History::workspaces_of(&cx.kb(), &cx.session.user) {
+        for w in History::workspaces_of(&*cx.kb_source(), &cx.session.user) {
             let name = w.name.clone();
             rows.push(Row::Workspace(w));
             if self.asst.open.as_deref() == Some(name.as_str()) {
-                for (chat, entries) in History::sessions_of(&cx.kb(), &cx.session.user, &name) {
+                for (chat, entries) in History::sessions_of(&*cx.kb_source(), &cx.session.user, &name) {
                     rows.push(Row::Chat { workspace: name.clone(), chat, entries });
                 }
             }
+        }
+        let presets = iyakki_shared::bundle_members::bundled_agent_presets(cx.data_dir(), &cx.session.user);
+        if !presets.is_empty() {
+            rows.push(Row::Preset(None));
+            rows.extend(presets.into_iter().map(|p| Row::Preset(Some(p.name))));
         }
         rows.push(Row::Limits(None));
         for p in Self::providers(cx) {
@@ -155,6 +162,7 @@ impl SettingsApp {
                 Some(Row::Workspace(w)) => self.asst.open = if self.asst.open.as_deref() == Some(w.name.as_str()) { None } else { Some(w.name) },
                 Some(Row::Switch) => self.asst_toggle(cx),
                 Some(Row::Waiting(rk)) => self.asst_waiting_change(cx, rk, 0),
+                Some(Row::Preset(name)) => self.asst_preset_pick(cx, name, pending),
                 _ => {}
             },
             Key::Char('-') | Key::Char('+') => {
@@ -211,8 +219,39 @@ impl SettingsApp {
         }
     }
 
+    /// The card for an assistant preset, then the choice: the first press says what the preset is and what it cannot do, the second (the same
+    /// key, on the same row) keeps the choice for this person. Any other key cancels. Audited.
+    fn asst_preset_pick(&mut self, cx: &AppCx, name: Option<String>, pending: Option<(String, char)>) {
+        let (user, data) = (&cx.session.user, cx.data_dir());
+        let what = match &name {
+            Some(n) => {
+                let Some(p) = iyakki_shared::bundle_members::bundled_agent_presets(data, user).into_iter().find(|p| &p.name == n) else {
+                    self.fail(format!("There is no assistant preset called {n} any more."));
+                    return;
+                };
+                format!("use the assistant preset {} ({})", p.name, if p.summary.is_empty() { "no summary".to_string() } else { p.summary })
+            }
+            None => "use the assistant as it is, with no preset".to_string(),
+        };
+        if pending.as_ref().is_none_or(|p| p.0 != what || p.1 != 'p') {
+            self.status = Some((format!("This will {what}. A preset is text from a bundle that tells the assistant what to focus on and how to answer; it cannot give it a tool or a permission or skip an approval. Press Enter again to do it; any other key cancels."), false));
+            self.asst.confirm = Some((what, 'p'));
+            return;
+        }
+        match iyakki_shared::bundle_members::choose_agent_preset(data, user, name.as_deref()) {
+            Ok(()) => {
+                cx.audit.record(user, "settings.assistant.preset", name.as_deref().unwrap_or("none"));
+                self.ok(match &name {
+                    Some(n) => format!("The assistant now follows the preset {n} in your chats."),
+                    None => "The assistant answers as it is, with no preset.".to_string(),
+                });
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
     fn asst_forget(&mut self, cx: &AppCx, row: Option<Row>) {
-        let kb = &cx.kb();
+        let kb = &*cx.kb_source();
         let (n, what) = match row {
             Some(Row::Workspace(w)) => (History::forget_workspace_of(kb, &cx.session.user, &w.name), format!("workspace {}", w.name)),
             Some(Row::Chat { workspace, chat, .. }) => (History::forget_session_of(kb, &cx.session.user, &workspace, &chat), format!("chat {chat} in {workspace}")),
@@ -230,6 +269,7 @@ impl SettingsApp {
             Some(Row::Workspace(_)) => vec![("Show chats", ACCENT, 'o'), ("Forget this history", crate::ui::ERR, 'f'), ("Remember on/off", MUTED, 'h')],
             Some(Row::Chat { .. }) => vec![("Forget this chat", crate::ui::ERR, 'f'), ("Remember on/off", MUTED, 'h')],
             Some(Row::Limits(_)) => vec![("Think +", ACCENT, 't'), ("Think -", MUTED, 'T'), ("Silence +", ACCENT, 'q'), ("Silence -", MUTED, 'Q'), ("Default", MUTED, '0')],
+            Some(Row::Preset(_)) => vec![("Use this preset (Enter, twice)", ACCENT, 'o')],
             Some(Row::Waiting(_)) => vec![("Switch (Enter)", ACCENT, 'o'), ("More (+)", ACCENT, '+'), ("Less (-)", MUTED, '-')],
             _ => vec![("Remember on/off", ACCENT, 'h')],
         }
@@ -250,7 +290,14 @@ impl SettingsApp {
         heading(g, &mut y, "What the assistant remembers");
         let mut limits_head = false;
         let mut waiting_head = false;
+        let mut preset_head = false;
+        let chosen = iyakki_shared::bundle_members::chosen_agent_preset(cx.data_dir(), &cx.session.user).map(|p| p.name);
         for (i, r) in rows.iter().enumerate() {
+            if matches!(r, Row::Preset(_)) && !preset_head {
+                preset_head = true;
+                y += 8.0 * s;
+                heading(g, &mut y, "Assistant preset: a way of working a bundle brought (yours to choose)");
+            }
             if matches!(r, Row::Limits(_)) && !limits_head {
                 limits_head = true;
                 y += 8.0 * s;
@@ -268,6 +315,11 @@ impl SettingsApp {
                 Row::Switch => ("Remember the work of each workspace".to_string(), if remember { "On: steps, results and summaries are kept per workspace so a later chat can look them up." } else { "Off: nothing new is kept. What is already kept stays until you forget it." }.to_string(), 0.0),
                 Row::Workspace(w) => (w.name.clone(), format!("{} entries from {} chat{}", w.entries, w.chats, if w.chats == 1 { "" } else { "s" }), 0.0),
                 Row::Chat { chat, entries, .. } => (format!("chat {chat}"), format!("{entries} entries"), 22.0 * s),
+                Row::Preset(None) => ("The assistant as it is".to_string(), if chosen.is_none() { "In use: no preset." } else { "No preset. Choose this to stop using one." }.to_string(), 0.0),
+                Row::Preset(Some(n)) => {
+                    let summary = iyakki_shared::bundle_members::bundled_agent_presets(cx.data_dir(), &cx.session.user).into_iter().find(|p| &p.name == n).map(|p| p.summary).unwrap_or_default();
+                    (n.clone(), format!("{}{}", if chosen.as_deref() == Some(n.as_str()) { "In use. " } else { "" }, if summary.is_empty() { "From an installed bundle." } else { summary.as_str() }), 0.0)
+                }
                 Row::Waiting(k) => match Self::asst_waiting_row(cx, k) {
                     Some(w) => (w.label.to_string(), format!("{}: {}", w.value, w.hint), 0.0),
                     None => ((*k).to_string(), String::new(), 0.0),

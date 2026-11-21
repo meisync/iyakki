@@ -135,7 +135,7 @@ fn keyboard_choices_are_audited_as_the_login_screen() {
     sh.handle(&Event::Key(Key::Ctrl('p')));
     sh.handle(&Event::Key(Key::Char('y')));
     assert_eq!(*host.powered_off.lock().unwrap(), Some("off".into()));
-    let log = std::fs::read_to_string(&sh.env.audit.path()).unwrap_or_default();
+    let log = std::fs::read_to_string(&sh.env.audit.path_buf()).unwrap_or_default();
     assert!(log.contains("login screen") && log.contains("power.off"), "{log}");
     // Cancel highlighted (Left from the first) + Enter closes without acting
     let (mut sh, host) = shell_with_users("lb-keys3");

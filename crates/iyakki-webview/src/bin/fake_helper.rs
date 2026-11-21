@@ -182,6 +182,10 @@ impl Fake {
                     // a page with a web app manifest and an icon
                     self.navigate_to(&url, true);
                     self.send(FromHelper::PageMeta { manifest_url: "https://a.org/app.webmanifest".into(), manifest: "{\"name\":\"Fake App\",\"start_url\":\"/\"}".into(), icon: "https://a.org/icon.png".into() });
+                } else if url == "fake://access" {
+                    // a page with a heading, a link, a button, a picture and a landmark on screen
+                    self.navigate_to(&url, true);
+                    self.send(FromHelper::PageAccess("[{\"r\":\"main\",\"n\":\"\",\"x\":0,\"y\":0,\"w\":600,\"h\":400},{\"r\":\"heading\",\"n\":\"Pricing\",\"l\":2,\"x\":20,\"y\":30,\"w\":200,\"h\":30},{\"r\":\"link\",\"n\":\"Read more\",\"x\":20,\"y\":80,\"w\":90,\"h\":20},{\"r\":\"button\",\"n\":\"Buy\",\"x\":20,\"y\":120,\"w\":60,\"h\":30},{\"r\":\"img\",\"n\":\"A red fox\",\"x\":300,\"y\":30,\"w\":120,\"h\":80}]".into()));
                 } else if let Some(name) = url.strip_prefix("fake://download/") {
                     self.send(FromHelper::Download { url: format!("https://example.org/files/{name}"), name: name.to_string() });
                 } else if let Some(raw) = url.strip_prefix("fake://report/") {
@@ -365,6 +369,7 @@ impl Fake {
             ToHelper::ScreenSource(_) => {} // logged only
             ToHelper::MediaPolicy { max_height, codecs } => self.log(format!("media policy: max_height {max_height}, codecs {codecs}")),
             ToHelper::ClearCache => self.log("cache cleared".into()),
+            ToHelper::CacheLimit { disk_mb } => self.log(format!("cache limit: {disk_mb} MB")),
             ToHelper::Extensions(blob) => {
                 use iyakki_webview::ext::Snapshot;
                 match Snapshot::decode(&blob.0) {

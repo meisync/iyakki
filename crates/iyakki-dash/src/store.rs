@@ -117,6 +117,8 @@ pub struct Dashboards {
 }
 
 /// The folder a person's dashboards are kept in.
+const LAST_MARKER: &str = ".last-opened";
+
 pub fn dashboards_dir(home: &Path) -> PathBuf {
     home.join("Dashboards")
 }
@@ -248,6 +250,20 @@ impl Dashboards {
         iyakki_schema::write_atomic(&p, text.as_bytes(), 0o644)
     }
 
+    /// Remember that the person opened this saved dashboard last (the dashboard a spoken request means when it names none,
+    /// D-GEMVOICE-40-NAMING). Only the id is kept, in a small marker beside the dashboards; a bad id or a missing dashboard is not kept.
+    pub fn note_opened(&self, id: &str) {
+        if self.path(id).is_ok_and(|p| p.is_file()) {
+            let _ = iyakki_schema::write_atomic(&self.dir.join(LAST_MARKER), id.as_bytes(), 0o644);
+        }
+    }
+
+    /// The dashboard the person opened last, when it still exists.
+    pub fn last_opened(&self) -> Option<Dashboard> {
+        let id = std::fs::read_to_string(self.dir.join(LAST_MARKER)).ok()?;
+        self.load(id.trim()).ok()
+    }
+
     pub fn delete(&self, id: &str) -> Result<bool, String> {
         let p = self.path(id)?;
         if !p.exists() {
@@ -364,6 +380,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn the_dashboard_opened_last_is_remembered_only_while_it_exists() {
+        let home = tmp("last");
+        let s = Dashboards::open(&home);
+        assert!(s.last_opened().is_none());
+        s.note_opened("../x");
+        s.note_opened("nope");
+        assert!(s.last_opened().is_none(), "a bad or missing id is not kept");
+        let d = Dashboard::new("one", "One");
+        s.save(&d).unwrap();
+        s.note_opened("one");
+        assert_eq!(s.last_opened().map(|d| d.id), Some("one".to_string()));
+        assert_eq!(s.list().len(), 1, "the marker is not a dashboard");
+        s.delete("one").unwrap();
+        assert!(s.last_opened().is_none());
     }
 
     #[test]

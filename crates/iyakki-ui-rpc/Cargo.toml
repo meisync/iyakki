@@ -20,6 +20,7 @@ iyakki-web = { workspace = true }
 iyakki-vt = { workspace = true }
 iyakki-cloudmode = { workspace = true }
 iyakki-tile-host = { path = "../iyakki-tile-host" }
+iyakki-tile-abi = { path = "../iyakki-tile-abi" }
 iyakki-tile-api = { path = "../iyakki-tile-api", default-features = false }
 zeroize = "1"
 iyakki-flowsx = { workspace = true }
@@ -29,6 +30,7 @@ iyakki-proxy = { path = "../iyakki-proxy" }
 iyakki-memx = { workspace = true }
 iyakki-clock = { workspace = true }
 iyakki-dash = { workspace = true }
+iyakki-accounts = { path = "../iyakki-accounts" }
 
 [dev-dependencies]
-iyakki-accounts = { path = "../iyakki-accounts" }
+iyakki-core-fake = { path = "../iyakki-core-fake" }

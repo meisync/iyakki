@@ -38,6 +38,7 @@ OPTIONS:
   --keep-esp             dual boot: keep the disk's EFI System Partition; add only EFI/IYAKKI and a boot entry
   --bios --bios-save F   also set up legacy BIOS boot on a shared disk (GRUB into the empty gap behind sector 0, or the BIOS boot
                          partition); sector 0 and that area are saved to F first (an absolute path that does not exist yet)
+  --bios-4k-boot-code F  4096-byte-sector disks: the boot code file for legacy BIOS boot there (a file, or `builtin` for our own code in dist/boot4k; without it --bios is refused)
   --bios-restore F --target-file P   undo --bios: put the sectors saved in F back on P (an image file or a device path)
   --bios-replace-boot-code   allow replacing another system's boot code in sector 0 (it is saved first; GRUB must chainload it)
   --delete-part N        delete existing partition N first (repeatable; free-space and custom mode); its space is used; erases its data
@@ -76,6 +77,7 @@ pub struct Opts {
     pub bios: bool,
     pub bios_replace: bool,
     pub bios_save: Option<String>,
+    pub bios_4k_code: Option<String>,
     /// `--bios-restore <save file> --target-file <image or device path>`: undo `--bios`.
     pub bios_restore: Option<String>,
     /// `--delete-part N` (repeatable): delete this existing partition first (free-space and custom mode).
@@ -116,6 +118,7 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
             "--bios" => o.bios = true,
             "--bios-replace-boot-code" => o.bios_replace = true,
             "--bios-restore" => o.bios_restore = Some(it.next().ok_or("--bios-restore needs the save file")?.to_string()),
+            "--bios-4k-boot-code" => o.bios_4k_code = Some(it.next().ok_or("--bios-4k-boot-code needs a file name")?.to_string()),
             "--bios-save" => o.bios_save = Some(it.next().ok_or("--bios-save needs a file name")?.to_string()),
             "--delete-part" => o.delete_parts.push(num(a, it.next())? as u32),
             "--confirm-running-disk" => o.confirm_running_disk = true,
@@ -172,6 +175,7 @@ impl Opts {
             bios: self.bios,
             bios_replace: self.bios_replace,
             bios_save: self.bios_save.clone().unwrap_or_default(),
+            bios_4k_code: self.bios_4k_code.clone().unwrap_or_default(),
             boot_mib: self.boot_mib,
             data_mib: self.data_mib,
             table: TableChoice::parse(self.table.as_deref().unwrap_or("auto"))?,
@@ -207,6 +211,15 @@ fn swap_parts(swaps: &str) -> Vec<String> {
 /// Every disk of the machine as a [`DiskModel`] (reading the tables needs administrator rights; unreadable disks are skipped with
 /// a note in `skipped`).
 pub fn discover(m: &Machine, boot_media: Option<&str>, skipped: &mut Vec<String>) -> (Vec<DiskModel>, Vec<DiskInfo>) {
+    // a Mac has no /sys: its disks come from diskutil (a test machine always has a made-up /sys folder)
+    #[cfg(target_os = "macos")]
+    if !m.sys.exists() {
+        return crate::macos::discover_real(boot_media, skipped);
+    }
+    #[cfg(windows)]
+    if !m.sys.exists() {
+        return crate::windows::discover_real(boot_media, skipped);
+    }
     let infos = install::list_disks(&m.sys, &m.dev, &m.proc_mounts, &m.swaps);
     let mounts = drives::parse_proc_mounts(&m.proc_mounts);
     let swaps = swap_parts(&m.swaps);
@@ -275,6 +288,31 @@ fn progress_line(machine: bool) -> impl FnMut(Progress) {
 
 /// Unmount the partitions the plan names (the person confirmed; the writer checks again afterwards).
 pub fn unmount_planned(plan: &Plan, model: &DiskModel) -> Result<(), String> {
+    // Windows locks and dismounts the volumes when the disk is opened for writing (`windisk::DiskCore::open`)
+    #[cfg(windows)]
+    {
+        let _ = (plan, model);
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = plan;
+        if model.parts.iter().all(|p| p.mounts.is_empty()) {
+            return Ok(());
+        }
+        // a Mac mounts through diskutil and keeps APFS volumes in synthesized containers: unmount those first, never forced
+        let run = |c: &str, a: &[&str]| -> Result<String, String> {
+            let o = std::process::Command::new(c).args(a).output().map_err(|e| format!("{c}: {e}"))?;
+            if o.status.success() { Ok(String::from_utf8_lossy(&o.stdout).into_owned()) } else { Err(String::from_utf8_lossy(&o.stderr).trim().to_string()) }
+        };
+        crate::macos::unmount_for_planner(&run, &model.path)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    unmount_planned_unix(plan, model)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn unmount_planned_unix(plan: &Plan, model: &DiskModel) -> Result<(), String> {
     use iyakki_storage::Mounter as _;
     for name in &plan.unmount {
         if let Some(p) = model.parts.iter().find(|p| &p.name == name) {
@@ -291,17 +329,21 @@ fn efivars(o: &Opts, plan: &Plan) -> Option<PathBuf> {
     (!o.no_boot_entry && o.target_file.is_none() && plan.internal && d.is_dir()).then_some(d)
 }
 
+/// On Windows the boot entry goes through the firmware-variable calls, under the same conditions as the efivarfs entry on Linux.
+fn windows_firmware(o: &Opts, plan: &Plan) -> bool {
+    cfg!(windows) && !o.no_boot_entry && o.target_file.is_none() && plan.internal
+}
+
 fn root() -> bool {
-    // SAFETY: geteuid takes no arguments.
-    unsafe { libc::geteuid() == 0 }
+    crate::posix::is_root()
 }
 
 /// Write `plan` for `model`: unmount what the plan lists, then [`apply::apply`].
 pub fn write_plan(o: &Opts, m: &Machine, model: &DiskModel, plan: &Plan, src: &SourceInfo, progress: &mut dyn FnMut(Progress)) -> Result<apply::ApplyReport, String> {
     unmount_planned(plan, model)?;
     let mounts_now = if o.target_file.is_some() { String::new() } else { iyakki_storage::read_mounts().unwrap_or_else(|_| m.proc_mounts.clone()) };
-    let env = ApplyEnv { proc_mounts: mounts_now, efivars: efivars(o, plan), dry_run: false };
-    let path = o.target_file.clone().unwrap_or_else(|| PathBuf::from(&model.path));
+    let env = ApplyEnv { proc_mounts: mounts_now, efivars: efivars(o, plan), firmware: windows_firmware(o, plan), dry_run: false };
+    let path = o.target_file.clone().unwrap_or_else(|| PathBuf::from(crate::macos::block_path(&model.path)));
     // the model is read again right before writing: the plan must still be the one the person confirmed
     let fresh = reread(o, m, model)?;
     apply::apply(&path, &fresh, &plan.request, src, Some(&plan.digest()), crate::install::booted_uefi(), &env, progress)
@@ -309,7 +351,7 @@ pub fn write_plan(o: &Opts, m: &Machine, model: &DiskModel, plan: &Plan, src: &S
 
 fn reread(o: &Opts, m: &Machine, model: &DiskModel) -> Result<DiskModel, String> {
     let mounts = drives::parse_proc_mounts(&iyakki_storage::read_mounts().unwrap_or_else(|_| m.proc_mounts.clone()));
-    let path = o.target_file.clone().unwrap_or_else(|| PathBuf::from(&model.path));
+    let path = o.target_file.clone().unwrap_or_else(|| PathBuf::from(crate::macos::block_path(&model.path)));
     let meta = DiskMeta { name: model.name.clone(), path: model.path.clone(), model: model.model.clone(), serial: model.serial.clone(), removable: model.removable, usb: model.usb, read_only: model.read_only, swap_parts: swap_parts(&m.swaps) };
     let mut f = std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut fresh = read_model(&mut f, &meta, model.size_bytes, model.sector, &mounts, if model.booted_from { Some(model.name.as_str()) } else { None });
@@ -322,6 +364,49 @@ fn target_model(o: &Opts, f: &Path) -> Result<DiskModel, String> {
     let meta = DiskMeta { name: "testfile".into(), path: f.display().to_string(), model: "test file".into(), serial: String::new(), removable: true, usb: true, ..Default::default() };
     let mut h = std::fs::File::open(f).map_err(|e| e.to_string())?;
     Ok(read_model(&mut h, &meta, size, o.sector_size.unwrap_or(512), &[], None))
+}
+
+/// A plan made without any screen (the chat tools of the Install page, F-INST-29): the disk, the plan and the image it copies from.
+pub struct Prepared {
+    pub opts: Opts,
+    pub model: DiskModel,
+    pub plan: Plan,
+    pub src: SourceInfo,
+}
+
+/// The same planning as `--disk D --mode M --dry-run`, returned instead of printed. Nothing is written.
+pub fn prepare(args: &[String], m: &Machine) -> Result<Prepared, String> {
+    let o = parse(args)?;
+    #[cfg(not(any(target_os = "linux", windows)))]
+    if o.target_file.is_none() {
+        return Err("the partition planner reads disks through Linux (/sys) and is not available on this system".into());
+    }
+    let name = o.disk.clone().ok_or("--disk is needed")?;
+    let (models, src) = if let Some(f) = &o.target_file {
+        let t = o.template.clone().ok_or("--target-file needs --template")?;
+        (vec![target_model(&o, f)?], install::read_source(&t)?)
+    } else {
+        let (models0, infos) = discover(m, None, &mut Vec::new());
+        let src = source_of(&o, m, &infos)?;
+        let boot = src.path.file_name().map(|n| n.to_string_lossy().into_owned()).filter(|n| models0.iter().any(|d| &d.name == n));
+        let models = if boot.is_some() { discover(m, boot.as_deref(), &mut Vec::new()).0 } else { models0 };
+        (models, src)
+    };
+    let spec = apply::source_spec(&src)?;
+    let model = models.iter().find(|d| d.name == name || d.path == format!("/dev/{name}")).cloned().ok_or_else(|| format!("{name} is not a disk of this computer"))?;
+    let plan = build_plan(&model, &o.request()?, &spec, crate::install::booted_uefi())?;
+    Ok(Prepared { opts: o, model, plan, src })
+}
+
+/// Write a prepared plan. `confirm` must be the drive's name exactly; the writer re-reads the disk and checks the plan's digest first.
+pub fn write_prepared(p: &Prepared, m: &Machine, confirm: &str, progress: &mut dyn FnMut(Progress)) -> Result<apply::ApplyReport, String> {
+    if confirm != p.model.name {
+        return Err(format!("confirm must repeat the drive name ({}); nothing was written", p.model.name));
+    }
+    if !root() && p.opts.target_file.is_none() {
+        return Err("writing needs administrator rights; nothing was written".into());
+    }
+    write_plan(&p.opts, m, &p.model, &p.plan, &p.src, progress)
 }
 
 /// `iyakki-usb --plan` / `iyakki install --plan`. Returns the exit code.
@@ -352,9 +437,11 @@ pub fn run_inner(args: &[String], m: &Machine, boot_mode: bool) -> Result<i32, S
         print!("{HELP}");
         return Ok(0);
     }
-    #[cfg(not(target_os = "linux"))]
+    // Linux reads /sys, a Mac reads diskutil (F-INST-12: the writer goes through the block device and unmounts APFS containers first),
+    // Windows reads PowerShell's disk list and writes through the locked, offline physical drive (`windisk`)
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     if o.target_file.is_none() {
-        return Err("the partition planner reads disks through Linux (/sys) and is not available on this system yet (macOS and Windows hosts: docs/INSTALLER.md). `iyakki-usb --install` still writes a whole USB stick here.".into());
+        return Err("the partition planner reads disks through Linux (/sys), macOS (diskutil) or Windows (PowerShell) and is not available on this system. `iyakki-usb --install` still writes a whole USB stick here.".into());
     }
     if let Some(save) = &o.bios_restore {
         let target = o.target_file.clone().ok_or("--bios-restore needs --target-file <the image file or the device path>")?;
@@ -446,6 +533,26 @@ pub fn run_inner(args: &[String], m: &Machine, boot_mode: bool) -> Result<i32, S
         return Err("no drives found".into());
     }
     let mut wiz = Wizard::new(models, spec, crate::install::booted_uefi());
+    if o.target_file.is_none() {
+        // the shrink step of the pages (F-INST-30): the computer's own file system tools, the machine's device nodes, root needed
+        wiz.shrink_opener = Some(std::sync::Arc::new(|d: &DiskModel| {
+            if !root() {
+                return Err("shrinking a partition needs administrator rights: start the installer with sudo".into());
+            }
+            let located = crate::resize::Located { path: std::path::PathBuf::from(&d.path), model: d.clone(), node: None, proc_mounts: Machine::real().proc_mounts };
+            Ok(crate::resize_step::ShrinkFlow::new(located, Box::new(crate::resize::HostTools)).with_device_folder("/dev".into()))
+        }));
+        let boot_name = src.path.file_name().map(|n| n.to_string_lossy().into_owned());
+        wiz.rereader = Some(std::sync::Arc::new(move || {
+            let (all, _) = discover(&Machine::real(), None, &mut Vec::new());
+            let boot = boot_name.clone().filter(|n| all.iter().any(|d| &d.name == n));
+            let (mut models, _) = if boot.is_some() { discover(&Machine::real(), boot.as_deref(), &mut Vec::new()) } else { (all, vec![]) };
+            if boot_mode {
+                models.retain(|d| !d.booted_from);
+            }
+            models
+        }));
+    }
     let models_for_write = wiz.disks.clone();
     let mut writer = |plan: &Plan, progress: &mut dyn FnMut(Progress)| -> Result<String, String> {
         if !root() && o.target_file.is_none() {
@@ -488,15 +595,8 @@ pub fn write_plan_file(path: &Path, plan: &Plan, confirmed: Option<&Confirmation
 
 /// `--apply-plan FILE`: the privileged writer.
 fn apply_plan_file(o: &Opts, m: &Machine, file: &Path) -> Result<i32, String> {
-    use std::os::unix::fs::MetadataExt;
-    let meta = std::fs::metadata(file).map_err(|e| format!("{}: {e}", file.display()))?;
     // the plan file is private to whoever asked for the install: not writable by others
-    // SAFETY: getuid takes no arguments.
-    let caller = unsafe { libc::getuid() };
-    let sudo_uid: Option<u32> = std::env::var("PKEXEC_UID").or_else(|_| std::env::var("SUDO_UID")).ok().and_then(|v| v.parse().ok());
-    if meta.mode() & 0o022 != 0 || !(meta.uid() == caller || Some(meta.uid()) == sudo_uid) {
-        return Err(format!("{} must be owned by the person who asked for the install and not writable by others; refused", file.display()));
-    }
+    crate::posix::plan_file_owner_ok(file)?;
     let j = Json::parse(&std::fs::read_to_string(file).map_err(|e| e.to_string())?)?;
     if j.get("format").and_then(Json::as_str) != Some("iyakki-install-plan-1") {
         return Err("this is not an IYAKKI install plan file".into());

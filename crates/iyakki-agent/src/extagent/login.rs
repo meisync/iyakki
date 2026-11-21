@@ -14,7 +14,8 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use iyakki_core_local::starters_launch::Launch;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -303,16 +304,11 @@ impl LoginSession {
             Ok(p) => p,
             Err(e) => return fail(format!("could not open a terminal: {e}")),
         };
-        let mut cmd = Command::new(prog);
-        cmd.args(&spec.argv[1..]).current_dir(&spec.cwd).env_clear();
-        for k in ["PATH", "LANG", "LC_ALL", "TMPDIR", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "USER", "LOGNAME"] {
-            if let Ok(v) = std::env::var(k) {
-                cmd.env(k, v);
-            }
-        }
+        let mut launch = Launch::new(prog).args(&spec.argv[1..]).cwd(&spec.cwd).env_clear().pass_env(["PATH", "LANG", "LC_ALL", "TMPDIR", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "USER", "LOGNAME"]);
         for (k, v) in &spec.env {
-            cmd.env(k, v);
+            launch = launch.env(k, v);
         }
+        let mut cmd = launch.into_command();
         let (a, b, c) = match (slave.try_clone(), slave.try_clone()) {
             (Ok(a), Ok(b)) => (a, b, slave),
             _ => return fail("could not open a terminal".into()),

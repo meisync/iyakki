@@ -12,7 +12,7 @@ pub const VISION_MAX_SIDE: u32 = 1024;
 pub const VISION_MAX_BYTES: usize = 3 << 20;
 
 /// How sure it is that a chat model can take pictures.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Sees {
     /// The server labelled it vision, or its name says so: a vision model.
     Yes,
@@ -21,7 +21,7 @@ pub enum Sees {
 }
 
 /// One request to a picture model.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PictureRequest {
     pub provider: String,
     pub model: String,
@@ -36,7 +36,7 @@ pub struct PictureRequest {
 }
 
 /// One question about one or more pictures.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VisionRequest {
     pub provider: String,
     pub model: String,
@@ -46,7 +46,7 @@ pub struct VisionRequest {
 }
 
 /// What a vision model answered.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VisionAnswer {
     pub text: String,
     /// (tokens in, tokens out) when the provider said; never guessed.
@@ -201,14 +201,37 @@ pub fn frames_question(question: &str, times: &[f64]) -> String {
 use crate::lemonade::ImageDefaults;
 use crate::providers::Kind;
 
+/// What a [`LabModel`] looks like on the wire (`place` arrives as text and is interned).
+#[derive(serde::Deserialize)]
+struct LabModelWire {
+    provider: String,
+    kind: Kind,
+    model: String,
+    remote: bool,
+    place: String,
+    size_gb: Option<f64>,
+    defaults: Option<ImageDefaults>,
+    loaded: bool,
+    sees: Sees,
+    why: String,
+}
+
+impl From<LabModelWire> for LabModel {
+    fn from(w: LabModelWire) -> LabModel {
+        LabModel { provider: w.provider, kind: w.kind, model: w.model, remote: w.remote, place: crate::serde_static::intern(&w.place), size_gb: w.size_gb, defaults: w.defaults, loaded: w.loaded, sees: w.sees, why: w.why }
+    }
+}
+
 /// One model of one provider as the tile lists it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "LabModelWire")]
 pub struct LabModel {
     pub provider: String,
     pub kind: Kind,
     pub model: String,
     pub remote: bool,
     /// `this computer`, `the network` or `the internet`.
+    #[serde(skip_deserializing)]
     pub place: &'static str,
     pub size_gb: Option<f64>,
     pub defaults: Option<ImageDefaults>,
@@ -262,7 +285,7 @@ impl LabModel {
 }
 
 /// The models of every enabled provider, sorted into what the tile needs.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Catalogue {
     pub pictures: Vec<LabModel>,
     /// Chat models that see pictures (labelled or by name).
@@ -499,7 +522,7 @@ pub fn short(t: &str, n: usize) -> String {
 
 
 /// What one call sent and got back, for the log.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CallTrace {
     pub status: Option<u16>,
     pub ms: u64,

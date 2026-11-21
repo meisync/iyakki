@@ -16,9 +16,9 @@ use super::AppCx;
 
 const TAB: &str = "Assistant";
 
-pub const TOOLS: [&str; 5] = ["assistant_memory_status", "assistant_memory_set", "assistant_memory_forget", "assistant_limits_status", "assistant_limits_set"];
+pub const TOOLS: [&str; 7] = ["assistant_memory_status", "assistant_memory_set", "assistant_memory_forget", "assistant_limits_status", "assistant_limits_set", "assistant_preset_status", "assistant_preset_set"];
 
-pub const PROMPT_RULE: &str = "\nASSISTANT MEMORY AND LIMITS (Settings -> Assistant): assistant_memory_status lists the workspaces the assistant remembers work of and the chats in them, and whether the history is on (free). assistant_memory_set turns the history on or off (asks). assistant_memory_forget forgets one workspace's history, or one chat's entries in it (always asks; it cannot be undone and is never granted for a session). assistant_limits_status shows how long a model may think or stay silent before a call is given up, for all models and per provider (free). assistant_limits_set changes them (asks; administrators).";
+pub const PROMPT_RULE: &str = "\nASSISTANT MEMORY AND LIMITS (Settings -> Assistant): assistant_memory_status lists the workspaces the assistant remembers work of and the chats in them, and whether the history is on (free). assistant_memory_set turns the history on or off (asks). assistant_memory_forget forgets one workspace's history, or one chat's entries in it (always asks; it cannot be undone and is never granted for a session). assistant_limits_status shows how long a model may think or stay silent before a call is given up, for all models and per provider (free). assistant_limits_set changes them (asks; administrators). assistant_preset_status lists the assistant presets that installed bundles brought (a name, a summary) and which one this person uses (free). assistant_preset_set picks one by name, or none with an empty name (asks, with what the preset is; a preset is text only and gives no tool or permission).";
 
 fn limit_arg(a: &Value, key: &str) -> Result<Option<u32>, String> {
     match a.get(key) {
@@ -32,7 +32,7 @@ fn words(v: u32) -> String {
 }
 
 pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
-    let kb = cx.kb().clone();
+    let kb = cx.kb_source();
     let user = cx.session.user.clone();
     let mut v = Vec::new();
     {
@@ -65,7 +65,7 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
     {
         let (kb2, user2, kb3, user3) = (kb.clone(), user.clone(), kb.clone(), user.clone());
         let e = env.clone();
-        let find = move |kb: &Arc<std::sync::Mutex<iyakki_memx::kb::KnowledgeBase>>, user: &str, a: &Value| -> Result<(String, Option<String>, usize), String> {
+        let find = move |kb: &Arc<dyn iyakki_memx::kb::KbSource>, user: &str, a: &Value| -> Result<(String, Option<String>, usize), String> {
             let ws = arg_str(a, "workspace")?;
             let w = History::workspaces_of(kb, user).into_iter().find(|w| w.name == ws).ok_or_else(|| format!("there is no history for the workspace `{ws}`; assistant_memory_status lists them"))?;
             match a.get("chat").and_then(Value::as_str).map(str::trim).filter(|c| !c.is_empty()) {
@@ -159,6 +159,44 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
             })
             .admin()
             .with_refusal(move |a| check2(&e2, a).err()),
+        );
+    }
+    {
+        let (data, user) = (cx.data_dir().to_path_buf(), user.clone());
+        v.push(Entry::read(TAB, "assistant_preset_status", "List the assistant presets that installed bundles brought (name and summary) and say which one this person uses. A preset is text that tells the assistant what to focus on; it holds no tool or permission.", no_args(), move |_| {
+            let presets = iyakki_shared::bundle_members::bundled_agent_presets(&data, &user);
+            if presets.is_empty() {
+                return Ok("No installed bundle brought an assistant preset: the assistant answers as it is.".into());
+            }
+            let chosen = iyakki_shared::bundle_members::chosen_agent_preset(&data, &user).map(|p| p.name);
+            let mut out = match &chosen {
+                Some(n) => format!("In use: {n}."),
+                None => "No preset is in use.".to_string(),
+            };
+            for p in presets {
+                out.push_str(&format!("\n- {}{}", p.name, if p.summary.is_empty() { String::new() } else { format!(": {}", p.summary) }));
+            }
+            Ok(out)
+        }));
+    }
+    {
+        let (data, user, data2, user2, e) = (cx.data_dir().to_path_buf(), user.clone(), cx.data_dir().to_path_buf(), user.clone(), env.clone());
+        let schema = json!({"type": "object", "properties": {"name": {"type": "string", "description": "the preset's name from assistant_preset_status; empty means no preset"}}, "required": ["name"]});
+        v.push(
+            Entry::change(TAB, "assistant_preset_set", "Choose the assistant preset (a way of working that an installed bundle brought) by `name`, or none with an empty name. It only adds instructions for style and focus; it gives the assistant no tool and no permission. The person approves a card first, with what the preset says it is.", schema, |a| format!("Use the assistant preset \"{}\"", a.get("name").and_then(Value::as_str).unwrap_or("")), move |a| {
+                let name = a.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
+                iyakki_shared::bundle_members::choose_agent_preset(&data, &user, Some(name.as_str()).filter(|n| !n.is_empty()))?;
+                e.audit("settings.assistant.preset", if name.is_empty() { "none" } else { &name });
+                Ok(if name.is_empty() { "The assistant answers as it is, with no preset.".to_string() } else { format!("The assistant now follows the preset {name} in this person's chats.") })
+            })
+            .with_preview(move |a| {
+                let name = a.get("name").and_then(Value::as_str).unwrap_or("").trim();
+                match iyakki_shared::bundle_members::bundled_agent_presets(&data2, &user2).into_iter().find(|p| p.name == name) {
+                    Some(p) => format!("Use the assistant preset {} from an installed bundle: {}\nIt adds instructions only; it gives no tool or permission.", p.name, if p.summary.is_empty() { "no summary" } else { &p.summary }),
+                    None if name.is_empty() => "Use the assistant as it is, with no preset.".to_string(),
+                    None => format!("This would be refused: there is no assistant preset called {name}."),
+                }
+            }),
         );
     }
     v

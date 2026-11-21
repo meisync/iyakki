@@ -23,6 +23,8 @@ pub struct SiteData {
     pub viewport: Option<iyakki_web::css::Viewport>,
     /// What makes passkeys for `navigator.credentials` (F-BROX-03): `None` means pages see no `navigator.credentials` at all.
     pub passkeys: Option<Arc<Mutex<dyn crate::modules::PasskeyHost>>>,
+    /// What registers service workers and makes push subscriptions for `PushManager` (F-INBOX-09): `None` keeps the plain stub of service workers.
+    pub push: Option<Arc<Mutex<dyn crate::modules::PushHost>>>,
 }
 
 struct SharedStore(Arc<Mutex<MemoryStore>>);
@@ -140,6 +142,14 @@ fn run_core(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> 
         };
         modules.push(Box::new(crate::modules::PasskeysModule::new(&origin, &url.host, host.clone())));
     }
+    if let Some(host) = &data.push {
+        let default = if url.https { 443 } else { 80 };
+        let origin = match url.port.filter(|p| *p != default) {
+            Some(p) => format!("{}://{}:{p}", if url.https { "https" } else { "http" }, url.host),
+            None => format!("{}://{}", if url.https { "https" } else { "http" }, url.host),
+        };
+        modules.push(Box::new(crate::modules::PushModule::new(&origin, host.clone())));
+    }
     modules.extend(extra);
     let mut engine = match JsEngine::new(limits, modules) {
         Ok(e) => e,
@@ -158,6 +168,7 @@ fn run_core(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> 
     // blocking scripts first, then `defer` scripts and modules, then `async` ones, each group in the order written (the stable sort keeps it)
     scripts.sort_by_key(|s| s.phase());
     let mut prefetched = prefetch_scripts(&scripts, &url, secure, &web, &allow);
+    let _ = engine.eval("queue", "__dom.queueAdded(true)");
     for (i, s) in scripts.iter().enumerate() {
         if started.elapsed() > TOTAL_WALL {
             report.notes.push("scripts stopped: the page took too long".into());
@@ -197,6 +208,9 @@ fn run_core(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> 
             continue;
         }
         let _ = engine.eval("current", &format!("__dom.setCurrent({})", s.node));
+        // a blocking script is run while the page is still being read: it sees only what is above it (deferred scripts, modules and
+        // async ones run after the whole page is read)
+        let unread = if s.phase() == 0 { engine.module::<DomModule>("dom").map(|d| d.hide_unread(s.node)) } else { None };
         let script_started = Instant::now();
         let outcome = if is_module {
             // an inline module has no address of its own: it is named after the page, so its imports resolve against it
@@ -209,6 +223,11 @@ fn run_core(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> 
             eprintln!("JSSTATS script {:7.3} s  {} bytes  {}", script_started.elapsed().as_secs_f64(), code.len(), name.chars().take(110).collect::<String>());
         }
         let _ = engine.eval("current", "__dom.setCurrent(null)");
+        if let Some(saved) = unread {
+            if let Some(d) = engine.module::<DomModule>("dom") {
+                d.restore_unread(saved);
+            }
+        }
         match outcome {
             Ok(()) => report.ran += 1,
             Err(JsError::Exception(m)) => {
@@ -229,6 +248,8 @@ fn run_core(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> 
             }
         }
     }
+    // scripts added by scripts run once the page's own scripts are done, each after the one that added it
+    let _ = engine.eval("flush", "__dom.flushAdded()").and_then(|_| engine.run_jobs().map(|_| ()));
     let t_scripts = t0.elapsed();
     // the page has loaded: the events, then whatever the timers had waiting
     if engine.eval("load", "__dom.fireLoad()").and_then(|_| engine.run_jobs().map(|_| ())).is_err() {
@@ -278,6 +299,18 @@ pub fn resize(engine: &mut JsEngine, vp: iyakki_web::css::Viewport) -> Result<()
     engine.run_jobs().map(|_| ())
 }
 
+/// What a pointer did over an element (see [`Interaction::Pointer`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerKind {
+    Down,
+    Up,
+    Move,
+    /// The pointer came onto the element (`pointerover`, `mouseover`, `pointerenter`, `mouseenter`).
+    Over,
+    /// The pointer left it (`pointerout`, `mouseout`, `pointerleave`, `mouseleave`).
+    Out,
+}
+
 /// What the person did to a live page.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Interaction {
@@ -287,6 +320,8 @@ pub enum Interaction {
     /// A key while `node` has the focus (`None`: the focused element, else the page). `mods` is a bit set: 1 ctrl, 2 shift, 4 alt, 8 meta.
     /// `up` is the release (keyup); a press is keydown, keypress for a printable key or Enter, and the field's implicit submit on Enter.
     Key { node: Option<usize>, key: String, code: String, mods: u8, up: bool },
+    /// The pointer did something over this node other than click (hover, press, release, move); a click already includes its own press and release.
+    Pointer { node: usize, kind: PointerKind, x: i32, y: i32 },
     /// The person sent a form (a submit button inside it, the node of the form and of the button): the page's `submit` handlers run first.
     Submit { form: usize, submitter: Option<usize> },
     /// This many milliseconds passed while the page was looked at: its timers and animation callbacks run (a clock ticks, a slide moves on).
@@ -369,6 +404,20 @@ impl LivePage {
         Ok(())
     }
 
+    /// One pointer event (see [`Interaction::Pointer`]).
+    pub fn pointer(&mut self, node: usize, kind: PointerKind, x: i32, y: i32) -> Result<(), JsError> {
+        let k = match kind {
+            PointerKind::Down => "down",
+            PointerKind::Up => "up",
+            PointerKind::Move => "move",
+            PointerKind::Over => "over",
+            PointerKind::Out => "out",
+        };
+        self.prevented = self.engine.eval("pointer", &format!("__dom.pointer({node}, {}, {x}, {y})", json_str(k)))? == "prevented";
+        self.settle();
+        Ok(())
+    }
+
     /// Send a form as a person does.
     pub fn submit(&mut self, form: usize, submitter: Option<usize>) -> Result<(), JsError> {
         let by = submitter.map(|n| n as i64).unwrap_or(-1);
@@ -417,6 +466,7 @@ impl LivePage {
             Interaction::Check(n, on) => self.check(*n, *on),
             Interaction::Key { node, key, code, mods, up } => self.key(*node, key, code, *mods, *up),
             Interaction::Submit { form, submitter } => self.submit(*form, *submitter),
+            Interaction::Pointer { node, kind, x, y } => self.pointer(*node, *kind, *x, *y),
             Interaction::Tick(ms) => {
                 self.advance((*ms).min(5_000));
                 Ok(())
@@ -549,7 +599,11 @@ pub fn navigation_in(notes: &[String]) -> Option<&str> {
 pub fn run_page_live(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> bool + Send + Clone + 'static, data: &SiteData, limits: Limits) -> (PageResult, Option<LivePage>) {
     match run_core(html, url, web, allow, data, limits, Vec::new(), |_| {}) {
         Ok((r, engine)) => {
-            let live = LivePage { engine, report: r.report.clone(), url: url.clone(), prevented: false };
+            let mut live = LivePage { engine, report: r.report.clone(), url: url.clone(), prevented: false };
+            // where the page's own scripts asked to go while it loaded is already in `r.report.navigation`, and the loader follows it (a few
+            // steps at most, never to the page itself). The live engine must not report that request a second time with the first interaction
+            // or beat: the second report would be followed without the limits, at a moment that depends on the speed of the machine.
+            let _ = live.take_navigation();
             (r, Some(live))
         }
         Err(r) => (r, None),
@@ -594,6 +648,8 @@ pub struct Sites {
     pub cookies: Arc<Mutex<CookieStore>>,
     /// Handed to every page of every site (F-BROX-03); `None`: no page has `navigator.credentials`.
     pub passkeys: Option<Arc<Mutex<dyn crate::modules::PasskeyHost>>>,
+    /// Handed to every page of every site (F-INBOX-09); `None`: pages keep the stub `navigator.serviceWorker` and have no `PushManager`.
+    pub push: Option<Arc<Mutex<dyn crate::modules::PushHost>>>,
 }
 
 fn key_of(url: &Url) -> String {
@@ -605,7 +661,7 @@ impl Sites {
         let key = key_of(url);
         let local = self.local.lock().map(|mut m| m.entry(key).or_default().clone()).unwrap_or_default();
         let idb = self.idb.lock().map(|mut m| m.entry(key_of(url)).or_default().clone()).unwrap_or_default();
-        SiteData { local, idb, cookies: self.cookies.clone(), viewport: None, passkeys: self.passkeys.clone() }
+        SiteData { local, idb, cookies: self.cookies.clone(), viewport: None, passkeys: self.passkeys.clone(), push: self.push.clone() }
     }
 
     /// The `localStorage` of every origin that holds something: `(origin, entries)`.
@@ -875,7 +931,12 @@ mod tests {
             use std::sync::atomic::Ordering::SeqCst;
             let n = self.now.fetch_add(1, SeqCst) + 1;
             self.most.fetch_max(n, SeqCst);
-            std::thread::sleep(Duration::from_millis(120));
+            // a fetch answers once another one is running with it (a page that asks one file after the other never gets there, and the
+            // `most` check below fails); a deadline, not a stopwatch, ends the wait
+            let t0 = Instant::now();
+            while self.most.load(SeqCst) < 2 && t0.elapsed() < Duration::from_secs(30) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
             self.now.fetch_sub(1, SeqCst);
             self.files.get(&url.to_string()).map(|b| Response { status: 200, content_type: "text/javascript".into(), body: b.as_bytes().to_vec(), ..Response::default() }).ok_or_else(|| "connection refused".to_string())
         }
@@ -891,16 +952,37 @@ mod tests {
         let web = Arc::new(Slow { files, now: Default::default(), most: Default::default() });
         let html = "<script src=/a.js></script><script defer src=/d.js></script><script async src=/y.js></script><script src=/b.js></script><script defer>(window.__log = window.__log || []).push('inline-defer-is-blocking');</script><script defer src=/d2.js></script><script>(window.__log = window.__log || []).push('inline');</script>";
         let mut log = String::new();
-        let began = Instant::now();
         let res = run_page_with(html, &Url::parse("https://a.org/").unwrap(), web.clone(), |_| true, &SiteData::default(), Limits::default(), |e| {
             log = e.eval("log", "window.__log.join(',')").unwrap_or_default();
         });
         assert_eq!(res.report.failed, 0, "{:?}", res.report.notes);
         // blocking ones in the order written (a `defer` on an inline script counts for nothing), then the deferred ones in order, then async
         assert_eq!(log, "a,b,inline-defer-is-blocking,inline,d,d2,y");
-        // five files at 120 ms each: one after the other would be 600 ms; they were asked for together
+        // five files, each held until another one is running: one after the other would never get two at once
         assert!(web.most.load(std::sync::atomic::Ordering::SeqCst) >= 2, "fetched side by side");
-        assert!(began.elapsed() < Duration::from_millis(560), "{:?}", began.elapsed());
+    }
+
+    #[test]
+    fn a_blocking_script_sees_only_what_is_above_it_and_an_added_script_runs_after_its_adder() {
+        let mut files: HashMap<String, String> = HashMap::new();
+        files.insert("https://a.org/seesp.js".into(), "(window.__log = window.__log || []).push('p' + document.querySelectorAll('p').length);".into());
+        files.insert("https://a.org/adds.js".into(), "var s = document.createElement('script'); s.src = '/dyn.js'; document.body.appendChild(s); (window.__log = window.__log || []).push('adds');".into());
+        for n in ["dyn", "b"] {
+            files.insert(format!("https://a.org/{n}.js"), pusher(n));
+        }
+        let web = Arc::new(Slow { files, now: Default::default(), most: Default::default() });
+        let run_log = |html: &str| {
+            let mut log = String::new();
+            let r = run_page_with(html, &Url::parse("https://a.org/").unwrap(), web.clone(), |_| true, &SiteData::default(), Limits::default(), |e| {
+                log = e.eval("log", "(window.__log || []).join(',')").unwrap_or_default();
+            });
+            assert!(r.report.notes.is_empty(), "{:?}", r.report.notes);
+            log
+        };
+        assert_eq!(run_log("<p>1</p><script src=/seesp.js></script><p>2</p><script src=/seesp.js></script><p>3</p><script defer src=/seesp.js></script>"), "p1,p2,p3");
+        // what a script appends lands before the rest of the page, and the rest is back afterwards
+        assert_eq!(run_log("<div id=a><script>document.body.appendChild(document.createElement('p')); (window.__log = window.__log || []).push(document.body.lastChild.tagName + document.getElementById('z'));</script></div><i id=z></i><script>(window.__log = window.__log || []).push(document.getElementById('z').id + document.querySelectorAll('p').length)</script>"), "Pnull,z1");
+        assert_eq!(run_log("<body><script src=/adds.js></script><script src=/b.js></script></body>"), "adds,b,dyn");
     }
 
     #[test]
@@ -991,6 +1073,15 @@ mod live_tests {
         // the tree drawn again gives a new document with the same controls (the nodes did not change)
         let again = iyakki_web::doc::build(&out.tree);
         assert_eq!(control_named(&again, "Add").node, add);
+    }
+
+    #[test]
+    fn a_navigation_the_loader_has_reported_is_not_reported_again_by_the_live_page() {
+        let u = Url::parse("https://a.org/").unwrap();
+        let html = "<p>x</p><script>location.href = '/next'</script>";
+        let (r, live) = run_page_live(html, &u, Arc::new(Site(HashMap::new())), |_| true, &SiteData::default(), Limits::default());
+        assert_eq!(r.report.navigation.as_deref(), Some("https://a.org/next"), "the loader is told where the script asked to go");
+        assert_eq!(live.expect("the engine stays alive").take_navigation(), None, "the live page does not repeat it with its first update");
     }
 
     #[test]
@@ -1104,5 +1195,25 @@ mod live_tests {
         assert!(n >= 3, "three seconds of a one second timer: {n}");
         let more = p.interact(&Interaction::Tick(2000)).unwrap();
         assert!(texts(&more.tree)[0].parse::<u32>().unwrap() >= n + 2);
+    }
+
+    #[test]
+    fn a_click_is_press_release_click_and_the_pointer_events_other_than_click_reach_the_page_in_order() {
+        let mut p = live("<p id=log></p><button id=b>Hit</button><script>const log = []; const show = () => { document.getElementById('log').textContent = log.join(' '); };\
+            const b = document.getElementById('b');\
+            for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click', 'pointerover', 'mouseover', 'pointerenter', 'mouseenter', 'pointerout', 'mouseout', 'pointerleave', 'mouseleave', 'pointermove', 'mousemove']) b.addEventListener(t, e => { log.push(t + (t === 'pointermove' ? ':' + e.clientX + ',' + e.clientY : '')); show(); });</script>");
+        let doc = iyakki_web::doc::build(&p.tree());
+        let b = control_named(&doc, "Hit").node;
+        let say = |p: &mut LivePage, what: Interaction| texts(&p.interact(&what).unwrap().tree)[0].clone();
+        assert_eq!(say(&mut p, Interaction::Click(b)), "pointerdown mousedown pointerup mouseup click");
+        let after_hover = say(&mut p, Interaction::Pointer { node: b, kind: PointerKind::Over, x: 5, y: 6 });
+        assert!(after_hover.ends_with("pointerover mouseover pointerenter mouseenter"), "{after_hover}");
+        assert!(say(&mut p, Interaction::Pointer { node: b, kind: PointerKind::Move, x: 7, y: 8 }).ends_with("pointermove:7,8 mousemove"));
+        assert!(say(&mut p, Interaction::Pointer { node: b, kind: PointerKind::Out, x: 9, y: 9 }).ends_with("pointerout mouseout pointerleave mouseleave"));
+        // a handler that stops a press is reported, and an unknown node is an error and not a crash
+        let mut q = live("<button id=b>Hit</button><script>document.getElementById('b').addEventListener('mousedown', e => e.preventDefault());</script>");
+        let dq = iyakki_web::doc::build(&q.tree());
+        assert!(q.interact(&Interaction::Pointer { node: control_named(&dq, "Hit").node, kind: PointerKind::Down, x: 0, y: 0 }).unwrap().prevented);
+        assert!(q.interact(&Interaction::Pointer { node: 99_999, kind: PointerKind::Over, x: 0, y: 0 }).is_err());
     }
 }

@@ -231,7 +231,7 @@ fn blit(g: &mut Gfx, f: &Frame, into: R) {
     if w == 0 {
         return;
     }
-    let dst = g.pm.data_mut();
+    let dst = g.pm_mut().data_mut();
     for row in 0..(f.h as i32).min(into.h as i32) {
         let dy = y0 + row;
         if dy < 0 || dy >= gh || x0 < 0 {
@@ -313,7 +313,7 @@ esac
         let mut g = Gfx::new(400, 300);
         v.render(&mut g, area(), 1.0);
         // the 0x80 picture is fitted into the picture area (400 x 220 minus bars): the centre is its grey
-        let px = |g: &Gfx, x: usize, y: usize| g.pm.data()[(y * 400 + x) * 4..(y * 400 + x) * 4 + 4].to_vec();
+        let px = |g: &Gfx, x: usize, y: usize| g.pm_ref().data()[(y * 400 + x) * 4..(y * 400 + x) * 4 + 4].to_vec();
         assert_eq!(px(&g, 200, 150), vec![0x80, 0x80, 0x80, 0x80]);
         let labels: Vec<String> = g.hits.iter().map(|h| h.label.clone()).collect();
         for want in ["Play again", "Fullscreen", "Stop", "Progress", "Picture"] {

@@ -1,0 +1,19 @@
+scenario: TOUCH-01
+title: Touch screen
+area: Touch
+rows: F-BOOT-06
+machines: any
+needs: person
+prereq: A computer with a touch screen. Start from a cold boot once if you can.
+step: Touch the sign-in field with one finger.
+expect: The field is chosen where your finger is, not somewhere else on the screen.
+clause: tap
+step: Touch and drag the finger slowly across the screen.
+expect: The pointer follows your finger without jumps.
+clause: drag
+step: Touch each corner of the screen in turn.
+expect: Every corner answers at the place you touched.
+clause: corners
+step: Touch with two fingers at once, then lift one.
+expect: The first finger keeps driving the pointer; the machine does not freeze or click by itself.
+clause: two-fingers

@@ -1,0 +1,14 @@
+# autotest pilot, batch A (2026-11-21). Written against the Feature text with sha f265eca15f43ed36; honest subset only: everything not checked is under not-covered.
+row: F-SDK-213
+targets: qemu
+profile: ram
+feature-sha: f265eca15f43ed36
+doc: an app permission change reaches the app it is about as app.permissions (needs the newest image)
+clause: 1 an app permission change reaches the app it is about as app.permissions (needs the newest image)
+not-covered: no other app or person's copy hears it
+not-covered: no registration and no scope needed, the person cannot switch it off
+not-covered: several changes merge into one with the changes added up
+not-covered: a taken-away events scope ends the registrations
+not-covered: the last change kept for the chat tool
+not-covered: names only, long sets cut with a count
+session-check: app_events_permissions

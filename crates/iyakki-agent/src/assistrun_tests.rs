@@ -79,6 +79,10 @@ struct Reg {
     delay: Duration,
     ran: Mutex<Vec<String>>,
     out: Handler,
+    /// Calls that must be in flight together before any of them answers (0: no meeting); `most` is the most that were.
+    meet: usize,
+    now: std::sync::atomic::AtomicUsize,
+    most: std::sync::atomic::AtomicUsize,
 }
 
 fn def(name: &str, props: Value, required: &[&str], risk: Risk) -> ToolDef {
@@ -106,10 +110,15 @@ fn registry(names: &[&str]) -> Vec<ToolDef> {
 
 impl Reg {
     fn new(names: &[&str]) -> Arc<Reg> {
-        Arc::new(Reg { defs: registry(names), delay: Duration::ZERO, ran: Mutex::new(vec![]), out: Box::new(|n, a| Ok(format!("{n} result for {a}"))) })
+        Arc::new(Reg { defs: registry(names), delay: Duration::ZERO, ran: Mutex::new(vec![]), out: Box::new(|n, a| Ok(format!("{n} result for {a}"))), meet: 0, now: Default::default(), most: Default::default() })
     }
     fn with(names: &[&str], delay_ms: u64, out: Handler) -> Arc<Reg> {
-        Arc::new(Reg { defs: registry(names), delay: Duration::from_millis(delay_ms), ran: Mutex::new(vec![]), out })
+        Arc::new(Reg { defs: registry(names), delay: Duration::from_millis(delay_ms), ran: Mutex::new(vec![]), out, meet: 0, now: Default::default(), most: Default::default() })
+    }
+    /// Every call waits until `meet` calls are running at the same time (or the wall-clock budget of the testkit passes): a runner that
+    /// starts them one after the other never gets there, and `most` says how many ran together.
+    fn meeting(names: &[&str], meet: usize, out: Handler) -> Arc<Reg> {
+        Arc::new(Reg { defs: registry(names), delay: Duration::ZERO, ran: Mutex::new(vec![]), out, meet, now: Default::default(), most: Default::default() })
     }
 }
 
@@ -121,6 +130,16 @@ impl Tools for Reg {
         self.ran.lock().unwrap().push(format!("{name} {args}"));
         if !self.delay.is_zero() {
             std::thread::sleep(self.delay);
+        }
+        if self.meet > 0 {
+            use std::sync::atomic::Ordering::SeqCst;
+            let n = self.now.fetch_add(1, SeqCst) + 1;
+            self.most.fetch_max(n, SeqCst);
+            let t0 = Instant::now();
+            while self.most.load(SeqCst) < self.meet && t0.elapsed() < iyakki_testkit::BUDGET {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            self.now.fetch_sub(1, SeqCst);
         }
         (self.out)(name, args)
     }
@@ -548,11 +567,10 @@ fn independent_read_only_calls_run_at_the_same_time_and_results_keep_their_order
         calls(vec![call("1", "web_fetch", json!({"url": "https://a"})), call("2", "web_fetch", json!({"url": "https://b"})), call("3", "weather", json!({"place": "Chennai"})), call("4", "web_search", json!({"query": "x"}))]),
         say("done"),
     ]);
-    let t = Reg::with(WEB, 400, Box::new(|n, a| Ok(format!("{n}:{a}"))));
-    let t0 = Instant::now();
-    let ev = run(b.clone(), t, "go", std_assist());
-    let took = t0.elapsed();
-    assert!(took < Duration::from_millis(1000), "four 400 ms tools should overlap, took {took:?}");
+    // each of the four calls waits until all four are running: only a runner that starts them together lets them answer
+    let t = Reg::meeting(WEB, 4, Box::new(|n, a| Ok(format!("{n}:{a}"))));
+    let ev = run(b.clone(), t.clone(), "go", std_assist());
+    assert_eq!(t.most.load(std::sync::atomic::Ordering::SeqCst), 4, "the four read-only calls ran at the same time");
     let r = results(&ev);
     assert_eq!(r.iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), vec!["web_fetch", "web_fetch", "weather", "web_search"]);
     assert!(r[0].2.contains("https://a") && r[1].2.contains("https://b"));
@@ -973,7 +991,7 @@ mod thinking {
 #[test]
 fn auto_mode_runs_writes_without_asking_but_destructive_secret_and_outside_calls_still_ask() {
     let ask = |n: &str| def(n, json!({}), &[], Risk::Ask);
-    let reg = || Arc::new(Reg { defs: vec![ask("write_file"), ask("deploy_build"), ask("k8s_delete"), ask("run_command"), ask("screen_capture"), ask("mcp__x__y")], delay: Duration::ZERO, ran: Mutex::new(vec![]), out: Box::new(|n, _| Ok(format!("{n} ok"))) });
+    let reg = || Arc::new(Reg { defs: vec![ask("write_file"), ask("deploy_build"), ask("k8s_delete"), ask("run_command"), ask("screen_capture"), ask("mcp__x__y")], delay: Duration::ZERO, ran: Mutex::new(vec![]), out: Box::new(|n, _| Ok(format!("{n} ok"))), meet: 0, now: Default::default(), most: Default::default() });
     let script = || {
         Scripted::new(vec![
             calls(vec![call("a", "write_file", json!({"path": "app.js"})), call("b", "deploy_build", json!({})), call("c", "run_command", json!({"program": "npm", "args": ["install"]}))]),
@@ -1139,6 +1157,9 @@ fn ask_user_ends_the_turn_with_the_question_and_its_numbered_options_and_the_mod
         delay: Duration::ZERO,
         ran: Mutex::new(vec![]),
         out: Box::new(|_, _| Ok("shown".into())),
+        meet: 0,
+        now: Default::default(),
+        most: Default::default(),
     });
     let b = Scripted::new(vec![calls(vec![call("a1", "ask_user", json!({"question": "Which registry?", "options": ["Docker Hub", "GHCR"]}))]), say("this must never be asked for")]);
     let ev = run(b.clone(), reg.clone(), "deploy my app", std_assist());
@@ -1187,6 +1208,9 @@ fn a_workspace_without_a_target_tells_the_model_to_ask_one_question_and_the_scri
         delay: Duration::ZERO,
         ran: Mutex::new(vec![]),
         out: Box::new(|_, _| Ok("shown".into())),
+        meet: 0,
+        now: Default::default(),
+        most: Default::default(),
     });
     let b = Scripted::new(vec![calls(vec![call("q1", "ask_user", json!({"question": "What should I build?", "options": ["IYAKKI tile app", "Service for k3s", "MCP server", "Skill"]}))]), say("never")]);
     let h = start_with(b.clone(), reg, vec![Message::system(format!("SYS\n{state}")), Message::user("make me a todo thing")], RunLimits::default(), std_assist());
@@ -3047,6 +3071,9 @@ fn teardown_world(tag: &str) -> (std::path::PathBuf, Arc<crate::boardtools::Proj
             "deploy_status" => Ok("Deployment web: 1/1 ready, Healthy".into()),
             o => Ok(format!("{o} ok")),
         }),
+        meet: 0,
+        now: Default::default(),
+        most: Default::default(),
     });
     (root.clone(), Arc::new(crate::boardtools::ProjectTools::new(inner.clone(), &root, "Web", &root.join("FEATURES.md"))), gone, inner)
 }
@@ -3164,6 +3191,9 @@ fn prose_that_repeats_the_question_ask_user_asks_is_dropped_so_it_is_asked_once(
         delay: Duration::ZERO,
         ran: Mutex::new(vec![]),
         out: Box::new(|_, _| Ok("shown".into())),
+        meet: 0,
+        now: Default::default(),
+        most: Default::default(),
     });
     let b = Scripted::new(vec![Ok(ModelTurn { text: REMOVED_PROSE.into(), calls: vec![call("q", "ask_user", json!({"question": "Tear down the dev environment?", "options": ["Keep it running", "Stop it", "Remove all"]}))] })]);
     let ev = run(b, reg, "tidy up", std_assist());
@@ -3172,7 +3202,7 @@ fn prose_that_repeats_the_question_ask_user_asks_is_dropped_so_it_is_asked_once(
     assert!(shown.iter().any(|t| t.contains("All resources in test-cla-dev were removed.")), "the summary stays: {shown:?}");
     assert_eq!(final_text(&ev), "Tear down the dev environment?\n\n1. Keep it running\n2. Stop it\n3. Remove all");
     // prose that says something else stays
-    let reg2 = Arc::new(Reg { defs: vec![def("ask_user", json!({"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}}}), &["question"], Risk::Safe)], delay: Duration::ZERO, ran: Mutex::new(vec![]), out: Box::new(|_, _| Ok("shown".into())) });
+    let reg2 = Arc::new(Reg { defs: vec![def("ask_user", json!({"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}}}), &["question"], Risk::Safe)], delay: Duration::ZERO, ran: Mutex::new(vec![]), out: Box::new(|_, _| Ok("shown".into())), meet: 0, now: Default::default(), most: Default::default() });
     let b = Scripted::new(vec![Ok(ModelTurn { text: "I found two registries on this machine.".into(), calls: vec![call("q", "ask_user", json!({"question": "Which registry?", "options": ["Docker Hub", "GHCR"]}))] })]);
     let ev = run(b, reg2, "deploy", std_assist());
     assert!(ev.iter().any(|e| matches!(e, RunEvent::Model { text, .. } if text.contains("two registries"))));

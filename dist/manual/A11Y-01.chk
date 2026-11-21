@@ -1,0 +1,16 @@
+scenario: A11Y-01
+title: Screen reader and text size
+area: Access
+rows: F-A11Y-05
+machines: any
+needs: person
+prereq: Speakers working.
+step: Open Settings, Accessibility and switch on the screen reader.
+expect: The page is read aloud, starting with its title.
+clause: reader
+step: Move through the page with Tab.
+expect: Every control you reach is spoken with its name and its state.
+clause: tab
+step: Switch on the largest text size.
+expect: Every screen of Settings stays readable with nothing cut off.
+clause: size

@@ -97,7 +97,7 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
 fn emulator_cmd(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
     let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("iyakki-sdk-emulator"))).filter(|p| p.is_file());
     let prog = beside.unwrap_or_else(|| PathBuf::from("iyakki-sdk-emulator"));
-    let o = std::process::Command::new(&prog).args(a).output().map_err(|_| "the program iyakki-sdk-emulator was not found next to iyakki or on PATH; build it with: cargo build --release -p iyakki-sdk-emulator".to_string())?;
+    let o = iyakki_core_local::starters::run_program(&prog, a).map_err(|_| "the program iyakki-sdk-emulator was not found next to iyakki or on PATH; build it with: cargo build --release -p iyakki-sdk-emulator".to_string())?;
     let text = String::from_utf8_lossy(&o.stdout).trim_end().to_string();
     if !text.is_empty() {
         out(&text);

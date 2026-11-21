@@ -79,7 +79,7 @@ fn each_key_changes_one_choice_keeps_it_for_this_person_and_audits_it() {
     assert_eq!(crate::uisize::load(&dir, "root"), crate::uisize::NORMAL + 1);
     press(&mut a, &cx, 'U');
     crate::uisize::apply(None);
-    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
     assert!(audit.contains("settings.accessibility"), "{audit}");
     assert!(!audit.contains("rootpass"));
 }
@@ -97,7 +97,7 @@ fn the_typing_echo_switch_is_on_the_page_saved_and_audited() {
     assert!(said.iter().any(|s| s == "Typing echo, switch, off"), "{said:?}");
     press(&mut a, &cx, 'e');
     assert!(acc::load(&dir, "root").typing_echo);
-    assert!(std::fs::read_to_string(cx.audit.path()).unwrap_or_default().contains("typing echo"));
+    assert!(std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default().contains("typing echo"));
 }
 
 #[test]

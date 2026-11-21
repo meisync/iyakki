@@ -18,9 +18,9 @@ use serde_json::{json, Value};
 
 use super::AppCx;
 
-pub const PROMPT_RULE: &str = "\nDISPLAY (Settings -> Display): displays_status says how each connected display looks to the computer and whether its list of sizes matches what it can do (free). displays_look_again reads the displays again when one shows a smaller size than it can do, for example a 4K monitor plugged in by USB-C that only offers 1920x1080 (free; it also happens by itself on a plug-in). displays_size_set (administrators; asks first) chooses the resolution of a connected display from the sizes it offers: it is kept in the person's display file and used the next time the shell drives that display; with one screen the shell drives it only when Screen features is Always on, so the tool turns that on and says so. KEYBOARD (Settings -> Keyboard, administrators): keyboard_status shows the input profile, function keys, key repeat, trackpad and scrolling choices (free); keyboard_set changes the ones you name and applies them at once (asks first). TIME (Settings -> Time): time_status shows the zone, network time and server (free); time_set changes them (administrators; asks first); clock_face_set changes the person's own 12-hour clock and seconds (asks first). POINTER SPEED (Settings -> Keyboard, administrators): pointer_speed_status shows how fast the mouse and the touchpad move, in percent (free); pointer_speed_set changes the mouse speed (mouse_pct) and/or the touchpad speed (touchpad_pct), 25 to 300 with 100 the default, applied at once (asks first). BROWSER CUSTOM HEADERS: browser_headers_list shows the rules without their values (free); browser_headers_enable and browser_headers_delete ask first. You cannot add a header or read its value: the person types the value on the Settings page, it goes to their vault. BROWSER ADS AND TRACKERS: browser_block_status shows the switch, the downloaded filter lists (rules, age, licence, source) and the allowed sites (free); browser_block_set switches blocking, browser_block_download fetches EasyList, EasyPrivacy, uBlock filters, all three (standard means EasyList and EasyPrivacy) or a list from an address the person gives, browser_block_update fetches the lists again, browser_block_remove removes every list and browser_block_allow lets one site through or stops that (each asks first; a download comes from the list's own server and is never shipped; the work runs in the background, ask browser_block_status for the result). KNOWN-BAD SITES: browser_badsites_status shows the list of dangerous sites the browser refuses to open (free); browser_badsites_add and browser_badsites_remove change it, browser_badsites_set switches it and browser_badsites_download adds a list such as urlhaus from its own server or an https address the person gives (each asks first; nothing is shipped). browser_certificate_view shows the certificate a site presents, its dates, names and whether it is trusted, with warnings (free; it only does the handshake). HOME LAYOUT: home_layout_list shows the groups (free); home_layout_group makes, renames, deletes a group of the person's own or resets the layout (asks first); an administrator can also use it to set or clear the default layout for new accounts.";
+pub const PROMPT_RULE: &str = "\nDISPLAY (Settings -> Display): displays_status says how each connected display looks to the computer and whether its list of sizes matches what it can do (free). displays_look_again reads the displays again when one shows a smaller size than it can do, for example a 4K monitor plugged in by USB-C that only offers 1920x1080 (free; it also happens by itself on a plug-in). displays_size_set (administrators; asks first) chooses the resolution of a connected display from the sizes it offers: it is kept in the person's display file and used the next time the shell drives that display; with one screen the shell drives it only when Screen features is Always on, so the tool turns that on and says so. KEYBOARD (Settings -> Keyboard, administrators): keyboard_status shows the input profile, function keys, key repeat, trackpad and scrolling choices (free); keyboard_set changes the ones you name and applies them at once (asks first). TIME (Settings -> Time): time_status shows the zone, network time and server (free); time_set changes them (administrators; asks first); clock_face_set changes the person's own 12-hour clock and seconds (asks first). POINTER SPEED (Settings -> Keyboard, administrators): pointer_speed_status shows how fast the mouse and the touchpad move, in percent (free); pointer_speed_set changes the mouse speed (mouse_pct) and/or the touchpad speed (touchpad_pct), 25 to 300 with 100 the default, applied at once (asks first). BROWSER CUSTOM HEADERS: browser_headers_list shows the rules without their values (free); browser_headers_enable and browser_headers_delete ask first. BROWSER PLUG-INS (the full web engine): browser_plugins_list shows the person's own scripts, style sheets and User-Agent (free; none until one is added); browser_plugin_add (asks) adds one, always off, a script or style must name its sites; browser_plugin_enable (asks) turns one on or off; browser_plugin_remove (asks) removes one. You cannot add a header or read its value: the person types the value on the Settings page, it goes to their vault. BROWSER ADS AND TRACKERS: browser_block_status shows the switch, the downloaded filter lists (rules, age, licence, source) and the allowed sites (free); browser_block_set switches blocking, browser_block_download fetches EasyList, EasyPrivacy, uBlock filters, all three (standard means EasyList and EasyPrivacy) or a list from an address the person gives, browser_block_update fetches the lists again, browser_block_remove removes every list and browser_block_allow lets one site through or stops that (each asks first; a download comes from the list's own server and is never shipped; the work runs in the background, ask browser_block_status for the result). KNOWN-BAD SITES: browser_badsites_status shows the list of dangerous sites the browser refuses to open (free); browser_badsites_add and browser_badsites_remove change it, browser_badsites_set switches it and browser_badsites_download adds a list such as urlhaus from its own server or an https address the person gives (each asks first; nothing is shipped). browser_certificate_view shows the certificate a site presents, its dates, names and whether it is trusted, with warnings (free; it only does the handshake). HOME LAYOUT: home_layout_list shows the groups (free); home_layout_group makes, renames, deletes a group of the person's own or resets the layout (asks first); an administrator can also use it to set or clear the default layout for new accounts.";
 
-pub const TOOLS: [&str; 27] = ["browser_badsites_status", "browser_badsites_set", "browser_badsites_add", "browser_badsites_remove", "browser_badsites_download", "browser_certificate_view", "displays_status", "displays_look_again", "displays_size_set", "pointer_speed_status", "pointer_speed_set", "browser_block_status", "browser_block_set", "browser_block_download", "browser_block_update", "browser_block_remove", "browser_block_allow", "keyboard_status", "keyboard_set", "time_status", "time_set", "clock_face_set", "browser_headers_list", "browser_headers_enable", "browser_headers_delete", "home_layout_list", "home_layout_group"];
+pub const TOOLS: [&str; 31] = ["browser_badsites_status", "browser_badsites_set", "browser_badsites_add", "browser_badsites_remove", "browser_badsites_download", "browser_certificate_view", "displays_status", "displays_look_again", "displays_size_set", "pointer_speed_status", "pointer_speed_set", "browser_block_status", "browser_block_set", "browser_block_download", "browser_block_update", "browser_block_remove", "browser_block_allow", "keyboard_status", "keyboard_set", "time_status", "time_set", "clock_face_set", "browser_headers_list", "browser_headers_enable", "browser_headers_delete", "browser_plugins_list", "browser_plugin_add", "browser_plugin_enable", "browser_plugin_remove", "home_layout_list", "home_layout_group"];
 
 fn kb_describe(k: &KeyboardSettings) -> String {
     let on = |o: Option<bool>, d: bool| if o.unwrap_or(d) { "on" } else { "off" };
@@ -353,6 +353,69 @@ fn header_entries(env: &Env, values: Arc<dyn Values>) -> Vec<Entry> {
     v
 }
 
+/// Browser plug-ins (F-BROW-90): the person's own scripts, style sheets and User-Agent for the full engine. None until one is added; adding,
+/// switching on or off and removing each ask first.
+fn plugin_entries(env: &Env) -> Vec<Entry> {
+    use iyakki_shared::browserplugins::{self as bp, Kind, Plugin, PluginStore};
+    let path = super::browser_plugins::path_for(&env.dir, &env.user);
+    let mut v = Vec::new();
+    {
+        let path = path.clone();
+        v.push(Entry::read("Browser", "browser_plugins_list", "List the browser's plug-ins (your own scripts, style sheets and User-Agent for the full web engine): name, kind, sites, on or off. There are none until one is added.", no_args(), move |_| {
+            let list = PluginStore::open(&path).list();
+            if list.is_empty() {
+                return Ok("No browser plug-ins.".into());
+            }
+            Ok(list.iter().map(|p| format!("{} [{}]: {}{} ({}, {} bytes)", p.name, p.id, p.kind.word(), if p.sites.is_empty() { String::new() } else { format!(" on {}", p.sites.join(", ")) }, if p.enabled { "on" } else { "off" }, p.body.len())).collect::<Vec<_>>().join("\n"))
+        }));
+    }
+    {
+        let (path, e) = (path.clone(), env.clone());
+        let schema = json!({"type": "object", "properties": {
+            "name": {"type": "string", "description": "A short name."},
+            "kind": {"type": "string", "enum": ["script", "style", "user_agent"]},
+            "sites": {"type": "array", "items": {"type": "string"}, "description": "Sites a script or style runs on, such as example.com or *.example.com (never every site). Leave out for a user_agent."},
+            "text": {"type": "string", "description": "The script, the style sheet, or the User-Agent string."},
+            "at_end": {"type": "boolean", "description": "Scripts and styles: run at the end of the page instead of the start."}
+        }, "required": ["name", "kind", "text"]});
+        v.push(Entry::change("Browser", "browser_plugin_add", "Add a browser plug-in (a script or style for named sites, or a User-Agent). It starts off; browser_plugin_enable turns it on. Works in the full web engine once its helper has the plug-in hooks. The person approves a card first.", schema, |a| format!("Add the browser plug-in {} ({})", a["name"].as_str().unwrap_or("?"), a["kind"].as_str().unwrap_or("?")), move |a| {
+            let kind = Kind::parse(&arg_str(a, "kind")?).ok_or("kind is script, style or user_agent")?;
+            let sites: Vec<String> = a.get("sites").and_then(|s| s.as_array()).map(|s| s.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+            let p = Plugin { id: String::new(), name: arg_str(a, "name")?, kind, sites, body: arg_str(a, "text")?, at_end: a.get("at_end").and_then(Value::as_bool).unwrap_or(false), enabled: false };
+            let store = PluginStore::open(&path);
+            let p = store.add(p)?;
+            e.audit("settings.browser.plugins", &format!("Browser plug-in \u{201C}{}\u{201D} ({}) added, off", p.name, p.kind.word()));
+            Ok(format!("Added {} [{}], off. Turn it on with browser_plugin_enable.", p.name, p.id))
+        }));
+    }
+    let schema = json!({"type": "object", "properties": {"plugin": {"type": "string", "description": "The plug-in's id or name from browser_plugins_list."}, "on": {"type": "boolean"}}, "required": ["plugin", "on"]});
+    {
+        let (path, e) = (path.clone(), env.clone());
+        v.push(Entry::change("Browser", "browser_plugin_enable", "Turn one browser plug-in on or off (a script or style then runs on the sites it names; a User-Agent applies to every site, one at a time). The person approves a card first.", schema, |a| format!("Turn the browser plug-in {} {}", a["plugin"].as_str().unwrap_or("?"), if a["on"].as_bool() == Some(false) { "off" } else { "on" }), move |a| {
+            let store = PluginStore::open(&path);
+            let p = store.find(&arg_str(a, "plugin")?).ok_or_else(|| "There is no such plug-in; call browser_plugins_list".to_string())?;
+            let on = arg_bool(a, "on")?;
+            store.set_enabled(&p.id, on)?;
+            bp::activate(store.list());
+            e.audit("settings.browser.plugins", &format!("Browser plug-in \u{201C}{}\u{201D} {}", p.name, if on { "turned on" } else { "turned off" }));
+            Ok(format!("{} is {}.", p.name, if on { "on" } else { "off" }))
+        }));
+    }
+    {
+        let e = env.clone();
+        let sel = json!({"type": "object", "properties": {"plugin": {"type": "string", "description": "The plug-in's id or name from browser_plugins_list."}}, "required": ["plugin"]});
+        v.push(Entry::change("Browser", "browser_plugin_remove", "Remove one browser plug-in. The person approves a card first.", sel, |a| format!("Remove the browser plug-in {}", a["plugin"].as_str().unwrap_or("?")), move |a| {
+            let store = PluginStore::open(&path);
+            let p = store.find(&arg_str(a, "plugin")?).ok_or_else(|| "There is no such plug-in; call browser_plugins_list".to_string())?;
+            store.remove(&p.id)?;
+            bp::activate(store.list());
+            e.audit("settings.browser.plugins", &format!("Browser plug-in \u{201C}{}\u{201D} removed", p.name));
+            Ok(format!("Removed {}.", p.name))
+        }));
+    }
+    v
+}
+
 /// Settings -> Display: how the connected displays look to the kernel (free) and "Look again" (free: it only asks the kernel to read the
 /// displays again, a few times in the background; nothing is switched off or changed).
 fn display_entries(env: &Env, sys_drm: std::path::PathBuf) -> Vec<Entry> {
@@ -465,6 +528,10 @@ fn layout_entries(env: &Env) -> Vec<Entry> {
     v
 }
 
+/// Tests that use `CERT_FAKE` (or need it empty) take this first, so they never see each other's answer.
+#[cfg(any(test, feature = "testing"))]
+pub(crate) static CERT_FAKE_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The certificate chain probe the tool uses; tests put their own here so nothing touches the network.
 #[cfg(any(test, feature = "testing"))]
 pub(crate) static CERT_FAKE: std::sync::Mutex<Option<iyakki_proxy::certview::View>> = std::sync::Mutex::new(None);
@@ -479,6 +546,17 @@ pub(crate) fn cert_probe(host: &str, port: u16) -> Result<iyakki_proxy::certview
     }
     #[allow(unreachable_code)]
     iyakki_proxy::certview::probe(host, port, iyakki_clock::now_unix() as i64)
+}
+
+/// The certificate the browser's own connection to the site was given, when it has one (F-BROW-98); tests use the same stand-in as the probe.
+pub(crate) fn cert_seen(host: &str, port: u16) -> Option<Result<iyakki_proxy::certview::View, String>> {
+    #[cfg(any(test, feature = "testing"))]
+    {
+        let _ = (host, port);
+        return None;
+    }
+    #[allow(unreachable_code)]
+    iyakki_proxy::certview::seen(host, port, iyakki_clock::now_unix() as i64)
 }
 
 /// The known-bad site list and the certificate details view (F-BROW-98).
@@ -731,7 +809,7 @@ fn wifi_ctl() -> iyakki_shared::settingstools_wifi::WifiCtl {
 
 /// The carrier the agent facet takes: the same data with the settings store type-erased.
 fn base_env(env: &Env) -> iyakki_shared::settingstools::Env {
-    iyakki_shared::settingstools::Env { dir: env.dir.clone(), user: env.user.clone(), admin: env.admin, settings: env.settings.clone(), audit: env.audit.clone() }
+    iyakki_shared::settingstools::Env { dir: env.dir.clone(), user: env.user.clone(), admin: env.admin, settings: Arc::new(env.settings.clone()), audit: env.audit.clone() }
 }
 
 /// Every Settings tool of this module and of the agent crate, in front of `inner`.
@@ -739,7 +817,7 @@ pub fn wrap(cx: &AppCx, inner: Arc<dyn Tools>) -> Arc<dyn Tools> {
     let audit = cx.audit.clone();
     let user = cx.session.user.clone();
     let admin = cx.session.policy.manage_settings;
-    let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin, settings: cx.settings().clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) };
+    let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin, settings: cx.settings(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) };
     let mut entries = Vec::new();
     entries.extend(cx.b4().settings_entries_a(&base_env(&env)));
     entries.extend(super::chat_settings_assistant::entries(cx, &env));
@@ -754,6 +832,7 @@ pub fn wrap(cx: &AppCx, inner: Arc<dyn Tools>) -> Arc<dyn Tools> {
     entries.extend(pointer_entries(&env));
     entries.extend(time_entries(&env));
     entries.extend(header_entries(&env, super::browser_headers::vault_values(cx.vault(), &cx.session.user)));
+    entries.extend(plugin_entries(&env));
     entries.extend(layout_entries(&env));
     entries.extend(display_entries(&env, crate::display::drm_dir()));
     entries.extend(block_entries(cx, &env));
@@ -786,6 +865,7 @@ pub fn prompt_rules(admin: bool) -> String {
     s.push_str(super::chat_settings_assistant::PROMPT_RULE);
     s.push_str(iyakki_shared::settingstools_memory::PROMPT_RULE);
     s.push_str(iyakki_shared::settingstools_linux::PROMPT_RULE);
+    s.push_str(iyakki_shared::settingstools_datasci::PROMPT_RULE);
     if admin {
         s.push_str(iyakki_shared::settingstools_access::PROMPT_RULE);
     }

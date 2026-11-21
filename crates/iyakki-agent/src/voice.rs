@@ -74,24 +74,15 @@ pub fn sound_player_argv(args: &[String]) -> Vec<String> {
 }
 
 pub(crate) fn command_for(args: &[String], cwd: Option<&Path>) -> Command {
-    use std::os::unix::process::CommandExt;
     let args = &sound_player_argv(args);
-    let mut c = Command::new(&args[0]);
-    c.process_group(0);
-    c.args(&args[1..]).env_clear().env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin").env("LANG", "C.UTF-8");
-    if let Some(h) = std::env::var_os("HOME") {
-        c.env("HOME", h);
-    }
-    for k in ["XDG_RUNTIME_DIR", "PULSE_SERVER", "PIPEWIRE_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
+    let mut envs: Vec<(String, String)> = vec![("PATH".into(), "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()), ("LANG".into(), "C.UTF-8".into())];
+    for k in ["HOME", "XDG_RUNTIME_DIR", "PULSE_SERVER", "PIPEWIRE_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
         // audio servers on a desktop need these; harmless elsewhere
         if let Some(v) = std::env::var_os(k) {
-            c.env(k, v);
+            envs.push((k.into(), v.to_string_lossy().into_owned()));
         }
     }
-    if let Some(d) = cwd {
-        c.current_dir(d);
-    }
-    c
+    iyakki_core_local::starters::audio_command(args, &envs, cwd)
 }
 
 /// Run to completion with a timeout; returns (stdout, stderr). The child is killed on timeout.
@@ -274,7 +265,7 @@ impl Drop for Recorder {
 /// Start the play command with a pipe on its stdin, for audio that arrives as it goes (radio). Kill it with [`kill_child`].
 /// The output of Settings -> Sound is given to `aplay` (`-D plughw:C,D`) unless the command names a device itself.
 pub fn spawn_player(play_cmd: &str) -> Result<Child, String> {
-    let args = crate::audioout::route_args(split_command(play_cmd)?, crate::audioout::global().device().as_deref());
+    let args = crate::audioout::route_args(split_command(play_cmd)?, crate::audioout::output_state().device().as_deref());
     let prog = args.first().ok_or("play command is empty")?;
     command_for(&args, None)
         .stdin(Stdio::piped())
@@ -339,15 +330,7 @@ pub fn launch_media_player(argv: &[String], url: &str) -> Result<(), String> {
 /// Like [`launch_media_player`] but the caller keeps the process, to see whether it still plays and to stop it
 /// ([`kill_child`] ends the whole group).
 pub fn spawn_media_player(argv: &[String], url: &str) -> Result<Child, String> {
-    use std::os::unix::process::CommandExt;
-    let mut child = std::process::Command::new(&argv[0])
-        .args(&argv[1..])
-        .arg(url)
-        .process_group(0)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+    let mut child = iyakki_core_local::starters::spawn_media(argv, url)
         .map_err(|e| format!("could not start {}: {e}", argv[0]))?;
     // a player that quits at once (no display, a missing codec, a sandbox that blocks it) is reported, not assumed to work
     for _ in 0..40 {
@@ -635,21 +618,9 @@ pub(crate) mod test_procs {
         }
     }
 
-    /// The direct children of this process whose program name is `name`.
+    /// The direct children of this process whose program name is `name` (the core reads `/proc`).
     pub fn children_named(name: &str) -> Vec<u32> {
-        let me = std::process::id();
-        let mut out = Vec::new();
-        for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
-            let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
-            let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else { continue };
-            // "pid (comm) S ppid ...": comm may hold spaces and brackets, so cut after the last ')'
-            let ppid = stat.rsplit_once(')').and_then(|(_, r)| r.split_whitespace().nth(1)).and_then(|p| p.parse::<u32>().ok());
-            let comm = std::fs::read_to_string(e.path().join("comm")).unwrap_or_default();
-            if ppid == Some(me) && comm.trim() == name {
-                out.push(pid);
-            }
-        }
-        out
+        iyakki_core_local::procfacts::my_children_named(name)
     }
 }
 
@@ -972,8 +943,8 @@ mod tests {
         use test_procs::*;
         for cmd in ["aplay -q", "/usr/bin/aplay -q -D plughw:0,0"] {
             let mut c = spawn_player(cmd).unwrap();
-            let comm = std::fs::read_to_string(format!("/proc/{}/comm", c.id())).unwrap_or_default();
-            assert_ne!(comm.trim(), "aplay", "{cmd}");
+            let comm = iyakki_core_local::procfacts::name(c.id()).unwrap_or_default();
+            assert_ne!(comm, "aplay", "{cmd}");
             kill_child(&mut c);
         }
         // a fake of the same name in a test's own folder still runs as written
@@ -982,7 +953,7 @@ mod tests {
         // only the system's aplay counts: another test running in parallel may have a fake player named aplay in its own folder (still a child named aplay)
         let real: Vec<u32> = children_named("aplay")
             .into_iter()
-            .filter(|p| std::fs::read_link(format!("/proc/{p}/exe")).is_ok_and(|e| ["/usr/", "/bin/", "/sbin/"].iter().any(|d| e.starts_with(d))))
+            .filter(|p| iyakki_core_local::procfacts::exe(*p).is_some_and(|e| ["/usr/", "/bin/", "/sbin/"].iter().any(|d| e.starts_with(d))))
             .collect();
         assert!(real.is_empty(), "this test binary has an aplay child: some test opened the real sound device: {real:?}");
     }

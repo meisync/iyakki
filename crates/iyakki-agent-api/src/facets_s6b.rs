@@ -28,12 +28,18 @@ pub trait SoundProbeFacet: Send + Sync {
     fn audio_card_starting(&self, _proc_root: &Path, _sys: &Path) -> Option<u32> {
         None
     }
-    /// What holds the sound cards now (the lookup of who owns a stream runs here, in the agent).
-    fn sounddoctor_scan(&self, _asound: &Path, _proc_root: &Path, _helper: u32, _own_pid: u32, _playing: bool) -> iyakki_shared::sounddoctor::Obs {
+    /// What holds the sound cards now, from the kernel facts of `route` (`Core::audio_route`): the lookup of who owns a stream and the
+    /// decision stay here, in the agent; the reads are the route's.
+    fn sounddoctor_scan_via(&self, _route: &dyn iyakki_core_api::AudioRoute, _helper: u32, _own_pid: u32, _playing: bool) -> iyakki_shared::sounddoctor::Obs {
         iyakki_shared::sounddoctor::Obs { playing: false, engine: iyakki_shared::sounddoctor::Engine::Closed, holder: None }
     }
-    fn sounddoctor_is_engine(&self, _proc_root: &Path, _helper: u32, _pid: u32) -> bool {
+    /// Is `pid` the web engine's helper or a descendant of it, by the parent chain the route reports?
+    fn sounddoctor_is_engine_via(&self, _route: &dyn iyakki_core_api::AudioRoute, _helper: u32, _pid: u32) -> bool {
         false
+    }
+    /// The route over this machine's own sound facts, for a page that was not given the core's.
+    fn system_audio_route(&self) -> std::sync::Arc<dyn iyakki_core_api::AudioRoute> {
+        std::sync::Arc::new(iyakki_core_api::audioroute::NoAudioRoute)
     }
     /// The words of the "Browser sound" row for the settings and the tap state.
     fn web_mix_status_text(&self, _web_mix: bool, _mixer_on: bool, _tap: Option<TapState>) -> &'static str {
@@ -60,6 +66,29 @@ pub trait SoundProbeFacet: Send + Sync {
     }
     /// Teach the Bluetooth speaker output which command plays sound.
     fn bluetooth_audio_install(&self, _play_cmd: Box<dyn Fn() -> String + Send + Sync>) {}
+    /// The Sound page's Bluetooth row (F-NET-28): whether the whole computer's sound goes to headphones or a speaker, the paired ones, and
+    /// the line that says so or why not.
+    fn bluetooth_sound_view(&self) -> BtSoundView {
+        BtSoundView::default()
+    }
+    /// Send ALL of the computer's sound to the paired headphones or speaker at `address` (empty: the only or remembered pair). The person has
+    /// already approved on the page. Returns the sentence to show.
+    fn bluetooth_sound_start(&self, _data: &Path, _address: &str) -> Result<String, String> {
+        Err(UNAVAILABLE_S6B.into())
+    }
+    /// Stop sending; the speakers play again.
+    fn bluetooth_sound_stop(&self, _data: &Path) -> Result<String, String> {
+        Err(UNAVAILABLE_S6B.into())
+    }
+}
+
+/// What the Sound page shows of the Bluetooth route.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BtSoundView {
+    pub active: bool,
+    pub line: String,
+    /// Paired headphones and speakers: (address, name).
+    pub sinks: Vec<(String, String)>,
 }
 
 /// The web engine and the places the person's files live.
@@ -361,6 +390,11 @@ pub trait UpdateCentre: Send + Sync {
     }
     /// Open a signed update file (a bundle) into the staging folder; the pack is listed by `find_packs` afterwards.
     fn open_file(&self, _path: &Path) -> Result<UpdateFound, String> {
+        Err("unavailable: this core does not serve this call".into())
+    }
+    /// Download a signed update from an https channel address (the signature is the same address with `.sig` added), check it and stage it like
+    /// `open_file` does; nothing is installed. Administrators only (the caller checks); the address is the person's.
+    fn fetch_file(&self, _url: &str) -> Result<UpdateFound, String> {
         Err("unavailable: this core does not serve this call".into())
     }
     fn preview(&self, _pack: &UpdateFound) -> Result<UpdatePreview, String> {

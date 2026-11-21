@@ -501,6 +501,10 @@ pub trait HelpersB6: Send + Sync {
     fn access_revoke(&self, _data: &Path, _installation: &str, _capability: &str) -> Result<bool, String> {
         Err(UNAVAILABLE_B6.into())
     }
+    /// Gives a held capability an end `hours` from now, or takes the end away (`None`). `Ok(false)`: it is not held. The caller writes the audit line.
+    fn access_limit(&self, _data: &Path, _installation: &str, _capability: &str, _hours: Option<u32>) -> Result<bool, String> {
+        Err(UNAVAILABLE_B6.into())
+    }
     /// Starts a check of the signed download list in the background (`force`: now, whatever the time since the last one). False: not started.
     fn dl_fetch_start(&self, _dir: &Path, _force: bool) -> bool {
         false

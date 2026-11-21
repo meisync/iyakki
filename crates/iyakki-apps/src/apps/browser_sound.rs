@@ -2,7 +2,6 @@
 //! kernel's playback streams about twice a second while it does, and turns the doctor's actions into things the view does.
 //! Also keeps the first audio error line of the engine's output, so a silent session leaves a line in the log.
 
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -114,7 +113,7 @@ impl SoundWatch {
     }
 
     /// Look and decide, at most every [`LOOK_EVERY`]; the actions to carry out. `helper` is the engine helper's pid.
-    pub fn tick(&mut self, helper: u32, asound: &Path, proc_root: &Path, own_pid: u32) -> Vec<Action> {
+    pub fn tick(&mut self, helper: u32, route: &dyn iyakki_core_api::AudioRoute, own_pid: u32) -> Vec<Action> {
         if !self.playing() && !self.doctor.wants_look() {
             return Vec::new();
         }
@@ -123,11 +122,11 @@ impl SoundWatch {
             return Vec::new();
         }
         self.last = Some(now);
-        self.step(now, helper, asound, proc_root, own_pid)
+        self.step(now, helper, route, own_pid)
     }
 
     /// The page plays, no stream of the engine runs, and the speaker is held by somebody the person can name: queue the question once.
-    fn consider_ask(&mut self, now: Duration, obs: &sounddoctor::Obs, proc_root: &Path, own_pid: u32) {
+    fn consider_ask(&mut self, now: Duration, obs: &sounddoctor::Obs, route: &dyn iyakki_core_api::AudioRoute, own_pid: u32) {
         if !obs.playing {
             self.playing_since = None;
             self.asked = false;
@@ -140,20 +139,20 @@ impl SoundWatch {
         }
         // an outside program only when it really plays (an idle leftover is ended by the doctor itself)
         let outside = obs.holder.as_ref().filter(|h| h.running);
-        let ours = |pid: u32| crate::agent().sound_probe().sounddoctor_is_engine(proc_root, own_pid, pid);
+        let ours = |pid: u32| crate::agent().sound_probe().sounddoctor_is_engine_via(route, own_pid, pid);
         if let Some(f) = self.reg.find(KEY, outside, &ours) {
             self.asked = true;
             self.ask = Some(f);
         }
     }
 
-    fn step(&mut self, now: Duration, helper: u32, asound: &Path, proc_root: &Path, own_pid: u32) -> Vec<Action> {
-        let mut obs = crate::agent().sound_probe().sounddoctor_scan(asound, proc_root, helper, own_pid, self.playing());
+    fn step(&mut self, now: Duration, helper: u32, route: &dyn iyakki_core_api::AudioRoute, own_pid: u32) -> Vec<Action> {
+        let mut obs = crate::agent().sound_probe().sounddoctor_scan_via(route, helper, own_pid, self.playing());
         if crate::agent().webmix_active() {
             // the page's sound goes through the mixer: the engine holds no stream of its own (see sounddoctor::through_mixer)
             obs = sounddoctor::through_mixer(obs, crate::agent().webmix_tap_state() == Some(iyakki_shared::webmix::TapState::Carrying));
         }
-        self.consider_ask(now, &obs, proc_root, own_pid);
+        self.consider_ask(now, &obs, route, own_pid);
         let actions = self.doctor.step(now, &obs);
         for a in &actions {
             match a {
@@ -180,35 +179,30 @@ impl Drop for SoundWatch {
 mod tests {
     use super::*;
 
-    fn tree(tag: &str) -> std::path::PathBuf {
-        let r = std::env::temp_dir().join(format!("browsersound-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&r);
-        std::fs::create_dir_all(r.join("asound/card0/pcm0p/sub0")).unwrap();
-        std::fs::create_dir_all(r.join("proc/100")).unwrap();
-        std::fs::write(r.join("asound/card0/pcm0p/sub0/status"), "closed\n").unwrap();
-        std::fs::write(r.join("proc/100/stat"), "100 (helper) S 1 1 1 0\n").unwrap();
+    fn tree() -> iyakki_core_fake::FakeAudioRoute {
+        let r = iyakki_core_fake::FakeAudioRoute::default();
+        r.put("card0/pcm0p/sub0/status", "closed\n");
+        r.set_process(100, 1, "helper");
         r
     }
 
     #[test]
     fn a_silent_page_is_reconnected_twice_then_told_once_and_a_quiet_page_is_never_looked_at() {
-        let r = tree("flow");
-        let (a, p) = (r.join("asound"), r.join("proc"));
+        let r = tree();
         let mut w = SoundWatch::new();
-        assert!(w.step(Duration::from_secs(0), 100, &a, &p, 1).is_empty());
+        assert!(w.step(Duration::from_secs(0), 100, &r, 1).is_empty());
         w.set_playing(true);
         let mut got = Vec::new();
         for t in 0..12u64 {
-            got.extend(w.step(Duration::from_secs(t), 100, &a, &p, 1));
+            got.extend(w.step(Duration::from_secs(t), 100, &r, 1));
         }
         assert_eq!(got.iter().filter(|x| **x == Action::Reconnect).count(), 2);
         assert_eq!(got.iter().filter(|x| **x == Action::Note(sounddoctor::NOTE_GIVE_UP.into())).count(), 1);
         // the sink runs: cleared
-        std::fs::write(a.join("card0/pcm0p/sub0/status"), "state: RUNNING\nowner_pid : 100\n").unwrap();
-        assert_eq!(w.step(Duration::from_secs(13), 100, &a, &p, 1), [Action::Clear]);
+        r.put("card0/pcm0p/sub0/status", "state: RUNNING\nowner_pid : 100\n");
+        assert_eq!(w.step(Duration::from_secs(13), 100, &r, 1), [Action::Clear]);
         w.set_playing(false);
-        assert!(w.tick(100, &a, &p, 1).is_empty());
-        let _ = std::fs::remove_dir_all(&r);
+        assert!(w.tick(100, &r, 1).is_empty());
     }
 
     #[test]
@@ -238,10 +232,9 @@ mod ask_tests {
     fn mpv(running: bool) -> Option<Holder> {
         Some(Holder { pid: 900, name: "mpv".into(), running })
     }
-    fn proc_root() -> std::path::PathBuf {
-        let r = std::env::temp_dir().join(format!("browsersound-ask-{}", std::process::id()));
-        std::fs::create_dir_all(r.join("900")).unwrap();
-        std::fs::write(r.join("900/stat"), "900 (mpv) S 1 900 900 0\n").unwrap();
+    fn proc_root() -> iyakki_core_fake::FakeAudioRoute {
+        let r = iyakki_core_fake::FakeAudioRoute::default();
+        r.set_process(900, 1, "mpv");
         r
     }
 

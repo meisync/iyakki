@@ -126,47 +126,55 @@ pub struct Probe {
     /// The core: the sound output the popover reads (F-SPLIT-03).
     pub core: Arc<dyn iyakki_core_api::Core>,
     pub dev: DeviceEnv,
-    pub hw: iyakki_hwinfo::Roots,
+    pub hw: iyakki_core_api::device_types::hwinfo::Roots,
     /// Where the data volume is mounted (free space is read from it).
     pub data_dir: PathBuf,
     /// Where a Bluetooth service keeps its paired devices (`/var/lib/bluetooth`).
     pub bt_dir: PathBuf,
-    pub drivers: Option<std::sync::Arc<dyn iyakki_agent_api::StoreDrivers>>,
+    pub drivers: Option<std::sync::Arc<dyn iyakki_core_api::drivers::Drivers>>,
     pub hostname: String,
     /// The data volume lives in memory (a live session).
     pub volatile: bool,
     /// The drawing surface (the window or the framebuffer), for "this window is ..." when `/sys` has nothing.
     pub screen: (u32, u32),
     /// Which network a WiFi interface is joined to (asks `iw`; a seam for tests).
-    pub wifi: Arc<dyn Fn(&str) -> Option<iyakki_devctl::WifiLink> + Send + Sync>,
+    pub wifi: Arc<dyn Fn(&str) -> Option<iyakki_core_api::device_types::devctl::WifiLink> + Send + Sync>,
     /// The kernel lists a configured Bluetooth controller: scanning is possible (through the in-house management channel, no program).
     pub can_scan: bool,
+    /// The hardware the popover reads addresses and the volume from and mutes through (the shell gives the guarded handle of `cx.os`; without one, the machine of `dev`).
+    pub hardware: Option<Arc<dyn iyakki_core_api::hardware::Hardware>>,
 }
 
 #[cfg(any(test, feature = "testing"))]
 impl Probe {
-    pub fn with_roots(mut self, r: iyakki_devctl::Roots) -> Self {
+    pub fn with_roots(mut self, r: iyakki_core_api::device_types::devctl::Roots) -> Self {
         self.dev.roots = r;
         self
     }
 }
 
 impl Probe {
-    pub fn real(core: Arc<dyn iyakki_core_api::Core>, dev: DeviceEnv, drivers: Option<Arc<dyn iyakki_agent_api::StoreDrivers>>, data_dir: PathBuf, hostname: String, volatile: bool) -> Probe {
+    /// The hardware handle: the one the shell gave, else the machine this probe looks at.
+    pub fn hardware(&self) -> Arc<dyn iyakki_core_api::hardware::Hardware> {
+        self.hardware.clone().unwrap_or_else(|| Arc::new(iyakki_core_local::LocalHardware::new(self.dev.roots.clone(), self.dev.ctl.clone())))
+    }
+
+    pub fn real(core: Arc<dyn iyakki_core_api::Core>, dev: DeviceEnv, drivers: Option<Arc<dyn iyakki_core_api::drivers::Drivers>>, data_dir: PathBuf, hostname: String, volatile: bool) -> Probe {
         let roots = dev.roots.clone();
         let wifi_roots = roots.clone();
         Probe {
             core,
             dev,
-            hw: iyakki_hwinfo::Roots { sys: roots.sys.clone(), proc: roots.proc_.clone() },
+            hw: iyakki_core_api::device_types::hwinfo::Roots { sys: roots.sys.clone(), proc: roots.proc_.clone() },
             data_dir,
             bt_dir: "/var/lib/bluetooth".into(),
             drivers,
             hostname,
             volatile,
             screen: (0, 0),
-            wifi: Arc::new(move |i| iyakki_devctl::wifi_link(&wifi_roots, i)),
-            can_scan: iyakki_devctl::btview::controllers().map(|c| c.iter().any(|c| c.configured)).unwrap_or(false),
+            wifi: Arc::new(move |i| iyakki_core_api::device_types::devctl::wifi_link(&wifi_roots, i)),
+            can_scan: iyakki_core_api::device_types::devctl::btview::controllers().map(|c| c.iter().any(|c| c.configured)).unwrap_or(false),
+            hardware: None,
         }
     }
 }
@@ -193,7 +201,7 @@ fn refresh_hz(mode: &str, fb_modes: Option<&str>, edid: Option<&[u8]>) -> Option
         (size == want).then(|| hz.trim().parse::<u32>().ok()).flatten()
     });
     from_fb.filter(|&h| h > 0).or_else(|| {
-        let (w, h, hz) = iyakki_devctl::drmmodes::parse_edid(edid?)?.preferred?;
+        let (w, h, hz) = iyakki_core_api::device_types::devctl::drmmodes::parse_edid(edid?)?.preferred?;
         ((w, h) == want && hz > 0).then_some(hz)
     })
 }
@@ -220,7 +228,7 @@ pub fn signal_words(dbm: i32) -> &'static str {
 }
 
 fn gb(b: u64) -> String {
-    iyakki_storage::human(b)
+    iyakki_core_api::device_types::storage::human(b)
 }
 
 /// The driver rows that are not working, matched to a kind of device by words in their name ("bluetooth", "wi-fi").
@@ -237,21 +245,21 @@ pub fn gather(p: &Probe) -> Snapshot {
     let driver_help: Vec<(String, String)> = p
         .drivers
         .as_ref()
-        .map(|d| d.rows().into_iter().filter(|row| row.status != iyakki_drivers::known::Status::Working).map(|row| (row.known.title.to_string(), if row.detail.is_empty() { row.known.why.to_string() } else { row.detail.clone() })).collect())
+        .map(|d| d.rows().into_iter().filter(|row| row.status != iyakki_core_api::device_types::driver_packs::known::Status::Working).map(|row| (row.known.title.to_string(), if row.detail.is_empty() { row.known.why.to_string() } else { row.detail.clone() })).collect())
         .unwrap_or_default();
 
     // ---- network
     if linux {
-        let links = iyakki_devctl::links(r);
-        let ips = p.dev.ctl.ipv4();
+        let links = iyakki_core_api::device_types::devctl::links(r);
+        let ips = p.hardware().ipv4();
         let ip_of = |n: &str| ips.iter().find(|(i, _)| i == n).map(|(_, a)| a.clone());
-        let rf = iyakki_devctl::rfkill_list(r);
+        let rf = iyakki_core_api::device_types::devctl::rfkill_list(r);
         let host = format!("host name {}", p.hostname);
         let mut first = true;
         let mut tag = |detail: String| -> String {
             if std::mem::take(&mut first) { format!("{host} · {detail}") } else { detail }
         };
-        let eth: Vec<_> = links.iter().filter(|l| l.kind == iyakki_devctl::LinkKind::Ethernet).collect();
+        let eth: Vec<_> = links.iter().filter(|l| l.kind == iyakki_core_api::device_types::devctl::LinkKind::Ethernet).collect();
         for l in &eth {
             let (level, state) = if !l.up {
                 (Level::Warn, "switched off".to_string())
@@ -266,7 +274,7 @@ pub fn gather(p: &Probe) -> Snapshot {
             let speed = l.speed.map(|s| format!(" · {s} Mb/s")).unwrap_or_default();
             items.push(Item::new("Ethernet", tag(format!("{} · {state}{speed}", l.name)), level, Jump::Settings("network")));
         }
-        let wifis: Vec<_> = links.iter().filter(|l| l.kind == iyakki_devctl::LinkKind::Wifi).collect();
+        let wifis: Vec<_> = links.iter().filter(|l| l.kind == iyakki_core_api::device_types::devctl::LinkKind::Wifi).collect();
         for l in &wifis {
             let off = rf.iter().any(|k| k.kind == "wlan" && (k.soft || k.hard));
             let (level, state) = if off {
@@ -303,7 +311,7 @@ pub fn gather(p: &Probe) -> Snapshot {
 
     // ---- Bluetooth
     if linux {
-        let bt = iyakki_devctl::bluetooth(r);
+        let bt = iyakki_core_api::device_types::devctl::bluetooth(r);
         if bt.detected() && (!bt.adapters.is_empty() || !bt.switches.is_empty()) {
             let blocked = bt.switches.iter().any(|k| k.soft || k.hard);
             let name = bt.adapters.first().cloned().unwrap_or_else(|| "adapter".into());
@@ -320,16 +328,16 @@ pub fn gather(p: &Probe) -> Snapshot {
             if let Some(c) = &mgmt {
                 let fw = p.dev.ctl.bt_firmware_file();
                 let product = read(p.dev.roots.sys.join("class/dmi/id/product_name")).unwrap_or_default();
-                it.detail = iyakki_devctl::btview::short(c, iyakki_drivers::macboard::uart_chip(&product), fw);
+                it.detail = iyakki_core_api::device_types::devctl::btview::short(c, iyakki_core_api::device_types::driver_packs::macboard::uart_chip(&product), fw);
                 if !c.addr_state().valid() {
                     it.level = Level::Warn;
                     it.detail.push_str(" · pairing and audio are not available yet");
                 }
                 // a Mac controller that is listed but has no patch file: say so first and lead to the Setup card, not to a device list
                 let mac = product.starts_with("Mac") || product.starts_with("iMac") || product.starts_with("Xserve");
-                if mac && iyakki_devctl::btview::needs_firmware(c, fw) {
+                if mac && iyakki_core_api::device_types::devctl::btview::needs_firmware(c, fw) {
                     it.level = Level::Missing;
-                    it.detail = format!("{} \u{b7} {}", iyakki_devctl::btview::NEEDS_FIRMWARE, it.detail);
+                    it.detail = format!("{} \u{b7} {}", iyakki_core_api::device_types::devctl::btview::NEEDS_FIRMWARE, it.detail);
                     it.jump = Jump::Setup(iyakki_shared::quickinstall::Item::MacFirmware.id());
                 }
             }
@@ -355,7 +363,7 @@ pub fn gather(p: &Probe) -> Snapshot {
             if p.dev.ctl.bt_held() {
                 // a T2 Mac keeps the drivers set aside until firmware exists: nothing is loaded, so no controller appeared
                 let product = read(p.dev.roots.sys.join("class/dmi/id/product_name")).unwrap_or_default();
-                let chip = if iyakki_drivers::macboard::uart_chip(&product).is_some() { format!(" · {}", iyakki_shared::macfw::NO_BCM4364_FILE) } else { String::new() };
+                let chip = if iyakki_core_api::device_types::driver_packs::macboard::uart_chip(&product).is_some() { format!(" · {}", iyakki_shared::macfw::NO_BCM4364_FILE) } else { String::new() };
                 it.detail = format!("no adapter yet · the Bluetooth drivers are set aside until firmware exists{chip}");
                 it = it.with_act(Act::BluetoothLoad);
             }
@@ -366,13 +374,13 @@ pub fn gather(p: &Probe) -> Snapshot {
     }
 
     // ---- displays
-    let scr = iyakki_devctl::screen(r);
+    let scr = iyakki_core_api::device_types::devctl::screen(r);
     let fb_modes = read(r.sys.join("class/graphics/fb0/modes"));
     let ui_scale = crate::uisize::LEVELS.iter().min_by(|a, b| (a.1 - crate::ui::ui_size()).abs().total_cmp(&(b.1 - crate::ui::ui_size()).abs())).map_or("Normal", |l| l.0);
     let connected: Vec<_> = scr.outputs.iter().filter(|o| o.connected).collect();
     for o in &connected {
         let card_conn = names(&r.sys.join("class/drm")).into_iter().find(|n| n.ends_with(&format!("-{}", o.name)) && n.starts_with("card"));
-        let monitor = card_conn.as_ref().and_then(|n| std::fs::read(r.sys.join("class/drm").join(n).join("edid")).ok()).and_then(|b| iyakki_hwinfo::parse_edid(&b)).map(|m| m.name);
+        let monitor = card_conn.as_ref().and_then(|n| std::fs::read(r.sys.join("class/drm").join(n).join("edid")).ok()).and_then(|b| iyakki_core_api::device_types::hwinfo::parse_edid(&b)).map(|m| m.name);
         let mode = o.modes.first().cloned().unwrap_or_else(|| "resolution unknown".into());
         let edid = card_conn.as_ref().and_then(|n| std::fs::read(r.sys.join("class/drm").join(n).join("edid")).ok());
         let hz = refresh_text(refresh_hz(&mode, fb_modes.as_deref(), edid.as_deref()));
@@ -389,7 +397,7 @@ pub fn gather(p: &Probe) -> Snapshot {
 
     // ---- sound
     if linux {
-        let cards = iyakki_devctl::cards(r);
+        let cards = iyakki_core_api::device_types::devctl::cards(r);
         if cards.is_empty() {
             let why = driver_reason(&driver_help, &["audio", "sound"]).unwrap_or_else(|| "no sound card found (it may need a driver)".into());
             items.push(Item::new("Sound", why, Level::Missing, Jump::Drivers));
@@ -402,7 +410,7 @@ pub fn gather(p: &Probe) -> Snapshot {
             // the volume of the card that plays (the T2 Mac's speaker is card 1, not card 0)
             let c = choice.output.as_ref().and_then(|o| cards.iter().find(|c| c.index == o.card)).unwrap_or(&cards[0]);
             let soft_card = if p.dev.roots.proc_ == std::path::Path::new("/proc") { p.core.sound().state().softvol_card } else { None };
-            let (v, mute) = sound_volume_view(c.index, p.dev.ctl.volume(c.index).as_ref(), soft_card, &prefs);
+            let (v, mute) = sound_volume_view(c.index, p.hardware().volume(c.index).as_ref(), soft_card, &prefs);
             let soft = if soft_card == Some(c.index) {
                 String::new() // the volume above is IYAKKI's
             } else if prefs.muted {
@@ -446,10 +454,10 @@ pub fn gather(p: &Probe) -> Snapshot {
 
     // ---- keyboard and pointer
     if linux {
-        let devs = read(r.proc_.join("bus/input/devices")).map(|t| iyakki_hwinfo::parse_input_devices(&t)).unwrap_or_default();
-        let of = |k: iyakki_hwinfo::InputKind| -> Vec<&iyakki_hwinfo::InputDevice> { devs.iter().filter(|d| d.kind == k).collect() };
-        let kb = of(iyakki_hwinfo::InputKind::Keyboard);
-        let ptr: Vec<String> = [iyakki_hwinfo::InputKind::Mouse, iyakki_hwinfo::InputKind::Touchpad, iyakki_hwinfo::InputKind::Touchscreen, iyakki_hwinfo::InputKind::Tablet].iter().flat_map(|k| of(*k).into_iter().map(|d| format!("{} ({})", d.name, d.kind.label()))).collect();
+        let devs = read(r.proc_.join("bus/input/devices")).map(|t| iyakki_core_api::device_types::hwinfo::parse_input_devices(&t)).unwrap_or_default();
+        let of = |k: iyakki_core_api::device_types::hwinfo::InputKind| -> Vec<&iyakki_core_api::device_types::hwinfo::InputDevice> { devs.iter().filter(|d| d.kind == k).collect() };
+        let kb = of(iyakki_core_api::device_types::hwinfo::InputKind::Keyboard);
+        let ptr: Vec<String> = [iyakki_core_api::device_types::hwinfo::InputKind::Mouse, iyakki_core_api::device_types::hwinfo::InputKind::Touchpad, iyakki_core_api::device_types::hwinfo::InputKind::Touchscreen, iyakki_core_api::device_types::hwinfo::InputKind::Tablet].iter().flat_map(|k| of(*k).into_iter().map(|d| format!("{} ({})", d.name, d.kind.label()))).collect();
         let detail = format!("keyboard: {} · pointer: {}", if kb.is_empty() { "none found".to_string() } else { kb.iter().map(|d| d.name.clone()).collect::<Vec<_>>().join(", ") }, if ptr.is_empty() { "none found".to_string() } else { ptr.join(", ") });
         items.push(Item::new("Keyboard and pointer", detail, if kb.is_empty() || ptr.is_empty() { Level::Warn } else { Level::Ok }, Jump::None));
     } else {
@@ -471,7 +479,7 @@ pub fn gather(p: &Probe) -> Snapshot {
         let model = ["vendor", "model"].iter().filter_map(|f| read(dir.join("device").join(f))).collect::<Vec<_>>().join(" ");
         disks.push((if model.is_empty() { n } else { model }, sectors * 512));
     }
-    let data = iyakki_storage::space(&p.data_dir).map(|(free, total)| format!("data {} free of {}{}", gb(free), gb(total), if p.volatile { " (in memory: not kept at power-off)" } else { "" }));
+    let data = iyakki_core_api::device_types::storage::space(&p.data_dir).map(|(free, total)| format!("data {} free of {}{}", gb(free), gb(total), if p.volatile { " (in memory: not kept at power-off)" } else { "" }));
     let drives = if disks.is_empty() { "no drives listed".to_string() } else { format!("{} drive{}: {}", disks.len(), if disks.len() == 1 { "" } else { "s" }, disks.iter().take(3).map(|d| format!("{} {}", d.0, gb(d.1))).collect::<Vec<_>>().join(", ")) };
     items.push(Item::new("Storage", [Some(drives), data].into_iter().flatten().collect::<Vec<_>>().join(" · "), if p.volatile { Level::Warn } else { Level::Ok }, Jump::Settings("storage")));
 
@@ -540,9 +548,9 @@ pub fn run_act(p: &Probe, act: &Act) -> Result<String, String> {
         Act::StopSharing => Ok(format!("Stopped {} shared folder(s).", crate::agent().sharedfolder_stop_everything())),
         Act::FirewallOff => Err("the firewall is switched off by the shell (administrators only)".into()),
         Act::ToggleSoundMute => Err("IYAKKI's mute is switched by the shell (it changes Settings -> Sound)".into()),
-        Act::ToggleMute(card) => p.dev.ctl.change_volume(*card, None).map(|v| if v.muted { "Muted.".to_string() } else { format!("Sound on, volume {}%.", v.percent) }),
+        Act::ToggleMute(card) => p.hardware().change_volume(*card, None).map(|v| if v.muted { "Muted.".to_string() } else { format!("Sound on, volume {}%.", v.percent) }),
         Act::TestSound => {
-            if !iyakki_devctl::cards(&p.dev.roots).iter().any(|_| true) {
+            if !iyakki_core_api::device_types::devctl::cards(&p.dev.roots).iter().any(|_| true) {
                 return Err("No sound card found.".into());
             }
             let (outs, choice) = sound_choice(p);
@@ -568,7 +576,7 @@ pub fn run_act(p: &Probe, act: &Act) -> Result<String, String> {
                 return Err("Scanning needs a Bluetooth controller that the kernel lists and that is switched on.".into());
             }
             std::thread::spawn(|| {
-                let _ = iyakki_devctl::btview::scan(0, 8);
+                let _ = iyakki_core_api::device_types::devctl::btview::scan(0, 8);
             });
             Ok("Scanning for Bluetooth devices for 8 seconds.".into())
         }
@@ -578,7 +586,7 @@ pub fn run_act(p: &Probe, act: &Act) -> Result<String, String> {
 /// The volume shown for the card that plays, and its Mute button. When IYAKKI's software volume carries that card's
 /// volume (it has no hardware control), the IYAKKI volume of Settings -> Sound is shown and Mute switches it, so muting
 /// keeps the level to come back to; else the card's own mixer, as before.
-pub fn sound_volume_view(card: u32, vol: Option<&iyakki_devctl::Volume>, soft_card: Option<u32>, prefs: &iyakki_shared::audioout::SoundSettings) -> (String, Option<Act>) {
+pub fn sound_volume_view(card: u32, vol: Option<&iyakki_core_api::device_types::devctl::Volume>, soft_card: Option<u32>, prefs: &iyakki_shared::audioout::SoundSettings) -> (String, Option<Act>) {
     if soft_card == Some(card) {
         let v = if prefs.muted { format!("muted ({}%)", prefs.volume_pct) } else { format!("volume {}%", prefs.volume_pct) };
         return (v, Some(Act::ToggleSoundMute));
@@ -591,7 +599,7 @@ pub fn sound_volume_view(card: u32, vol: Option<&iyakki_devctl::Volume>, soft_ca
 
 /// The sound outputs of the machine the popover looks at, and the one IYAKKI plays on.
 fn sound_choice(p: &Probe) -> (Vec<iyakki_shared::audioout::Output>, iyakki_shared::audioout::Choice) {
-    let outs = p.core.sound().outputs_at(&p.dev.roots.proc_);
+    let outs = p.core.sound().outputs_via(&*p.core.audio_route_at(&p.dev.roots.proc_, &p.dev.roots.sys));
     let choice = iyakki_shared::audioout::choose(&outs, &p.core.sound().prefs().output);
     (outs, choice)
 }
@@ -652,6 +660,8 @@ pub struct DevPop {
     tip: crate::tooltip::Tooltip,
     /// Where the tooltip was drawn last frame.
     pub tip_rect: Option<R>,
+    /// The panel shows only the network rows (the top bar's network button, F-LAUNCH-25), titled Network.
+    net_only: bool,
 }
 
 /// Take the rows named in `hide` out of a reading.
@@ -659,6 +669,9 @@ pub fn without_rows(mut s: Snapshot, hide: &[&str]) -> Snapshot {
     s.items.retain(|i| !hide.contains(&i.title.as_str()));
     s
 }
+
+/// The titles of the rows the network panel keeps.
+pub const NETWORK_ROWS: [&str; 5] = ["Network", "Ethernet", "Wi-Fi", "Sharing", "Firewall"];
 
 const REFRESH_EVERY: Duration = Duration::from_secs(3);
 
@@ -670,7 +683,7 @@ impl Default for DevPop {
 
 impl DevPop {
     pub fn new() -> DevPop {
-        DevPop { open: false, sel: 0, scroll: 0, snap: Arc::new(Mutex::new(None)), busy: Arc::new(AtomicBool::new(false)), last: None, seen: 0, visible: 6, hide: Vec::new(), tip: crate::tooltip::Tooltip::new(), tip_rect: None }
+        DevPop { open: false, sel: 0, scroll: 0, snap: Arc::new(Mutex::new(None)), busy: Arc::new(AtomicBool::new(false)), last: None, seen: 0, visible: 6, hide: Vec::new(), tip: crate::tooltip::Tooltip::new(), tip_rect: None, net_only: false }
     }
 
     /// Cloud mode: leave these rows (hardware rows by title) out of every reading from now on.
@@ -679,12 +692,37 @@ impl DevPop {
     }
 
     pub fn toggle(&mut self) {
+        self.net_only = false;
         self.open = !self.open;
         self.sel = 0;
         self.scroll = 0;
         self.last = None; // look again as soon as it opens
         self.tip = crate::tooltip::Tooltip::new();
         self.tip_rect = None;
+    }
+
+    /// Open or close the network panel: the same panel with only the network rows (Ethernet, Wi-Fi, the host name, sharing, the
+    /// firewall), each with its jump to Settings -> Network. The Devices list opened by `toggle` is unchanged.
+    pub fn toggle_network(&mut self) {
+        let was = self.open && self.net_only;
+        self.toggle();
+        self.net_only = !was;
+        self.open = !was;
+    }
+
+    /// The panel shows only the network rows.
+    pub fn is_network_panel(&self) -> bool {
+        self.open && self.net_only
+    }
+
+    /// The rows the panel shows now: the whole reading, or only the network rows in the network panel.
+    fn view(&self) -> Option<Snapshot> {
+        let mut s = self.snapshot()?;
+        if self.net_only {
+            s.items.retain(|i| NETWORK_ROWS.contains(&i.title.as_str()));
+            s.driver_help.clear();
+        }
+        Some(s)
     }
 
     /// Every event the shell sees while the popover is open (movement, press, release, wheel, keys, the heartbeat): the
@@ -776,7 +814,7 @@ impl DevPop {
     }
 
     fn count(&self) -> usize {
-        self.snapshot().map_or(0, |s| s.items.len())
+        self.view().map_or(0, |s| s.items.len())
     }
 
     fn keep_in_view(&mut self) {
@@ -789,7 +827,7 @@ impl DevPop {
     }
 
     pub fn handle_key(&mut self, key: &Key) -> Outcome {
-        let Some(snap) = self.snapshot() else {
+        let Some(snap) = self.view() else {
             return if matches!(key, Key::Esc | Key::F(8)) { Outcome::Close } else { Outcome::Nothing };
         };
         let n = snap.items.len();
@@ -830,7 +868,7 @@ impl DevPop {
 
     /// A click on one of the popover's own regions (their ids are in the constants above).
     pub fn handle_hit(&mut self, id: usize) -> Outcome {
-        let Some(snap) = self.snapshot() else { return Outcome::Nothing };
+        let Some(snap) = self.view() else { return Outcome::Nothing };
         match id {
             CLOSE_BTN => Outcome::Close,
             HELP_BTN => Outcome::Jump(Jump::Drivers),
@@ -883,11 +921,11 @@ impl DevPop {
         }
         g.clear_hits();
         self.tip_rect = None;
-        let snap = self.snapshot();
+        let snap = self.view();
         let rows = snap.as_ref().map_or(2, |x| x.items.len().max(1));
         let p = Self::panel(w, h, s, rows);
         crate::fx::modal_panel(g, p, s, crate::fx::CYAN, false);
-        g.text(p.x + 22.0 * s, p.y + 14.0 * s, 19.0 * s, TEXT, "Devices", Face::Bold);
+        g.text(p.x + 22.0 * s, p.y + 14.0 * s, 19.0 * s, TEXT, if self.net_only { "Network" } else { "Devices" }, Face::Bold);
         let hint = "F8 or Esc closes · Up/Down · Enter opens · r refreshes";
         let hw = g.text_width(12.0 * s, hint, Face::Sans);
         if hw < p.w - 190.0 * s {
@@ -978,7 +1016,8 @@ pub(crate) mod tests;
 #[cfg(test)]
 pub(crate) fn scanning_core() -> Arc<dyn iyakki_core_api::Core> {
     let core = iyakki_core_fake::FakeCore::new();
-    core.sound_fake().set_scanner(|p| crate::agent().sound_probe().audio_outputs_at(p));
-    core.sound_fake().set_starting_scanner(|p, s| crate::agent().sound_probe().audio_card_starting(p, s));
+    core.set_route_at(|p, s| Arc::new(iyakki_core_local::audioroute::LocalAudioRoute::at(p, s)));
+    core.sound_fake().set_route_scanner(|r| iyakki_agent::audioout::scan_via(r, &|_| None));
+    core.sound_fake().set_route_starting_scanner(iyakki_agent::audioout::card_starting_via);
     Arc::new(core)
 }

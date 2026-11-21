@@ -13,6 +13,8 @@
 //!   name; containerd resolves it in IYAKKI's spec (libraries, nodes, environment).
 
 pub use iyakki_shared::gpu_workloads::{GPU_RESOURCE, NVIDIA_RESOURCE};
+/// The AMD compute resource (stage 2): the unpatches take it away too.
+const AMD_RESOURCE: &str = iyakki_shared::gpu_rocm::RESOURCE;
 /// The namespace of the AI servers (shared with Lemonade).
 pub const NAMESPACE: &str = crate::quickinstall::LEMONADE_NAMESPACE;
 /// llama.cpp's Vulkan image (pinned build): Mesa's Vulkan drivers (RADV, ANV, NVK) and `llama-server`, whose `--list-devices` names the GPU.
@@ -240,12 +242,12 @@ pub fn ollama_patch(g: Gpu, render_gid: Option<u32>) -> String {
 
 /// The patch that takes the GPU away from the Ollama Deployment again.
 pub fn ollama_unpatch() -> String {
-    serde_json::json!({ "spec": { "template": { "spec": { "securityContext": { "supplementalGroups": null }, "containers": [{ "name": "ollama", "env": [{ "name": "OLLAMA_VULKAN", "$patch": "delete" }], "resources": { "limits": { GPU_RESOURCE: null, NVIDIA_RESOURCE: null } } }] } } } }).to_string()
+    serde_json::json!({ "spec": { "template": { "spec": { "securityContext": { "supplementalGroups": null }, "containers": [{ "name": "ollama", "env": [{ "name": "OLLAMA_VULKAN", "$patch": "delete" }], "resources": { "limits": { GPU_RESOURCE: null, NVIDIA_RESOURCE: null, AMD_RESOURCE: null } } }] } } } }).to_string()
 }
 
 /// The patch that takes the GPU away again (a `null` deletes the key; the env entry is deleted by name).
 pub fn lemonade_unpatch() -> String {
-    serde_json::json!({ "spec": { "template": { "spec": { "securityContext": { "supplementalGroups": null }, "containers": [{ "name": "lemonade", "env": [{ "name": "LEMONADE_LLAMACPP", "$patch": "delete" }], "resources": { "limits": { GPU_RESOURCE: null, NVIDIA_RESOURCE: null } } }] } } } }).to_string()
+    serde_json::json!({ "spec": { "template": { "spec": { "securityContext": { "supplementalGroups": null }, "containers": [{ "name": "lemonade", "env": [{ "name": "LEMONADE_LLAMACPP", "$patch": "delete" }], "resources": { "limits": { GPU_RESOURCE: null, NVIDIA_RESOURCE: null, AMD_RESOURCE: null } } }] } } } }).to_string()
 }
 
 /// Ollama as a Deployment in `iyakki-ai` with a GPU: the image from Docker Hub, its models on a volume, a ClusterIP Service on 11434 and a

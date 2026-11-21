@@ -155,7 +155,7 @@ impl<S: Store> Volume<S> {
     }
 
     fn finish_open(store: S, header: Header, u: Unlocked, active: u8, bad: bool) -> Result<Volume<S>, VolError> {
-        if store.len()? < container_len(header.payload_bytes) {
+        if store.len()? < header.payload_offset.saturating_add(header.payload_bytes) {
             return Err(VolError::Invalid("the drive is smaller than the volume says"));
         }
         let xts = Xts::new(&u.key);

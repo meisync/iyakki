@@ -1168,3 +1168,93 @@ fn a_cloud_flows_job_spec_becomes_one_sandbox_request_with_the_hardened_manifest
     let with_secret = JobSpec { secret_env: vec![("API_TOKEN".into(), "web-prod-api".into(), "token".into())], ..js };
     assert!(super::wiring::spec_from_flow_job(&with_secret, "mia").unwrap_err().contains("vault reference"));
 }
+
+#[test]
+fn the_namespace_tier_can_run_inside_a_pod_that_builds_its_own_sandbox_and_is_relaxed_in_one_place_only() {
+    let mut st = JobState::default();
+    st.succeeded = true;
+    let k = FakeKube::finishing(st, "hello\n");
+    let mut ex = JobExecutor::new(k.clone(), pol(), Arc::new(Gate(Ok(()))), Arc::new(Secrets(BTreeMap::new())));
+    ex.poll = Duration::from_millis(1);
+    // off by default: the Job executor does not take the namespace tier
+    assert!(!ex.handles(Tier::Namespace) && ex.handles(Tier::Job));
+    ex.ns_in_pod = true;
+    assert!(ex.handles(Tier::Namespace));
+    let mut s = SandboxSpec { tier: Some(Tier::Namespace), ..spec() };
+    s.argv = vec!["python3".into(), "-c".into(), "print('hello')".into()];
+    s.inputs = vec![InputFile { name: "a.txt".into(), bytes: b"a".to_vec() }];
+    let r = engine(vec![Arc::new(ex)], Arc::new(Rec::default())).run(&s, &who(), None).unwrap();
+    assert!(r.ok() && r.tier == Tier::Namespace && r.stdout == "hello\n", "{r:?}");
+    let applied = k.applied.lock().unwrap().clone();
+    let job = applied.last().unwrap();
+    let pod = job.pointer("/spec/template/spec").unwrap();
+    let cmd: Vec<String> = pod.pointer("/containers/0/command").unwrap().as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    assert_eq!(cmd[0], "iyakki");
+    let parsed = crate::linuxapps_init::Spec::parse(&cmd[1..]).expect("linuxapp-init parses what the pod runs");
+    assert_eq!((parsed.root.as_str(), parsed.net, parsed.seccomp, parsed.uid), (job::NS_ROOTFS_IN_POD, false, true, 10001));
+    assert_eq!(parsed.cmd, ["python3", "-c", "print('hello')"]);
+    assert!(parsed.binds.iter().any(|b| b.dst == "/workspace" && b.rw) && parsed.binds.iter().any(|b| b.src == "/inputs" && b.dst == "/inputs" && !b.rw));
+    // the relaxation is exactly: no seccomp or AppArmor profile in the way, own user ids; nothing else is loosened
+    assert_eq!(pod["hostUsers"], json!(false));
+    assert_eq!(pod.pointer("/containers/0/securityContext/seccompProfile/type").unwrap(), "Unconfined");
+    assert_eq!(pod.pointer("/containers/0/securityContext/appArmorProfile/type").unwrap(), "Unconfined");
+    let sc = pod.pointer("/containers/0/securityContext").unwrap();
+    assert_eq!((sc["privileged"].clone(), sc["allowPrivilegeEscalation"].clone(), sc["readOnlyRootFilesystem"].clone(), sc["runAsNonRoot"].clone()), (json!(false), json!(false), json!(true), json!(true)));
+    assert_eq!(sc.pointer("/capabilities/drop").unwrap(), &json!(["ALL"]));
+    assert!(sc.pointer("/capabilities/add").is_none());
+    for k in ["hostNetwork", "hostPID", "hostIPC"] {
+        assert_eq!(pod[k], json!(false));
+    }
+    // a pod of the job tier keeps the runtime default profiles
+    let k2 = FakeKube::finishing(JobState { succeeded: true, ..Default::default() }, "x");
+    engine(vec![job_exec(k2.clone(), Ok(()))], Arc::new(Rec::default())).run(&spec(), &who(), None).unwrap();
+    let job2 = k2.applied.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(job2.pointer("/spec/template/spec/containers/0/securityContext/seccompProfile/type").unwrap(), "RuntimeDefault");
+    assert!(job2.pointer("/spec/template/spec/hostUsers").is_none());
+}
+
+#[test]
+fn the_namespace_image_recipe_matches_what_the_job_runs_and_the_context_script_refuses_an_unsafe_rootfs() {
+    let docker = include_str!("../../../../dist/sandbox/Dockerfile.ns");
+    let lines: Vec<&str> = docker.lines().filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty()).collect();
+    // the image has what the pod's command needs: `iyakki` by PATH, the rootfs where the sandbox pivots, the run's own user id
+    assert_eq!(lines[0], "FROM scratch", "no base image is pulled");
+    assert!(lines.contains(&"COPY iyakki /iyakki") && lines.contains(&"ENV PATH=/"));
+    assert!(lines.contains(&format!("COPY rootfs/ {}/", job::NS_ROOTFS_IN_POD).as_str()), "{lines:?}");
+    assert!(lines.contains(&format!("USER {0}:{0}", job::RUN_UID).as_str()));
+    assert!(!lines.iter().any(|l| l.starts_with("ENTRYPOINT") || l.starts_with("CMD")), "the Job names the command");
+    // the script: a good rootfs makes a context; set-uid files, device nodes and escaping links are refused (a shell is needed: Unix only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let base = std::env::temp_dir().join(format!("iyakki-nsimg-{}", crate::cloudkeys::hex(&crate::cloudkeys::random::<6>().unwrap())));
+        let root = base.join("rootfs");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin").join("tool"), "x").unwrap();
+        symlink("tool", root.join("bin").join("alias")).unwrap();
+        symlink("/bin/tool", root.join("bin").join("absolute")).unwrap();
+        let bin = base.join("iyakki");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/sandbox/build-ns-image.sh");
+        let run = |out: &std::path::Path| std::process::Command::new("bash").arg(script).args(["--iyakki", &bin.display().to_string(), "--rootfs", &root.display().to_string(), "--out", &out.display().to_string()]).output().unwrap();
+        let out = base.join("ctx");
+        let ok = run(&out);
+        assert!(ok.status.success(), "{}", String::from_utf8_lossy(&ok.stderr));
+        assert!(out.join("Dockerfile").is_file() && out.join("iyakki").is_file() && out.join("rootfs/bin/tool").is_file());
+        // a set-uid file
+        std::fs::write(root.join("bin").join("su"), "x").unwrap();
+        std::fs::set_permissions(root.join("bin").join("su"), std::fs::Permissions::from_mode(0o4755)).unwrap();
+        let bad = run(&base.join("ctx2"));
+        assert!(!bad.status.success() && String::from_utf8_lossy(&bad.stderr).contains("set-uid"), "{}", String::from_utf8_lossy(&bad.stderr));
+        std::fs::remove_file(root.join("bin").join("su")).unwrap();
+        // a link out of the folder
+        symlink("../../etc/passwd", root.join("bin").join("escape")).unwrap();
+        let bad = run(&base.join("ctx3"));
+        assert!(!bad.status.success() && String::from_utf8_lossy(&bad.stderr).contains("outside the rootfs"), "{}", String::from_utf8_lossy(&bad.stderr));
+        // no program, no folder
+        let none = std::process::Command::new("bash").arg(script).output().unwrap();
+        assert!(!none.status.success());
+        std::fs::remove_dir_all(&base).ok();
+    }
+}

@@ -30,7 +30,7 @@ impl Status {
 use crate::mediaindex::ItemKind;
 
 /// What the list shows for one entry.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct View {
     pub id: u64,
     pub url: String,
@@ -61,7 +61,7 @@ pub struct View {
 pub const INTERRUPTED: &str = "Interrupted: IYAKKI was restarted before it finished. Retry it.";
 
 /// What a person asks for: an address and the free-text words that go with it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Request {
     pub url: String,
     /// Free-text categories (any words); known ones become types, the others tags.
@@ -78,7 +78,7 @@ pub fn folder_label(path: &str) -> String {
 }
 
 /// Who is asking for a download and where an automatic one may go (what the queue's worker needs from the person's session).
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Who {
     pub policy: iyakki_sec::policy::Policy,
     pub user: String,

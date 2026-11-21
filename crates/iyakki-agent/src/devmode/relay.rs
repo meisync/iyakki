@@ -239,6 +239,10 @@ struct RelayState {
     /// Where the relay is (`https://host[:port]`); empty until the person gives it (F-CORE-33).
     #[serde(default)]
     url: String,
+    /// SHA-256 fingerprint of the relay's own certificate (64 hex digits): an https relay is trusted for that certificate only, and
+    /// without it the machine connects nowhere (F-CORE-33). Empty until the person gives it.
+    #[serde(default)]
+    pin: String,
 }
 
 struct Session {
@@ -325,6 +329,26 @@ impl DevMode {
         self.relay_state().url
     }
 
+    /// The fingerprint of the relay's certificate that an https relay must show (empty: none given, so an https relay is not used).
+    pub fn relay_pin(&self) -> String {
+        self.relay_state().pin
+    }
+
+    /// Set the fingerprint of the relay's certificate (administrators; asks the same card as the switch). Empty takes it away. Checked: 64 hex digits.
+    pub fn set_relay_pin(&self, policy: &Policy, user: &str, pin: &str) -> Result<(), String> {
+        Self::need_admin(policy)?;
+        let p = iyakki_proxy::certinfo::norm_fingerprint(pin.trim());
+        if !p.is_empty() && (p.len() != 64 || pin.trim().chars().any(|c| !(c.is_ascii_hexdigit() || c == ':' || c == ' '))) {
+            return Err("the certificate fingerprint is 64 hexadecimal digits (SHA-256), with or without colons".into());
+        }
+        let _one = super::keys_lock();
+        let mut st = self.relay_state();
+        st.pin = p;
+        self.write("relay.json", &st)?;
+        self.log(user, user, "devmode.relay.pin", if st.pin.is_empty() { "removed" } else { "set" }, true);
+        Ok(())
+    }
+
     pub fn relay_approved(&self, computer: &str) -> bool {
         self.relay_state().approved.iter().any(|c| c == computer)
     }
@@ -335,7 +359,15 @@ impl DevMode {
         format!(
             "The relay is {}{}. Approved computers: {}.{}",
             if st.enabled { "on" } else { "off (the default)" },
-            if st.url.is_empty() { " (no address set: the machine connects nowhere)".to_string() } else { format!(" (address {})", st.url) },
+            if st.url.is_empty() {
+                " (no address set: the machine connects nowhere)".to_string()
+            } else if st.url.starts_with("https://") && st.pin.is_empty() {
+                format!(" (address {}, but no certificate fingerprint is set: an https relay is only used for the certificate you name, so the machine connects nowhere)", st.url)
+            } else if st.url.starts_with("https://") {
+                format!(" (address {}, certificate {})", st.url, iyakki_proxy::certinfo::fingerprint_groups(&st.pin).split(' ').next().unwrap_or(""))
+            } else {
+                format!(" (address {})", st.url)
+            },
             if st.approved.is_empty() { "none".to_string() } else { st.approved.join(", ") },
             if st.enabled { "" } else { " Nothing reaches this machine through a relay while it is off." }
         )

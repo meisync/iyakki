@@ -319,6 +319,36 @@ impl Default for ChatApp {
 }
 
 impl ChatApp {
+    /// Ctrl+Shift+V: the newest copy is a picture. It is kept in Uploads as a PNG and goes with the next message like a dropped picture.
+    fn attach_clipboard_picture(&mut self, cx: &AppCx) {
+        let (_, _, png) = match super::pastepic::newest_png() {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                self.info = Some("The newest copy is not a picture. Ctrl+V pastes text.".into());
+                return;
+            }
+            Err(e) => {
+                self.info = Some(e);
+                return;
+            }
+        };
+        let uploads = cx.core.file_scope().home_root(&cx.session.user, cx.data_dir()).join("Uploads");
+        if let Err(e) = cx.core.file_scope().check_write(&cx.session.policy, &cx.session.user, &uploads) {
+            self.info = Some(e);
+            return;
+        }
+        match super::pastepic::save(&uploads, &png) {
+            Ok(p) => {
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                cx.audit.record(&cx.session.user, "chat.attach", "1 pasted picture");
+                let size = png.len() as u64;
+                self.attachments.push(super::dropattach::Attachment { block: format!("[Attached picture: {name} ({} KB), saved as {}; show it with show_image]", size.div_ceil(1024), p.display()), name: name.clone(), size });
+                self.info = Some(format!("Attached {name}. It goes with your next message."));
+            }
+            Err(e) => self.info = Some(e),
+        }
+    }
+
     pub fn new() -> ChatApp {
         ChatApp {
             jobs_ui: super::jobs_ui::JobsUi::new(Some("")),
@@ -872,6 +902,11 @@ impl ChatApp {
         self.scroll_px = 0.0;
         self.ensure_session(cx);
         self.last_q = text.trim().to_string();
+        // a program without the agent in it (iyakki-ui over the core's socket): the core builds the tool chain and drives the run
+        if let Some(runs) = crate::chat_runs() {
+            self.start_core_run(cx, runs, text, continues, ext);
+            return;
+        }
         // the agent has its own document-search tool, so passages are not pre-loaded for it
         let mut opts = ContextOptions { use_docs: false, ..Default::default() };
         // the PROJECT STATE of a workspace chat: rebuilt from the disk at the start of every run (and every Autopilot step)
@@ -890,142 +925,23 @@ impl ChatApp {
         }
         let mut workdir = workdir;
         let mut kit: Option<Arc<dyn iyakki_agent_api::ProjectKit>> = None;
-        let mut cluster_pair: Option<(iyakki_shared::devcluster::ClusterProfile, String)> = None;
         let mut platform: Option<Arc<dyn std::any::Any + Send + Sync>> = None;
         let mut system = match &workdir {
             Some(d) => format!("{AGENT_SYSTEM_PROMPT}\nYour working folder for this chat is {}. Relative paths and new files go there; each chat has its own folder.", d.display()),
             None => AGENT_SYSTEM_PROMPT.to_string(),
         };
+        // the assistant preset the person chose in Settings (text from a bundle: style and focus only)
+        system.push_str(&iyakki_shared::bundle_members::preset_note(cx.data_dir(), &cx.session.user));
         // an AI IDE workspace: the account's file scope is narrowed to the workspace folder (what the account may do there stays)
         let project = self.project.clone();
         if let Some(p) = &project {
-            let root = p.root.display().to_string();
-            let (user, base) = (cx.session.user.as_str(), &cx.session.policy);
-            policy = base.clone();
-            policy.fs_read = if base.allows_read(user, &root) { vec![root.clone()] } else { vec![] };
-            policy.fs_write = if base.allows_write(user, &root) { vec![root] } else { vec![] };
-            workdir = Some(p.root.clone());
-            // the workspace's connected cluster: the k8s_* and deploy_* tools, only for an account that may run commands
-            let profile = p.cluster.as_ref().and_then(|c| c.slot.lock().ok().and_then(|g| g.resolution.as_ref().and_then(|r| r.reachable().cloned())));
-            let may_run = cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full && (profile.as_ref().is_none_or(|pr| pr.local) || cx.session.policy.allows_host("*"));
-            let mut kit_cluster = None;
-            if let (Some(c), Some(pr), true) = (&p.cluster, profile, may_run) {
-                cluster_pair = Some((pr.clone(), c.namespace.clone()));
-                kit_cluster = Some(iyakki_agent_api::ProjectCluster { runner: c.runner.clone(), profile: pr, namespace: c.namespace.clone(), phrase: cx.agent.clusters_phrase_for(cx.data_dir(), &cx.session.user, &p.name) });
-                // platform services (Gitea, a private store) are offered with the cluster tools; they always ask
-                let env = if crate::TESTING { iyakki_shared::devcluster::Env::default() } else { iyakki_shared::devcluster::Env::real() };
-                platform = Some(super::platform_services::platform_for(cx, c.runner.clone(), env).tools_any());
-            }
-            {
-                let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-                kit = cx.b4().project_kit(iyakki_agent_api::ProjectKitSpec { user: cx.session.user.clone(), name: p.name.clone(), root: p.root.clone(), features: p.features.clone(), audit: Arc::new(move |k, d| audit.record(&user, k, d)), session: self.session.as_ref().map(|s| s.id.clone()), cluster: kit_cluster });
-            }
-            system = format!("{AGENT_SYSTEM_PROMPT}{}", cx.agent.helpers_b4().workspace_prompt(&p.name, &p.root, &p.features.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "FEATURES.md".into()), cluster_pair.as_ref().map(|(pr, ns)| (pr, ns.as_str()))));
-            {
-                let cfg = iyakki_shared::workspace::ProjectConfig::load(&p.root).unwrap_or_default();
-                opts.pinned_skills = cx.agent.helpers_b4().project_pinned_skills(&p.root, &cfg.stack, text.trim());
-                let f: Arc<dyn Fn() -> String + Send + Sync> = match kit.clone() {
-                    Some(k) => {
-                        let root = p.root.clone();
-                        Arc::new(move || {
-                            let cfg = iyakki_shared::workspace::ProjectConfig::load(&root).unwrap_or_default();
-                            k.state(&cfg.stack, &cfg.commands.test, &cfg.commands.run, &cfg.commands.build)
-                        })
-                    }
-                    None => Arc::new(String::new),
-                };
-                if !self.autopilot {
-                    system.push_str("\n\n");
-                    system.push_str(&f());
-                }
-                state_fn = Some(f);
-            }
-            if cx.agent.b0().idebrowser().offered(&cx.session.policy) {
-                system.push('\n');
-                system.push_str(iyakki_shared::idebrowser::PROMPT_RULES);
-            }
-            if self.tasks.is_some() && cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full {
-                system.push_str(iyakki_shared::tasktools::PROMPT_RULE);
-            }
-            system.push_str(iyakki_shared::toolrouting::PROMPT_RULE);
-            if iyakki_shared::gitworktools::offered(&cx.session.policy) {
-                system.push_str(iyakki_shared::gitworktools::PROMPT_RULE);
-            }
-            system.push_str(&cx.services.msg_prompt_rules(&cx.session.user));
-            if cx.session.policy.allows_app(iyakki_sec::policy::App::Rag) {
-                system.push_str(iyakki_shared::ragtools::PROMPT_RULE);
-            }
-            system.push_str(iyakki_shared::updatestools::PROMPT_RULE);
-            system.push_str(iyakki_shared::doctortools::PROMPT_RULE);
-            system.push_str(iyakki_shared::wizardtools::PROMPT_RULE);
-            system.push_str(iyakki_shared::routertools::PROMPT_RULE);
-            system.push_str(cx.services.fleet_prompt_rule());
-            system.push_str(iyakki_shared::imagebuildtools::PROMPT_RULE);
-            system.push_str(iyakki_shared::linuxpodtools::PROMPT_RULE);
-            system.push_str(iyakki_shared::mcpadmintools::PROMPT_RULE);
-            system.push_str(iyakki_shared::skillstools::PROMPT_RULE);
-            system.push_str(iyakki_shared::linuxappimagetools::PROMPT_RULE);
-            system.push_str(iyakki_shared::linuxsandboxtools::PROMPT_RULE);
-            system.push_str(iyakki_shared::k8sexptools::PROMPT_RULE);
-            system.push_str(iyakki_shared::sessionlogtools::PROMPT_RULE);
-            system.push_str(iyakki_shared::lockscreentools::PROMPT_RULE);
-            system.push_str(&super::chat_settings::prompt_rules(cx.session.policy.manage_settings));
-            if cx.session.role == iyakki_sec::policy::Role::Admin {
-                system.push_str(iyakki_shared::clientmedia::DEVICE_PROMPT_RULE);
-                system.push_str(iyakki_shared::devmode::restarttools::PROMPT_RULE);
-                system.push_str(iyakki_shared::devmode::restarttools::PAIRING_RULE);
-            }
-            system.push_str(iyakki_shared::enchometools::PROMPT_RULE);
-            system.push_str(iyakki_shared::accessibilitytools::PROMPT_RULE);
-            system.push_str(iyakki_shared::browsera11y::PROMPT_RULE);
-            if cx.session.role != iyakki_sec::policy::Role::Guest {
-                system.push_str(iyakki_shared::disksunlocktools::PROMPT_RULE);
-                if cx.session.role == iyakki_sec::policy::Role::Admin {
-                    system.push_str(iyakki_shared::disksformattools::PROMPT_RULE);
-                }
-            }
-            if cx.session.policy.manage_settings {
-                system.push_str(iyakki_shared::componentstools::PROMPT_RULE);
-                system.push_str(iyakki_shared::buildtools::PROMPT_RULE);
-            }
-            system.push_str(iyakki_shared::pdftools::PROMPT_RULE);
-            if cx.session.policy.manage_settings {
-                system.push_str(iyakki_shared::pdfnativetools::PROMPT_RULE);
-            }
-            system.push_str(iyakki_shared::tilestools::PROMPT_RULE);
-            system.push_str(iyakki_shared::dictfixtools::PROMPT_RULE);
-            system.push_str(iyakki_shared::voiceassisttools::PROMPT_RULE);
-            system.push_str(cx.services.cloud_stream_prompt_rule());
-            system.push_str(iyakki_shared::sharetools::PROMPT_RULE);
-            system.push_str(iyakki_shared::browsershort::PROMPT_RULE);
-            system.push_str(iyakki_shared::remotefilestools::PROMPT_RULE);
-            if cx.session.policy.allows_app(iyakki_sec::policy::App::Cameras) {
-                system.push_str(iyakki_shared::camerastools::PROMPT_RULE);
-                system.push_str(iyakki_shared::camerastools::MOTION_RULE);
-            }
-            if cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full {
-                system.push_str(iyakki_shared::sshsessiontools::PROMPT_RULE);
-            }
-            if cx.session.policy.manage_settings {
-                system.push_str(iyakki_shared::sshtunneltools::PROMPT_RULE);
-                system.push_str(iyakki_shared::domainstools::PROMPT_RULE);
-                system.push_str(iyakki_shared::sftptools::PROMPT_RULE);
-                system.push_str(iyakki_shared::webgraphicstools::PROMPT_RULE);
-                system.push_str(iyakki_shared::objectstoragetools::PROMPT_RULE);
-                system.push_str(iyakki_shared::ollamatools::PROMPT_RULE);
-                system.push_str(iyakki_shared::modelopttools::PROMPT_RULE);
-                system.push_str(iyakki_shared::quickuninstalltools::PROMPT_RULE);
-                system.push_str(iyakki_shared::lemonadecomputetools::PROMPT_RULE);
-                system.push_str(iyakki_shared::thiscomputertools::PROMPT_RULE);
-                system.push_str(iyakki_shared::sharedvaulttools::PROMPT_RULE);
-                system.push_str(iyakki_shared::vpntools::PROMPT_RULE);
-                system.push_str(iyakki_shared::bluetoothtools::PROMPT_RULE);
-                system.push_str(iyakki_shared::btaudiotools::PROMPT_RULE);
-                system.push_str(iyakki_shared::bluetoothpair::PROMPT_RULE);
-            }
-            if kit.as_ref().and_then(|k| k.cluster_line()).is_none() {
-                system.push_str("\nNo cluster is connected to this workspace. Never start, install or stop a cluster (k3s server, minikube, kind, kubeadm): it is refused. If the person wants to deploy, tell them to use the K8S panel's Change cluster, or to set a cluster up themselves.");
-            }
+            let parts = super::core_run::project_parts(cx, p, self.session.as_ref().map(|s| s.id.as_str()), self.autopilot, self.tasks.is_some(), &text, &mut opts);
+            policy = parts.policy;
+            workdir = Some(parts.workdir);
+            system = parts.system;
+            kit = parts.kit;
+            platform = parts.platform;
+            state_fn = Some(parts.state_fn);
         }
         // detached jobs: anything slow goes through job_start (it outlives this chat and shows in the Jobs strip)
         if cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full {
@@ -1083,18 +999,7 @@ impl ChatApp {
         let ide_policy = policy.clone();
         let tools: Arc<dyn iyakki_shared::agent::Tools> = cx.services.user_tools(&cx.session.user, policy, cx.host.clone(), cx.mcp_servers.clone(), Some(text.trim()), workdir.as_deref());
         let tools_arc: Arc<dyn iyakki_shared::agent::Tools> = match &project {
-            Some(p) => {
-                // the IDE's Browser tab tools sit under the board tools, so the harness's http check of a deploy row can use them
-                let base: Arc<dyn iyakki_shared::agent::Tools> = if cx.agent.b0().idebrowser().offered(&ide_policy) {
-                    cx.b0().ide_browser_tools(tools.clone(), ide_policy, &cx.session.user, &p.name, &p.root)
-                } else {
-                    tools.clone()
-                };
-                match &kit {
-                    Some(k) => k.wrap(base, platform),
-                    None => base,
-                }
-            }
+            Some(p) => super::core_run::wrap_project_tools(cx, tools.clone(), ide_policy, p, kit.as_ref(), platform),
             None => tools,
         };
         let tools_arc: Arc<dyn iyakki_shared::agent::Tools> = match &self.dash {
@@ -1120,40 +1025,7 @@ impl ChatApp {
             None => tools_arc,
         };
         cx.audit.record(&cx.session.user, "agent.start", &format!("{} chars", text.len()));
-        let browser = match cx.session.policy.browser_agent {
-            iyakki_sec::policy::BrowserAgent::Off => "off",
-            iyakki_sec::policy::BrowserAgent::Interactive => "interactive",
-            _ => "read-only",
-        };
-        let reminder = iyakki_shared::toolblock::ReminderCtx { agent_on: true, browser_policy: browser.into(), engine_installed: cx.agent.webengine_embedded_available(), screen_available: cx.screen().present(), loaded: None };
-        let mut assist = iyakki_shared::assistrun::Assist::standard(reminder);
-        {
-            // tool routing (Settings → Models): the groups this chat's context needs from the first request, or every tool
-            use iyakki_shared::toolblock::Group;
-            let machine_off = cx.settings().lock().unwrap_or_else(|e| e.into_inner()).get().no_tool_routing;
-            assist.lazy_groups = cx.agent.toolrouting_lazy_groups(cx.data_dir(), &cx.session.user, machine_off);
-            if flows_link.is_some() {
-                assist.context_groups.insert(Group::Flows);
-            }
-            if self.dash.is_some() {
-                assist.context_groups.insert(Group::Dash);
-            }
-            if project.is_some() {
-                assist.context_groups.extend([Group::Workspace, Group::Cluster, Group::Build, Group::System, Group::Data]);
-            }
-        }
-        {
-            // the thinking watchdog's limits (Settings; 0 = the defaults of 60 s of pure thinking and 120 s of silence)
-            let st = cx.settings().lock().unwrap_or_else(|e| e.into_inner());
-            let provider = st.get().chat.as_ref().map(|c| c.provider.clone()).unwrap_or_default();
-            let (t, q) = st.get().stall_limits(&provider);
-            if t > 0 {
-                assist.think_limit = std::time::Duration::from_secs(t as u64);
-            }
-            if q > 0 {
-                assist.silence_limit = std::time::Duration::from_secs(q as u64);
-            }
-        }
+        let mut assist = super::core_run::assist_for(cx, super::core_run::AssistScope { flows: flows_link.is_some(), dash: self.dash.is_some(), project: project.is_some() });
         assist.prepare = Some(prepare);
         // the live mode: the chip can change it while this run goes, and the run reads it at every decision
         self.mode_cell.set(self.live_mode());
@@ -1176,40 +1048,10 @@ impl ChatApp {
         }
         let mut run = match (self.autopilot, &project) {
             (true, Some(p)) => {
-                // the AI IDE's Autopilot: a series of runs toward the goal (see iyakki_agent::autopilot)
-                let mut resume = std::mem::take(&mut self.ap_resume);
-                let mut goal = text.trim().to_string();
-                let mut interjection = None;
-                // a message typed while the run was paused is an interjection to re-plan for, not a new goal
-                if !resume {
-                    if let Some(s) = cx.agent.helpers_b4().autopilot_saved(&p.root.join(".iyakki/autopilot.json")).filter(|s| s.status == "paused") {
-                        resume = true;
-                        goal = s.goal.clone();
-                        interjection = Some(text.trim().to_string());
-                    }
-                }
-                let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-                let (svc, user2) = (cx.services.clone(), cx.session.user.clone());
-                let history = (!cx.settings().lock().unwrap_or_else(|e| e.into_inner()).get().no_workspace_history).then(|| (p.name.clone(), self.session.as_ref().map(|s| s.id.clone())));
-                let start = iyakki_agent_api::ApStart {
-                    root: p.root.clone(),
-                    features: p.features.clone(),
-                    goal,
-                    resume,
-                    interjection,
-                    session: self.session.as_ref().map(|s| s.id.clone()).unwrap_or_default(),
-                    state: state_fn.clone(),
-                    audit: Some(Arc::new(move |k, d| audit.record(&user, if k.starts_with("autopilot") || k == "board.auto" { k } else { "autopilot.other" }, d))),
-                    notify: Some(Arc::new(move |title, body| {
-                        let _ = svc.inbox().add(&user2, iyakki_shared::inbox::Kind::Agent, title, body, "autopilot", Some(iyakki_shared::inbox::Link::new("inbox", "")), iyakki_clock::now_unix());
-                    })),
-                    // an external coding agent carries out the steps (the harness keeps the board, the checks, the caps, the summary)
-                    executor: ext.as_ref().map(|id| self.ext_executor(cx, id, tools_arc.clone(), workdir.clone())),
-                    history,
-                };
+                let resume = std::mem::take(&mut self.ap_resume);
+                let executor = ext.as_ref().map(|id| self.ext_executor(cx, id, tools_arc.clone(), workdir.clone()));
                 self.run_is_ap = true;
-                let h = cx.b4().autopilot_start(&cx.session.user, cx.chat.clone(), tools_arc, vec![Message::user(text.trim())], limits, Box::new(assist), start);
-                cx.b4().chat_run_from_handle(&cx.session.user, text.trim(), h).expect("the agent core serves chat runs")
+                super::core_run::autopilot_run(cx, p, self.session.as_ref().map(|s| s.id.clone()), text.trim(), resume, state_fn.clone().expect("a workspace chat has its project state"), executor, tools_arc, limits, assist).expect("the agent core serves chat runs")
             }
             _ => cx.b4().chat_run_start(&cx.session.user, text.trim(), cx.chat.clone(), tools_arc, vec![Message::user(text.trim())], limits, Box::new(assist)).expect("the agent core serves chat runs"),
         };
@@ -1217,6 +1059,38 @@ impl ChatApp {
             run = run.in_session(&s.id);
         }
         self.run = Some(run);
+    }
+
+    /// The run of a program that has no agent in it: the request goes to the core as data (who, what, which chat, the earlier messages, the project,
+    /// the external agent, the mode) and the core's run comes back as the handle the chat already reads. The tool chain, the approvals' rules, the
+    /// budget and the context are the core's (`core_run::CoreRunStarter`); the dashboard, flow, task list and cluster the chat shows are named
+    /// to the core once they can be given by name, and until then the run goes without them.
+    fn start_core_run(&mut self, cx: &AppCx, runs: Arc<dyn iyakki_agent_api::ChatRuns>, text: String, continues: bool, ext: Option<String>) {
+        let req = iyakki_agent_api::RunRequest {
+            user: cx.session.user.clone(),
+            prompt: text.trim().to_string(),
+            session: self.session.as_ref().map(|s| s.id.clone()).unwrap_or_default(),
+            history: self.msgs.clone(),
+            project: self.project.as_ref().map(|p| (p.name.clone(), p.root.display().to_string())),
+            workdir: None,
+            ext,
+            ext_model: None,
+            resume: std::mem::take(&mut self.ap_resume),
+            autopilot: self.autopilot,
+            auto_approve: self.approvals.is_auto() || self.autopilot,
+            ..Default::default()
+        };
+        if !continues {
+            self.msgs.push(Message::user(text.trim()));
+        }
+        self.mode_cell.set(self.live_mode());
+        self.run_is_ap = self.autopilot && self.project.is_some();
+        self.ap_after_run = false;
+        cx.audit.record(&cx.session.user, "agent.start", &format!("{} chars", text.len()));
+        match super::core_run::remote_run(runs, req) {
+            Ok(run) => self.run = Some(run),
+            Err(e) => self.error = Some(e),
+        }
     }
 
     /// The waker: when work the assistant waited for has ended and no run is going, a synthetic turn starts with the result
@@ -2366,7 +2240,12 @@ impl App for ChatApp {
             _ => None,
         };
         if let Some(t) = text {
-            crate::ui::clipboard::copy(&t);
+            // a whole message keeps its paragraphs and code blocks for a page that takes HTML; a code block alone is just text
+            if id == "copymsg" {
+                crate::ui::clipboard::copy_rich(&t, &crate::ui::clipboard::html_from_text(&t));
+            } else {
+                crate::ui::clipboard::copy(&t);
+            }
         }
         Flow::Stay
     }
@@ -2569,7 +2448,7 @@ fn set_pin(cx: &AppCx, key: &str, on: bool) {
     let _ = write_pin(&pin_file(cx), key, on);
 }
 
-fn browser_limits(p: &iyakki_sec::policy::Policy, mut l: RunLimits) -> RunLimits {
+pub(super) fn browser_limits(p: &iyakki_sec::policy::Policy, mut l: RunLimits) -> RunLimits {
     if p.browser_agent != iyakki_sec::policy::BrowserAgent::Off {
         l.max_steps = l.max_steps.max(p.browser_max_actions as usize + 20);
         l.max_tool_calls = l.max_tool_calls.max(p.browser_max_actions as usize * 2 + 20);
@@ -2716,12 +2595,12 @@ impl ChatApp {
     fn offer_consent_request(&mut self, cx: &AppCx) {
         let user = cx.session.user.as_str();
         if let Some(d) = &self.consent {
-            if cx.browser().consent.get(user, &d.req.id).is_none() {
+            if cx.browser_consent().get(user, &d.req.id).is_none() {
                 self.consent = None;
             }
             return;
         }
-        if let Some(r) = cx.browser().consent.pending(user).into_iter().next() {
+        if let Some(r) = cx.browser_consent().pending(user).into_iter().next() {
             self.consent = Some(super::browser_consent::ConsentDialog::new(r));
         }
     }
@@ -3093,6 +2972,8 @@ impl ChatApp {
             Event::Paste(t) => {
                 self.input.paste(t);
             }
+            // the newest copy is a picture: keep it in Uploads and send it with the next message (the same as a dropped picture)
+            Event::Key(Key::Ctrl('V')) => self.attach_clipboard_picture(cx),
             // a press in the composer puts the caret there (the right button too, which comes as a focus request)
             Event::AreaAt(INPUT_AREA, x, y) => {
                 self.view.clear_selection();
@@ -3794,6 +3675,39 @@ mod tests {
         let (name, bytes) = app.take_host_save().expect("a file to save");
         assert_eq!((name.as_str(), String::from_utf8(bytes).unwrap().as_str()), ("result.csv", "a,b\n1,2\n"));
         iyakki_shared::hostfiles::set_enabled(false);
+    }
+
+    #[test]
+    fn a_picture_on_top_of_the_clipboard_history_is_kept_in_uploads_and_goes_with_the_next_message_and_text_pastes_as_before() {
+        let (mut app, mut cx, _d) = chat_with_answer("chatpastepic");
+        let home = cx.core.file_scope().home_root(&cx.session.user, cx.data_dir());
+        cx.session.policy.fs_write = vec![home.display().to_string()];
+        crate::ui::clipboard::clear();
+        app.handle(&Event::Key(Key::Ctrl('V')), &cx);
+        assert!(app.info.as_deref().is_some_and(|i| i.contains("not a picture")) && app.attachments.is_empty(), "nothing copied: nothing attached");
+        // HTML from a page is plain text in the history: an ordinary paste inserts it
+        crate::ui::clipboard::copy("Hello there");
+        app.handle(&Event::Paste(crate::ui::clipboard::paste().unwrap()), &cx);
+        assert_eq!(app.input_text(), "Hello there");
+        app.handle(&Event::Key(Key::Ctrl('V')), &cx);
+        assert!(app.attachments.is_empty(), "the newest copy is text, so no picture is taken from older history");
+        // a picture on top
+        crate::ui::clipboard::copy_image(2, 1, vec![10, 20, 30, 255, 40, 50, 60, 255]);
+        app.handle(&Event::Key(Key::Ctrl('V')), &cx);
+        app.handle(&Event::Key(Key::Ctrl('V')), &cx);
+        assert_eq!(app.attachments.len(), 2);
+        assert!(app.attachments[0].name == "Pasted-picture-1.png" && app.attachments[1].name == "Pasted-picture-2.png", "no file is replaced: a number is added");
+        let png = std::fs::read(home.join("Uploads").join("Pasted-picture-1.png")).unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        app.input.set("what is this?");
+        app.send(&cx);
+        let sent = app.msgs.iter().rev().find(|m| m.role == Role::User).unwrap().content.clone();
+        assert!(sent.starts_with("what is this?") && sent.contains("[Attached picture: Pasted-picture-1.png") && sent.contains("show_image"), "{sent}");
+        assert!(cx.audit.recent(20).iter().any(|l| l.contains("chat.attach")));
+        // no write right to the uploads folder: refused in words, nothing kept
+        cx.session.policy.fs_write = vec![];
+        app.handle(&Event::Key(Key::Ctrl('V')), &cx);
+        assert!(app.attachments.is_empty() && app.info.is_some());
     }
 
     #[test]
@@ -4568,6 +4482,7 @@ mod tests {
 
     #[test]
     fn replies_are_read_aloud_when_enabled_and_can_be_stopped() {
+        let _route = iyakki_agent::mixer::pin_command_route(); // the speaker is the play command (on a Mac the mixer is otherwise always on)
         struct Echo;
         impl ChatBackend for Echo {
             fn complete(&self, h: &[Message]) -> Result<String, String> {
@@ -4747,7 +4662,7 @@ mod tests {
                 assert!(sent.iter().any(|r| word.x >= r.x - 0.6 && word.x + word.w <= r.x + r.w + 0.6 + 2.0 && word.y >= r.y - 0.6 && word.y + word.h <= r.y + r.h + 0.6), "{w}x{h}: word {word:?} outside the sentence {sent:?}");
                 // gold fill at the left edge of the word, where no glyph is drawn
                 let s = crate::ui::scale_for(w, h);
-                let px = g.pm.pixel((word.x - 1.0 * s).max(0.0) as u32, (word.y + word.h / 2.0) as u32).expect("pixel");
+                let px = g.pm_mut().pixel((word.x - 1.0 * s).max(0.0) as u32, (word.y + word.h / 2.0) as u32).expect("pixel");
                 assert!(px.red() > 200 && px.green() > 170 && px.blue() > 80, "{w}x{h} word {k}: {px:?}");
                 seen_lines.insert((word.y * 10.0) as i32);
                 // the reply was far below the scrolled view: it was brought back
@@ -5278,7 +5193,7 @@ mod session_tests {
         let ns = iyakki_agent::sessions::namespace(app.session_id().unwrap());
         let __wall = std::time::Instant::now();
         while __wall.elapsed() < std::time::Duration::from_secs(30) {
-            if cx.kb().lock().unwrap().stats(&ns).is_some_and(|s| s.docs >= n) {
+            if cx.kb().stats(&ns).is_some_and(|s| s.docs >= n) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -5347,7 +5262,7 @@ mod session_tests {
     fn skills_and_documents_reach_the_prompt_and_the_status_line() {
         let (cx, seen) = rig("sess-skills");
         cx.skills().add(iyakki_shared::skills::Scope::Shared, "---\nname: meeting-notes\ndescription: Summarise meeting notes into decisions and actions\ntriggers: meeting, minutes\n---\nList decisions first.\n", true, true).unwrap();
-        cx.kb().lock().unwrap().add_document(&format!("user/{}", cx.session.user), "ops", "ops.md", "The deploy key is stored in the vault.", Default::default()).unwrap();
+        cx.kb().add_document(&format!("user/{}", cx.session.user), "ops", "ops.md", "The deploy key is stored in the vault.", Default::default()).unwrap();
         let mut app = ChatApp::new();
         say(&mut app, &cx, "summarise these meeting minutes and the deploy key");
         let sys = seen.lock().unwrap().last().unwrap()[0].content.clone();
@@ -5733,7 +5648,7 @@ mod edit_mode_tests {
         assert!(app.secret.is_none() && app.cred.is_none());
         assert_eq!(cx.vault().user_get("tester", "svc.weather").unwrap().as_str(), key);
         assert!(app.info.as_deref().unwrap().contains("uvault:svc.weather"));
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
         assert!(log.contains("chat.credential.blocked") && log.contains("vault.user.set") && !log.contains("sk-proj"), "{log}");
         // ordinary talk about passwords is sent as it is
         say(&mut app, "my password is hard to remember");
@@ -5775,7 +5690,7 @@ mod edit_mode_tests {
         use iyakki_shared::browserconsent::{Answer, ConsentKind};
         let (cx, _d) = cx_with_backend("chatconsent", iyakki_shared::chat::Unconfigured);
         let mut app = ChatApp::new();
-        let c = &cx.browser().consent;
+        let c = &cx.browser_consent();
         // the host question: Allow / Allow for this session / Deny, in the conversation
         let id = c.create("tester", ConsentKind::Look, "gemini.google.com", "", "", 1).unwrap();
         app.poll(&cx);
@@ -5815,7 +5730,7 @@ mod edit_mode_tests {
         assert!(app.consent.is_none());
         // the bell counts it
         c.create("tester", ConsentKind::Look, "c.test", "", "", 5).unwrap();
-        assert_eq!(cx.browser().consent.pending("tester").len(), 1);
+        assert_eq!(cx.browser_consent().pending("tester").len(), 1);
     }
 }
 

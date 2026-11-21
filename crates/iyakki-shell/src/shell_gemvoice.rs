@@ -19,6 +19,9 @@ pub const STOP: usize = 1_361_003;
 pub const MIC: usize = 1_361_004;
 pub const DONE: usize = 1_361_005;
 
+/// How long the start key is kept down, in ticks (about 30 a second), for its release to mean press-to-talk.
+pub const HOLD_TICKS: u64 = 15;
+
 pub fn is_click(n: usize) -> bool {
     (ALLOW..=DONE).contains(&n)
 }
@@ -33,11 +36,13 @@ pub struct GvUi {
     /// Whether the key and the button are offered (read every couple of seconds).
     pub offered: bool,
     pub(super) looked: u64,
+    /// The press of the start key that began a session: the tick it went down at. Its release after a hold hands the turn over.
+    held: Option<u64>,
 }
 
 impl Default for GvUi {
     fn default() -> GvUi {
-        GvUi { board: Board::new(), running: None, shown: None, cards: 0, offered: false, looked: 0 }
+        GvUi { board: Board::new(), running: None, shown: None, cards: 0, offered: false, looked: 0, held: None }
     }
 }
 
@@ -92,6 +97,24 @@ impl Shell {
         if n != self.gv.cards {
             self.gv.cards = n;
             mark_stale!(self);
+        }
+    }
+
+    /// The start key went down. A tap starts (or ends) a session as it always did; the key kept down after it started one is press-to-talk:
+    /// its release hands the turn over (`gv_release`).
+    pub(super) fn gv_press(&mut self) {
+        let was_open = self.gv.open();
+        self.gv_toggle();
+        self.gv.held = (!was_open && self.gv.open()).then_some(self.tick);
+    }
+
+    /// The start key was let go. Held for at least `HOLD_TICKS` (about half a second) after it started the session: "done talking", the turn
+    /// is handed over and the session ends after the answer. A tap does nothing here: the session stays open until the key, the button or
+    /// Esc ends it. Hands-free end of speech is a different row (the level gate).
+    pub(super) fn gv_release(&mut self) {
+        let Some(at) = self.gv.held.take() else { return };
+        if self.tick.saturating_sub(at) >= HOLD_TICKS && self.gv.open() {
+            self.gv_done();
         }
     }
 
@@ -160,7 +183,8 @@ impl Shell {
 
 /// Draws the card of the oldest tool that waits (Allow, Deny), the session line (Done talking, Stop) and the microphone button.
 /// `row` is the number of signs stacked at the bottom left (the card sits above them, centred).
-pub(crate) fn render(ui: &GvUi, g: &mut Gfx, w: u32, h: u32, s: f32) {
+/// `in_bar`: the top bar carries the microphone button (the corner one is left out then).
+pub(crate) fn render(ui: &GvUi, g: &mut Gfx, w: u32, h: u32, s: f32, in_bar: bool) {
     let (wf, hf) = (w as f32, h as f32);
     let size = 14.0 * s;
     if let Some(card) = ui.board.pending().into_iter().next() {
@@ -196,7 +220,7 @@ pub(crate) fn render(ui: &GvUi, g: &mut Gfx, w: u32, h: u32, s: f32) {
         let bx = x.max(8.0 * s) + tw;
         let bw = g.button(bx, y, size, "Done talking", ACCENT_MAIN, Event::Tab(DONE));
         g.button(bx + bw + 12.0 * s, y, size, "Stop (Esc)", ERR, Event::Tab(STOP));
-    } else if ui.offered {
+    } else if ui.offered && !in_bar {
         let label = "Mic";
         let bw = g.text_width(size, label, Face::Bold) + size * 1.7;
         g.button(wf - 16.0 * s - bw, hf - 56.0 * s - size * 2.1, size, label, MUTED, Event::Tab(MIC));

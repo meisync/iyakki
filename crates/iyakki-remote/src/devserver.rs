@@ -167,7 +167,7 @@ fn accept_loop(listener: TcpListener, sh: Arc<Shared>) {
 /// fetches its own mailbox now and then and answers what `relay.rs` accepts. Nothing listens for the relay: the machine only connects out.
 fn relay_loop(sh: Arc<Shared>) {
     use iyakki_agent::devmode::relay::{RelayCx, RelayMachine};
-    use iyakki_agent::devmode::relay_link::{pump_once, HttpLink};
+    use iyakki_agent::devmode::relay_link::{link_for, pump_once, HttpLink};
     let mut machine: Option<RelayMachine> = None;
     let mut link: Option<(String, HttpLink)> = None;
     let mut backoff = 0u32;
@@ -184,11 +184,16 @@ fn relay_loop(sh: Arc<Shared>) {
         if url.is_empty() {
             continue;
         }
-        if link.as_ref().is_none_or(|(u, _)| *u != url) {
-            let up: Arc<dyn iyakki_proxy::Upstream> = Arc::new(iyakki_proxy::https::UreqUpstream::with_timeout(Duration::from_secs(10)));
-            match HttpLink::new(up, &url) {
-                Ok(l) => link = Some((url.clone(), l)),
-                Err(_) => continue,
+        // the link follows the address AND the certificate fingerprint; an https relay without one is never connected to
+        let key = format!("{url}|{}", sh.dm.relay_pin());
+        if link.as_ref().is_none_or(|(u, _)| *u != key) {
+            let plain: Arc<dyn iyakki_proxy::Upstream> = Arc::new(iyakki_proxy::https::UreqUpstream::with_timeout(Duration::from_secs(10)));
+            match link_for(&url, &sh.dm.relay_pin(), plain) {
+                Ok(l) => link = Some((key, l)),
+                Err(_) => {
+                    link = None;
+                    continue;
+                }
             }
         }
         if machine.is_none() {
@@ -321,7 +326,12 @@ fn pair(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
 
 /// The account's actor (its role decides personal or shared installs, and whether it may use the STORE at all).
 fn actor_of(sh: &Shared, account: &str) -> Result<(Actor, iyakki_sec::policy::Policy, String), String> {
-    let store = sh.env.store.lock().map_err(|_| "busy".to_string())?;
+    actor_in(&sh.env.store, account)
+}
+
+/// A panic in another thread that held the account lock must not lock every paired computer out (KI-121): the lock is taken even when poisoned.
+fn actor_in(store: &iyakki_shell::accounts::UsersRef, account: &str) -> Result<(Actor, iyakki_sec::policy::Policy, String), String> {
+    let store = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let u = store.get(account).ok_or_else(|| format!("the account {account} that this computer acts as no longer exists on the device"))?;
     let policy = u.policy();
     let actor = Actor::from_policy(account, &policy);
@@ -534,4 +544,31 @@ fn start_on(env: &ShellEnv, tls_dir: &Path, port: u16) -> Result<DevServer, Stri
 /// The fingerprint computers will see (for the pairing screen), making the certificate if there is none yet.
 pub fn fingerprint(tls_dir: &Path) -> Result<String, String> {
     crate::tls::identity(tls_dir, &[]).map(|i| i.fingerprint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ki121_a_poisoned_account_lock_does_not_refuse_a_paired_computer() {
+        let d = std::env::temp_dir().join(format!("iyakki-ki121-actor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let mut store = iyakki_shell::accounts::UserStore::open(&d.join("users.json")).unwrap();
+        store.create_first_admin("root", "rootpass12").unwrap();
+        let store = std::sync::Arc::new(std::sync::Mutex::new(store));
+        let s2 = store.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = s2.lock().unwrap();
+            panic!("a thread dies while it holds the account lock");
+        })
+        .join();
+        assert!(store.is_poisoned());
+        let users = iyakki_shell::accounts::UsersRef::of_store(&store);
+        let (_, _, role) = actor_in(&users, "root").expect("the lock is taken although it is poisoned");
+        assert_eq!(role, "admin");
+        assert!(actor_in(&users, "nobody").unwrap_err().contains("no longer exists"), "and the answer is the real one, not `busy`");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

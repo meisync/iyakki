@@ -205,7 +205,7 @@ fn model_key_auto_default_and_hiding_are_set_with_keys_and_clicks() {
     assert!(!cfg(&cx).copilot.enabled);
     let g = {
         // a hidden agent is not offered in the chat's list
-        let entries = iyakki_agent::extagent::entries(&cfg(&cx), &cx.ext_status());
+        let entries = iyakki_shared::extagent::entries_with(&cfg(&cx), &|id| cx.ext_status().get(id));
         entries.iter().map(|e| e.id.clone()).collect::<Vec<_>>()
     };
     assert_eq!(g, ["claude-code"]);
@@ -231,7 +231,7 @@ fn key_v_on_the_copilot_row_switches_it_between_working_through_the_tools_and_a_
     assert!(cfg(&cx).copilot.advisor_only);
     assert!(status(&a).contains("is an advisor now: read-only, no IYAKKI tools; you apply its edits."), "{}", status(&a));
     // the agent's own configuration follows: the advisor has no write or shell tool offered
-    let entries = iyakki_agent::extagent::entries(&cfg(&cx), &cx.ext_status());
+    let entries = iyakki_shared::extagent::entries_with(&cfg(&cx), &|id| cx.ext_status().get(id));
     assert!(entries.iter().any(|e| e.id == "copilot"));
     press(&mut a, &cx, 'v');
     assert!(!cfg(&cx).copilot.advisor_only);

@@ -194,6 +194,9 @@ pub struct MorePersonFacts {
     /// Backups this person made by hand or by the chat tool since the machine kept count, and the last one (file name, whether it worked).
     pub backups: u64,
     pub backup_last: (String, bool),
+    /// Downloads the update centre page made since the machine kept count (a machine-wide note), and the last one (name, whether it worked).
+    pub downloads: u64,
+    pub download_last: (String, bool),
 }
 
 #[derive(Default)]
@@ -215,6 +218,9 @@ impl MorePersonWatch {
             }
             if now.backups > prev.backups {
                 out.push(("backup.finished", payload(&[("name", word(&now.backup_last.0)), ("outcome", word(if now.backup_last.1 { "finished" } else { "failed" }))])));
+            }
+            if now.downloads > prev.downloads {
+                out.push(("transfer.finished", payload(&[("kind", word("download")), ("name", word(&now.download_last.0)), ("outcome", word(if now.download_last.1 { "finished" } else { "failed" }))])));
             }
             for t in now.reminders_due.difference(&prev.reminders_due) {
                 out.push(("reminder.due", payload(&[("title", word(t))])));
@@ -262,6 +268,24 @@ pub fn note_backup_made(dir: &Path, user: &str, file_name: &str, ok: bool) {
     let _ = std::fs::write(p, serde_json::json!({"count": count + 1, "name": name, "ok": ok}).to_string());
 }
 
+fn download_note_path(dir: &Path) -> std::path::PathBuf {
+    dir.join("downloads-made.json")
+}
+
+/// A download that no person's session started (the update centre page fetching a signed system update) ended: keep a count and the fixed
+/// name for the pulled source (F-SDK-207). Machine-wide; never an address, never what was in the file. Never fails the download.
+pub fn note_download_made(dir: &Path, name: &str, ok: bool) {
+    let (count, _) = downloads_made(dir);
+    let name: String = name.chars().filter(|c| !c.is_control()).take(80).collect();
+    let _ = std::fs::write(download_note_path(dir), serde_json::json!({"count": count + 1, "name": name, "ok": ok}).to_string());
+}
+
+/// The count of page-started downloads and the last one `(name, ok)`.
+pub fn downloads_made(dir: &Path) -> (u64, (String, bool)) {
+    let Some(v) = std::fs::read_to_string(download_note_path(dir)).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else { return (0, (String::new(), false)) };
+    (v["count"].as_u64().unwrap_or(0), (v["name"].as_str().unwrap_or("").to_string(), v["ok"].as_bool().unwrap_or(false)))
+}
+
 /// The count of hand-made backups and the last one `(name, ok)`.
 pub fn backups_made(dir: &Path, user: &str) -> (u64, (String, bool)) {
     let Some(v) = backup_note_path(dir, user).and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else { return (0, (String::new(), false)) };
@@ -280,55 +304,13 @@ pub fn transfer_finished(hub: &dyn AppEvents, user: &str, kind: &str, name: &str
     emit(hub, "transfer.finished", Some(user), payload(&[("kind", word(kind)), ("name", word(name)), ("outcome", word(if ok { "finished" } else { "failed" }))]));
 }
 
-// ------------------------------------------------------------------------------------------------ real readers (plain files)
+// ------------------------------------------------------------------------------------------------ real readers (the kernel reads are the core's)
 
-/// Free percent of each mounted block-device volume.
-pub fn free_percents(mounts_text: &str) -> BTreeMap<String, u8> {
-    use std::os::unix::ffi::OsStrExt;
-    let mut out = BTreeMap::new();
-    for m in iyakki_core_api::parse_mounts(mounts_text).into_iter().filter(|m| m.source.starts_with("/dev/")) {
-        let Ok(c) = std::ffi::CString::new(std::path::Path::new(&m.target).as_os_str().as_bytes()) else { continue };
-        // SAFETY: `c` is a valid NUL-terminated path and `st` is plain data that statvfs fills in.
-        let st = unsafe {
-            let mut st: libc::statvfs = std::mem::zeroed();
-            if libc::statvfs(c.as_ptr(), &mut st) != 0 {
-                continue;
-            }
-            st
-        };
-        if st.f_blocks > 0 {
-            out.insert(m.target.clone(), ((st.f_bavail as u128 * 100) / st.f_blocks as u128).min(100) as u8);
-        }
-    }
-    out
-}
-
-/// Disks that report themselves badly: an NVMe controller with a critical warning, or a block device whose state file is not `running`.
-pub fn disk_states(sys: &Path) -> BTreeMap<String, bool> {
-    let mut out = BTreeMap::new();
-    for e in std::fs::read_dir(sys.join("class/nvme")).into_iter().flatten().flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        let ok = std::fs::read_to_string(e.path().join("state")).map(|s| s.trim() == "live").unwrap_or(true);
-        out.insert(name, ok);
-    }
-    for e in std::fs::read_dir(sys.join("block")).into_iter().flatten().flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        if let Ok(s) = std::fs::read_to_string(e.path().join("device/state")) {
-            out.insert(name, s.trim() == "running");
-        }
-    }
-    out
-}
-
-/// The names of connected Bluetooth devices: `<sys>/class/bluetooth/<hciN>:<handle>` entries are links, their `name` file is not
-/// kept by the kernel, so the link's own device name is the address-free handle `hciN:H`.
-pub fn bluetooth_links(sys: &Path) -> BTreeSet<String> {
-    std::fs::read_dir(sys.join("class/bluetooth")).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.contains(':')).collect()
-}
+pub use iyakki_core_local::appevent_facts::{bluetooth_links, disk_states, free_percents, printers_and_scanners, screen_resolution, suspend_count};
 
 /// The names of the connected Bluetooth devices (F-SDK-211): each connected address is looked up in the pairing store by its address and told
 /// by the device's own name; a device the store does not know is told as `device` (an address is never put in an event). Sorted, no repeats.
-pub fn bluetooth_names(connected: &[String], store: &iyakki_devctl::bthid::Store) -> BTreeSet<String> {
+pub fn bluetooth_names(connected: &[String], store: &iyakki_core_local::devctl::bthid::Store) -> BTreeSet<String> {
     connected.iter().map(|a| store.device(a).map(|k| k.name.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "device".to_string())).collect()
 }
 
@@ -340,52 +322,18 @@ pub fn bluetooth_connected(sys: &Path, store_path: &Path) -> BTreeSet<String> {
         return links;
     }
     let addresses = (|| {
-        let sock = iyakki_devctl::btmgmt::ControlSocket::open().ok()?;
-        let mut m = iyakki_devctl::btmgmt::Mgmt::new(sock);
+        let sock = iyakki_core_local::devctl::btmgmt::ControlSocket::open().ok()?;
+        let mut m = iyakki_core_local::devctl::btmgmt::Mgmt::new(sock);
         let mut all = Vec::new();
-        for c in iyakki_devctl::btview::read_controllers(&mut m).ok()? {
+        for c in iyakki_core_local::devctl::btview::read_controllers(&mut m).ok()? {
             all.extend(m.connections(c.index).ok()?.into_iter().map(|(a, _)| a));
         }
         Some(all)
     })();
     match addresses {
-        Some(a) => bluetooth_names(&a, &iyakki_devctl::bthid::Store::parse(&std::fs::read_to_string(store_path).unwrap_or_default())),
+        Some(a) => bluetooth_names(&a, &iyakki_core_local::devctl::bthid::Store::parse(&std::fs::read_to_string(store_path).unwrap_or_default())),
         None => links,
     }
-}
-
-/// Printers and scanners: the printer device nodes of the USB printer class, and scanners that SANE-style udev rules tag.
-pub fn printers_and_scanners(sys: &Path) -> BTreeSet<(String, String)> {
-    let mut out = BTreeSet::new();
-    for e in std::fs::read_dir(sys.join("class/usbmisc")).into_iter().flatten().flatten() {
-        let n = e.file_name().to_string_lossy().to_string();
-        if n.starts_with("lp") {
-            out.insert(("printer".to_string(), n));
-        }
-    }
-    for e in std::fs::read_dir(sys.join("class/scanner")).into_iter().flatten().flatten() {
-        out.insert(("scanner".to_string(), e.file_name().to_string_lossy().to_string()));
-    }
-    out
-}
-
-/// `WIDTHxHEIGHT` of the first connected screen's preferred mode (the first line of its `modes` file).
-pub fn screen_resolution(sys: &Path) -> String {
-    let mut cards: Vec<_> = std::fs::read_dir(sys.join("class/drm")).into_iter().flatten().flatten().collect();
-    cards.sort_by_key(|e| e.file_name());
-    for e in cards {
-        if std::fs::read_to_string(e.path().join("status")).is_ok_and(|s| s.trim() == "connected") {
-            if let Some(m) = std::fs::read_to_string(e.path().join("modes")).ok().and_then(|t| t.lines().next().map(str::to_string)) {
-                return m;
-            }
-        }
-    }
-    String::new()
-}
-
-/// The count of good suspends (`<sys>/power/suspend_stats/success`).
-pub fn suspend_count(sys: &Path) -> u64 {
-    std::fs::read_to_string(sys.join("power/suspend_stats/success")).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0)
 }
 
 /// Seconds until a scheduled shutdown (`/run/systemd/shutdown/scheduled` style: the first line `USEC=<epoch microseconds>`); none when absent.

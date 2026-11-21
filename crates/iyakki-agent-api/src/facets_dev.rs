@@ -156,6 +156,14 @@ pub trait DevRelay: Send + Sync {
     fn relay_summary(&self) -> String {
         String::new()
     }
+    /// The fingerprint of the certificate an https relay must show (SHA-256, 64 hex digits; empty: none given).
+    fn relay_pin(&self) -> String {
+        String::new()
+    }
+    /// Set it (administrators, audited; empty takes it away; refused unless 64 hex digits).
+    fn set_relay_pin(&self, _policy: &Policy, _user: &str, _pin: &str) -> Result<(), String> {
+        Err(UNAVAILABLE_DEV.into())
+    }
     fn network_wide(&self) -> bool {
         false
     }
@@ -184,7 +192,7 @@ impl DevTrust for NoDev {}
 impl DevRelay for NoDev {}
 
 /// A developer-mode device an account paired with (`iyakki dev pair`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DevDevice {
     pub name: String,
     pub host: String,

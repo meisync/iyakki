@@ -52,6 +52,47 @@ const SIZE: u32 = 13;
 const GUTTER: i32 = 34;
 const RETRY_MS: u32 = 2000;
 
+struct Toolbar {
+    title: bool,
+    /// Text size of the labels: smaller on a narrow tile so all seven buttons stay.
+    size: u32,
+    buttons: Vec<(u32, &'static str, Rect)>,
+}
+
+/// The toolbar's buttons as (hit id, label, rect) from left to right for a tile `w` wide, and whether the title fits beside them.
+fn toolbar(w: i32) -> Toolbar {
+    // (hit id, label, natural width), left to right; when room is short the leftmost (least used) buttons are the first to go
+    const SET: [(u32, &str, i32); 7] = [(8, "Ask", 46), (7, "Find", 46), (4, "Open", 46), (5, "Save", 46), (1, "Undo", 46), (2, "Redo", 46), (3, "Clear", 50)];
+    let natural: i32 = SET.iter().map(|b| b.2 + 4).sum::<i32>() - 4 + 6;
+    let title = w >= natural + 64;
+    let gap = if title { 4 } else { 2 };
+    let left = if title { w - natural } else { 10 };
+    let avail = (w - left - 4).max(0);
+    let size = if title { 13 } else { 11 };
+    let min = |label: &str| measure_text(0, size, label) + 4;
+    // take buttons from the right while they fit at their smallest
+    let mut keep = 0;
+    let mut used = 0;
+    for b in SET.iter().rev() {
+        let need = min(b.1) + if keep > 0 { gap } else { 0 };
+        if !title && used + need > avail {
+            break;
+        }
+        used += need;
+        keep += 1;
+    }
+    let set = &SET[SET.len() - keep..];
+    let slack = if keep > 0 { (avail - used) / keep as i32 } else { 0 };
+    let mut x = if title { left } else { w - 4 - used - slack * keep as i32 };
+    let mut buttons = Vec::new();
+    for &(id, label, nat) in set {
+        let bw = if title { nat } else { min(label) + slack };
+        buttons.push((id, label, Rect::new(x, 4, bw, 24)));
+        x += bw + gap;
+    }
+    Toolbar { title, size, buttons }
+}
+
 pub struct EditTile<S: Source> {
     src: S,
     buf: Buffer,
@@ -534,14 +575,21 @@ impl<S: Source> App for EditTile<S> {
         l.push(Op::Rect { r: Rect::new(0, 0, w, h), color: p.bg });
         l.push(Op::Rect { r: Rect::new(0, 0, w, 32), color: p.bar });
         let dirty = self.buf.text() != self.saved;
-        l.push(text(8, 8, 14, p.fg, if dirty { "EDIT *" } else { "EDIT" }));
-        button(&mut l, 3, Rect::new(w - 56, 4, 50, 24), "Clear", &p);
-        button(&mut l, 2, Rect::new(w - 106, 4, 46, 24), "Redo", &p);
-        button(&mut l, 1, Rect::new(w - 156, 4, 46, 24), "Undo", &p);
-        button(&mut l, 5, Rect::new(w - 206, 4, 46, 24), "Save", &p);
-        button(&mut l, 4, Rect::new(w - 256, 4, 46, 24), "Open", &p);
-        button(&mut l, 7, Rect::new(w - 306, 4, 46, 24), "Find", &p);
-        button(&mut l, 8, Rect::new(w - 356, 4, 46, 24), "Ask", &p);
+        // KI-990: seven buttons need 356 px beside the title; a narrower tile shrinks the buttons (and keeps only the dirty marker of the title)
+        // so none is cut off at either edge.
+        let tool = toolbar(w);
+        l.push(text(8, 8, 14, p.fg, if tool.title { if dirty { "EDIT *" } else { "EDIT" } } else if dirty { "*" } else { "" }));
+        for (id, label, r) in tool.buttons {
+            if tool.size == 13 {
+                button(&mut l, id, r, label, &p);
+            } else {
+                l.push(Op::RoundRect { r, radius: 6, color: p.accent });
+                let lw = measure_text(0, tool.size, label);
+                l.push(text(r.x + (r.w - lw) / 2, r.y + (r.h - line_height(tool.size)) / 2, tool.size, Color::rgb(255, 255, 255), label));
+                l.push(Op::Hit { id, r });
+                iyakki_tile_kit::access(&mut l, id, iyakki_tile_kit::abi::Role::Button, r, label, "", 0);
+            }
+        }
         // the path line: click it to type a file name, Enter opens it
         let on_find = self.find_focus;
         l.push(Op::Outline { r: Rect::new(4, 36, w - 8, 20), thickness: 1, color: if self.path_focus || on_find { p.accent } else { p.mute } });
@@ -700,6 +748,26 @@ mod tests {
         let x = texts(&t.frame());
         assert!(x.contains(&"1".to_string()) && x.contains(&"2".to_string()) && x.iter().any(|s| s.starts_with("fn main()")), "{x:?}");
         assert!(t.source().calls.is_empty(), "no call for plain editing");
+    }
+
+    #[test]
+    fn the_toolbar_fits_a_phone_wide_tile_and_keeps_every_button_it_draws_inside_it() {
+        // KI-990: at 390 px the web UI gives the tile 332 px; the Clear button was cut off at the edge
+        for w in [332, 300, 360, 420, 500, 800] {
+            let t = toolbar(w);
+            assert!(!t.buttons.is_empty(), "width {w}");
+            if w >= 320 {
+                assert_eq!(t.buttons.len(), 7, "all seven buttons stay at {w}");
+            }
+            let mut right = 0;
+            for (id, label, r) in &t.buttons {
+                assert!(r.x >= 0 && r.x + r.w <= w, "{label} ({id}) is inside a {w} px tile: {r:?}");
+                assert!(r.x >= right, "{label} does not overlap the one before it at {w}: {r:?}");
+                assert!(t.title || r.w >= measure_text(0, t.size, label), "{label} keeps room for its text at {w}: {r:?}");
+                right = r.x + r.w;
+            }
+        }
+        assert!(toolbar(800).title && !toolbar(332).title);
     }
 
     #[test]
@@ -953,6 +1021,33 @@ mod tests {
         key(&mut bad, 'a' as u32, 2);
         key(&mut bad, 'x' as u32, 2);
         assert_eq!(bad.buf.text().trim_end(), "keep me", "a refused cut keeps the text");
+    }
+
+    #[test]
+    fn the_selected_lines_go_to_the_assistant_as_context_and_nothing_selected_sends_no_selection() {
+        let mut t = tile(vec![Ok(json!({"id": "r1"}).to_string())]);
+        typed(&mut t, "first");
+        key(&mut t, 13, 0);
+        typed(&mut t, "second");
+        key(&mut t, 13, 0);
+        typed(&mut t, "third");
+        key(&mut t, 'a' as u32, 2);
+        ask(&mut t, "tidy this", 0);
+        let sent: serde_json::Value = serde_json::from_str(&t.source().calls[0].2).unwrap();
+        assert_eq!((sent["selection"]["from"].as_u64(), sent["selection"]["to"].as_u64()), (Some(1), Some(3)), "{sent}");
+        assert!(sent["selection"]["text"].as_str().unwrap().starts_with("first\nsecond\nthird"));
+        let mut t = tile(vec![Ok(json!({"id": "r1"}).to_string())]);
+        typed(&mut t, "first second");
+        ask(&mut t, "tidy this", 0);
+        let sent: serde_json::Value = serde_json::from_str(&t.source().calls[0].2).unwrap();
+        assert!(sent.get("selection").is_none(), "{sent}");
+        // a long selection is cut at 4000 characters
+        let mut t = tile(vec![Ok(json!({"id": "r1"}).to_string())]);
+        typed(&mut t, &"x".repeat(5000));
+        key(&mut t, 'a' as u32, 2);
+        ask(&mut t, "shorten", 0);
+        let sent: serde_json::Value = serde_json::from_str(&t.source().calls[0].2).unwrap();
+        assert_eq!(sent["selection"]["text"].as_str().unwrap().chars().count(), 4000);
     }
 
     fn block(search: &str, replace: &str) -> String {

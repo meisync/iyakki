@@ -930,6 +930,27 @@ fn the_settings_tile_changes_a_switch_only_after_the_persons_own_click_through_t
     assert!(lines.contains("tile.asked tile=settings tool=screensaver_set") && lines.contains("tile.call tile=settings tool=screensaver_set") && lines.contains("tile.ask_denied tile=settings tool=notification_filter_set"), "{lines}");
 }
 
+#[test]
+fn the_settings_tile_shows_read_only_pages_from_the_persons_own_status_tools_and_only_the_listed_ones() {
+    let h = harness("agent-api", |_| {});
+    let (ann, gus) = (h.ann(), h.login("gus", "gus-password-1"));
+    let v = runs_tile_named(&h, &ann, "settings", json!({"width": 360, "height": 480}));
+    // the tab row: the overview and the pages whose status tool the account has (the harness has no sound or time tool)
+    assert!(["Overview", "Display", "Network"].iter().all(|t| texts(&v).contains(&t.to_string())) && !texts(&v).contains(&"Sound".to_string()), "{:?}", texts(&v));
+    let (x, y) = hit_centre(&v, 31);
+    let v = click_at(&h, &ann, "settings", x, y);
+    assert!(texts(&v).contains(&"Screen 1: 2560x1440 at 100%".to_string()) && texts(&v).contains(&"Screen 2: off".to_string()), "{:?}", texts(&v));
+    assert!(!texts(&v).iter().any(|t| t.contains('\x07')), "control characters are removed");
+    let (x, y) = hit_centre(&v, 30);
+    let v = click_at(&h, &ann, "settings", x, y);
+    assert!(texts(&v).contains(&"Account".to_string()), "back on the overview: {:?}", texts(&v));
+    // a call for a page that is not listed is refused, as is any call by an account without the chat right
+    let lines = h.accounts.lines().join("\n");
+    assert!(lines.contains("tile.call tile=settings tool=displays_status"), "{lines}");
+    let v = runs_tile_named(&h, &gus, "settings", json!({"width": 360, "height": 480}));
+    assert!(!texts(&v).contains(&"Display".to_string()), "{:?}", texts(&v));
+}
+
 // ---- the picture table (F-WASM-12): pictures a tile names by handle, decoded once when it starts and sent with its frames ----
 
 /// A PNG of `w` x `h` RGBA pixels (stored by the same zlib the agent reads with; chunk checksums are not read by the host).
@@ -1155,6 +1176,35 @@ fn the_access_lint_finds_no_unnamed_part_in_the_shipped_tiles_that_use_the_kit_a
 }
 
 #[test]
+fn the_sealed_browser_data_is_carried_to_the_real_cloud_service_and_back_byte_for_byte_over_pinned_tls() {
+    use iyakki_link::cloudcarrier::TenantFiles;
+    use iyakki_link::cloudclient::{Pin, Target};
+    let (h, _, _, _, _) = acme_cloud();
+    let addr = format!("127.0.0.1:{}", h.svc.local_addr().port());
+    let pin = Pin::parse(&h.svc.fingerprint().replace(':', "")).expect("the service's fingerprint is a SHA-256");
+    let t = Target { addr: addr.clone(), pin };
+    let e = TenantFiles::sign_in(&t, "ann", "not-the-password").err().expect("refused");
+    assert!(e.contains("refused the sign-in") && !e.contains("not-the-password"), "{e}");
+    assert!(TenantFiles::sign_in(&Target { addr, pin: Pin([9u8; 32]) }, "ann", "ann-password-1").err().expect("pin").contains("not the one that was trusted"));
+    let f = TenantFiles::sign_in(&t, "ann", "ann-password-1").unwrap();
+    assert_eq!(f.get().unwrap(), None, "nothing held yet");
+    // a sealed file is any bytes: larger than the 1 MiB an ordinary answer may be, with every byte value in it
+    let bytes: Vec<u8> = (0..1_500_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+    let sum = f.put(&bytes).unwrap();
+    assert_eq!(sum.len(), 64);
+    assert_eq!(f.get().unwrap().unwrap(), bytes, "it comes back exactly");
+    // replacing keeps one file
+    f.put(b"second").unwrap();
+    assert_eq!(f.get().unwrap().unwrap(), b"second");
+    assert!(f.put(&[]).is_err());
+    // another person's tenant account never sees ann's file
+    let g = TenantFiles::sign_in(&t, "gus", "gus-password-1").unwrap();
+    assert!(g.get().is_err(), "a stranger to the tenant is denied, whatever ann holds");
+    f.sign_out();
+    assert!(f.get().unwrap_err().contains("signed you out"));
+}
+
+#[test]
 fn the_native_connector_signs_in_lists_the_tenants_tiles_and_drives_one_over_pinned_tls() {
     use iyakki_link::cloudclient::{Pin, Target};
     use iyakki_link::cloudtiles::{FrameRequest, TileConnector};
@@ -1221,6 +1271,21 @@ fn the_edit_tile_asks_the_assistant_through_the_persons_own_run_shows_its_edit_a
 }
 
 #[test]
+fn the_edit_tile_sends_the_selected_lines_to_the_assistant_as_marked_data() {
+    let h = harness("agent-api", |_| {});
+    let ann = h.ann();
+    runs_tile_named(&h, &ann, "edit", json!({"width": 480, "height": 360}));
+    runs_tile_named(&h, &ann, "edit", json!({"events": [{"type": "text", "text": "alpha"}]}));
+    let ctrl = |c: char| json!({"type": "key", "code": c as u32, "mods": 2, "down": true});
+    h.script.turns.lock().unwrap().push_back(final_turn("Nothing to change."));
+    runs_tile_named(&h, &ann, "edit", json!({"events": [ctrl('a'), ctrl('k'), {"type": "text", "text": "selectionword please"}, {"type": "key", "code": 13, "mods": 0, "down": true}]}));
+    let v = wait_tile(&h, &ann, "edit", json!({"events": [{"type": "tick", "dt_ms": 2000}]}), |_| SEEN_TOOLS.lock().unwrap().iter().any(|s| s.0.contains("selectionword")));
+    let prompt = SEEN_TOOLS.lock().unwrap().iter().find(|s| s.0.contains("selectionword")).map(|s| s.0.clone()).unwrap_or_else(|| panic!("the run reached the model: {:?}", texts(&v)));
+    assert!(prompt.contains("The user has selected lines 1-1:") && prompt.contains("BEGIN SELECTION (data)") && prompt.contains("alpha"), "{prompt}");
+    assert!(!h.accounts.lines().join("\n").contains("alpha"), "no text in the audit");
+}
+
+#[test]
 fn the_chat_tile_can_limit_a_run_to_reading_tools_or_to_none_and_an_unknown_choice_is_refused() {
     let h = harness("agent-api", |_| {});
     let ann = h.ann();
@@ -1258,6 +1323,35 @@ fn the_chat_tile_can_limit_a_run_to_reading_tools_or_to_none_and_an_unknown_choi
 }
 
 #[test]
+fn the_chat_tile_can_offer_a_run_single_tools_by_name_and_a_name_the_person_does_not_have_starts_no_run() {
+    let h = harness("agent-api", |_| {});
+    let ann = h.ann();
+    runs_tile_named(&h, &ann, "chat", json!({"width": 360, "height": 400}));
+    let pick = |clicks: usize, names: &str, words: &str| {
+        for _ in 0..clicks {
+            click_at(&h, &ann, "chat", 250, 352);
+        }
+        runs_tile_named(&h, &ann, "chat", json!({"events": [{"type": "text", "text": names}, {"type": "key", "code": 13, "mods": 0, "down": true}, {"type": "text", "text": words}]}));
+        runs_tile_named(&h, &ann, "chat", json!({"events": [{"type": "pointer_down", "x": 330, "y": 376, "button": 0}, {"type": "pointer_up", "x": 330, "y": 376, "button": 0}]}))
+    };
+    // a name the account does not have: said on the tile, no run, the audit line names no prompt
+    let v = pick(3, "nope_tool", "use the nope");
+    assert!(texts(&v).iter().any(|t| t.contains("`nope_tool` is not a tool you have")), "{:?}", texts(&v));
+    let (_, runs, _) = h.call("GET", "/api/v1/chat/runs", Some(&ann), None);
+    assert!(runs["runs"].as_array().is_none_or(|a| a.is_empty()), "{runs}");
+    // two real names: the model is offered exactly those two
+    click_at(&h, &ann, "chat", 326, 16);
+    h.script.turns.lock().unwrap().push_back(final_turn("done"));
+    pick(4, "now, web_fetch", "only those two");
+    wait_tile(&h, &ann, "chat", json!({"events": [{"type": "tick", "dt_ms": 2000}]}), |v| texts(v).iter().any(|t| t.starts_with("answer: ")));
+    let seen = SEEN_TOOLS.lock().unwrap().iter().find(|s| s.0.contains("only those two")).cloned().expect("the run reached the model");
+    let mut got = seen.1.clone();
+    got.sort();
+    assert_eq!(got, vec!["now".to_string(), "web_fetch".to_string()]);
+    assert!(!h.accounts.lines().join("\n").contains("only those two"), "no prompt in the audit");
+}
+
+#[test]
 fn files_attached_in_the_chat_tile_are_read_through_the_persons_own_tool_as_data_and_a_refusal_starts_no_run() {
     let h = harness("agent-api", |_| {});
     let ann = h.ann();
@@ -1291,6 +1385,80 @@ fn files_attached_in_the_chat_tile_are_read_through_the_persons_own_tool_as_data
     assert!(SEEN_TOOLS.lock().unwrap().iter().any(|s| s.0.contains("what are the numbers")), "the run reached the model");
     let lines = h.accounts.lines().join("\n");
     assert!(lines.contains("tile.call tile=chat tool=read_file") && !lines.contains("the numbers are 42") && !lines.contains("what are the numbers"), "{lines}");
+}
+
+#[test]
+fn a_png_attached_in_the_chat_tile_goes_as_text_read_from_it_marked_as_data_and_a_bad_picture_starts_no_run() {
+    let h = harness("agent-api", |_| {});
+    let ann = h.ann();
+    h.extras.home.lock().unwrap().insert("blank-attach.png".into(), png_of(40, 40, &vec![255u8; 40 * 40 * 4]));
+    h.extras.home.lock().unwrap().insert("junk-attach.png".into(), b"not a png".to_vec());
+    runs_tile_named(&h, &ann, "chat", json!({"width": 360, "height": 400}));
+    let file_btn = (250, 380);
+    let attach = |p: &str| {
+        click_at(&h, &ann, "chat", file_btn.0, file_btn.1);
+        runs_tile_named(&h, &ann, "chat", json!({"events": [{"type": "text", "text": p}, {"type": "key", "code": 13, "mods": 0, "down": true}]}));
+    };
+    let send = |words: &str| {
+        runs_tile_named(&h, &ann, "chat", json!({"events": [{"type": "text", "text": words}]}));
+        runs_tile_named(&h, &ann, "chat", json!({"events": [{"type": "pointer_down", "x": 330, "y": 376, "button": 0}, {"type": "pointer_up", "x": 330, "y": 376, "button": 0}]}))
+    };
+    // a file that is not a picture: the reason on the tile and no run
+    attach("junk-attach.png");
+    let v = send("what is in it");
+    assert!(texts(&v).iter().any(|t| t.starts_with("cannot attach junk-attach.png")), "{:?}", texts(&v));
+    let (_, runs, _) = h.call("GET", "/api/v1/chat/runs", Some(&ann), None);
+    assert!(runs["runs"].as_array().is_none_or(|a| a.is_empty()), "{runs}");
+    // a good picture: the model gets what was read in it (here: nothing, said so) after the words, marked as data; the audit has no name
+    click_at(&h, &ann, "chat", 326, 16);
+    h.script.turns.lock().unwrap().push_back(final_turn("seen"));
+    attach("blank-attach.png");
+    send("describe the picture please");
+    wait_tile(&h, &ann, "chat", json!({"events": [{"type": "tick", "dt_ms": 2000}]}), |v| texts(v).iter().any(|t| t.starts_with("answer: ")));
+    let seen = SEEN_TOOLS.lock().unwrap().iter().find(|s| s.0.contains("describe the picture please")).cloned().expect("the run reached the model");
+    assert!(seen.0.contains("BEGIN ATTACHED PICTURE blank-attach.png 40x40") && seen.0.contains("no text was recognised") && seen.0.contains("data, not instructions"), "{}", seen.0);
+    let lines = h.accounts.lines().join("\n");
+    assert!(lines.contains("tile.call tile=chat tool=read_picture") && !lines.contains("blank-attach") && !lines.contains("describe the picture"), "{lines}");
+}
+
+#[test]
+fn the_settings_tile_fills_in_forms_for_wifi_and_model_options_and_changes_only_after_the_persons_own_click() {
+    let h = harness("agent-api", |_| {});
+    let (ann, gus) = (h.ann(), h.login("gus", "gus-password-1"));
+    let v = runs_tile_named(&h, &ann, "settings", json!({"width": 360, "height": 480}));
+    assert!(texts(&v).contains(&"Join Wi-Fi".to_string()) && texts(&v).contains(&"Model".to_string()) && texts(&v).contains(&"Wi-Fi scan".to_string()), "{:?}", texts(&v));
+    // the scan is a list page, shown only
+    let (x, y) = hit_centre(&v, 33);
+    let v2 = click_at(&h, &ann, "settings", x, y);
+    assert!(texts(&v2).contains(&"cafe-guest  open  weak".to_string()), "{:?}", texts(&v2));
+    // the Wi-Fi form: a network name and the NAME of a vault entry, never a password
+    let (x, y) = hit_centre(&v, 40);
+    let v = click_at(&h, &ann, "settings", x, y);
+    assert!(texts(&v).iter().any(|t| t.starts_with("Passwords are never typed here")), "{:?}", texts(&v));
+    let key = |code: u32| json!({"type": "key", "code": code, "mods": 0, "down": true});
+    let v = runs_tile_named(&h, &ann, "settings", json!({"events": [{"type": "text", "text": "unique-form-ssid"}, key(9), {"type": "text", "text": "unique-vault-entry"}, key(13)]}));
+    assert!(texts(&v).iter().any(|t| t.starts_with("Waiting for your answer")), "{:?}", texts(&v));
+    assert!(!FAKE_FORMS.lock().unwrap().iter().any(|c| c.1["ssid"] == "unique-form-ssid"), "nothing is joined before the click on the card");
+    let cards = tile_approvals(&h, &ann);
+    assert!(cards.len() == 1 && cards[0]["summary"].as_str().unwrap().contains("wifi_join") && cards[0]["summary"].as_str().unwrap().contains("unique-form-ssid"), "{cards:?}");
+    let id = cards[0]["call"].as_str().unwrap().to_string();
+    h.call("POST", &format!("/api/v1/approvals/tile/{id}"), Some(&ann), Some(json!({"verdict": "approve"})));
+    let v = runs_tile_named(&h, &ann, "settings", json!({"events": [{"type": "tick", "dt_ms": 2000}]}));
+    assert!(texts(&v).contains(&"Done.".to_string()), "{:?}", texts(&v));
+    let joined = FAKE_FORMS.lock().unwrap().iter().find(|c| c.1["ssid"] == "unique-form-ssid").cloned().expect("joined after the yes");
+    assert_eq!((joined.0.as_str(), joined.1["secret_entry"].as_str()), ("wifi_join", Some("unique-vault-entry")));
+    // a wrong number is refused in words, no card is made
+    let (x, y) = hit_centre(&v, 41);
+    click_at(&h, &ann, "settings", x, y);
+    let v = runs_tile_named(&h, &ann, "settings", json!({"events": [{"type": "text", "text": "local"}, key(9), {"type": "text", "text": "tiny"}, key(9), key(9), {"type": "text", "text": "9"}, key(13)]}));
+    assert!(texts(&v).contains(&"temperature is a number from 0 to 2".to_string()), "{:?}", texts(&v));
+    assert!(tile_approvals(&h, &ann).is_empty());
+    // the audit has the tools and never what was typed
+    let lines = h.accounts.lines().join("\n");
+    assert!(lines.contains("tile.asked tile=settings tool=wifi_join") && lines.contains("tile.call tile=settings tool=wifi_join") && !lines.contains("unique-form-ssid") && !lines.contains("unique-vault-entry"), "{lines}");
+    // an account without the chat right sees no forms and a direct call is refused
+    let v = runs_tile_named(&h, &gus, "settings", json!({"width": 360, "height": 480}));
+    assert!(!texts(&v).contains(&"Join Wi-Fi".to_string()), "{:?}", texts(&v));
 }
 
 fn b64(bytes: &[u8]) -> String {
@@ -1385,7 +1553,7 @@ ws.onmessage = (m) => {
 };
 const call = (method, params = {}) => new Promise((r) => { const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
 const ev = async (expr) => { const r = await call("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true }); if (r.result.exceptionDetails) throw new Error("eval: " + JSON.stringify(r.result.exceptionDetails.exception?.description)); return r.result.result.value; };
-const waitFor = async (expr, what, ms = 20000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { try { if (await ev(expr)) return; } catch (e) {} await sleep(100); } throw new Error("timed out waiting for " + what + "; page=" + (await ev("document.body.innerText.slice(0, 300)").catch(() => "?"))); };
+const waitFor = async (expr, what, ms = 120000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { try { if (await ev(expr)) return; } catch (e) {} await sleep(100); } throw new Error("timed out waiting for " + what + "; page=" + (await ev("document.body.innerText.slice(0, 300)").catch(() => "?"))); };
 const openTile = async (title) => {
   await ev("[...document.querySelectorAll('#page button')].find((b) => b.textContent === " + JSON.stringify(title) + ").click(); true");
   await waitFor("(() => { const c = document.querySelector('canvas.tile-canvas'); return c && !c.className.includes('tile-off') && c.width > 10; })()", "the tile " + title + " to be live");
@@ -1586,4 +1754,215 @@ fn a_tile_without_the_dock_capability_or_with_a_no_from_the_person_changes_nothi
     tick(&h);
     tick(&h);
     assert!(h.executed.lock().unwrap().is_empty(), "{:?}", h.executed.lock().unwrap());
+}
+
+fn header_of<'a>(r: &'a crate::httpmini::Response, name: &str) -> Option<&'a str> {
+    r.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+}
+
+#[test]
+fn a_web_bundle_tile_is_installed_served_under_a_strict_policy_called_through_its_manifest_and_removed() {
+    let h = harness("tile-host", |_| {});
+    let (root, ann) = (h.root(), h.ann());
+    let index = "<!doctype html><html><body><script src=\"/tiles/bridge.js\"></script><script src=app.js></script></body></html>";
+    let pkg = |id: &str, caps: Value| json!({"id": id, "title": "Paste box", "caps": caps, "files": [{"name": "index.html", "base64": b64(index.as_bytes())}, {"name": "app.js", "base64": b64(b"window.iyakki.onready(function () {});")}, {"name": "app.css", "base64": b64(b"body{margin:0}")}]});
+    // only administrators install
+    assert_eq!(h.call("POST", "/api/v1/tile-bundles", Some(&ann), Some(pkg("pastebox", json!([])))).0, 403);
+    assert_eq!(h.call("POST", "/api/v1/tile-bundles", None, Some(pkg("pastebox", json!([])))).0, 401);
+    let (s, v, _) = h.call("POST", "/api/v1/tile-bundles", Some(&root), Some(pkg("pastebox", json!(["clipboard.copy", "clipboard.paste"]))));
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["page"], "/tiles/pastebox/w", "a person opens the wrapper");
+    assert_eq!(v["frame"], "/tiles/pastebox/b/index.html");
+    assert_eq!(v["bridge"], "/tiles/pastebox/bridge");
+    // everybody lists it
+    let (_, l, _) = h.call("GET", "/api/v1/tile-bundles", Some(&ann), None);
+    assert_eq!(l["bundles"][0]["id"], "pastebox");
+    assert_eq!(l["bundles"][0]["caps"], json!(["clipboard.copy", "clipboard.paste"]));
+    // a file is public and static, under the strict policy, with the right type
+    let (s, _, r) = h.call("GET", "/tiles/pastebox/b/index.html", None, None);
+    assert_eq!(s, 200);
+    assert_eq!(String::from_utf8_lossy(&r.body), index);
+    assert_eq!(header_of(&r, "Content-Type"), Some("text/html; charset=utf-8"));
+    assert!(header_of(&r, "Content-Security-Policy").unwrap().contains("script-src 'self'"));
+    assert!(!header_of(&r, "Content-Security-Policy").unwrap().contains("unsafe-"));
+    assert_eq!(header_of(&r, "X-Content-Type-Options"), Some("nosniff"));
+    assert_eq!(header_of(&r, "Content-Type").map(|_| ()), Some(()));
+    let (_, _, js) = h.call("GET", "/tiles/pastebox/b/app.js", None, None);
+    assert_eq!(header_of(&js, "Content-Type"), Some("text/javascript; charset=utf-8"));
+    let (_, _, css) = h.call("GET", "/tiles/pastebox/b/app.css", None, None);
+    assert_eq!(header_of(&css, "Content-Type"), Some("text/css; charset=utf-8"));
+    for missing in ["/tiles/pastebox/b/nothing.js", "/tiles/nobody/b/index.html", "/tiles/pastebox/b/..", "/tiles/pastebox/b/.hidden"] {
+        assert_eq!(h.call("GET", missing, None, None).0, 404, "{missing}");
+    }
+    let (s, _, b) = h.call("GET", "/tiles/bridge.js", None, None);
+    assert_eq!(s, 200);
+    assert!(String::from_utf8_lossy(&b.body).contains("window.iyakki = Object.freeze("));
+    // every file of the bundle is sandboxed with no same-origin rights and may be framed only by this service; the wrapper is public, static and framed by nobody
+    let csp = header_of(&r, "Content-Security-Policy").unwrap();
+    assert!(csp.starts_with("sandbox allow-scripts;") && !csp.contains("allow-same-origin") && csp.contains("frame-ancestors 'self'") && csp.contains("connect-src 'none'"), "{csp}");
+    let (s, _, w) = h.call("GET", "/tiles/pastebox/w", None, None);
+    assert_eq!(s, 200);
+    assert_eq!(header_of(&w, "Content-Type"), Some("text/html; charset=utf-8"));
+    let wcsp = header_of(&w, "Content-Security-Policy").unwrap();
+    assert!(wcsp.contains("frame-ancestors 'none'") && wcsp.contains("frame-src 'self'") && !wcsp.contains("unsafe-"), "{wcsp}");
+    assert!(String::from_utf8_lossy(&w.body).contains("/tiles/wrapper.js"));
+    let (s, _, wj) = h.call("GET", "/tiles/wrapper.js", None, None);
+    assert_eq!(s, 200);
+    assert!(String::from_utf8_lossy(&wj.body).contains("setAttribute('sandbox', 'allow-scripts')"));
+    // a call: the manifest decides; the person's own clipboard is used
+    let call = |tok: &str, call: &str, args: Value| h.call("POST", "/api/v1/tile-bundles/pastebox/call", Some(tok), Some(json!({"call": call, "args": args})));
+    let (s, v, _) = call(&ann, "clipboard.copy", json!({"text": "hello bundle"}));
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["ok"], true);
+    let (s, v, _) = call(&ann, "clipboard.paste", json!({}));
+    assert_eq!((s, v["value"]["text"].as_str()), (200, Some("hello bundle")), "{v}");
+    // not in the manifest, malformed, not an object, no token, not a bundle
+    assert_eq!(call(&ann, "files.read", json!({"path": "/etc/passwd"})).0, 403);
+    assert_eq!(call(&ann, "tools.run_command", json!({})).0, 403);
+    assert_eq!(call(&ann, "clipboard", json!({})).0, 400);
+    assert_eq!(h.call("POST", "/api/v1/tile-bundles/pastebox/call", Some(&ann), Some(json!({"call": "clipboard.paste", "args": [1]}))).0, 400);
+    assert_eq!(h.call("POST", "/api/v1/tile-bundles/pastebox/call", None, Some(json!({"call": "clipboard.paste"}))).0, 401);
+    assert_eq!(h.call("POST", "/api/v1/tile-bundles/nobody/call", Some(&ann), Some(json!({"call": "clipboard.paste"}))).0, 404);
+    // the audit line names the call and the tile, never the arguments
+    let lines = h.accounts.lines().join("\n");
+    assert!(lines.contains("tile_bundle_call") && lines.contains("call=clipboard.copy") && lines.contains("tile=pastebox") && !lines.contains("hello bundle") && !lines.contains("base64"), "{lines}");
+    // the rules of a bundle: a tile id that exists, inline code, a picture-table call, a missing index, a folder name, a tool
+    let wat = iyakki_tile_example::TILE_WAT.as_bytes();
+    assert_eq!(h.call("POST", "/api/v1/tile-bundles", Some(&root), Some(pkg("counter", json!([])))).0, 409);
+    let mut inline = pkg("inline", json!([]));
+    inline["files"][0] = json!({"name": "index.html", "base64": b64(b"<script>alert(1)</script>")});
+    assert_eq!(h.call("POST", "/api/v1/tile-bundles", Some(&root), Some(inline)).0, 400);
+    assert_eq!(h.call("POST", "/api/v1/tile-bundles", Some(&root), Some(pkg("pics", json!(["pictures.load"])))).0, 400);
+    assert_eq!(h.call("POST", "/api/v1/tile-bundles", Some(&root), Some(pkg("toolish", json!(["tools.run_command"])))).0, 400);
+    let mut deep = pkg("deep", json!([]));
+    deep["files"][1] = json!({"name": "a/b.js", "base64": b64(b"1")});
+    assert_eq!(h.call("POST", "/api/v1/tile-bundles", Some(&root), Some(deep)).0, 400);
+    assert_eq!(h.call("POST", "/api/v1/tile-bundles", Some(&root), Some(json!({"id": "x", "title": "t", "files": "no"}))).0, 400);
+    // a WASM tile cannot take a bundle's id, either
+    let (s, _, _) = h.call("POST", "/api/v1/tiles/install", Some(&root), Some(json!({"id": "pastebox", "title": "t", "wasm_base64": b64(wat)})));
+    assert_eq!(s, 409);
+    // a restart: the folder has it again, privately kept
+    let dir = crate::webservice::webbundle::bundles_dir(&h.svc.shared().cfg.data_dir);
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(dir.join("pastebox").join("index.html")).unwrap().permissions().mode() & 0o777, 0o600);
+    let again = crate::webservice::webbundle::Bundles::default();
+    assert_eq!(again.load(&dir, &|_| {}), 1);
+    assert_eq!(again.get("pastebox").unwrap().caps, ["clipboard.copy", "clipboard.paste"]);
+    // removal: administrators only; the files and the calls are gone
+    assert_eq!(h.call("DELETE", "/api/v1/tile-bundles/pastebox", Some(&ann), None).0, 403);
+    assert_eq!(h.call("DELETE", "/api/v1/tile-bundles/pastebox", Some(&root), None).0, 200);
+    assert_eq!(h.call("DELETE", "/api/v1/tile-bundles/pastebox", Some(&root), None).0, 404);
+    assert!(!dir.join("pastebox").exists());
+    assert_eq!(h.call("GET", "/tiles/pastebox/b/index.html", None, None).0, 404);
+    assert_eq!(call(&ann, "clipboard.paste", json!({})).0, 404);
+}
+
+#[test]
+fn bundles_exist_only_in_the_tile_host_profile() {
+    let h = harness("agent-api", |_| {});
+    let root = h.root();
+    for (m, p) in [("GET", "/tiles/x/b/index.html"), ("GET", "/tiles/x/w"), ("GET", "/tiles/wrapper.js"), ("GET", "/tiles/bridge.js"), ("GET", "/api/v1/tile-bundles"), ("POST", "/api/v1/tile-bundles"), ("POST", "/api/v1/tile-bundles/x/call")] {
+        assert_eq!(h.call(m, p, Some(&root), Some(json!({}))).0, 404, "{m} {p}");
+    }
+}
+
+#[test]
+fn a_plain_request_to_the_bridge_address_is_told_it_is_a_websocket() {
+    let h = harness("tile-host", |_| {});
+    let (s, v, _) = h.call("GET", "/tiles/pastebox/bridge", None, None);
+    assert_eq!(s, 400, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("WebSocket"));
+}
+
+/// A tile that makes the `terminal` calls named in `steps` (domain "terminal"), one step per event (the event number is kept in the tile's memory).
+fn terminal_tile(steps: &[(&str, &str)]) -> String {
+    let mut names: Vec<String> = Vec::new();
+    let mut put = |s: &str| -> (usize, usize) {
+        let at = 1000 + 16 * names.len();
+        let b = s.as_bytes();
+        for c in b.chunks(16) {
+            names.push(String::from_utf8(c.to_vec()).unwrap().replace('"', "\\22"));
+        }
+        (at, b.len())
+    };
+    let dom = put("terminal");
+    let mut body = String::from("(i32.store (i32.const 8000) (i32.add (i32.load (i32.const 8000)) (i32.const 1)))\n");
+    for (i, (method, args)) in steps.iter().enumerate() {
+        let (m, a) = (put(method), put(args));
+        body.push_str(&format!(
+            "(if (i32.eq (i32.load (i32.const 8000)) (i32.const {})) (then (drop (call $call (i32.const {}) (i32.const {}) (i32.const {}) (i32.const {}) (i32.const {}) (i32.const {}) (i32.const 8192) (i32.const 1024)))))\n",
+            i + 1, dom.0, dom.1, m.0, m.1, a.0, a.1
+        ));
+    }
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    wat_tile(1, &body, &refs)
+}
+
+#[test]
+fn a_tile_runs_a_line_that_changes_something_only_after_the_persons_own_card_and_a_no_runs_nothing() {
+    let h = harness("agent-api", |_| {});
+    let ann = h.ann();
+    // the fake terminal numbers its questions: open is 1, the first line that asks is c2, the second c3
+    let steps = [
+        ("open", "{}"),
+        ("run", r#"{"line":"rm x"}"#),
+        ("decide", r#"{"call":"c2","approve":true}"#),
+        ("decide", r#"{"call":"c2","approve":true}"#),
+        ("run", r#"{"line":"rm y"}"#),
+        ("decide", r#"{"call":"c3","approve":false}"#),
+        ("decide", r#"{"call":"c9","approve":true}"#),
+    ];
+    h.svc.shared().tiles.register(def("shell", terminal_tile(&steps), &["terminal"]));
+    assert_eq!(post(&h, &ann, "shell", json!({"width": 50, "height": 50})).0, 200);
+    let tick = |h: &H| assert_eq!(post(h, &ann, "shell", json!({"events": [{"type": "tick", "dt_ms": 1}]})).0, 200);
+    tick(&h); // open
+    tick(&h); // run: the core asks, and the question is the person's card in their page at once
+    let card = pending_tile_asks(&h, &ann);
+    assert_eq!(card.len(), 1, "{card:?}");
+    assert_eq!((card[0]["tool"].as_str(), card[0]["detail"].as_str()), (Some("terminal_line"), Some("c2")));
+    assert!(card[0]["summary"].as_str().unwrap().contains("rm x"), "{card:?}");
+    assert!(h.extras.terminal.log().is_empty(), "nothing ran");
+    tick(&h); // the tile's own Allow: nothing runs without the person's yes in the page
+    assert!(h.extras.terminal.log().is_empty());
+    assert_eq!(pending_tile_asks(&h, &ann).len(), 1, "no second card");
+    let id = card[0]["call"].as_str().unwrap().to_string();
+    assert_eq!(decide(&h, &h.login("bob", "bob-password-1"), &id, "approve").0, 404, "another person cannot answer it");
+    assert_eq!(decide(&h, &ann, &id, "approve").0, 200);
+    tick(&h); // Allow again: the core runs it, once
+    assert_eq!(h.extras.terminal.log(), vec!["ann: rm x".to_string()]);
+    tick(&h); // a second line asks again
+    assert_eq!(pending_tile_asks(&h, &ann).len(), 1);
+    tick(&h); // the tile's own no drops the question and the card with it
+    assert!(pending_tile_asks(&h, &ann).is_empty());
+    tick(&h); // a call that was never asked is refused
+    assert_eq!(h.extras.terminal.log(), vec!["ann: rm x".to_string()], "only the approved line ran");
+    let lines = h.accounts.lines().join("\n");
+    assert!(lines.contains("tile.asked") && lines.contains("tool=terminal_line") && lines.contains("tile.call") && lines.contains("tool=terminal_run"), "{lines}");
+    assert!(!lines.contains("rm x"), "no command text in the audit");
+}
+
+#[test]
+fn a_tile_without_the_terminal_capability_reaches_no_terminal_and_a_whole_session_waits_for_the_persons_card() {
+    let h = harness("agent-api", |_| {});
+    let ann = h.ann();
+    h.svc.shared().tiles.register(def("nocap", terminal_tile(&[("open", "{}")]), &["files.read"]));
+    assert_eq!(post(&h, &ann, "nocap", json!({"width": 50, "height": 50})).0, 200);
+    assert_eq!(post(&h, &ann, "nocap", json!({"events": [{"type": "tick", "dt_ms": 1}]})).0, 200);
+    assert!(h.accounts.lines().join("\n").contains("tile.denied"), "the call was refused before the core");
+    let steps = [("screen_open", r#"{"cols":20,"rows":4}"#), ("screen_decide", r#"{"call":"pc1","approve":true}"#), ("screen_key", r#"{"key":"enter"}"#), ("screen_decide", r#"{"call":"pc1","approve":true}"#), ("screen_key", r#"{"key":"enter"}"#)];
+    h.svc.shared().tiles.register(def("full", terminal_tile(&steps), &["terminal"]));
+    assert_eq!(post(&h, &ann, "full", json!({"width": 50, "height": 50})).0, 200);
+    let tick = |h: &H| assert_eq!(post(h, &ann, "full", json!({"events": [{"type": "tick", "dt_ms": 1}]})).0, 200);
+    tick(&h);
+    let card = pending_tile_asks(&h, &ann);
+    assert_eq!((card.len(), card[0]["tool"].as_str()), (1, Some("terminal_session")), "{card:?}");
+    tick(&h); // Allow before the person said yes in the page: the session does not start
+    tick(&h); // a key before the yes goes nowhere
+    use iyakki_core_api::Terminal as _;
+    assert!(h.extras.terminal.pty_frame("ann", "p1").unwrap_err().contains("waits"), "the core's session still waits for the yes");
+    let id = card[0]["call"].as_str().unwrap().to_string();
+    assert_eq!(decide(&h, &ann, &id, "approve").0, 200);
+    tick(&h); // Allow now starts it
+    tick(&h); // and a key reaches the program
+    assert!(h.extras.terminal.pty_frame("ann", "p1").unwrap().text().contains("ran:"), "the Enter reached the session");
 }

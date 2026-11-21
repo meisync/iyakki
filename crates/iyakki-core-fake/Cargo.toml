@@ -9,6 +9,7 @@ description = "In-memory implementation of the IYAKKI core API for tests: canned
 iyakki-core-api = { path = "../iyakki-core-api" }
 iyakki-cloudmode.workspace = true
 iyakki-sec.workspace = true
+iyakki-diskcrypt.workspace = true
 # the display list writer only (no pixel toolkit): the fake browser answers frames in the list format
 iyakki-ui-sdk = { path = "../iyakki-ui-sdk", default-features = false }
 

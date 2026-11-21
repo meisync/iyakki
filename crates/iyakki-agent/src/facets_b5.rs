@@ -89,6 +89,10 @@ impl ServicesFacetB5 for ServicesB5 {
     fn lab_frames(&self) -> Arc<dyn iyakki_shared::lab::FrameSource> {
         Arc::new(crate::labkit::Ffmpeg)
     }
+    /// In process the person's file rules were already applied by the tile; over the core socket the served object judges each file first.
+    fn lab_frames_for(&self, _user: &str) -> Arc<dyn iyakki_shared::lab::FrameSource> {
+        self.lab_frames()
+    }
     fn scene_agent_chat(
         &self,
         agent: Arc<dyn iyakki_shared::extagent::ExternalAgent>,

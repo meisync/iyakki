@@ -46,6 +46,20 @@ pub trait McpApi: Send + Sync {
     fn remove(&self, name: &str) -> Result<(), String>;
 }
 
+/// `McpApi` over the `mcp()` member of a services handle (the root object the core serves over the UI socket, F-SPLIT-03).
+pub struct McpVia(pub Arc<dyn crate::ServicesHandle>);
+impl McpApi for McpVia {
+    fn add(&self, s: StoredServer) -> Result<(), String> {
+        self.0.mcp().add(s)
+    }
+    fn list(&self) -> Vec<StoredServer> {
+        self.0.mcp().list()
+    }
+    fn remove(&self, name: &str) -> Result<(), String> {
+        self.0.mcp().remove(name)
+    }
+}
+
 pub trait PackageApi: Send + Sync {
     fn install(&self, review: &Review, approved: bool, can_shared: bool, can_own: bool) -> Result<Skill, PkgError>;
     fn list(&self, scope: &Scope) -> Vec<(String, Installed)>;
@@ -80,6 +94,10 @@ pub trait RadioApi: Send + Sync {
     fn levels(&self) -> [f32; BANDS];
     fn pause(&self) -> bool;
     fn play(&self, station: &Station, allow: Arc<dyn Fn(&str) -> bool + Send + Sync>, play_cmd: &str);
+    /// [`RadioApi::play`] with the person's current list, for moving on to the next station when a live one drops (F-RADIO-17).
+    fn play_in(&self, station: &Station, allow: Arc<dyn Fn(&str) -> bool + Send + Sync>, play_cmd: &str, around: iyakki_tile_api::radio::Around);
+    /// What the status line adds while the radio recovers ("Reconnecting 1 of 2", "Switched to NAME").
+    fn notice(&self) -> Option<String>;
     fn resume(&self) -> bool;
     fn set_retry_wait(&self, d: Duration);
     fn set_streamer(&self, s: Arc<dyn Streamer>);

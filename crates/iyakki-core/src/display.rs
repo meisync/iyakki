@@ -269,7 +269,7 @@ fn probe_once_with(sys_drm: &Path, why: &str, found: fn(), mode: ProbeMode, touc
     new
 }
 
-pub const SYS_DRM: &str = "/sys/class/drm";
+pub const SYS_DRM: &str = iyakki_core_local::kernelfacts::DRM_CLASS;
 
 /// The boot-time search in a background thread, then a watch on DRM events for the rest of the run. `found` runs whenever a
 /// monitor turns up through our probing (the boot screen and the shell redraw everything on it).

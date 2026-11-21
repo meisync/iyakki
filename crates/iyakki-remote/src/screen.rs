@@ -79,8 +79,49 @@ pub trait Screen: Send {
     fn take_rich_copy(&mut self) -> Option<Vec<u8>> {
         None
     }
+    /// Display-list mode (F-SDK-29): open an SDK app of this person's shell at a pane of `w` by `h` logical units and answer its first frame
+    /// as display list text. The default refuses: a screen that is only a picture has no apps of its own.
+    fn app_open(&mut self, _app: &str, _w: u32, _h: u32) -> Result<String, AppRefusal> {
+        Err(AppRefusal::unsupported())
+    }
+    /// Display-list mode: apply a batch of the SDK's input lines to the open app; the next frame and whether the person left the app.
+    fn app_input(&mut self, _lines: &str) -> Result<(String, bool), AppRefusal> {
+        Err(AppRefusal::unsupported())
+    }
+    /// Display-list mode: close the open app (nothing when none is open).
+    fn app_close(&mut self) {}
+    /// File transfer (F-CLIENT-01): a folder of this person's home, through the core's files facet. The default refuses: a screen with no core has
+    /// no files.
+    fn files_list(&mut self, _dir: &str) -> Result<iyakki_core_api::Listing, AppRefusal> {
+        Err(AppRefusal::unsupported())
+    }
+    /// File transfer: the bytes of one file of the home (at most `MAX_UPLOAD`).
+    fn files_read(&mut self, _path: &str) -> Result<Vec<u8>, AppRefusal> {
+        Err(AppRefusal::unsupported())
+    }
+    /// File transfer: save `bytes` as `path` in the home, through the core's change and its approval book (the person already said yes on the
+    /// machine's card, which is the answer). Returns the sentence the core gives.
+    fn files_save(&mut self, _path: &str, _bytes: Vec<u8>) -> Result<String, AppRefusal> {
+        Err(AppRefusal::unsupported())
+    }
     /// The person signed out.
     fn finished(&self) -> bool;
+}
+
+/// Why a display-list request was refused: the stable word of the client protocol's `app_err` and a sentence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppRefusal {
+    pub code: String,
+    pub message: String,
+}
+
+impl AppRefusal {
+    pub fn new(code: &str, message: &str) -> AppRefusal {
+        AppRefusal { code: code.into(), message: message.into() }
+    }
+    pub fn unsupported() -> AppRefusal {
+        AppRefusal::new("unsupported", "this screen has no apps to show in a client")
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -128,6 +169,12 @@ pub trait Gate: Send + Sync {
 
     /// The experimental session endpoint for clients (`/client/ws`, `/connect`). The default has none: both routes are 404.
     fn client_endpoint(&self) -> Option<&crate::clientsession::ClientEndpoint> {
+        None
+    }
+
+    /// The pages a browser loads to subscribe to Web Push (`/push/sw.js`, `/push/subscribe`), answered on this same server over TLS only.
+    /// The default has none (404); the shell's gate gives them, and they stay dark until an administrator has set the public name.
+    fn push_pages(&self) -> Option<std::sync::Arc<iyakki_agent::webpush_page::PushPages>> {
         None
     }
 
@@ -195,7 +242,14 @@ impl ShellGate {
         let media = Arc::new(iyakki_agent::clientmedia::MediaHost::shared(Some(card)).with_cameras(iyakki_shell::apps::cameras::client_feed(&self.env.services.b4(), self.env.services.dir(), &self.env.audit, &self.env.store)));
         let (broker, _log) = iyakki_agent::accessbroker::local(dir, Some(media.card()));
         let audit = self.env.audit.clone();
-        crate::clientsession::ClientEndpoint::new(dir, broker, Arc::new(ShellCalls(self.env.share())), Arc::new(move |user: &str, action: &str, detail: &str| audit.record(user, action, detail))).with_media(media)
+        // the person's choice of how sound reaches clients (chat tool `client_sound_mode`) holds from the start
+        iyakki_agent::clientmedia::audio_routes().set_per_person(iyakki_agent::clientlink::sound_per_person(dir));
+        let ep = crate::clientsession::ClientEndpoint::new(dir, broker, Arc::new(ShellCalls(self.env.share())), Arc::new(move |user: &str, action: &str, detail: &str| audit.record(user, action, detail))).with_media(media);
+        // a cloud tenant's pod names its tenant: the endpoint then keeps to it (D-CLIENT-TENANT)
+        match std::env::var(iyakki_agent::cloudvaultlink::ENV_TENANT) {
+            Ok(t) if !t.trim().is_empty() => ep.with_tenant(t.trim()),
+            _ => ep,
+        }
     }
 
     pub fn with_device_keys(mut self, keys: Arc<crate::devicekeys::DeviceKeys>) -> ShellGate {
@@ -217,13 +271,17 @@ impl Gate for ShellGate {
         self.client.as_ref()
     }
 
+    fn push_pages(&self) -> Option<std::sync::Arc<iyakki_agent::webpush_page::PushPages>> {
+        Some(iyakki_agent::webpush_page::PushPages::shared(self.env.services.dir()))
+    }
+
     fn device_keys(&self, user: &str) -> Vec<[u8; 32]> {
         self.keys.as_ref().map(|k| k.keys_of(user)).unwrap_or_default()
     }
 
     fn login_key(&self, user: &str) -> Result<Box<dyn Screen>, LoginError> {
         let session = {
-            let mut store = self.env.store.lock().map_err(|_| LoginError::Other("accounts are busy".into()))?;
+            let mut store = self.env.store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             store.refresh();
             // an account removed since the key was enrolled has no sign-in; the same answer as a wrong key
             let u = store.get(user).ok_or(LoginError::Invalid)?;
@@ -255,7 +313,7 @@ impl Gate for ShellGate {
     }
 
     fn login(&self, user: &str, password: &str) -> Result<Box<dyn Screen>, LoginError> {
-        let mut store = self.env.store.lock().map_err(|_| LoginError::Other("accounts are busy".into()))?;
+        let mut store = self.env.store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         store.refresh();
         if store.is_empty() {
             return Err(LoginError::Other("This machine has no accounts yet. On the machine run: iyakki user add NAME --role admin".into()));
@@ -279,7 +337,21 @@ impl Gate for ShellGate {
     }
 }
 
+/// A display-list request for the shell's thread and where the answer goes.
+enum AppCmd {
+    Open(String, u32, u32, std::sync::mpsc::Sender<Result<String, AppRefusal>>),
+    Input(String, std::sync::mpsc::Sender<Result<(String, bool), AppRefusal>>),
+    Close,
+    List(String, std::sync::mpsc::Sender<Result<iyakki_core_api::Listing, AppRefusal>>),
+    Read(String, std::sync::mpsc::Sender<Result<Vec<u8>, AppRefusal>>),
+    Save(String, Vec<u8>, std::sync::mpsc::Sender<Result<String, AppRefusal>>),
+}
+
+/// How long a request of display-list mode waits for the shell's thread (it answers between two frames).
+const APP_WAIT: Duration = Duration::from_secs(5);
+
 enum Cmd {
+    App(AppCmd),
     In(Input),
     Viewing(bool),
     Stream(bool),
@@ -394,6 +466,24 @@ fn shell_loop(mut shell: Shell, cmds: std::sync::mpsc::Receiver<Cmd>, out: std::
         };
         while let Some(c) = next {
             match c {
+                Cmd::App(AppCmd::Open(app, w, h, reply)) => {
+                    let _ = reply.send(shell.list_app_open(&app, w, h).map_err(|e| AppRefusal::new(e.code, &e.message)));
+                }
+                Cmd::App(AppCmd::Input(lines, reply)) => {
+                    let _ = reply.send(shell.list_app_input(&lines).map_err(|e| AppRefusal::new(e.code, &e.message)));
+                }
+                Cmd::App(AppCmd::Close) => {
+                    shell.list_app_close();
+                }
+                Cmd::App(AppCmd::List(dir, reply)) => {
+                    let _ = reply.send(shell.client_files_list(&dir).map_err(|e| AppRefusal::new("failed", &e)));
+                }
+                Cmd::App(AppCmd::Read(path, reply)) => {
+                    let _ = reply.send(shell.client_files_read(&path).map_err(|e| AppRefusal::new("failed", &e)));
+                }
+                Cmd::App(AppCmd::Save(path, bytes, reply)) => {
+                    let _ = reply.send(shell.client_files_save(&path, bytes).map_err(|e| AppRefusal::new("failed", &e)));
+                }
                 Cmd::In(Input::Event(e)) => {
                     shell.handle(&e);
                     dirty |= shell.take_stale();
@@ -461,7 +551,10 @@ fn shell_loop(mut shell: Shell, cmds: std::sync::mpsc::Receiver<Cmd>, out: std::
                     let _ = out.try_send(Out::Rich(msg));
                 }
             }
-            if let Some(t) = shell.take_host_copy() {
+            // a copy with an HTML form goes as the HTML message, which the page writes with its plain text beside it; otherwise as text
+            let html = iyakki_shell::ui::clipboard::take_host_html();
+            let rich_sent = html.as_deref().and_then(|h| iyakki_agent::browsermedia::BrowserMedia::clip_out(iyakki_agent::browsermedia::ClipKind::Html, h.as_bytes())).map(|m| out.try_send(Out::Rich(m)).is_ok()).unwrap_or(false);
+            if let Some(t) = shell.take_host_copy().filter(|_| !rich_sent) {
                 if out.try_send(Out::Copy(t)).is_err() {
                     log::debug!("web: a copied text was dropped (the page is slow)");
                 }
@@ -662,6 +755,40 @@ impl Screen for ShellScreen {
 
     fn take_rich_copy(&mut self) -> Option<Vec<u8>> {
         self.rich.take()
+    }
+
+    fn app_open(&mut self, app: &str, w: u32, h: u32) -> Result<String, AppRefusal> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.tx.send(Cmd::App(AppCmd::Open(app.into(), w, h, tx))).map_err(|_| AppRefusal::new("failed", "the shell is gone"))?;
+        rx.recv_timeout(APP_WAIT).unwrap_or_else(|_| Err(AppRefusal::new("failed", "the shell did not answer in time")))
+    }
+
+    fn app_input(&mut self, lines: &str) -> Result<(String, bool), AppRefusal> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.tx.send(Cmd::App(AppCmd::Input(lines.into(), tx))).map_err(|_| AppRefusal::new("failed", "the shell is gone"))?;
+        rx.recv_timeout(APP_WAIT).unwrap_or_else(|_| Err(AppRefusal::new("failed", "the shell did not answer in time")))
+    }
+
+    fn app_close(&mut self) {
+        let _ = self.tx.send(Cmd::App(AppCmd::Close));
+    }
+
+    fn files_list(&mut self, dir: &str) -> Result<iyakki_core_api::Listing, AppRefusal> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.tx.send(Cmd::App(AppCmd::List(dir.into(), tx))).map_err(|_| AppRefusal::new("failed", "the shell is gone"))?;
+        rx.recv_timeout(APP_WAIT).unwrap_or_else(|_| Err(AppRefusal::new("failed", "the shell did not answer in time")))
+    }
+
+    fn files_read(&mut self, path: &str) -> Result<Vec<u8>, AppRefusal> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.tx.send(Cmd::App(AppCmd::Read(path.into(), tx))).map_err(|_| AppRefusal::new("failed", "the shell is gone"))?;
+        rx.recv_timeout(APP_WAIT).unwrap_or_else(|_| Err(AppRefusal::new("failed", "the shell did not answer in time")))
+    }
+
+    fn files_save(&mut self, path: &str, bytes: Vec<u8>) -> Result<String, AppRefusal> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.tx.send(Cmd::App(AppCmd::Save(path.into(), bytes, tx))).map_err(|_| AppRefusal::new("failed", "the shell is gone"))?;
+        rx.recv_timeout(APP_WAIT).unwrap_or_else(|_| Err(AppRefusal::new("failed", "the shell did not answer in time")))
     }
 
     fn finished(&self) -> bool {

@@ -441,12 +441,63 @@ fn tool_and_nested_tile_members_are_kept_only_for_an_administrator_for_everyone_
     // the card tells what they are: kept, not run, not installed
     let note = |m: &Member, b: &[u8]| live.describe(m, b);
     assert!(note(&tool, br#"{"name": "lookup", "description": "finds words"}"#).contains("nothing runs") && note(&tool, br#"{"name": "lookup"}"#).contains("tool lookup"));
-    assert!(note(&tile, signed.as_bytes()).contains("not installed or opened"), "{}", note(&tile, signed.as_bytes()));
-    // installing them keeps nothing running: the install and uninstall of these kinds change no list of servers or apps
+    assert!(note(&tile, signed.as_bytes()).contains("installs the signed app child"), "{}", note(&tile, signed.as_bytes()));
+    // a tool member is kept and listed: installing it changes no list of servers (D-BUNDLE-TOOL-RUN)
     live.install(&tool, br#"{"name": "lookup"}"#).unwrap();
-    live.install(&tile, signed.as_bytes()).unwrap();
     assert!(f.svc.mcp.list().is_empty());
     live.uninstall(&tool, br#"{"name": "lookup"}"#).unwrap();
+}
+
+/// A nested app: a tile package of its own, signed by `key`, with `extra` merged into its app.json.
+fn nested_pkg(key: &ed25519_dalek::SigningKey, name: &str, version: &str, extra: serde_json::Value) -> String {
+    let mut m = json!({"id": name, "name": name, "version": version, "icon": "🧩"});
+    for (k, v) in extra.as_object().unwrap() {
+        m[k] = v.clone();
+    }
+    let mt = m.to_string();
+    let b = Bundle::from_files(&[("index.html", "<p>child</p>"), ("app.json", &mt)], name).unwrap();
+    pkg::build_generic("tile", name, version, "MIT", &b.to_payload(), Some(&meta("acme", &[]).to_json()), None, Some(key)).unwrap()
+}
+
+#[test]
+fn a_nested_tile_member_is_started_as_an_app_of_its_own_under_the_rules_and_goes_away_with_the_bundle() {
+    use super::bundle::{LiveMembers, MemberBackend};
+    use super::install::tests::admin;
+    let f = fxb("nested-tile-start");
+    let a = admin();
+    let shared = Scope::Shared;
+    let (tile, _) = member("child", "tile", false);
+    let live = LiveMembers::new(&f.store, &f.svc, &a, &shared);
+    let key = pkg::new_signing_key().unwrap();
+    let text = nested_pkg(&key, "child", "1.0.0", json!({}));
+    // a signer nobody here trusts: refused with the reason, nothing installed
+    let e = live.install(&tile, text.as_bytes()).unwrap_err();
+    assert!(e.contains("cannot be installed"), "{e}");
+    assert!(f.store.records().is_empty());
+    // a trusted signer: the nested app is installed like any app, with a record of its own
+    f.svc.packages.trust_key(&iyakki_shared::pkg::public_key_hex(&key), "Acme").unwrap();
+    live.install(&tile, text.as_bytes()).unwrap();
+    assert_eq!(f.store.records().get(&record_key("tile", &shared, "child")).map(|r| r.version.clone()).as_deref(), Some("1.0.0"));
+    // the same name again is refused: it would replace an app the bundle did not put there
+    assert!(live.install(&tile, text.as_bytes()).unwrap_err().contains("already installed"));
+    // removing the member takes the app away while it is still the package the bundle installed
+    live.uninstall(&tile, text.as_bytes()).unwrap();
+    assert!(f.store.records().is_empty());
+    // an app the administrator put there since (another version) is left alone by the member's removal
+    let other = nested_pkg(&key, "child", "1.0.1", json!({}));
+    live.install(&tile, other.as_bytes()).unwrap();
+    live.uninstall(&tile, text.as_bytes()).unwrap();
+    assert_eq!(f.store.records().len(), 1);
+    f.store.remove(&f.svc, &a, "tile", "child", &shared).unwrap();
+    // a nested app that is a bundle itself is refused (one level only)
+    let own = nested_pkg(&key, "grand", "1.0.0", json!({"contents": [{"id": "s", "kind": "skill", "file": "index.html"}]}));
+    let e = live.install(&tile, own.as_bytes()).unwrap_err();
+    assert!(e.contains("one level only") || e.contains("cannot be installed"), "{e}");
+    // an app that asks the core for something the member did not declare is refused; declared on the member, the same app is let in
+    let greedy = nested_pkg(&key, "greedy", "1.0.0", json!({"capabilities": [{"name": "notify", "why": "tell you"}]}));
+    let e = live.install(&tile, greedy.as_bytes()).unwrap_err();
+    assert!(e.contains("notify") || e.contains("did not declare") || e.contains("cannot be installed"), "{e}");
+    assert!(f.store.records().is_empty());
 }
 
 #[test]
@@ -463,6 +514,31 @@ fn the_install_card_of_an_mcp_member_names_the_program_it_will_run() {
     assert_eq!(live.describe(&m, br#"{"name": "x y", "command": "npx"}"#), "");
     let (skill, _) = member("s", "skill", false);
     assert_eq!(live.describe(&skill, b"x"), "");
+}
+
+#[test]
+fn a_theme_member_is_written_as_a_theme_file_for_the_chooser_and_taken_away_with_the_bundle() {
+    use super::bundle::{LiveMembers, MemberBackend};
+    use super::install::tests::admin;
+    let f = fxb("theme-member-file");
+    let (m, _) = member("dusk", "theme", false);
+    let a = admin();
+    let me_scope = me();
+    let live = LiveMembers::new(&f.store, &f.svc, &a, &me_scope);
+    let body = br##"{"name": "Dusk", "base": "dark", "bg_top": "#101830"}"##;
+    live.check(&m, body).unwrap();
+    assert!(live.check(&m, br#"{"base": "dark"}"#).is_err() && live.check(&m, b"[]").is_err());
+    live.install(&m, body).unwrap();
+    let file = iyakki_shared::bundle_members::theme_file(f.store.data_dir(), Some("root"), "dusk");
+    assert!(std::fs::read_to_string(&file).unwrap().contains("name = Dusk"), "a person's own install writes the person's own file");
+    live.uninstall(&m, body).unwrap();
+    assert!(!file.exists());
+    let shared = LiveMembers::new(&f.store, &f.svc, &a, &Scope::Shared);
+    shared.install(&m, body).unwrap();
+    let all = iyakki_shared::bundle_members::theme_file(f.store.data_dir(), None, "dusk");
+    assert!(std::fs::read_to_string(&all).unwrap().contains("bg_top = #101830"));
+    shared.uninstall(&m, body).unwrap();
+    assert!(!all.exists());
 }
 
 #[test]
@@ -483,6 +559,79 @@ fn a_tile_reads_the_kept_data_members_of_its_kind_and_nothing_that_is_not_a_json
     assert!(kept_members(&f.store, "agent").is_empty());
 }
 
+#[test]
+fn a_template_and_an_agent_member_are_kept_as_files_for_the_lists_checked_against_their_schema_and_taken_away_with_the_bundle() {
+    use super::bundle::{LiveMembers, MemberBackend};
+    use super::install::tests::admin;
+    let f = fxb("template-agent-member-file");
+    let (t, _) = member("study", "template", false);
+    let (g, _) = member("rev", "agent", false);
+    let a = admin();
+    let me_scope = me();
+    let live = LiveMembers::new(&f.store, &f.svc, &a, &me_scope);
+    let (tb, gb) = (br#"{"name": "Study", "tiles": ["learn", "notes"]}"#, br#"{"name": "Reviewer", "prompt": "Read the diff."}"#);
+    live.check(&t, tb).unwrap();
+    live.check(&g, gb).unwrap();
+    assert!(live.check(&t, br#"{"name": "Study", "tiles": []}"#).is_err() && live.check(&g, br#"{"name": "x"}"#).is_err() && live.check(&t, b"[]").is_err());
+    live.install(&t, tb).unwrap();
+    live.install(&g, gb).unwrap();
+    let data = f.store.data_dir();
+    assert_eq!(iyakki_shared::bundle_members::bundled_view_templates(data, "root")[0].id, "bundle-study");
+    assert!(iyakki_shared::bundle_members::bundled_view_templates(data, "bob").is_empty(), "a person's own install is the person's own");
+    assert_eq!(iyakki_shared::bundle_members::bundled_agent_presets(data, "root")[0].name, "Reviewer");
+    live.uninstall(&t, tb).unwrap();
+    live.uninstall(&g, gb).unwrap();
+    assert!(iyakki_shared::bundle_members::bundled_view_templates(data, "root").is_empty() && iyakki_shared::bundle_members::bundled_agent_presets(data, "root").is_empty());
+    // for everybody
+    let shared = LiveMembers::new(&f.store, &f.svc, &a, &Scope::Shared);
+    shared.install(&t, tb).unwrap();
+    assert_eq!(iyakki_shared::bundle_members::bundled_view_templates(data, "bob").len(), 1);
+    shared.uninstall(&t, tb).unwrap();
+    assert!(iyakki_shared::bundle_members::bundled_view_templates(data, "bob").is_empty());
+}
+
+#[test]
+fn the_assistant_lists_the_members_of_installed_bundles_with_the_kept_data_and_can_narrow_by_kind() {
+    let f = fxb("bundle-members-text");
+    assert_eq!(members_text(&f.store, None), "No bundle members are installed.");
+    let key = "tile/user/root/kit";
+    let mk = |id: &str, kind: &str, body: &str| (serde_json::from_value::<Member>(json!({"id": id, "kind": kind, "file": format!("{id}.json"), "title": format!("T {id}")})).unwrap(), body.as_bytes().to_vec());
+    apply(&f.store, key, &Fake::default(), &[mk("dark", "theme", r##"{"bg":"#000"}"##), mk("broken", "agent", "not json"), mk("s", "skill", "x")], &by("1.0.0")).unwrap();
+    let all = members_text(&f.store, None);
+    assert!(all.contains(key) && all.contains("dark (theme) T dark · kept: {\"bg\":\"#000\"}") && all.contains("s (skill)"), "{all}");
+    assert!(members_text(&f.store, Some("theme")).contains("dark") && !members_text(&f.store, Some("theme")).contains("s (skill)"));
+    assert_eq!(members_text(&f.store, Some("tile")), "No bundle members are installed.");
+}
+
+#[test]
+fn the_template_agent_and_extension_lists_read_only_members_that_pass_their_schema_and_say_why_in_the_chat_list() {
+    let f = fxb("bundle-typed-readers");
+    let key = "tile/user/root/kit";
+    let mk = |id: &str, kind: &str, body: &str| (serde_json::from_value::<Member>(json!({"id": id, "kind": kind, "file": format!("{id}.json"), "title": id})).unwrap(), body.as_bytes().to_vec());
+    let v = vec![
+        mk("study", "template", r#"{"name":"Study","tiles":["learn","notes"]}"#),
+        mk("empty", "template", r#"{"name":"Empty","tiles":[]}"#),
+        mk("rev", "agent", r#"{"name":"Reviewer","prompt":"Read the diff."}"#),
+        mk("noprompt", "agent", r#"{"name":"x"}"#),
+        mk("mail", "extension", r#"{"name":"Mail helper","summary":"s","target":"chat"}"#),
+        mk("bare", "extension", r#"{"summary":"no name"}"#),
+    ];
+    apply(&f.store, key, &Fake::default(), &v, &by("1.0.0")).unwrap();
+    assert_eq!(view_templates(&f.store).iter().map(|k| (k.id.as_str(), k.value.id.as_str())).collect::<Vec<_>>(), [("study", "bundle-study")]);
+    assert_eq!(agent_presets(&f.store).iter().map(|k| k.value.name.as_str()).collect::<Vec<_>>(), ["Reviewer"]);
+    assert_eq!(extension_lines(&f.store).iter().map(|k| (k.value.name.as_str(), k.value.target.as_deref())).collect::<Vec<_>>(), [("Mail helper", Some("chat"))]);
+    let all = members_text(&f.store, None);
+    assert!(all.contains("empty (template)") && all.contains("not offered, A template has 1 to 6 apps") && all.contains("not offered, the member needs the prompt as text"), "{all}");
+    assert!(!members_text(&f.store, Some("template")).contains("Study room"), "{all}");
+    // the extension is in the installed list as a member of the bundle that goes with it
+    let p = iyakki_sec::policy::Role::Admin.template();
+    let inst = f.store.installed(&f.svc, &p, "root", &[]);
+    let e = inst.iter().find(|e| e.key == format!("bundle-ext//{key}/mail")).expect("listed");
+    assert_eq!((e.title.as_str(), e.target.as_deref(), e.removable, e.can_toggle), ("Mail helper", Some("chat"), false, false));
+    remove_all(&f.store, key, &Fake::default()).unwrap();
+    assert!(view_templates(&f.store).is_empty() && agent_presets(&f.store).is_empty() && extension_lines(&f.store).is_empty());
+    assert!(!f.store.installed(&f.svc, &p, "root", &[]).iter().any(|e| e.key.starts_with("bundle-ext//")));
+}
 
 // ---------------------------------------------------------------------------------------- the app's own data migration (F-CORE-28)
 

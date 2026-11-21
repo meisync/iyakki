@@ -279,6 +279,7 @@ pub enum Ptz
 Variants:
 
 - `Move { pan: f32, tilt: f32, zoom: f32 }`
+- `Absolute { pan: f32, tilt: f32, zoom: f32 }`: Go to a place: pan and tilt -1.0 to 1.0 across the camera's range, zoom 0.0 (wide) to 1.0 (closest).
 - `Stop`
 
 ### enum `CamEvent`

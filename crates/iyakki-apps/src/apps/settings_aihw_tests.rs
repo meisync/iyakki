@@ -23,7 +23,7 @@ fn draw(a: &mut SettingsApp, cx: &AppCx, w: u32, h: u32) -> (Gfx, R) {
 }
 
 fn audit(cx: &AppCx) -> String {
-    std::fs::read_to_string(cx.audit.path()).unwrap_or_default()
+    std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default()
 }
 
 #[test]

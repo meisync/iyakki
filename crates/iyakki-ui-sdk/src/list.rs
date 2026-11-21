@@ -119,7 +119,7 @@ impl DisplayList {
                     }
                     Op::PushClip(r) => Op::PushClip(mv(r)),
                     Op::PopClip => Op::PopClip,
-                    Op::Hit(r, h) if h.action < action_cap => Op::Hit(mv(r), Hit { action: h.action + action_base, name: h.name.clone(), role: h.role }),
+                    Op::Hit(r, h) if h.action < action_cap => Op::Hit(mv(r), Hit { action: h.action + action_base, name: h.name.clone(), role: h.role, state: h.state, value: h.value.clone() }),
                     Op::Hit(..) => return None,
                     Op::Image(r, i) => Op::Image(mv(r), i.clone()),
                 })
@@ -297,7 +297,7 @@ impl DisplayList {
                     img.check().map_err(|e| bad(&e))?;
                     Op::Image(r(1)?, img)
                 }
-                ("hit", 8) => Op::Hit(r(1)?, Hit { action: f[5].parse().map_err(|_| format!("line {n}: bad action"))?, role: Role::from_key(f[6]).ok_or(format!("line {n}: unknown role"))?, name: unesc(f[7], n)? }),
+                ("hit", 8) => Op::Hit(r(1)?, Hit { action: f[5].parse().map_err(|_| format!("line {n}: bad action"))?, role: Role::from_key(f[6]).ok_or(format!("line {n}: unknown role"))?, name: unesc(f[7], n)?, ..Default::default() }),
                 (other, _) => return Err(format!("line {n}: unknown or malformed operation '{other}'")),
             };
             ops.push(op);

@@ -5,7 +5,7 @@ use iyakki_devctl::mac::MacEnv;
 use iyakki_devctl::wifi::KnownStore;
 use iyakki_devctl::wifi::Wifi;
 
-pub const PROMPT_RULE: &str = "\nWIFI (Settings -> Network, administrators): wifi_status lists the saved networks and the adapter, wifi_scan lists the networks in range with signal, security and band (both free). wifi_join joins and remembers a network (asks; a saved or open network needs only the name; for WPA, WPA3, WEP and enterprise networks first call vault_request for the passphrase, password or key and pass its entry name as secret_entry; never ask for or type it in the chat. An enterprise network also needs identity, ca_cert (a full path of the authority file that checks the network) and optionally method (PEAP, TTLS or TLS), server_name, client_cert and private_key. WEP is broken: only with accept_wep_risk true after the person has read the warning). wifi_forget removes a saved network (asks). HOTSPOT: hotspot_status says the hotspot's name, band, country and security (never the password; free); hotspot_set changes the country (two capital letters, empty for the card's own rules), the security (wpa2, transition or wpa3; a card that cannot do WPA3 itself keeps WPA2) and the band (auto, 2.4 or 5); it asks, and it applies the next time sharing starts.";
+pub const PROMPT_RULE: &str = "\nWIFI (Settings -> Network, administrators): wifi_status lists the saved networks and the adapter, wifi_scan lists the networks in range with signal, security and band (both free). wifi_join joins and remembers a network (asks; a saved or open network needs only the name; for WPA, WPA3, WEP and enterprise networks first call vault_request for the passphrase, password or key and pass its entry name as secret_entry; never ask for or type it in the chat. An enterprise network also needs identity, ca_cert (a full path of the authority file that checks the network) and optionally method (PEAP, TTLS or TLS), server_name, client_cert and private_key. WEP is broken: only with accept_wep_risk true after the person has read the warning). wifi_forget removes a saved network (asks). HOTSPOT: hotspot_status says the hotspot's name, band, country and security (never the password; free); hotspot_set changes the country (two capital letters, empty for the card's own rules), the security (wpa2, transition or wpa3; a card that cannot do WPA3 itself keeps WPA2) and the band (auto, 2.4 or 5); it asks, and it applies the next time sharing starts. wifi_adapter_set chooses which WiFi adapter is used when the computer has two or more (asks; wifi_status lists them). INTERNET SHARING: internet_share_status says whether the computer shares its internet and what it can share through, with the reason for anything that cannot be used (free); internet_share_set starts it (through bluetooth so phones connect to this computer, wifi for the hotspot, or a cable's interface name; optional uplink, hours, isolate, allow_lan) or stops it; it asks every time because everything the other devices download counts as the person's.";
 
 /// What the WiFi tools act on: the programs that scan and join, the saved networks, the machine's links and the private-address settings.
 #[derive(Clone)]
@@ -31,8 +31,14 @@ impl WifiCtl {
         }
     }
 
+    /// The WiFi adapters that can join networks (the hotspot's own interface never).
+    pub fn adapters(&self) -> Vec<String> {
+        iyakki_devctl::links(&self.roots).into_iter().filter(|l| l.kind == iyakki_devctl::LinkKind::Wifi && l.name != iyakki_devctl::HOTSPOT_IFACE).map(|l| l.name).collect()
+    }
+
+    /// The adapter in use: the person's choice (Settings -> Network, key v) while it is still there, else the first one.
     pub fn iface(&self) -> Option<String> {
-        iyakki_devctl::links(&self.roots).into_iter().find(|l| l.kind == iyakki_devctl::LinkKind::Wifi).map(|l| l.name)
+        iyakki_devctl::wifi::pick_adapter(&self.adapters(), self.known.chosen_adapter())
     }
 
     pub fn no_adapter(&self) -> String {

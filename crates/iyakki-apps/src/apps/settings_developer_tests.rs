@@ -71,19 +71,19 @@ fn only_administrators_have_the_page_and_it_switches_on_pairs_revokes_and_switch
     let pubhex = iyakki_shared::pkg::public_key_hex(&k);
     let fp = "AA:BB";
     d.complete_pairing(fp, "laptop", &pubhex, &dm::auth::pair_proof(&dm::auth::pair_key(&p.code, fp).unwrap(), fp, &pubhex, "laptop")).unwrap();
-    let g = draw(&mut a, &cx, 1280, 800);
+    let g = draw(&mut a, &cx, 1280, 1000);
     assert!(g.hits.iter().any(|h| h.label == "laptop" && matches!(h.ev, Event::Row(0))), "the computer is listed");
     // the page draws at the usual sizes, with and without the log
     for (w, h) in [(1280, 720), (1920, 1080), (1024, 600), (800, 480)] {
         let _ = draw(&mut a, &cx, w, h);
     }
     key(&mut a, &cx, Key::Char('l'));
-    let _ = draw(&mut a, &cx, 1280, 800);
+    let _ = draw(&mut a, &cx, 1280, 1000);
     key(&mut a, &cx, Key::Char('l'));
     // remove: the first press only asks (and the page says what goes), the second removes
     key(&mut a, &cx, Key::Char('x'));
     assert!(!d.keys().is_empty(), "the first press only asks");
-    let g = draw(&mut a, &cx, 1280, 800);
+    let g = draw(&mut a, &cx, 1280, 1000);
     assert!(g.hits.iter().any(|h| h.label == "Confirm: remove this computer"), "the button changes to the confirmation");
     key(&mut a, &cx, Key::Char('x'));
     assert!(d.keys().is_empty(), "{:?}", a.status());
@@ -777,4 +777,53 @@ fn the_relay_switch_is_on_the_developer_page_off_by_default_needs_an_address_and
     assert!(!d.relay_enabled());
     let log = cx.audit.recent(30);
     assert!(log.iter().any(|l| l.contains("relay on")) && log.iter().any(|l| l.contains("relay off")), "{log:?}");
+}
+
+#[test]
+fn the_relay_certificate_fingerprint_is_typed_on_the_developer_page_checked_kept_and_audited() {
+    let cx = admin("devset-relay-pin");
+    let d = DevMode::open(cx.data_dir());
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Developer);
+    key(&mut a, &cx, Key::Char('e'));
+    assert_eq!(d.relay_pin(), "", "nothing is set by default");
+    let g = draw(&mut a, &cx, 1280, 2600);
+    assert!(g.hits.iter().any(|h| h.label == "Relay certificate") && g.hits.iter().any(|h| h.label.starts_with("Relay certificate fingerprint: none")), "the row and the button are on the page");
+    // a short or wrong text is refused in words and nothing is kept
+    key(&mut a, &cx, Key::Char('F'));
+    a.handle(&Event::Paste("AB:CD".into()), &cx);
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(d.relay_pin(), "");
+    assert!(a.status().is_some_and(|s| !s.1 && s.0.contains("64 hexadecimal")), "{:?}", a.status());
+    // typing while the box is open does not press the page's keys (e would switch developer mode off)
+    key(&mut a, &cx, Key::Char('F'));
+    let fp = "ab".repeat(32);
+    a.handle(&Event::Paste(fp.clone()), &cx);
+    key(&mut a, &cx, Key::Char('e'));
+    assert!(d.is_on(), "a letter typed into the box is not a page key");
+    key(&mut a, &cx, Key::Backspace);
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(d.relay_pin(), fp.to_uppercase());
+    let g = draw(&mut a, &cx, 1280, 2600);
+    assert!(g.hits.iter().any(|h| h.label.contains("ABABABAB")), "the page shows the fingerprint it keeps");
+    // Esc leaves the box without a change; an empty box takes it away
+    key(&mut a, &cx, Key::Char('F'));
+    key(&mut a, &cx, Key::Esc);
+    assert_eq!(d.relay_pin().len(), 64);
+    key(&mut a, &cx, Key::Char('F'));
+    key(&mut a, &cx, Key::Char('a'));
+    for _ in 0..80 {
+        key(&mut a, &cx, Key::Backspace);
+    }
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(d.relay_pin(), "");
+    let log = cx.audit.recent(30);
+    assert!(log.iter().any(|l| l.contains("fingerprint set")) && log.iter().any(|l| l.contains("fingerprint removed")), "{log:?}");
+}
+
+#[test]
+fn a_person_who_is_not_an_administrator_cannot_set_the_relay_fingerprint() {
+    let cx = admin("devset-relay-pin-user");
+    let p = iyakki_sec::policy::Role::User.template();
+    assert!(DevMode::open(cx.data_dir()).set_relay_pin(&p, "amy", &"ab".repeat(32)).is_err());
 }

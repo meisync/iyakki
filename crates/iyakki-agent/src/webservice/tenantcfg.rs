@@ -165,6 +165,15 @@ pub fn handle_other(c: &Ctx, id: &str) -> Out {
     }
 }
 
+/// Is there a configured entry of `kind` with this name that applies to `team` (a tenant-wide one, or the team's own)?
+pub fn has_entry(c: &Ctx, kind: &str, name: &str, team: Option<&str>) -> bool {
+    if !c.sh.profile.is_cloud() {
+        return false;
+    }
+    let Ok(cfg) = crate::tenantconfig::store::Store::new(&c.data_dir()).load() else { return false };
+    cfg.entries().iter().any(|e| e.item.kind == kind && e.item.name == name && (e.item.namespace.is_none() || e.item.namespace.as_deref() == team))
+}
+
 /// Run start naming a provider that is a team's (or the tenant's) own `models.provider`, `integration.apikey` or `models.local` entry:
 /// the model must be on its list and the person's counters must have room (`tenantconfig::runtime::provider_gate`). A provider no entry
 /// is named after is not ours to gate (`Ok`); outside the cloud profile nothing changes.

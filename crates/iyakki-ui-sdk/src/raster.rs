@@ -105,7 +105,7 @@ impl Canvas for RasterCanvas<'_> {
             return;
         }
         let mut region = vec![0u8; bw * bh * 4];
-        let data = self.g.pm.data_mut();
+        let data = self.g.pm_mut().data_mut();
         for row in 0..bh {
             let src = ((y0 as usize + row) * pw as usize + x0 as usize) * 4;
             region[row * bw * 4..(row + 1) * bw * 4].copy_from_slice(&data[src..src + bw * 4]);

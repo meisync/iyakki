@@ -194,7 +194,7 @@ fn requests_from_the_assistant_are_one_word_taken_once_and_never_carry_a_secret(
     let d = std::env::temp_dir().join(format!("iyakki-enchome-req-{}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     assert_eq!(take_request(&d, "amy"), None);
-    for r in [Request::Create, Request::Unlock, Request::ChangeRecovery, Request::AdminSlotOn, Request::AdminSlotOff, Request::Migrate] {
+    for r in [Request::Create, Request::Unlock, Request::ChangeRecovery, Request::AdminSlotOn, Request::AdminSlotOff, Request::Migrate, Request::Export] {
         leave_request(&d, "amy", r);
         assert_eq!(take_request(&d, "amy"), Some(r));
         assert_eq!(take_request(&d, "amy"), None);
@@ -204,4 +204,36 @@ fn requests_from_the_assistant_are_one_word_taken_once_and_never_carry_a_secret(
     leave_request(&d, "../../etc/x", Request::Create);
     assert!(std::fs::read_dir(&d).unwrap().flatten().all(|e| e.path().parent() == Some(d.as_path())));
     let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn the_export_form_needs_a_locked_home_and_the_sign_in_password_and_writes_a_luks2_file_without_overwriting() {
+    let r = rig("form-export");
+    r.home("eve");
+    let ok = |p: &str| p == "eve-pass";
+    let c = cx(&r, "eve", &ok);
+    let mut f = Form::default();
+    f.start(Purpose::Export, &c);
+    assert!(f.failed && f.notice.as_deref().unwrap().contains("no encrypted home"));
+    r.env.create("eve", "eve-pass", Some(MIN_PAYLOAD)).unwrap();
+    f.start(Purpose::Export, &c);
+    assert!(f.failed && f.notice.as_deref().unwrap().contains("Lock it first"), "{:?}", f.notice);
+    r.env.lock("eve").unwrap();
+    f.start(Purpose::Export, &c);
+    assert!(f.needs_background());
+    type_all(&mut f, "wrong");
+    f.submit(&c);
+    assert!(f.failed && f.notice.as_deref().unwrap().contains("not your sign-in password"));
+    assert!(!r.env.export_path("eve").exists());
+    type_all(&mut f, "eve-pass");
+    f.submit(&c);
+    assert!(!f.failed, "{:?}", f.notice);
+    let n = f.notice.clone().unwrap();
+    assert!(n.contains("LUKS2") && n.contains("luksOpen") && !n.contains("eve-pass"), "{n}");
+    assert!(r.env.export_path("eve").exists());
+    // a second export never overwrites the first
+    f.start(Purpose::Export, &c);
+    type_all(&mut f, "eve-pass");
+    f.submit(&c);
+    assert!(f.failed && f.notice.as_deref().unwrap().contains("never overwrites"), "{:?}", f.notice);
 }

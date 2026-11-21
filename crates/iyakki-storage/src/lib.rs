@@ -488,6 +488,13 @@ pub fn data_location(roots: &Roots, data_dir: &Path) -> DataLocation {
 }
 
 /// Free and total bytes of the filesystem holding `path`.
+#[cfg(not(unix))]
+pub fn space(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
+/// Free and total bytes of the filesystem holding `path`.
+#[cfg(unix)]
 pub fn space(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
@@ -580,13 +587,41 @@ pub fn link_disk_uuid(roots: &Roots, name: &str) -> Result<Option<String>, Strin
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let link = dir.join(&uuid);
     let _ = std::fs::remove_file(&link);
-    std::os::unix::fs::symlink(format!("../../{name}"), &link).map_err(|e| format!("{}: {e}", link.display()))?;
+    make_symlink(&format!("../../{name}"), &link).map_err(|e| format!("{}: {e}", link.display()))?;
     Ok(Some(uuid))
 }
 
+#[cfg(unix)]
+fn make_symlink(target: &str, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// Device links exist only on a Linux machine; a build for another system (the installer's planner) never makes one.
+#[cfg(not(unix))]
+fn make_symlink(_target: &str, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "device links are made on IYAKKI only"))
+}
+
+#[cfg(unix)]
 fn set_private(dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn set_private(_dir: &Path) {}
+
+/// Copy the permission bits of `from` onto `to` (nothing on a system without them).
+fn copy_mode(from: &Path, to: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(m) = std::fs::metadata(from) {
+            let _ = std::fs::set_permissions(to, std::fs::Permissions::from_mode(m.permissions().mode() & 0o7777));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (from, to);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -598,15 +633,12 @@ pub struct PersistReport {
 
 /// Recursively copy `from` into `to` (regular files and directories only; symlinks are skipped).
 pub fn copy_tree(from: &Path, to: &Path) -> Result<(usize, u64), String> {
-    use std::os::unix::fs::PermissionsExt;
     fn walk(from: &Path, to: &Path, depth: u32, n: &mut usize, bytes: &mut u64) -> Result<(), String> {
         if depth > 32 {
             return Err("directory tree too deep".into());
         }
         std::fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
-        if let Ok(m) = std::fs::metadata(from) {
-            let _ = std::fs::set_permissions(to, std::fs::Permissions::from_mode(m.permissions().mode() & 0o7777));
-        }
+        copy_mode(from, to);
         for e in std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))?.flatten() {
             let ft = e.file_type().map_err(|e| e.to_string())?;
             let dst = to.join(e.file_name());
@@ -692,8 +724,7 @@ pub fn persist(roots: &Roots, mounter: &dyn Mounter, mke2fs: &Path, scratch: &Pa
     let all = list(roots);
     let dev = all.iter().find(|d| d.name == name).ok_or_else(|| format!("no such disk: {name}"))?;
     if roots.require_block {
-        use std::os::unix::fs::FileTypeExt;
-        if !std::fs::metadata(&dev.path).map(|m| m.file_type().is_block_device()).unwrap_or(false) {
+        if !is_block_device(&dev.path) {
             return Err(format!("{} is not a block device", dev.path.display()));
         }
     }
@@ -723,10 +754,25 @@ pub fn persist(roots: &Roots, mounter: &dyn Mounter, mke2fs: &Path, scratch: &Pa
     Ok(PersistReport { device: name.into(), files_copied: files, bytes_copied: bytes })
 }
 
+#[cfg(unix)]
+fn is_block_device(p: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(p).map(|m| m.file_type().is_block_device()).unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_block_device(_p: &Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
 fn unsafe_sync() {
     // SAFETY: sync(2) takes no arguments.
     unsafe { libc::sync() };
 }
+
+#[cfg(not(unix))]
+fn unsafe_sync() {}
 
 #[cfg(test)]
 mod tests {

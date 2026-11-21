@@ -109,7 +109,7 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::new()));
         let l2 = log.clone();
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&d.join("settings.json")).unwrap()));
-        (Env { dir: d.to_path_buf(), user: "admin".into(), admin, settings, audit: Arc::new(move |a, b| l2.lock().unwrap().push(format!("{a} {b}"))) }, log)
+        (Env { dir: d.to_path_buf(), user: "admin".into(), admin, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, b| l2.lock().unwrap().push(format!("{a} {b}"))) }, log)
     }
 
     #[test]

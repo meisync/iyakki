@@ -1,3 +1,2 @@
 # Direct kernel/hardware access in non-test tile code (see tests/dependency_ratchet.rs and docs/development/UI-OS-SPLIT-PLAN.md).
 # One line per file: <path> <count>. The list may only shrink; lower a number (or delete the line) when a slice is moved to IYAKKI core.
-crates/iyakki-apps/src/apps/settings_install.rs 1

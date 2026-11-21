@@ -102,10 +102,20 @@ def known_issues():
     start = next(i for i, l in enumerate(lines) if l.startswith("## Do not use it for"))
     end = next(i for i, l in enumerate(lines) if i > start and l.startswith("## "))
     for ln in lines[start:end]:
-        m = re.match(r"\* (KI-\d{3}) (?:\*\*(.+?)\*\*|([^.]+)\.)", ln)
+        m = re.match(r"\* (KI-\d{3}) (?:\[\w+\] ([^|]+?)(?: \||$)|\*\*(.+?)\*\*|([^.]+)\.)", ln)
         if m:
-            top.append((m.group(1), (m.group(2) or m.group(3)).rstrip(".")))
-    return len(ids), top
+            top.append((m.group(1), (m.group(2) or m.group(3) or m.group(4)).rstrip(".")))
+    # the same rules as `iyakki-relcheck known-issues`: entries above the generated appendix, class in square brackets, none = UNTRIAGED
+    counts = {"BUG": 0, "UNPROVEN": 0, "LIMIT": 0, "UNTRIAGED": 0}
+    for ln in lines:
+        if ln.startswith("## Appendix") or "<!-- appendix:start -->" in ln:
+            break
+        m = re.match(r"\* KI-\d+ \[(\w+)\]", ln)
+        if m and m.group(1) in counts:
+            counts[m.group(1)] += 1
+        elif re.match(r"\* KI-\d+", ln):
+            counts["UNTRIAGED"] += 1
+    return len(ids), top, counts
 
 
 # ---------------------------------------------------------------- page frame
@@ -387,7 +397,9 @@ def page_progress(ver, rows, rel_file):
         '<tr data-area="%s"><th scope="row"><code>%s</code></th><td class="n">%d</td><td class="n">%d</td><td class="n">%d%%</td><td class="n">%d%%</td><td class="n">%d</td><td class="n">%d</td></tr>' % (
             esc(k), esc(k), len(v), sum(1 for r in v if r[2] == "planned"), avg([r[3] for r in v]), avg([r[4] for r in v]), sum(1 for r in v if r[5] == "needed"), sum(1 for r in v if r[5].startswith("passed")))
         for k, v in sorted(areas.items()))
-    n_ki, top = known_issues()
+    n_ki, top, kc = known_issues()
+    ki_counts = "".join('<tr><th scope="row">%s</th><td class="n">%d</td></tr>' % (k, kc[k]) for k in ("BUG", "UNPROVEN", "LIMIT", "UNTRIAGED"))
+    n_open = sum(kc.values())
     ki = "".join("<li><strong>%s</strong> %s.</li>" % (esc(a), esc(b)) for a, b in top)
     body = """
 <h1>Progress</h1>
@@ -451,6 +463,9 @@ Most rows are <code>partial</code>: some of it works and the notes in the matrix
 <p>The honest list is <a href="%(repo)s/blob/HEAD/KNOWN-ISSUES.md">KNOWN-ISSUES.md</a>; it names %(n_ki)d numbered issues (KI-numbers), grouped by hardware, browser and media, assistant, security, install and tests.
 Its first section, "Do not use it for", says:</p>
 <ul>%(ki)s</ul>
+<h3 id="issue-counts">Known issues: %(n_open)d</h3>
+<p>Open entries by class: a <strong>BUG</strong> is wrong behaviour we know about, <strong>UNPROVEN</strong> is code that is written but not yet tried on real hardware or a real service, a <strong>LIMIT</strong> is something the product does not do by design for now, and <strong>UNTRIAGED</strong> entries are still waiting to be sorted. The goal is zero.</p>
+<div class="tw"><table><caption>Open known issues by class.</caption><thead><tr><th scope="col">Class</th><th scope="col">Entries</th></tr></thead><tbody>%(ki_counts)s</tbody></table></div>
 <p>From the <a href="%(repo)s/blob/HEAD/%(rel)s">release notes</a>, known limits include: the wake phrase has no real-voice measurement and should stay off;
 the encrypted home folder is a first version (whole-disk encryption and TPM sealing are not built); Secure Boot is verified in QEMU only on most machines.</p>
 
@@ -474,7 +489,7 @@ Not machine translation; English complete, a pseudo-locale and one small sample 
 <p>The v1.0.0 gate and the open decisions are in <a href="%(repo)s/blob/HEAD/docs/project/BACKLOG.md">the backlog</a> and <a href="%(repo)s/blob/HEAD/docs/BETA-SCOPE.md">the beta scope</a>.</p>
 """ % dict(asof=datetime.date.today().isoformat(), repo=REPO, ver=esc(ver), area_impl_rows=area_impl_rows, impl=mt["impl"], test=mt["test"], impl_f=mt["impl_f"], test_f=mt["test_f"], live=mt["live"], full_impl=mt["full_impl"], stack_impl=stack("impl", rows), stack_test=stack("test", rows),
            full_test=mt["full_test"], passed=mt["passed"], needed=mt["needed"], failed=mt["failed"], stats=stats, bar=bar(counts, total), key=key, thead_s=thead % "Snapshot", snap_rows=snap_rows,
-           thead_p=thead % "Phase", phase_rows=phase_rows, thead_a=thead % "Area", area_rows=area_rows, n_areas=len(by_area), n_ki=n_ki, ki=ki,
+           thead_p=thead % "Phase", phase_rows=phase_rows, thead_a=thead % "Area", area_rows=area_rows, n_areas=len(by_area), n_ki=n_ki, ki=ki, ki_counts=ki_counts, n_open=n_open,
            rel=rel_file, exp=EXP)
     desc = "Progress of IYAKKI, the AI-first operating system: feature counts by status generated from the project's feature matrix (%d rows), known issues in short, and the alpha.3 and alpha.4 roadmap." % total
     return frame("progress.html", "IYAKKI progress: feature status and roadmap", desc, body, ver)

@@ -376,3 +376,214 @@ fn a_machine_that_does_not_name_a_fleet_refuses() {
     use iyakki_core_api::fleet::{Fleet, NoFleet};
     assert!(NoFleet.read("x").is_err() && NoFleet.join("x").is_err() && NoFleet.manage("x").is_err() && NoFleet.assign("x").is_err() && NoFleet.receive("x").is_err());
 }
+
+#[test]
+fn the_drivers_are_a_plain_read_through_the_guard_and_a_refused_read_gives_the_empty_answer_and_never_reaches_the_machine() {
+    let (f, _log, g) = rig("somewidget", yes());
+    f.drivers_fake().set_machine(iyakki_core_api::drivers::Machine { vendor: "Acme".into(), ..Default::default() });
+    f.drivers_fake().set_disabled("pack-a");
+    assert_eq!(g.drivers().machine().vendor, "Acme");
+    assert!(g.drivers().is_disabled("pack-a") && !g.drivers().is_disabled("pack-b"));
+    assert!(g.drivers().rows().is_empty() && g.drivers().installed().is_empty());
+
+    let fake = Arc::new(FakeOs::new());
+    fake.drivers_fake().set_machine(iyakki_core_api::drivers::Machine { vendor: "Acme".into(), ..Default::default() });
+    fake.drivers_fake().set_disabled("pack-a");
+    let log = Arc::new(MemoryLog::new(10));
+    let broker = Arc::new(Broker::new(Arc::new(NoApprovals), yes(), log.clone(), Arc::new(|| 1)));
+    let denied = GuardedOs::new(fake.clone(), broker, Caller { app: "x".into(), kind: CallerKind::Store { installation: "i".into() }, person: "p".into(), device: "d".into() });
+    assert!(denied.drivers().machine().vendor.is_empty() && !denied.drivers().is_disabled("pack-a"));
+    assert!(denied.drivers().rows().is_empty() && denied.drivers().installed().is_empty());
+    assert!(fake.drivers_fake().calls().is_empty(), "a refused read never reaches the machine");
+}
+
+#[test]
+fn the_sound_facts_are_a_plain_read_through_the_guard_and_a_refused_read_gives_nothing_and_never_reaches_the_machine() {
+    use iyakki_core_api::PcmHolder;
+    let (f, _log, g) = rig("somewidget", yes());
+    f.audio_route_fake().put("cards", " 0 [PCH]: HDA-Intel - HDA Intel PCH\n");
+    f.audio_route_fake().set_holders(0, 0, vec![PcmHolder { pid: 9, name: "mpv".into() }]);
+    f.audio_route_fake().set_mixer(0, "numid=1");
+    f.audio_route_fake().set_product(Some("MacBookPro14,1"));
+    let r = g.audio_route();
+    assert_eq!(r.card_count(), 1);
+    assert_eq!(r.pcm_holders(0, 0).len(), 1);
+    assert_eq!(r.mixer_contents(0).as_deref(), Some("numid=1"));
+    assert_eq!(r.product_name().as_deref(), Some("MacBookPro14,1"));
+
+    let fake = Arc::new(FakeOs::new());
+    fake.audio_route_fake().put("cards", " 0 [PCH]: HDA-Intel - HDA Intel PCH\n");
+    fake.audio_route_fake().set_holders(0, 0, vec![PcmHolder { pid: 9, name: "mpv".into() }]);
+    let log = Arc::new(MemoryLog::new(10));
+    let broker = Arc::new(Broker::new(Arc::new(NoApprovals), yes(), log.clone(), Arc::new(|| 1)));
+    let denied = GuardedOs::new(fake.clone(), broker, Caller { app: "x".into(), kind: CallerKind::Store { installation: "i".into() }, person: "p".into(), device: "d".into() });
+    let r = denied.audio_route();
+    assert!(r.cards_text().is_empty() && r.pcm_holders(0, 0).is_empty() && r.mixer_contents(0).is_none() && r.product_name().is_none() && !r.asound_has("cards"));
+    assert!(fake.audio_route_fake().calls().is_empty(), "a refused read never reaches the machine");
+}
+
+#[test]
+fn the_drive_engine_reads_with_system_read_and_opening_closing_or_ejecting_needs_the_disk_capability_and_a_refusal_reaches_nothing() {
+    use iyakki_core_api::diskmodel::{Actor, Disk, Fs, MountOpts, Part, Snapshot, Table, Transport};
+    let part = Part { name: "sdb1".into(), path: "/dev/sdb1".into(), number: 1, start_bytes: 0, size_bytes: 1 << 30, fs: Fs::Ext4, label: "STICK".into(), uuid: String::new(), mountpoints: vec![], space: None, mounted_ro: false, swap_in_use: false, system: false, type_name: String::new(), crypt: None, unlocked: false };
+    let disk = Disk { name: "sdb".into(), path: "/dev/sdb".into(), vendor: "Acme".into(), model: "Stick".into(), serial: "SN001234".into(), size_bytes: 1 << 30, sector: 512, removable: true, transport: Transport::Usb, read_only: false, table: Table::Gpt, table_notes: vec![], parts: vec![part], system: false, system_why: String::new(), holders: vec![] };
+    let snap = Snapshot { disks: vec![disk], support: vec![] };
+    let who = Actor::new("ann", iyakki_sec::policy::Role::User);
+    let audit = |_: &str, _: &str| {};
+
+    // a widget outside the table: reads yes, changes no
+    let (f, log, g) = rig("somewidget", yes());
+    f.disk_engine_fake().set_snapshot(snap.clone());
+    assert_eq!(g.disk_engine().scan().disks.len(), 1);
+    assert!(g.disk_engine().mount(&who, "sdb1", &MountOpts::default(), &audit).unwrap_err().contains("not_granted"));
+    assert!(g.disk_engine().eject(&who, "sdb", &audit).is_err() && g.disk_engine().unmount(&who, "sdb1", &audit).is_err());
+    assert!(g.disk_engine().at_sign_out(&who, &audit).is_none());
+    assert!(f.disk_engine_fake().calls().iter().all(|c| c == "scan"), "{:?}", f.disk_engine_fake().calls());
+    assert!(log.rows().iter().any(|r| !r.allowed && r.reason == "not_granted"));
+
+    // the DISKS app holds it: the engine's own role rule still decides
+    let (f, _log, g) = rig("disks", yes());
+    f.disk_engine_fake().set_snapshot(snap);
+    let m = g.disk_engine().mount(&who, "sdb1", &MountOpts::default(), &audit).unwrap();
+    assert_eq!(m.target, "/home/ann/media/STICK");
+    assert!(g.disk_engine().mount(&Actor::new("g", iyakki_sec::policy::Role::Guest), "sdb1", &MountOpts::default(), &audit).is_err());
+    assert!(g.disk_engine().eject(&who, "sdb", &audit).is_ok());
+}
+
+#[test]
+fn partitioning_needs_system_disk_partition_and_unlocking_needs_system_disk_unlock_and_a_refusal_reaches_nothing() {
+    use iyakki_core_api::diskmodel::{Actor, Confirm, Disk, Fs, Part, PartOp, Snapshot, Table, Transport};
+    let crypt = iyakki_diskcrypt::CryptInfo { kind: iyakki_diskcrypt::CryptKind::Luks2, uuid: String::new(), label: String::new(), detail: String::new(), problem: None };
+    let mk = |name: &str, fs: Fs, crypt: Option<iyakki_diskcrypt::CryptInfo>| Part { name: name.into(), path: format!("/dev/{name}"), number: if name == "sdb1" { 1 } else { 2 }, start_bytes: 0, size_bytes: 1 << 30, fs, label: String::new(), uuid: String::new(), mountpoints: vec![], space: None, mounted_ro: false, swap_in_use: false, system: false, type_name: String::new(), crypt, unlocked: false };
+    let disk = Disk { name: "sdb".into(), path: "/dev/sdb".into(), vendor: "Acme".into(), model: "Stick".into(), serial: "SN001234".into(), size_bytes: 1 << 30, sector: 512, removable: true, transport: Transport::Usb, read_only: false, table: Table::Gpt, table_notes: vec![], parts: vec![mk("sdb1", Fs::Ext4, None), mk("sdb2", Fs::Luks, Some(crypt))], system: false, system_why: String::new(), holders: vec![] };
+    let snap = Snapshot { disks: vec![disk], support: vec![] };
+    let admin = Actor::new("root", iyakki_sec::policy::Role::Admin);
+    let audit = |_: &str, _: &str| {};
+    let go = Confirm { typed: "sdb".into(), second: true };
+    let op = PartOp::Delete { number: 1 };
+    let key = iyakki_diskcrypt::Secret::new("open sesame");
+
+    // a widget outside the table: the dry run and the plan are reads, every change is refused before the machine
+    let (f, log, g) = rig("somewidget", yes());
+    f.disk_engine_fake().set_snapshot(snap.clone());
+    f.disk_engine_fake().set_key("sdb2", "open sesame");
+    assert!(g.disk_engine().plan_partition(&admin, "sdb", &op).is_ok());
+    assert_eq!(g.disk_engine().plan_unlock(&snap, &admin, "sdb2").unwrap(), iyakki_diskcrypt::CryptKind::Luks2);
+    assert!(g.disk_engine().apply_partition(&admin, "sdb", &op, &go, &audit).unwrap_err().contains("not_granted"));
+    assert!(g.disk_engine().unlock(&admin, "sdb2", &key, &audit).unwrap_err().contains("not_granted"));
+    assert!(g.disk_engine().lock(&admin, "sdb2", &audit).is_err() && g.disk_engine().allow_writing(&admin, "sdb2", &audit).is_err());
+    assert_eq!(iyakki_core_api::diskmodel::DiskEngine::scan(&*f.disk_engine_fake()).disks[0].parts.len(), 2, "nothing was changed");
+    assert!(!f.disk_engine_fake().calls().iter().any(|c| c.starts_with("apply_partition") || c.starts_with("unlock(") || c.starts_with("lock(")), "{:?}", f.disk_engine_fake().calls());
+    assert!(log.rows().iter().any(|r| !r.allowed && r.reason == "not_granted"));
+
+    // the DISKS app holds both: the engine's own rules (administrator, the typed name) still decide
+    let (f, _log, g) = rig("disks", yes());
+    f.disk_engine_fake().set_snapshot(snap);
+    f.disk_engine_fake().set_key("sdb2", "open sesame");
+    assert!(g.disk_engine().apply_partition(&Actor::new("u", iyakki_sec::policy::Role::User), "sdb", &op, &go, &audit).is_err());
+    assert!(g.disk_engine().apply_partition(&admin, "sdb", &op, &Confirm { typed: "x".into(), second: true }, &audit).is_err());
+    assert!(g.disk_engine().apply_partition(&admin, "sdb", &op, &go, &audit).is_ok());
+    assert!(g.disk_engine().unlock(&admin, "sdb2", &key, &audit).unwrap().read_only);
+    assert!(g.disk_engine().lock(&admin, "sdb2", &audit).is_ok());
+    g.disk_engine().use_programs("/data/cli/bin");
+    assert_eq!(f.disk_engine_fake().programs().as_deref(), Some("/data/cli/bin"));
+}
+
+#[test]
+fn the_card_volume_and_the_link_switches_of_the_hardware_follow_their_capabilities_and_a_refusal_reaches_nothing() {
+    use iyakki_core_api::hardware::{Card, Hardware as _, Link, LinkKind};
+    let prepare = |fake: &FakeOs| {
+        fake.hardware_fake().set(|s| {
+            s.cards = vec![(Card { index: 0, name: "PCH".into(), long_name: "HDA Intel PCH".into() }, Some(iyakki_core_api::hardware::Volume { control: "Master".into(), percent: 40, muted: false }))];
+            s.links = vec![Link { name: "eth0".into(), kind: LinkKind::Ethernet, up: true, carrier: true, mac: String::new(), speed: None, driver: String::new() }];
+        })
+    };
+    // an app the table does not name reads the volume (system.read) and changes nothing
+    let (fake, _log, g) = rig("somewidget", yes());
+    prepare(&fake);
+    assert_eq!(g.hardware().volume(0).unwrap().percent, 40);
+    assert!(g.hardware().set_volume(0, 90).unwrap_err().contains("not_granted"));
+    assert!(g.hardware().change_volume(0, None).unwrap_err().contains("not_granted"));
+    assert!(g.hardware().set_link("eth0", false).unwrap_err().contains("not_granted"));
+    assert!(g.hardware().dhcp("eth0").unwrap_err().contains("not_granted"));
+    assert!(fake.hardware_fake().calls().iter().all(|c| !c.contains("volume") && !c.contains("link") && !c.contains("dhcp")), "{:?}", fake.hardware_fake().calls());
+    // Settings holds both
+    let (fake, log, g) = rig("settings", yes());
+    prepare(&fake);
+    assert_eq!(g.hardware().set_volume(0, 70).unwrap().percent, 70);
+    assert_eq!(g.hardware().change_volume(0, Some(-20)).unwrap().percent, 50);
+    assert!(g.hardware().change_volume(0, None).unwrap().muted);
+    g.hardware().set_link("eth0", false).unwrap();
+    assert!(g.hardware().dhcp("eth0").is_err(), "a link that is down gets no address");
+    g.hardware().set_link("eth0", true).unwrap();
+    g.hardware().dhcp("eth0").unwrap();
+    assert!(fake.hardware_fake().links()[0].up);
+    assert!(rows(&log, "system.link.set").iter().all(|e| e.allowed && e.app == "settings"));
+    // the shell holds the volume, not the links
+    let (_f, _log, g) = rig("shell", yes());
+    prepare(&_f);
+    assert!(g.hardware().change_volume(0, None).is_ok());
+    assert!(g.hardware().set_link("eth0", false).unwrap_err().contains("not_granted"));
+}
+
+#[test]
+fn the_startup_disk_is_read_with_system_read_and_every_change_needs_its_capability_an_administrator_and_a_refusal_reaches_nothing() {
+    use iyakki_core_api::startupdisk::StartupAction;
+    // an app the table does not name reads the status and plans or changes nothing
+    let (fake, log, g) = rig("somewidget", yes());
+    assert!(g.startup_disk().status_line(false).starts_with("no IYAKKI entry"));
+    assert!(g.startup_disk().status_lines(true).len() >= 3);
+    for a in StartupAction::ALL {
+        assert!(g.startup_disk().plan(a, true).unwrap_err().contains("not_granted"), "{a:?}");
+        assert!(g.startup_disk().apply(a, true).unwrap_err().contains("not_granted"), "{a:?}");
+    }
+    assert_eq!(g.startup_disk().before_dev_reboot(true), None);
+    assert!(fake.startup_disk_fake().calls().is_empty(), "{:?}", fake.startup_disk_fake().calls());
+    assert!(rows(&log, "system.startup.set").iter().all(|e| !e.allowed));
+    // Settings holds it: an administrator changes, anybody else is refused by the handle itself
+    let (fake, log, g) = rig("settings", yes());
+    assert_eq!(g.startup_disk().plan(StartupAction::Next, false).unwrap_err(), iyakki_core_api::startupdisk::ADMIN_ONLY);
+    assert!(g.startup_disk().apply(StartupAction::First, true).unwrap().contains("first"));
+    assert_eq!(fake.startup_disk_fake().calls(), vec!["apply(first)"]);
+    assert!(rows(&log, "system.startup.set").iter().any(|e| e.allowed && e.app == "settings"));
+    // the shell does not change the startup disk
+    let (_f, _l, g) = rig("shell", yes());
+    assert!(g.startup_disk().apply(StartupAction::Next, true).unwrap_err().contains("not_granted"));
+}
+
+#[test]
+fn bluetooth_audio_is_read_with_system_read_and_every_change_needs_bluetooth_use_and_a_refusal_reaches_nothing() {
+    use iyakki_core_api::btaudio::BtAudioAction;
+    let paired = |f: &FakeOs| f.bt_audio_fake().set(|s| s.paired = vec![iyakki_core_fake::BtPaired { address: "AA:01".into(), name: "Pixel".into(), kind: "phone".into() }]);
+    let (fake, log, g) = rig("somewidget", yes());
+    paired(&fake);
+    assert!(g.bt_audio().receive_view().ready, "a read needs no card");
+    assert!(g.bt_audio().sinks().is_empty());
+    for a in [BtAudioAction::Connect { device: String::new() }, BtAudioAction::ConnectAt { address: "AA:01".into() }, BtAudioAction::Disconnect, BtAudioAction::Pairing { on: true }, BtAudioAction::SendStop, BtAudioAction::SendTone] {
+        assert!(g.bt_audio().plan(&a).unwrap_err().contains("not_granted"), "{a:?}");
+        assert!(g.bt_audio().apply(&a).unwrap_err().contains("not_granted"), "{a:?}");
+    }
+    assert!(fake.bt_audio_fake().calls().is_empty(), "{:?}", fake.bt_audio_fake().calls());
+    assert!(rows(&log, "bluetooth.use").iter().all(|e| !e.allowed));
+    // Settings holds bluetooth.use
+    let (fake, _log, g) = rig("settings", yes());
+    paired(&fake);
+    assert!(g.bt_audio().apply(&BtAudioAction::ConnectAt { address: "AA:01".into() }).is_ok());
+    assert_eq!(fake.bt_audio_fake().calls(), vec!["apply(bluetooth_audio_connect)"]);
+    g.bt_audio().clear_remote();
+    assert_eq!(fake.bt_audio_fake().state().remote_cleared, 1, "signing out always clears the phone's keys, whoever asks");
+}
+
+#[test]
+fn the_sound_output_state_is_a_plain_read_and_a_refused_read_never_silences_a_player() {
+    let (fake, log, g) = rig("somewidget", yes());
+    fake.output_state_fake().set_device(Some("plughw:0,3"));
+    fake.output_state_fake().set_gain(35);
+    let s = g.output_state();
+    assert_eq!((s.device().as_deref(), s.generation(), s.gain()), (Some("plughw:0,3"), 1, 35));
+    assert!(rows(&log, "system.read").iter().all(|e| e.allowed));
+    // a store app with no approval is refused the read: nothing of the machine is told, and the volume stays full so a player is never silenced
+    let broker = Arc::new(Broker::new(Arc::new(NoApprovals), yes(), Arc::new(MemoryLog::new(10)), Arc::new(|| 1)));
+    let denied = GuardedOs::new(fake.clone(), broker, Caller { app: "x".into(), kind: CallerKind::Store { installation: "i".into() }, person: "p".into(), device: "d".into() }).output_state();
+    assert_eq!((denied.device(), denied.generation(), denied.gain()), (None, 0, 100));
+}

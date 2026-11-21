@@ -1,0 +1,19 @@
+scenario: VOICE-MIC-01
+title: USB microphone dictation
+area: Voice
+rows: F-VOICE-04, F-VOICE-18, F-HW-02
+machines: any
+needs: person
+prereq: A USB microphone (or a headset) is plugged in. A quiet room.
+step: Open Settings, Voice and look at the list of microphones.
+expect: Your microphone is listed by name and chosen.
+clause: F-VOICE-04.listed
+step: Open the VOICE tile, DICTATE. Press Record and read this sentence at normal speed: The quick brown fox jumps over the lazy dog.
+expect: A red recording indicator shows for as long as you record, and recording never starts by itself.
+clause: F-VOICE-18.indicator
+step: Press Stop and wait a moment.
+expect: The words appear as text within a few seconds and are close to what you said (one or two wrong words are acceptable).
+clause: F-VOICE-04.text
+step: Unplug the microphone while the VOICE tile is open and press Record.
+expect: A plain sentence says that no microphone was found; nothing crashes and the indicator does not stay on.
+clause: F-HW-02.unplug

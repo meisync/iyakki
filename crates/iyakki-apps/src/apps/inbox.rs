@@ -200,7 +200,7 @@ impl InboxApp {
             asked.push(PendingApproval { run_id: "vault".into(), user: u.to_string(), prompt: format!("needs a secret: {}", r.purpose), call_id: r.id, tool: "vault_request".into(), summary, detail: String::new(), risk: "low", since: r.since });
         }
         // questions about the assistant in the person's browser (the wait of a running tool ends when they answer)
-        for r in cx.browser().consent.pending(u) {
+        for r in cx.browser_consent().pending(u) {
             asked.push(PendingApproval { run_id: "browser".into(), user: u.to_string(), prompt: r.title.clone(), call_id: r.id.clone(), tool: "browser_consent".into(), summary: row_summary(&r), detail: r.detail.clone(), risk: "medium", since: r.since });
         }
         asked.append(&mut self.approvals);
@@ -454,7 +454,7 @@ impl InboxApp {
 
     /// Open the dialog for a browser question.
     fn open_browser(&mut self, cx: &AppCx, a: &PendingApproval) {
-        match cx.browser().consent.get(&cx.session.user, &a.call_id) {
+        match cx.browser_consent().get(&cx.session.user, &a.call_id) {
             Some(r) => self.mode = Mode::Browser(ConsentDialog::new(r)),
             None => {
                 self.fail("That question is not waiting any more.");
@@ -492,7 +492,7 @@ impl InboxApp {
         if Self::is_browser(a) {
             if approve {
                 self.open_browser(cx, a);
-            } else if let Some(r) = cx.browser().consent.get(&cx.session.user, &a.call_id) {
+            } else if let Some(r) = cx.browser_consent().get(&cx.session.user, &a.call_id) {
                 // "n" says no: Deny (or Cancel for a hand-over)
                 let d = ConsentDialog::new(r);
                 match d.answer_of(&Key::Esc).map(|ans| d.answer(cx, ans)) {
@@ -898,7 +898,7 @@ impl InboxApp {
                 let (bw, bh) = (50.0 * s, r.h - 12.0 * s);
                 let k = (bw / pm.width() as f32).min(bh / pm.height() as f32);
                 let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
-                g.pm.draw_pixmap(0, 0, pm.as_ref(), &paint, tiny_skia::Transform::from_translate(r.x + 14.0 * s, r.y + 6.0 * s).pre_scale(k, k), None);
+                g.pm_mut().draw_pixmap(0, 0, pm.as_ref(), &paint, tiny_skia::Transform::from_translate(r.x + 14.0 * s, r.y + 6.0 * s).pre_scale(k, k), None);
             }
             let tw = r.w - 200.0 * s - pic;
             let t = g.fit(15.5 * s, &format!("{star}{}", n.title), face, tw);
@@ -1125,7 +1125,7 @@ mod tests {
         a.handle(&h.ev.clone(), cx);
     }
     fn audit(cx: &AppCx) -> String {
-        std::fs::read_to_string(cx.audit.path()).unwrap_or_default()
+        std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default()
     }
 
     #[test]
@@ -1489,7 +1489,7 @@ mod tests {
         let cx = admin_cx("inbbrowser");
         let mut a = InboxApp::new(&cx);
         a.handle(&Event::Tab(2), &cx);
-        let c = &cx.browser().consent;
+        let c = &cx.browser_consent();
         let look = c.create("root", ConsentKind::Look, "gemini.google.com", "", "", 1).unwrap();
         let act = c.create("root", ConsentKind::Interact, "gemini.google.com", &iyakki_shared::browserconsent::willingness_text("gemini.google.com", None), "click button \"Send\"", 2).unwrap();
         a.handle(&Event::Tick, &cx);

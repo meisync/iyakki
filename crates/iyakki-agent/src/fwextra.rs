@@ -10,7 +10,7 @@
 //!    Other ways to get the same bytes: a folder or USB stick (a `firmware-extra` folder, an unpacked release, or the release tarball),
 //!    the staging folder the developer-mode link fills, or the internet of another computer over a cable (`fwextra_net.rs`).
 //! 3. **Install** ([`run`]): the files, their licence texts and the WHENCE entries become the driver pack `fw-hardware` on the data volume
-//!    (`iyakki_drivers::apply`: linked into `/lib/firmware` at every boot, the mechanism the other firmware packs use). Drivers that are
+//!    (`iyakki_core_local::driver_packs::apply`: linked into `/lib/firmware` at every boot, the mechanism the other firmware packs use). Drivers that are
 //!    safe to reload are reloaded (never the graphics driver); otherwise the result says "restart needed" and the tile offers a Restart
 //!    button. Nothing restarts by itself. [`remove`] takes the pack away.
 //!
@@ -20,8 +20,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use iyakki_drivers::pack::{self};
-use iyakki_drivers::apply;
+use iyakki_core_local::driver_packs::pack::{self};
+use iyakki_core_local::driver_packs::apply;
 
 use crate::fwpack::{ModState, Outcome};
 pub use iyakki_shared::fwextra::*;
@@ -313,7 +313,7 @@ pub struct RealEnv {
 
 impl RealEnv {
     pub fn new(data: &Path, streamer: std::sync::Arc<dyn iyakki_proxy::Streamer>) -> RealEnv {
-        RealEnv { data: data.to_path_buf(), streamer, sys: "/sys".into() }
+        RealEnv { data: data.to_path_buf(), streamer, sys: iyakki_core_local::kernelfacts::SYS.into() }
     }
 }
 
@@ -331,10 +331,10 @@ impl Env for RealEnv {
         crate::k3sdev::space(dir).map(|s| s.0)
     }
     fn data_in_memory(&self) -> bool {
-        crate::macfw::in_memory(&iyakki_storage::read_mounts().unwrap_or_default(), &self.data)
+        crate::macfw::in_memory(&iyakki_core_local::kernelfacts::mounts_text(), &self.data)
     }
     fn kernel_log(&self) -> String {
-        std::process::Command::new("dmesg").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+        iyakki_core_local::starters::dmesg()
     }
     fn devs(&self) -> Vec<Dev> {
         read_devs(&self.sys)
@@ -345,7 +345,7 @@ impl Env for RealEnv {
     }
     fn install(&mut self, version: &str, source: &str, p: &pack::Pack) -> Result<apply::Report, String> {
         let (fs, real) = apply::Fs::for_data(&self.data);
-        let run: Box<dyn iyakki_drivers::run::Runner> = if real { Box::new(iyakki_drivers::run::System) } else { Box::new(iyakki_drivers::run::Dry) };
+        let run = iyakki_core_local::kmodpack::runner(real);
         crate::fwpack::install_checked(&fs, run.as_ref(), PACK_ID, version, "LicenseRef-linux-firmware-various-per-file", source, p)
     }
     fn module_state(&self, name: &str) -> ModState {
@@ -361,4 +361,4 @@ impl Env for RealEnv {
 mod tests;
 
 #[cfg(test)]
-use iyakki_drivers::pack::sha256_hex;
+use iyakki_core_local::kmodpack::sha256_hex;

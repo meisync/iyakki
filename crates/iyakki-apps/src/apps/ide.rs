@@ -723,7 +723,7 @@ impl IdeApp {
         }
         let features = cfg.features_path(&root);
         let scope = ProjectScope { name: w.name.clone(), root: root.clone(), key: w.chat_key(user), features: features.clone(), cluster: None };
-        let mut tasks = TasksView::new(super::ide_tasks_run::manager(cx, &root, &features, &w.name), &cfg.commands.test);
+        let mut tasks = TasksView::new(super::ide_tasks_run::shared_manager(cx, &root, &features, &w.name), &cfg.commands.test);
         tasks.user = cx.session.user.clone();
         if ro.is_none() && cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full {
             // fleet (experimental): work another member sends runs as a task of this workspace; its Context may be shared
@@ -1594,7 +1594,7 @@ impl IdeApp {
     /// The chats that left entries in the active workspace's history, and the choices the settings form offers for them.
     fn history_choices(&self, cx: &AppCx) -> Vec<(String, usize)> {
         let Some(w) = self.active_ws() else { return vec![] };
-        iyakki_memx::history::History::sessions_of(&cx.kb(), &cx.session.user, &w.meta.name).into_iter().take(20).collect()
+        iyakki_memx::history::History::sessions_of(&*cx.kb_source(), &cx.session.user, &w.meta.name).into_iter().take(20).collect()
     }
 
     /// The project settings with the assistant's memory of this workspace at the end: keep it, forget all of it, or forget what one chat left.
@@ -1602,7 +1602,7 @@ impl IdeApp {
         self.open_settings_form();
         let Some(w) = self.active_ws() else { return };
         let name = w.meta.name.clone();
-        let total = iyakki_memx::history::History::workspaces_of(&cx.kb(), &cx.session.user).into_iter().find(|x| x.name == iyakki_memx::history::History::workspace_key(&name)).map_or(0, |x| x.entries);
+        let total = iyakki_memx::history::History::workspaces_of(&*cx.kb_source(), &cx.session.user).into_iter().find(|x| x.name == iyakki_memx::history::History::workspace_key(&name)).map_or(0, |x| x.entries);
         if total == 0 {
             return;
         }
@@ -1700,10 +1700,10 @@ impl IdeApp {
                 if forget > 0 {
                     let user = cx.session.user.clone();
                     let n = if forget == 1 {
-                        iyakki_memx::history::History::forget_workspace_of(&cx.kb(), &user, &ws_name)
+                        iyakki_memx::history::History::forget_workspace_of(&*cx.kb_source(), &user, &ws_name)
                     } else {
                         match chats_for_forget.get(forget - 2) {
-                            Some((chat, _)) => iyakki_memx::history::History::forget_session_of(&cx.kb(), &user, &ws_name, chat),
+                            Some((chat, _)) => iyakki_memx::history::History::forget_session_of(&*cx.kb_source(), &user, &ws_name, chat),
                             None => 0,
                         }
                     };

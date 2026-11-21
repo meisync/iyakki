@@ -4,9 +4,9 @@
 //! reaps the child (no zombies).
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use iyakki_core_local::starters_launch::{Launch, Stream};
+use std::process::Child;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -30,19 +30,12 @@ const PASS: [&str; 14] = ["PATH", "HOME", "LANG", "LC_ALL", "TERM", "USER", "LOG
 
 pub fn spawn(argv: &[String], cwd: &Path, env: &[(String, String)], stdin: Option<&[u8]>) -> Result<Spawned, std::io::Error> {
     let prog = argv.first().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no command"))?;
-    let mut cmd = Command::new(prog);
-    cmd.args(&argv[1..]).current_dir(cwd).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped()).env_clear();
-    for k in PASS {
-        if let Ok(v) = std::env::var(k) {
-            cmd.env(k, v);
-        }
-    }
-    cmd.env("NO_COLOR", "1");
+    let mut launch = Launch::new(prog).args(&argv[1..]).cwd(cwd).stdin(if stdin.is_some() { Stream::Piped } else { Stream::Null }).stdout(Stream::Piped).stderr(Stream::Piped).env_clear().pass_env(PASS).env("NO_COLOR", "1");
     for (k, v) in env {
-        cmd.env(k, v);
+        launch = launch.env(k, v);
     }
     // its own process group: the group id is the child's pid, so one kill reaches the whole tree
-    cmd.process_group(0);
+    let mut cmd = launch.own_group().into_command();
     let mut child = crate::wsexec::spawn_exec(&mut cmd)?;
     let pid = child.id();
     if let (Some(data), Some(mut si)) = (stdin, child.stdin.take()) {

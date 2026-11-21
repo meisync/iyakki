@@ -2,7 +2,6 @@
 //! The agents themselves live in `iyakki_agent::extagent`; Settings → Agents configures them.
 
 use super::*;
-use iyakki_agent_api::ExtRunSpec;
 
 impl ChatApp {
     /// The agent that answers this chat (`None`: the built-in model of Settings → Models). The first time it is asked, the
@@ -133,7 +132,7 @@ impl ChatApp {
         let cfg = cx.agents_cfg();
         let a = cfg.agent(&id)?;
         let chosen = self.ext_model_of(cx, &id);
-        let model = if chosen.is_empty() || chosen == "default" { "Default".to_string() } else { cx.ext_status().models_for(a.as_ref()).into_iter().find(|m| m.id == chosen).map_or(chosen.clone(), |m| m.label.split(" (").next().unwrap_or(&m.label).to_string()) };
+        let model = if chosen.is_empty() || chosen == "default" { "Default".to_string() } else { iyakki_shared::extagent::models_with(cx.ext_status().cli_models(&a.as_ref().id()), a.as_ref()).into_iter().find(|m| m.id == chosen).map_or(chosen.clone(), |m| m.label.split(" (").next().unwrap_or(&m.label).to_string()) };
         let sess = self.session.as_ref().and_then(|s| cx.ai().ext_session(&s.id, &id)).map_or("new session".to_string(), |s| format!("session {}", s.chars().take(8).collect::<String>()));
         let state = cx.ext_status().get(&id).map_or(String::new(), |s| if s.ready() { String::new() } else { format!(" · {}", s.chip) });
         Some(format!("agent: {} · {model} · {sess}{state} · {}", a.label(), a.mode().label()))
@@ -142,78 +141,20 @@ impl ChatApp {
     /// Start a run with the chosen agent: same tools, approvals and policy as the built-in assistant (through the bridge).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn run_external(&mut self, cx: &AppCx, id: &str, text: &str, tools: Arc<dyn iyakki_shared::agent::Tools>, limits: RunLimits, prepare: Option<iyakki_shared::assistrun::Prepare>, workspace: Option<std::path::PathBuf>) -> Result<Box<dyn iyakki_agent_api::ChatRun>, String> {
-        let sid = self.session.as_ref().map(|s| s.id.clone());
-        let model = self.ext_model_of(cx, id);
-        let req = make_request(cx, id, text, tools, limits, prepare, workspace, sid, model)?;
-        let h = cx.extagent_facet().start(req);
-        cx.b4().chat_run_from_handle(&cx.session.user, text, h).ok_or_else(|| "the agent core serves no chat runs".to_string())
+        let (sid, model) = (self.session.as_ref().map(|s| s.id.clone()), self.ext_model_of(cx, id));
+        crate::apps::core_run::run_external(cx, id, sid, model, text, tools, limits, prepare, workspace)
     }
 
-    /// Why Autopilot cannot drive this agent (`None`: it can). Autopilot needs an agent that can use IYAKKI's tools.
+    /// Why Autopilot cannot drive this agent (`None`: it can).
     pub(super) fn autopilot_refusal(&mut self, cx: &AppCx) -> Option<String> {
         let id = self.ext_id(cx)?;
-        let a = cx.agents_cfg().agent(&id)?;
-        (a.mode() != iyakki_extagentx::Mode::Bridged).then(|| if id == iyakki_extagentx::COPILOT {
-            "Autopilot needs an agent that works through IYAKKI's tools and approvals. GitHub Copilot normally does, but it is set to advisor only (read-only) in Settings → Agents: switch Advisor only off there, or pick a built-in model or Claude Code (Ctrl+P), or turn Autopilot off to chat with it step by step.".to_string()
-        } else {
-            format!("Autopilot needs an agent that can use IYAKKI's tools; Claude Code and GitHub Copilot can, {} runs read-only here (it can only advise). Pick a built-in model, Claude Code or GitHub Copilot (Ctrl+P) for Autopilot, or turn Autopilot off to chat with {} step by step.", a.label(), a.label())
-        })
+        crate::apps::core_run::autopilot_refusal(cx, &id)
     }
 
-    /// The Autopilot steps carried out by the agent: each step's message is its prompt, resuming its own session, so it keeps
-    /// its context; the harness keeps the board, the checks, the caps and the summary.
+    /// The Autopilot steps carried out by the agent (see [`crate::apps::core_run::ext_executor`]).
     pub(super) fn ext_executor(&self, cx: &AppCx, id: &str, tools: Arc<dyn iyakki_shared::agent::Tools>, workspace: Option<std::path::PathBuf>) -> iyakki_shared::autopilot::Executor {
-        let (cx, id, sid, model) = (cx.clone(), id.to_string(), self.session.as_ref().map(|s| s.id.clone()), self.ext_model_of(cx, id));
-        Arc::new(move |call: iyakki_shared::autopilot::StepCall| {
-            match make_request(&cx, &id, &call.prompt, tools.clone(), call.limits, call.prepare, workspace.clone(), sid.clone(), model.clone()) {
-                Ok(req) => cx.extagent_facet().start(req),
-                Err(e) => {
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    let (dtx, _drx) = std::sync::mpsc::channel();
-                    let _ = tx.send(RunEvent::Failed { error: e });
-                    iyakki_shared::agent::RunHandle::from_parts(rx, dtx)
-                }
-            }
-        })
+        crate::apps::core_run::ext_executor(cx, id, self.session.as_ref().map(|s| s.id.clone()), self.ext_model_of(cx, id), tools, workspace)
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn make_request(cx: &AppCx, id: &str, text: &str, tools: Arc<dyn iyakki_shared::agent::Tools>, limits: RunLimits, prepare: Option<iyakki_shared::assistrun::Prepare>, workspace: Option<std::path::PathBuf>, sid: Option<String>, model: String) -> Result<ExtRunSpec, String> {
-    let cfg = cx.agents_cfg();
-    cfg.agent(id).ok_or("That agent is no longer configured. Pick a model again (Ctrl+P).")?;
-    let workspace = workspace.ok_or("This chat has no work folder to run an agent in.")?;
-    let (allow_auto, key_ref) = cfg.cfg_of(id).unwrap_or_default();
-    // a login kept in the person's vault (Copilot): its token goes to this one run as the variable the program reads
-    let key = if key_ref.is_empty() { cx.services.agent_vault_token(&cx.session.user, id).map(|(_, t)| t) } else { Some(cx.secrets().resolve(&key_ref, None).map_err(|e| format!("The API key `{key_ref}` could not be read from the vault: {e}. Open Settings → Agents to pick another."))?) };
-    let resume = sid.as_ref().and_then(|s| cx.ai().ext_session(s, id));
-    let (ai, user) = (cx.ai(), cx.session.user.clone());
-    let (tools2, audit, user2) = (tools.clone(), cx.audit.clone(), cx.session.user.clone());
-    let (ai2, sid2, aid2) = (ai.clone(), sid.clone(), id.to_string());
-    Ok(ExtRunSpec {
-        agent: id.to_string(),
-        workspace,
-        prompt: text.to_string(),
-        system: Arc::new(move || match &prepare {
-            Some(p) => p(&tools2.defs()).iter().filter(|m| m.role == Role::System).map(|m| m.content.clone()).collect::<Vec<_>>().join("\n\n"),
-            None => String::new(),
-        }),
-        model,
-        resume,
-        tools,
-        limits,
-        allow_auto,
-        key,
-        audit: Arc::new(move |k, d| audit.record(&user2, k, d)),
-        exe: std::env::current_exe().unwrap_or_default(),
-        on_session: Arc::new(move |s| {
-            if let Some(sid) = &sid2 {
-                ai2.ext_session_set(sid, &aid2, s);
-            }
-        }),
-        on_usage: Arc::new(move |l, m, i, o| ai.usage_record(&user, l, m, i, o)),
-        no_tools: false,
-    })
 }
 
 /// The Autopilot steps of a parallel task carried out by an external agent. The agent session is the task's own (`sid` is
@@ -225,7 +166,7 @@ pub(in crate::apps) fn task_executor(cx: &AppCx, id: &str, tools: Arc<dyn iyakki
     Arc::new(move |call: iyakki_shared::autopilot::StepCall| {
         let made = match &refusal {
             Some(r) => Err(r.clone()),
-            None => make_request(&cx, &id, &call.prompt, tools.clone(), call.limits, call.prepare, Some(workspace.clone()), Some(sid.clone()), model.clone()),
+            None => crate::apps::core_run::make_request(&cx, &id, &call.prompt, tools.clone(), call.limits, call.prepare, Some(workspace.clone()), Some(sid.clone()), model.clone()),
         };
         match made {
             Ok(req) => cx.extagent_facet().start(req),

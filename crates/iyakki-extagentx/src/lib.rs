@@ -260,7 +260,7 @@ pub fn tidy(s: &str, n: usize) -> String {
 }
 
 /// One line of the model list.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Entry {
     pub id: String,
     /// `agent:<id>`, the provider column of the list.

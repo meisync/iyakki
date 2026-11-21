@@ -43,7 +43,7 @@ pub const IMAGE_GIT_SSH: &str = "/usr/libexec/iyakki/git-ssh";
 /// Looks for git in `search` (a PATH-style list) and says plainly when it is missing and what can be done about it.
 pub fn check_git(search: &str) -> GitCheck {
     let Some(path) = crate::ssh::find_program("git", search) else { return GitCheck::Missing { message: missing_message() } };
-    let version = std::process::Command::new(&path).arg("--version").env_clear().output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_start_matches("git version ").to_string()).unwrap_or_default();
+    let version = iyakki_core_local::starters::version_text(&path).trim().trim_start_matches("git version ").to_string();
     GitCheck::Ready { path, version }
 }
 

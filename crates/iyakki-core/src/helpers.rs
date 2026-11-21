@@ -223,6 +223,21 @@ pub fn vpn_helper_spec(exe: PathBuf, uid: u32, socket: &str) -> Spec {
 /// What init should start now, given the settings below `data_dir`: the fan service only when the person turned fan control on, the
 /// VPN helper only when its setting says so. Pure: the caller starts them.
 pub fn wanted(exe: &std::path::Path, sys: &str, data_dir: &std::path::Path, own_uid: u32) -> Vec<Spec> {
+    wanted_with(exe, sys, data_dir, own_uid, &std::fs::read_to_string("/etc/passwd").unwrap_or_default())
+}
+
+/// The user id of the account `name` in the text of a passwd file (`name:x:uid:gid:...`), if it has one.
+pub fn account_uid(passwd: &str, name: &str) -> Option<u32> {
+    passwd.lines().filter(|l| !l.starts_with('#')).find_map(|l| {
+        let mut f = l.split(':');
+        (f.next() == Some(name)).then(|| f.nth(1).and_then(|u| u.parse().ok())).flatten()
+    })
+}
+
+/// [`wanted`] with the passwd file given (tests). The helper allows the account's OWN user id when its setting names none: the VPN
+/// session of that person runs as them, not as the core, so the helper no longer has to trust the core's (root's) id on an image
+/// whose session runs without root (F-VPN-05). Without a passwd entry the core's own id is the fallback, as before.
+pub fn wanted_with(exe: &std::path::Path, sys: &str, data_dir: &std::path::Path, own_uid: u32, passwd: &str) -> Vec<Spec> {
     let mut v = Vec::new();
     if iyakki_drivers::fanservice::load(data_dir).enabled {
         v.push(fan_spec(exe.to_path_buf(), sys, &data_dir.to_string_lossy()));
@@ -236,7 +251,9 @@ pub fn wanted(exe: &std::path::Path, sys: &str, data_dir: &std::path::Path, own_
         for d in dirs {
             let s = iyakki_agent::vpn_helper::read_setting(&d);
             if s.enabled && !sockets.contains(&s.socket) {
-                v.push(vpn_helper_spec(exe.to_path_buf(), s.allow_uid.unwrap_or(own_uid), &s.socket));
+                let account = d.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let uid = s.allow_uid.or_else(|| account_uid(passwd, account)).unwrap_or(own_uid);
+                v.push(vpn_helper_spec(exe.to_path_buf(), uid, &s.socket));
                 sockets.push(s.socket);
             }
         }

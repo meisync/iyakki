@@ -534,13 +534,10 @@ impl Live for SysLive {
             return Err(format!("{name} is not a service a patch may restart"));
         }
         let mut hit = 0;
-        for e in std::fs::read_dir("/proc").map_err(|e| e.to_string())?.flatten() {
-            let Ok(pid) = e.file_name().to_string_lossy().parse::<i32>() else { continue };
-            if std::fs::read_to_string(e.path().join("comm")).is_ok_and(|n| n.trim() == name) {
-                // SAFETY: plain signal to a process found by exact name.
-                if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
-                    hit += 1;
-                }
+        for pid in iyakki_core_local::procfacts::pids_named(name).ok_or_else(|| "the process list is not available".to_string())? {
+            // SAFETY: plain signal to a process found by exact name.
+            if unsafe { libc::kill(pid as i32, libc::SIGTERM) } == 0 {
+                hit += 1;
             }
         }
         if hit == 0 {
@@ -561,7 +558,7 @@ impl Live for SysLive {
 
     fn drop_caches(&self) -> Result<(), String> {
         self.sync()?;
-        std::fs::write("/proc/sys/vm/drop_caches", "3").map_err(|e| format!("drop caches: {e}"))
+        iyakki_core_local::kernelfacts::drop_caches()
     }
 
     fn sync(&self) -> Result<(), String> {
@@ -571,7 +568,8 @@ impl Live for SysLive {
     }
 
     fn shell(&self, cmd: &str) -> Result<(), String> {
-        let mut ch = std::process::Command::new("/bin/sh").arg("-c").arg(cmd).stdin(std::process::Stdio::null()).spawn().map_err(|e| e.to_string())?;
+        use iyakki_core_local::starters_launch::{Launch, Stream};
+        let mut ch = Launch::new("/bin/sh").arg("-c").arg(cmd).stdin(Stream::Null).spawn().map_err(|e| e.to_string())?;
         let start = std::time::Instant::now();
         loop {
             match iyakki_core_api::child_status(&mut ch) {
@@ -590,7 +588,7 @@ impl Live for SysLive {
     }
 
     fn boot_id(&self) -> String {
-        std::fs::read_to_string("/proc/sys/kernel/random/boot_id").map(|s| s.trim().to_string()).unwrap_or_default()
+        iyakki_core_local::kernelfacts::boot_id()
     }
 
     fn is_root(&self) -> bool {

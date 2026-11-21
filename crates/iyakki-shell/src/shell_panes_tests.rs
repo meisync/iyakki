@@ -111,7 +111,7 @@ fn overlaps(a: &R, b: &R) -> bool {
 
 fn pixel(g: &Gfx, x: i32, y: i32) -> [u8; 4] {
     let i = ((y as u32 * g.width() + x as u32) * 4) as usize;
-    let d = g.pm.data();
+    let d = g.pm_ref().data();
     [d[i], d[i + 1], d[i + 2], d[i + 3]]
 }
 

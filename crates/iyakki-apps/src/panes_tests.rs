@@ -232,3 +232,33 @@ fn degenerate_areas_do_not_panic() {
     let mut l = Layout::from_template("grid");
     let _ = l.drag(area(0.0, 0.0), 6.0, 0, 3.0, &[]);
 }
+
+#[test]
+fn a_browser_jumps_to_a_view_with_ctrl_alt_shift_and_a_digit_and_applies_a_layout_without_shift() {
+    assert_eq!(chord_from_name("Digit2", false), Some(LayoutKey::Apply(2)));
+    assert_eq!(chord_from_name("Digit2", true), Some(LayoutKey::View(2)));
+    assert_eq!(chord_from_name("Digit9", true), Some(LayoutKey::View(9)));
+    assert_eq!(chord_from_name("Digit0", true), Some(LayoutKey::Picker));
+}
+
+#[test]
+fn own_step_keys_are_ctrl_alt_plus_an_allowed_key_and_never_one_that_already_means_something() {
+    let keys = ("KeyJ".to_string(), "KeyK".to_string());
+    assert_eq!(custom_step_in(Some(&keys), "KeyJ"), Some(LayoutKey::ViewStepCustom { back: true }));
+    assert_eq!(custom_step_in(Some(&keys), "KeyK"), Some(LayoutKey::ViewStepCustom { back: false }));
+    assert_eq!(custom_step_in(Some(&keys), "KeyL"), None);
+    assert_eq!(custom_step_in(None, "KeyJ"), None, "off means off");
+    // the evdev codes of J and K, the brackets; Q, L, S and M (the shell's own chords) and the digits are not offered
+    assert_eq!(custom_name_of_evdev(36), Some("KeyJ"));
+    assert_eq!(custom_name_of_evdev(37), Some("KeyK"));
+    assert_eq!(custom_name_of_evdev(26), Some("BracketLeft"));
+    for code in [16u16, 38, 31, 50, 2, 15, 103, 104] {
+        assert_eq!(custom_name_of_evdev(code), None, "code {code}");
+    }
+    // every name the table gives is one the model allows, and the model allows nothing the table cannot reach from the keyboard
+    for code in 0u16..200 {
+        if let Some(n) = custom_name_of_evdev(code) {
+            assert!(iyakki_shared::views::custom_key_ok(n), "{n}");
+        }
+    }
+}

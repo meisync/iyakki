@@ -319,7 +319,7 @@ fn the_display_fits_and_is_drawn_at_the_four_usual_sizes_without_taking_input() 
             assert!((r.x + r.w / 2.0 - w as f32 / 2.0).abs() < 1.0, "bottom centre");
             assert!(g.hits.is_empty(), "the display registers no click region: it never takes focus");
             // painted: something other than black inside the pill, nothing outside the screen's centre column far above it
-            let px = |x: f32, y: f32| g.pm.pixel(x as u32, y as u32).map(|p| (p.red(), p.green(), p.blue())).unwrap();
+            let px = |x: f32, y: f32| g.pm_ref().pixel(x as u32, y as u32).map(|p| (p.red(), p.green(), p.blue())).unwrap();
             assert_ne!(px(r.x + r.w / 2.0, r.y + 2.0 * s), (0, 0, 0), "{w}x{h}");
             assert_eq!(px(w as f32 / 2.0, 10.0), (0, 0, 0), "{w}x{h}: nothing drawn at the top");
         }
@@ -332,7 +332,7 @@ fn the_display_fits_and_is_drawn_at_the_four_usual_sizes_without_taking_input() 
         draw_osd(&mut g, w as f32, h as f32, s, &Osd::volume(&SoundSettings { volume_pct: pct, ..Default::default() }, 1));
         let r = osd_rect(w as f32, h as f32, s, 0.0, true);
         let y = r.y + r.h / 2.0;
-        (0..r.w as u32).filter(|dx| g.pm.pixel(r.x as u32 + dx, y as u32).map(|p| p.blue() > 200 && p.red() < 160).unwrap_or(false)).count()
+        (0..r.w as u32).filter(|dx| g.pm_mut().pixel(r.x as u32 + dx, y as u32).map(|p| p.blue() > 200 && p.red() < 160).unwrap_or(false)).count()
     };
     assert!(fill(90) > fill(30) + 40, "{} vs {}", fill(90), fill(30));
 }

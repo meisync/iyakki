@@ -366,7 +366,10 @@ fn debian_is_pulled_by_manifest_and_every_layer_is_checked_against_its_digest() 
     let (routes, mdigest) = debian_routes(&layer, &digest, dist::arch());
     let st = fake(routes);
     let rel = dist::release("debian-12").unwrap();
-    let (files, v) = dist::fetch(&st, rel, &tmp("deb").join("dl"), &|_| Ok(()), &mut |_, _| {}).unwrap();
+    // the signed-list check has its own test (it needs a list signed by the key under test): here the registry route alone
+    let dl = tmp("deb").join("dl");
+    std::fs::create_dir_all(&dl).unwrap();
+    let (files, v) = dist::fetch_debian_with(&st, rel, &dl, &|_| Ok(()), &mut |_, _| {}, None, 0).unwrap();
     assert_eq!(files.len(), 1);
     assert!(v.verified.contains(&mdigest) && v.source.contains("bookworm-slim"), "{v:?}");
     let asked = st.asked.lock().unwrap();
@@ -376,11 +379,69 @@ fn debian_is_pulled_by_manifest_and_every_layer_is_checked_against_its_digest() 
     drop(asked);
     // a layer that hashes differently is refused
     let (routes, _) = debian_routes(&layer, &format!("sha256:{}", "9".repeat(64)), dist::arch());
-    let err = dist::fetch(&fake(routes), rel, &tmp("deb2").join("dl"), &|_| Ok(()), &mut |_, _| {}).unwrap_err();
+    let err = dist::fetch_debian_with(&fake(routes), rel, &{ let d = tmp("deb2").join("dl"); std::fs::create_dir_all(&d).unwrap(); d }, &|_| Ok(()), &mut |_, _| {}, None, 0).unwrap_err();
     assert!(err.contains("manifest names") && err.contains("discarded"), "{err}");
     // an index without this processor
     let (routes, _) = debian_routes(&layer, &digest, "riscv64");
-    assert!(dist::fetch(&fake(routes), rel, &tmp("deb3").join("dl"), &|_| Ok(()), &mut |_, _| {}).unwrap_err().contains("no linux/"));
+    assert!(dist::fetch_debian_with(&fake(routes), rel, &{ let d = tmp("deb3").join("dl"); std::fs::create_dir_all(&d).unwrap(); d }, &|_| Ok(()), &mut |_, _| {}, None, 0).unwrap_err().contains("no linux/"));
+}
+
+
+const DEB_KEY: &[u8] = include_bytes!("../../iyakki-shared/tests/fixtures/debian-release/test-key.asc");
+const DEB_OTHER: &[u8] = include_bytes!("../../iyakki-shared/tests/fixtures/debian-release/other-key.asc");
+const DEB_INRELEASE: &[u8] = include_bytes!("../../iyakki-shared/tests/fixtures/debian-release/InRelease");
+/// 2025-08-10 12:00:00 UTC, inside the fixture's window.
+const DEB_NOW: i64 = 1_754_827_200;
+
+fn trixie_routes(layer: &[u8], digest: &str) -> (Vec<(String, Reply)>, String) {
+    let (mut routes, m) = debian_routes(layer, digest, dist::arch());
+    for r in routes.iter_mut() {
+        r.0 = r.0.replace("bookworm-slim", "trixie-slim");
+    }
+    routes.push(("https://deb.debian.org/debian/dists/trixie/InRelease".into(), ok(DEB_INRELEASE)));
+    (routes, m)
+}
+
+#[test]
+fn the_debian_archives_signed_list_is_consulted_when_its_key_is_pinned_and_a_bad_list_stops_everything() {
+    let layer = mini_base();
+    let digest = format!("sha256:{}", sha(&layer));
+    let rel = dist::release("debian-13").unwrap();
+    let dl = |tag: &str| {
+        let d = tmp(tag).join("dl");
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    };
+    let go = |routes: Vec<(String, Reply)>, key: Option<&[u8]>, tag: &str| dist::fetch_debian_with(&fake(routes), rel, &dl(tag), &|_| Ok(()), &mut |_, _| {}, key, DEB_NOW);
+    // no key pinned: the registry digest is the only pin, and the words say the list was not consulted
+    let (routes, _) = trixie_routes(&layer, &digest);
+    let (files, v) = go(routes, None, "deb-nokey").unwrap();
+    assert_eq!(files.len(), 1);
+    assert!(v.verified.contains("signed list was not consulted") && v.verified.contains("archive key is not pinned"), "{}", v.verified);
+    // the right key: fetched, checked, said
+    let (routes, _) = trixie_routes(&layer, &digest);
+    let fk = fake(routes);
+    let (_, v) = dist::fetch_debian_with(&fk, rel, &dl("deb-key"), &|_| Ok(()), &mut |_, _| {}, Some(DEB_KEY), DEB_NOW).unwrap();
+    assert!(v.verified.contains("has a good signature from the pinned Debian archive key"), "{}", v.verified);
+    assert!(fk.asked.lock().unwrap().iter().any(|(u, _)| u == "https://deb.debian.org/debian/dists/trixie/InRelease"));
+    // another key, an expired list, a missing list and the wrong suite: refused before any image byte is asked for
+    let (routes, _) = trixie_routes(&layer, &digest);
+    let e = go(routes, Some(DEB_OTHER), "deb-wrongkey").unwrap_err();
+    assert!(e.contains("signed list is not good") && e.contains("nothing was downloaded"), "{e}");
+    let (routes, _) = trixie_routes(&layer, &digest);
+    let late = dist::fetch_debian_with(&fake(routes), rel, &dl("deb-late"), &|_| Ok(()), &mut |_, _| {}, Some(DEB_KEY), DEB_NOW + 400 * 86_400).unwrap_err();
+    assert!(late.contains("expired"), "{late}");
+    let (mut routes, _) = trixie_routes(&layer, &digest);
+    routes.retain(|r| !r.0.contains("InRelease"));
+    assert!(go(routes, Some(DEB_KEY), "deb-nolist").unwrap_err().contains("could not be fetched"));
+    let (routes, _) = debian_routes(&layer, &digest, dist::arch());
+    let bookworm = dist::release("debian-12").unwrap();
+    let mut routes = routes;
+    routes.push(("https://deb.debian.org/debian/dists/bookworm/InRelease".into(), ok(DEB_INRELEASE)));
+    let e = dist::fetch_debian_with(&fake(routes), bookworm, &dl("deb-suite"), &|_| Ok(()), &mut |_, _| {}, Some(DEB_KEY), DEB_NOW).unwrap_err();
+    assert!(e.contains("is for trixie, not bookworm"), "{e}");
+    let asked = fake(vec![]);
+    let _ = asked;
 }
 
 #[test]
@@ -389,7 +450,9 @@ fn a_pinned_release_refuses_a_tag_that_moved() {
     let digest = format!("sha256:{}", sha(&layer));
     let (routes, _) = debian_routes(&layer, &digest, dist::arch());
     let rel = dist::Release { pin: Some("sha256:0000000000000000000000000000000000000000000000000000000000000001"), ..*dist::release("debian-12").unwrap() };
-    let err = dist::fetch(&fake(routes), &rel, &tmp("pin").join("dl"), &|_| Ok(()), &mut |_, _| {}).unwrap_err();
+    let dl = tmp("pin").join("dl");
+    std::fs::create_dir_all(&dl).unwrap();
+    let err = dist::fetch_debian_with(&fake(routes), &rel, &dl, &|_| Ok(()), &mut |_, _| {}, None, 0).unwrap_err();
     assert!(err.contains("not the pinned"), "{err}");
 }
 
@@ -1213,4 +1276,73 @@ fn a_download_with_no_signature_or_a_bad_one_is_refused_before_any_tarball_is_fe
     let _ = dist::fetch(&st, rel, &d.join("c"), &|_| Ok(()), &mut |_, _| {});
     assert!(st.asked.lock().unwrap().iter().any(|(u, _)| u.ends_with(&format!("base-{}.tar.gz", dist::arch()))), "the tarball was asked for");
     let _ = rootfs::remove_tree(&d);
+}
+
+/// Interop with the real GNU `tar`: a root made the way apt or debootstrap leave one (merged-usr symlinks, an absolute symlink, a hard
+/// link, a path longer than 100 bytes, an executable with its mode, a private folder), archived by the real tool in three formats and
+/// three compressions, becomes a sandbox with the same contents; a tarball the real tar made with a `..` member is refused whole.
+#[test]
+fn a_root_archived_by_the_real_tar_in_each_format_and_compression_imports_with_its_links_modes_and_long_names() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::process::Command;
+    let run = |c: &mut Command| {
+        let o = c.output().expect("tar, gzip, xz and zstd must be installed for the interop test");
+        assert!(o.status.success(), "{c:?}: {}", String::from_utf8_lossy(&o.stderr));
+    };
+    let data = tmp("realtar");
+    let src = data.join("src");
+    let long = format!("usr/share/doc/{}/{}", "a-very-long-folder-name".repeat(4), "file-with-a-long-name-too.txt");
+    assert!(long.len() > 100);
+    for d in ["usr/bin", "usr/lib", "etc", "root", "tmp", "usr/share/doc"] {
+        std::fs::create_dir_all(src.join(d)).unwrap();
+    }
+    std::fs::create_dir_all(src.join(&long).parent().unwrap()).unwrap();
+    std::fs::write(src.join("usr/bin/dash"), b"#!shell-ish\n".repeat(5000)).unwrap();
+    std::fs::set_permissions(src.join("usr/bin/dash"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::hard_link(src.join("usr/bin/dash"), src.join("usr/bin/sh")).unwrap();
+    std::fs::write(src.join("etc/os-release"), "ID=debian\n").unwrap();
+    std::fs::write(src.join(&long), "long name works\n").unwrap();
+    std::fs::set_permissions(src.join("root"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(src.join("tmp"), std::fs::Permissions::from_mode(0o1777)).unwrap();
+    std::os::unix::fs::symlink("usr/bin", src.join("bin")).unwrap();
+    std::os::unix::fs::symlink("/usr/lib", src.join("lib64")).unwrap();
+    for (fmt, comp, ext) in [("gnu", "gzip", "tar.gz"), ("pax", "xz", "tar.xz"), ("ustar", "zstd", "tar.zst")] {
+        let tb = data.join(format!("root-{fmt}.{ext}"));
+        let mut c = Command::new("tar");
+        c.args(["--owner=0", "--group=0", "--numeric-owner", &format!("--format={fmt}"), "-I", comp, "-cf"]).arg(&tb).arg("-C").arg(&src).arg(".");
+        if fmt == "ustar" {
+            // ustar cannot hold the long name: the real tool says so, so that archive is made without it
+            c = Command::new("tar");
+            c.args(["--owner=0", "--group=0", "--numeric-owner", "--format=ustar", "-I", comp, "-cf"]).arg(&tb).arg("-C").arg(&src).args(["--exclude=./usr/share", "."]);
+        }
+        run(&mut c);
+        let la = manager(&data, Arc::new(FakeRunner::new(&[])));
+        let name = format!("real-{fmt}");
+        let s = la.import(&name, &tb, false, &mut |_| {}).unwrap_or_else(|e| panic!("{fmt}/{comp}: {e}"));
+        assert_eq!(s.release, "imported", "{fmt}");
+        let root = la.rootfs_of(&name);
+        assert_eq!(std::fs::read(root.join("usr/bin/dash")).unwrap(), b"#!shell-ish\n".repeat(5000), "{fmt}");
+        assert_eq!(std::fs::metadata(root.join("usr/bin/dash")).unwrap().permissions().mode() & 0o7777, 0o755, "{fmt}: the executable bit stays");
+        assert_eq!(std::fs::read(root.join("usr/bin/sh")).unwrap().len(), 60000, "{fmt}: the hard link has its contents");
+        assert_eq!(std::fs::read_to_string(root.join("etc/os-release")).unwrap(), "ID=debian\n", "{fmt}");
+        assert_eq!(std::fs::read_link(root.join("bin")).unwrap(), Path::new("usr/bin"), "{fmt}: a merged-usr link stays a link");
+        assert!(std::fs::symlink_metadata(root.join("lib64")).unwrap().file_type().is_symlink(), "{fmt}: an absolute link stays a link inside the root");
+        assert_eq!(std::fs::metadata(root.join("root")).unwrap().permissions().mode() & 0o777, 0o700, "{fmt}: a private folder stays private");
+        assert_eq!(std::fs::metadata(root.join("tmp")).unwrap().permissions().mode() & 0o7777, 0o1777, "{fmt}: the sticky bit stays");
+        if fmt != "ustar" {
+            assert_eq!(std::fs::read_to_string(root.join(&long)).unwrap(), "long name works\n", "{fmt}: a path over 100 bytes");
+        }
+        // nothing was written outside the sandbox's own folder
+        assert!(std::fs::metadata(root.join("etc/os-release")).unwrap().dev() == std::fs::metadata(&data).unwrap().dev());
+    }
+    // a member that climbs out, made by the real tar, is refused and leaves nothing
+    let evil = data.join("evil");
+    std::fs::create_dir_all(evil.join("sub")).unwrap();
+    std::fs::write(evil.join("escape.txt"), "x").unwrap();
+    let bad = data.join("bad.tar.gz");
+    run(Command::new("tar").args(["-czPf"]).arg(&bad).arg("-C").arg(evil.join("sub")).arg("../escape.txt"));
+    let la = manager(&data, Arc::new(FakeRunner::new(&[])));
+    assert!(la.import("evil", &bad, false, &mut |_| {}).is_err());
+    assert!(!la.dir_of("evil").exists() && !data.join("linuxapps/escape.txt").exists());
+    let _ = rootfs::remove_tree(&data);
 }

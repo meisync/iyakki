@@ -14,8 +14,7 @@
 //! challenge works once on one connection; a revoked device is refused and an open session of it is closed within a second; failed
 //! tokens, signatures and passwords from one address are rate limited; nothing secret is logged or audited (no token, password or signature).
 
-use crate::adapt::Controller;
-use crate::codec::{Caps, Opts, Streamer};
+use crate::picturepump::PicturePump;
 use crate::input::{self, Input};
 use crate::screen::{Gate, LoginError, Screen};
 use crate::ws::{self, Message, Parser};
@@ -29,6 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod files;
 mod media;
 
 /// Failed tokens, signatures and passwords from one address in a window before it is refused.
@@ -101,6 +101,8 @@ pub struct ClientEndpoint {
     next_open: AtomicU64,
     /// The media half (sound, clipboard, camera frames, the client's own devices); none: those messages answer `unsupported`.
     media: Option<Arc<iyakki_agent::clientmedia::MediaHost>>,
+    /// The cloud tenant this endpoint serves (one pod per tenant, docs/development/CLOUD-MULTITENANT-PLAN.md section 3.1); none on a machine.
+    tenant: Option<String>,
 }
 
 fn now_secs() -> i64 {
@@ -114,7 +116,7 @@ impl ClientEndpoint {
     }
 
     pub fn with_limit(data: &Path, broker: Arc<Broker>, calls: Arc<dyn CallHandler>, audit: Arc<dyn Fn(&str, &str, &str) + Send + Sync>, fails: FailLimit) -> ClientEndpoint {
-        ClientEndpoint { data: data.to_path_buf(), broker, calls, audit, fails, ring: Mutex::new(EventRing::new(EVENT_RING)), open: Mutex::new(HashMap::new()), next_open: AtomicU64::new(1), media: None }
+        ClientEndpoint { data: data.to_path_buf(), broker, calls, audit, fails, ring: Mutex::new(EventRing::new(EVENT_RING)), open: Mutex::new(HashMap::new()), next_open: AtomicU64::new(1), media: None, tenant: None }
     }
 
     /// Serve the media half too (EXPERIMENTAL): the hello then offers `audio.out`, `clipboard.text`, `camera.frames`, `client.camera` and
@@ -122,6 +124,23 @@ impl ClientEndpoint {
     pub fn with_media(mut self, media: Arc<iyakki_agent::clientmedia::MediaHost>) -> ClientEndpoint {
         self.media = Some(media);
         self
+    }
+
+    /// Serve one cloud tenant (D-CLIENT-TENANT): the links, the devices and the tokens live in this tenant's own data folder, so another
+    /// tenant's endpoint never knows them; every audit line says which tenant; and a device belongs to the person who made its link, so another
+    /// person of the tenant cannot sign in on it (each person adds their own devices).
+    pub fn with_tenant(mut self, tenant: &str) -> ClientEndpoint {
+        let clean: String = tenant.chars().filter(|c| c.is_ascii_graphic()).take(64).collect();
+        let audit = self.audit.clone();
+        let t = clean.clone();
+        self.audit = Arc::new(move |who: &str, action: &str, detail: &str| audit(who, action, &format!("{detail} tenant={t}")));
+        self.tenant = Some(clean);
+        self
+    }
+
+    /// The tenant this endpoint serves, if it is a cloud one.
+    pub fn tenant(&self) -> Option<&str> {
+        self.tenant.as_deref()
     }
 
     /// The experimental switch (Settings, Remote access). Off: every route of the endpoint answers 404.
@@ -181,6 +200,9 @@ impl ClientEndpoint {
             self.unregister(id);
         }
         if let Some(screen) = s.screen.as_mut() {
+            if s.app.take().is_some() {
+                screen.app_close();
+            }
             screen.viewing(false);
         }
         if std::mem::take(&mut s.counted_screen) {
@@ -192,12 +214,6 @@ impl ClientEndpoint {
     }
 }
 
-struct Pump {
-    ctl: Controller,
-    st: Streamer,
-    caps: Caps,
-    armed: bool,
-}
 
 struct Session<'a> {
     ep: &'a ClientEndpoint,
@@ -208,7 +224,7 @@ struct Session<'a> {
     open: Option<(u64, Arc<AtomicBool>)>,
     person: Option<String>,
     screen: Option<Box<dyn Screen>>,
-    pump: Option<Pump>,
+    pump: Option<PicturePump>,
     sent_seq: u64,
     sign_in_fails: u32,
     out: Vec<u8>,
@@ -218,15 +234,24 @@ struct Session<'a> {
     media: media::MediaState,
     /// This session was counted as one that sees the screen (undone when it ends).
     counted_screen: bool,
+    /// The SDK app shown in display-list mode, if one is open (`app_open`).
+    app: Option<String>,
+    /// File transfer (`files.rs`): the upload and the download that are going.
+    files: files::FileState,
 }
 
 fn say(out: &mut Vec<u8>, m: &ServerMsg) {
     out.extend(ws::text_frame(&proto::encode_server(m)));
 }
 
+/// A message of the display-list mode (`proto::AppMsg`).
+fn say_app(out: &mut Vec<u8>, m: &proto::AppMsg) {
+    out.extend(ws::text_frame(&proto::encode_app(m)));
+}
+
 impl<'a> Session<'a> {
     fn new(ep: &'a ClientEndpoint, peer: &'a str) -> Session<'a> {
-        Session { ep, peer, negotiated: false, challenge: None, device: None, open: None, person: None, screen: None, pump: None, sent_seq: 0, sign_in_fails: 0, out: Vec::new(), close: false, agreed: Vec::new(), media: media::MediaState::default(), counted_screen: false }
+        Session { ep, peer, negotiated: false, challenge: None, device: None, open: None, person: None, screen: None, pump: None, sent_seq: 0, sign_in_fails: 0, out: Vec::new(), close: false, agreed: Vec::new(), media: media::MediaState::default(), counted_screen: false, app: None, files: Default::default() }
     }
 
     /// Say why and end the connection.
@@ -307,6 +332,7 @@ impl<'a> Session<'a> {
                 self.pump_screen(now);
                 self.pump_events();
                 self.pump_media();
+                self.pump_files();
             }
             if self.close {
                 self.out.extend(ws::close_frame());
@@ -329,8 +355,12 @@ impl<'a> Session<'a> {
                     return self.refuse(ErrorCode::BadSequence, "hello was already said");
                 }
                 let mut server: Vec<&str> = proto::cap::SERVER.to_vec();
+                // display-list mode (ADDITIVE): offered to every client; a screen with no apps of its own answers `unsupported`
+                server.extend_from_slice(proto::cap::SERVER_UI);
                 if self.ep.media.is_some() {
                     server.extend_from_slice(proto::cap::SERVER_MEDIA);
+                    // file transfer rides on the media half's cards and broker
+                    server.extend_from_slice(proto::cap::SERVER_FILES);
                 }
                 match proto::negotiate(v, min_v, &offered, &needed, &server) {
                     Ok(caps) => match link::new_challenge() {
@@ -354,7 +384,7 @@ impl<'a> Session<'a> {
                 let Some(screen) = self.screen.as_mut() else { return self.complain(ErrorCode::NotSignedIn, "sign in first") };
                 screen.set_stream(true);
                 screen.viewing(true);
-                self.pump = Some(Pump { ctl: Controller::new(now_ms), st: Streamer::new(), caps: Caps { deflate }, armed: false });
+                self.pump = Some(PicturePump::new(now_ms, deflate));
                 say(&mut self.out, &ServerMsg::PictureOk);
             }
             ClientMsg::Ack { seq } => {
@@ -387,6 +417,16 @@ impl<'a> Session<'a> {
             ClientMsg::CameraClose { unit } => self.camera_close(&unit),
             ClientMsg::OfferOpen { kind } => self.offer_open(&kind),
             ClientMsg::OfferClose { kind } => self.offer_close(&kind),
+            ClientMsg::AppOpen { app, w, h } => self.app_open(&app, w, h),
+            ClientMsg::AppInput { lines } => self.app_input(&lines),
+            ClientMsg::AppClose => self.app_close("closed"),
+            ClientMsg::FileList { dir } => self.file_list(&dir),
+            ClientMsg::FileGet { id, path } => self.file_get(id, &path),
+            ClientMsg::FilePut { id, path, size } => self.file_put(id, &path, size),
+            ClientMsg::FileEnd { id } => self.file_end(id),
+            ClientMsg::FileCancel { id } => self.file_cancel(id),
+            // a message of a type a newer client added: ignored and reported (charter rule 2), the connection goes on
+            ClientMsg::Unknown => self.complain(ErrorCode::Unsupported, "this instance does not know that message type (the client is newer)"),
         }
     }
 
@@ -474,6 +514,11 @@ impl<'a> Session<'a> {
         if self.ep.fails.blocked(self.peer) {
             return self.refuse(ErrorCode::RateLimited, "too many failed tries, wait a minute");
         }
+        // a cloud tenant: a device belongs to the person who made its link (checked before the password is looked at, so nothing is learnt)
+        if self.ep.tenant.is_some() && dev.by != user.trim() {
+            (self.ep.audit)("", "client.signin.refused", &format!("other_person {}", dev.id));
+            return self.complain(ErrorCode::RoleDenied, "this device was added by another person of this tenant");
+        }
         match gate.login(user, password) {
             Ok(screen) => {
                 let person = user.trim().to_string();
@@ -538,6 +583,70 @@ impl<'a> Session<'a> {
         }
     }
 
+    fn app_err(&mut self, code: &str, message: &str) {
+        say_app(&mut self.out, &proto::AppMsg::AppErr { code: code.into(), message: message.into() });
+    }
+
+    /// One frame of the open app to the client; a list over the bound is refused in words (the app is closed: it cannot be shown here).
+    fn app_frame(&mut self, app: &str, text: String) {
+        if text.len() > proto::MAX_APP_LIST {
+            self.app_close("too_big");
+            return self.app_err("too_big", "that app's picture is too big to send");
+        }
+        say_app(&mut self.out, &proto::AppMsg::AppList { app: app.into(), text });
+    }
+
+    fn app_open(&mut self, app: &str, w: u32, h: u32) {
+        if self.person.is_none() {
+            return self.complain(ErrorCode::NotSignedIn, "sign in first");
+        }
+        if !self.agreed.iter().any(|c| c == proto::cap::DISPLAY_LIST) {
+            return self.app_err("unsupported", "the display-list mode was not agreed in hello");
+        }
+        if app.is_empty() || app.len() > 64 || !app.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
+            return self.app_err("bad_request", "that app name is not understood");
+        }
+        let Some(screen) = self.screen.as_mut() else { return self.complain(ErrorCode::NotSignedIn, "sign in first") };
+        match screen.app_open(app, w, h) {
+            Ok(text) => {
+                self.app = Some(app.to_string());
+                let who = self.person.clone().unwrap_or_default();
+                (self.ep.audit)(&who, "client.app.open", app);
+                self.app_frame(app, text);
+            }
+            Err(e) => self.app_err(&e.code, &e.message),
+        }
+    }
+
+    fn app_input(&mut self, lines: &str) {
+        let Some(app) = self.app.clone() else { return self.app_err("not_open", "no app is open") };
+        let Some(screen) = self.screen.as_mut() else { return self.complain(ErrorCode::NotSignedIn, "sign in first") };
+        match screen.app_input(lines) {
+            Ok((text, left)) => {
+                if left {
+                    // the person left the app with Back: the last frame is still sent, then the app is over
+                    self.app_frame(&app, text);
+                    self.app = None;
+                    say_app(&mut self.out, &proto::AppMsg::AppClosed { app, reason: "left".into() });
+                } else {
+                    self.app_frame(&app, text);
+                }
+            }
+            Err(e) => self.app_err(&e.code, &e.message),
+        }
+    }
+
+    /// Close the open app (the client asked, or it cannot be shown): the machine's picture carries on.
+    fn app_close(&mut self, reason: &str) {
+        let Some(app) = self.app.take() else { return self.app_err("not_open", "no app is open") };
+        if let Some(screen) = self.screen.as_mut() {
+            screen.app_close();
+        }
+        let who = self.person.clone().unwrap_or_default();
+        (self.ep.audit)(&who, "client.app.close", &app);
+        say_app(&mut self.out, &proto::AppMsg::AppClosed { app, reason: reason.into() });
+    }
+
     fn pump_screen(&mut self, now: u64) {
         let Some(screen) = self.screen.as_mut() else { return };
         let _ = screen.step();
@@ -547,21 +656,8 @@ impl<'a> Session<'a> {
             return;
         }
         let Some(p) = self.pump.as_mut() else { return };
-        p.ctl.tick(now);
-        if let Some(px) = screen.take_pixels() {
-            p.armed = false;
-            p.st.set_source(px.w as usize, px.h as usize, px.rgba);
-        }
-        if p.ctl.can_send(now) && p.st.wants_encode(now) {
-            let o = Opts { level: p.ctl.level(), caps: p.caps, budget: p.ctl.budget(), now_ms: now };
-            if let Some(e) = p.st.encode(&o) {
-                p.ctl.on_send(e.seq, e.msg.len(), now);
-                self.out.extend(ws::binary_frame(&proto::binary(proto::STREAM_PICTURE, &e.msg)));
-            }
-        }
-        if !p.armed && p.ctl.can_send(now) {
-            p.armed = true;
-            screen.arm();
+        if let Some(msg) = p.turn(&mut **screen, now) {
+            self.out.extend(ws::binary_frame(&proto::binary(proto::STREAM_PICTURE, &msg)));
         }
     }
 

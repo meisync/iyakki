@@ -471,7 +471,7 @@ mod tests {
         app.handle(&Event::Key(Key::Right), &cx); // user -> guest
         app.handle(&Event::Key(Key::Enter), &cx);
         assert_eq!(app.mode(), &Mode::List);
-        let rec = cx.store.lock().unwrap().get("carol").cloned().unwrap();
+        let rec = cx.store.lock().unwrap().get("carol").unwrap();
         assert_eq!(rec.role, Role::Guest);
         assert!(cx.audit.recent(5).iter().any(|l| l.contains("user.create") && l.contains("carol")));
         // duplicate is refused and the form stays open with the reason shown
@@ -512,7 +512,7 @@ mod tests {
         app.handle(&Event::Row(1), &cx); // click dave
         // user role has MCP; toggle 3 turns it off, again turns it back on
         app.handle(&Event::Key(Key::Char('3')), &cx);
-        let dave = cx.store.lock().unwrap().get("dave").cloned().unwrap();
+        let dave = cx.store.lock().unwrap().get("dave").unwrap();
         assert!(!dave.policy().allows_app(PApp::Mcp));
         app.handle(&Event::Key(Key::Char('3')), &cx);
         assert!(cx.store.lock().unwrap().get("dave").unwrap().policy().allows_app(PApp::Mcp));
@@ -576,8 +576,8 @@ mod tests {
         assert_eq!(app.mode(), &Mode::List);
         assert!(cx.audit.verify().is_ok() && !cx.audit.recent(5).iter().any(|l| l.contains("audit.restart")), "an intact chain is left alone");
         cx.audit.record("root", "login", "ok");
-        let text = std::fs::read_to_string(cx.audit.path()).unwrap();
-        std::fs::write(cx.audit.path(), text.replacen("\"login\"", "\"logout\"", 1)).unwrap();
+        let text = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
+        std::fs::write(cx.audit.path_buf(), text.replacen("\"login\"", "\"logout\"", 1)).unwrap();
         assert!(cx.audit.verify().is_err());
         app.handle(&Event::Key(Key::Char('l')), &cx);
         app.handle(&Event::Key(Key::Char('N')), &cx);

@@ -458,6 +458,15 @@ impl Setup {
         if card.item == Item::VoicePack && matches!(card.state, CardState::Installed | CardState::Earlier) && admin {
             v.push(Btn { label: "Remove (undo)".into(), accent: ERR, ev: Some(Event::Tab(REMOVE + idx)) });
         }
+        if card.item == Item::DataScience && admin && matches!(card.state, CardState::Installed) {
+            let st = self.ds_state.as_ref().map(|s| s.0.as_str());
+            if matches!(st, Some("current" | "upgrade")) {
+                v.push(Btn { label: "Verify (run the self-test)".into(), accent: ACCENT, ev: Some(Event::Tab(VERIFY + idx)) });
+            }
+            if st == Some("upgrade") {
+                v.push(Btn { label: "Upgrade to this IYAKKI's pins".into(), accent: ACCENT, ev: Some(Event::Tab(UPGRADE + idx)) });
+            }
+        }
         if card.item != Item::VoicePack && self.can_remove(card.item) {
             v.push(Btn { label: "Remove (r)".into(), accent: ERR, ev: Some(Event::Tab(remove::RM_OPEN + idx)) });
         }
@@ -522,6 +531,9 @@ impl Setup {
         row(g, &mut v, "Size and time", &size_text(item), MUTED);
         row(g, &mut v, "Licence", item.licence(), MUTED);
         row(g, &mut v, "Where it goes", where_text(item), MUTED);
+        if let (Item::DataScience, Some((_, t))) = (item, &self.ds_state) {
+            row(g, &mut v, "Toolkit", t, MUTED);
+        }
         if let Some(t) = self.deploy_text(item) {
             row(g, &mut v, "Deploys to", &t, if self.cluster.as_ref().is_some_and(|c| !c.kind.is_local()) { AMBER } else { MUTED });
         }

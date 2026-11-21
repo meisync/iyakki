@@ -7,9 +7,9 @@
 //! [`crate::credguard`] before anything is indexed, the oldest low-value chunks are pruned past a cap, and the whole
 //! history can be forgotten per workspace or per session.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use crate::kb::KnowledgeBase;
+use crate::kb::KbSource;
 pub use iyakki_shared::history::{WorkspaceMemory};
 
 /// Longest text of one chunk (characters).
@@ -45,7 +45,7 @@ pub struct Snippet {
 
 #[derive(Clone)]
 pub struct History {
-    kb: Arc<Mutex<KnowledgeBase>>,
+    kb: Arc<dyn KbSource>,
     ns: String,
     session: String,
 }
@@ -64,7 +64,7 @@ fn parse_tag(title: &str) -> (String, String, String, i64) {
 
 impl History {
     /// `workspace` is the workspace's name or folder; `session` the chat's id (empty when there is none).
-    pub fn new(kb: Arc<Mutex<KnowledgeBase>>, user: &str, workspace: &str, session: Option<&str>) -> History {
+    pub fn new(kb: Arc<dyn KbSource>, user: &str, workspace: &str, session: Option<&str>) -> History {
         History { kb, ns: format!("workspace/{}/{}", slug(user), slug(workspace)), session: session.map(slug).unwrap_or_default() }
     }
 
@@ -80,12 +80,12 @@ impl History {
             return;
         }
         let tag = format!("{}|{}|{}|{}", slug(kind), row.replace('|', "/"), self.session, crate::clock::now_unix());
-        let mut kb = self.kb.lock().unwrap_or_else(|e| e.into_inner());
+        let kb = &*self.kb;
         let _ = kb.add_document(&self.ns, &tag, "workspace history", &format!("{kind} {row}\n{body}"), Default::default());
-        self.prune(&mut kb);
+        self.prune(kb);
     }
 
-    fn prune(&self, kb: &mut KnowledgeBase) {
+    fn prune(&self, kb: &dyn KbSource) {
         let mut docs = kb.docs(&self.ns);
         if docs.len() <= MAX_DOCS {
             return;
@@ -102,7 +102,7 @@ impl History {
         if query.trim().is_empty() || k == 0 {
             return vec![];
         }
-        let hits = self.kb.lock().unwrap_or_else(|e| e.into_inner()).search_weighted(&[(self.ns.as_str(), 1.0)], query, k * 4 + 8);
+        let hits = self.kb.search_weighted(&[(self.ns.clone(), 1.0)], query, k * 4 + 8);
         let mut out = Vec::new();
         for h in hits {
             let (kd, row, session, ts) = parse_tag(&h.title);
@@ -123,15 +123,15 @@ impl History {
 
     /// The newest chunk of a kind in this workspace (for example the last `summary` of an earlier session).
     pub fn latest(&self, kind: &str) -> Option<Snippet> {
-        let kb = self.kb.lock().unwrap_or_else(|e| e.into_inner());
+        let kb = &*self.kb;
         let doc = kb.docs(&self.ns).into_iter().filter(|d| parse_tag(&d.title).0 == kind).max_by_key(|d| (parse_tag(&d.title).3, d.added))?;
-        let hit = kb.search_weighted(&[(self.ns.as_str(), 1.0)], kind, 400).into_iter().find(|h| h.doc_id == doc.id)?;
+        let hit = kb.search_weighted(&[(self.ns.clone(), 1.0)], kind, 400).into_iter().find(|h| h.doc_id == doc.id)?;
         let (kd, row, session, ts) = parse_tag(&hit.title);
         Some(Snippet { id: format!("{}#{}", hit.doc_id, hit.chunk_idx), kind: kd, row, session, ts, text: hit.text.split_once('\n').map_or(hit.text.clone(), |x| x.1.to_string()) })
     }
 
     pub fn len(&self) -> usize {
-        self.kb.lock().unwrap_or_else(|e| e.into_inner()).docs(&self.ns).len()
+        self.kb.docs(&self.ns).len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -140,7 +140,7 @@ impl History {
 
     /// Forget everything of this workspace (the IDE's "forget history").
     pub fn forget_workspace(&self) {
-        let _ = self.kb.lock().unwrap_or_else(|e| e.into_inner()).drop_namespace(&self.ns);
+        let _ = self.kb.drop_namespace(&self.ns);
     }
 
     /// Forget what the session this history was made for did.
@@ -153,7 +153,7 @@ impl History {
     /// Forget what one session did (when its chat is deleted).
     pub fn forget_session(&self, session: &str) {
         let s = slug(session);
-        let mut kb = self.kb.lock().unwrap_or_else(|e| e.into_inner());
+        let kb = &*self.kb;
         for d in kb.docs(&self.ns) {
             if parse_tag(&d.title).2 == s {
                 let _ = kb.remove_document(&self.ns, &d.id);
@@ -162,10 +162,10 @@ impl History {
     }
 
     /// Forget what one chat did in every workspace of this person (the chat does not know its workspace any more).
-    pub fn forget_session_everywhere(kb: &Arc<Mutex<KnowledgeBase>>, user: &str, session: &str) -> usize {
+    pub fn forget_session_everywhere(kb: &dyn KbSource, user: &str, session: &str) -> usize {
         let prefix = format!("workspace/{}/", slug(user));
         let s = slug(session);
-        let mut kb = kb.lock().unwrap_or_else(|e| e.into_inner());
+        
         let mut n = 0;
         for ns in kb.namespaces().into_iter().filter(|n| n.starts_with(&prefix)) {
             for d in kb.docs(&ns) {
@@ -178,9 +178,9 @@ impl History {
     }
 
     /// The workspaces of `user` that have a history: (id, workspace name as stored, entries, chats).
-    pub fn workspaces_of(kb: &Arc<Mutex<KnowledgeBase>>, user: &str) -> Vec<WorkspaceMemory> {
+    pub fn workspaces_of(kb: &dyn KbSource, user: &str) -> Vec<WorkspaceMemory> {
         let prefix = format!("workspace/{}/", slug(user));
-        let kb = kb.lock().unwrap_or_else(|e| e.into_inner());
+        
         let mut out = Vec::new();
         for ns in kb.namespaces().into_iter().filter(|n| n.starts_with(&prefix)) {
             let docs = kb.docs(&ns);
@@ -197,9 +197,9 @@ impl History {
     }
 
     /// The chats that left entries in one workspace of `user` (by the workspace name `workspaces_of` gave): (chat id as stored, entries).
-    pub fn sessions_of(kb: &Arc<Mutex<KnowledgeBase>>, user: &str, workspace: &str) -> Vec<(String, usize)> {
+    pub fn sessions_of(kb: &dyn KbSource, user: &str, workspace: &str) -> Vec<(String, usize)> {
         let ns = format!("workspace/{}/{}", slug(user), slug(workspace));
-        let kb = kb.lock().unwrap_or_else(|e| e.into_inner());
+        
         let mut m: std::collections::BTreeMap<String, usize> = Default::default();
         for d in kb.docs(&ns) {
             let s = parse_tag(&d.title).2;
@@ -216,19 +216,19 @@ impl History {
     }
 
     /// Forget all of one workspace's history (the person's own namespace only); how many entries went.
-    pub fn forget_workspace_of(kb: &Arc<Mutex<KnowledgeBase>>, user: &str, workspace: &str) -> usize {
+    pub fn forget_workspace_of(kb: &dyn KbSource, user: &str, workspace: &str) -> usize {
         let ns = format!("workspace/{}/{}", slug(user), slug(workspace));
-        let mut kb = kb.lock().unwrap_or_else(|e| e.into_inner());
+        
         let n = kb.docs(&ns).len();
         let _ = kb.drop_namespace(&ns);
         n
     }
 
     /// Forget what one chat did in one workspace of `user`; how many entries went.
-    pub fn forget_session_of(kb: &Arc<Mutex<KnowledgeBase>>, user: &str, workspace: &str, session: &str) -> usize {
+    pub fn forget_session_of(kb: &dyn KbSource, user: &str, workspace: &str, session: &str) -> usize {
         let ns = format!("workspace/{}/{}", slug(user), slug(workspace));
         let s = slug(session);
-        let mut kb = kb.lock().unwrap_or_else(|e| e.into_inner());
+        
         let mut n = 0;
         for d in kb.docs(&ns) {
             if parse_tag(&d.title).2 == s && kb.remove_document(&ns, &d.id).is_ok() {
@@ -255,6 +255,8 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kb::KnowledgeBase;
+    use std::sync::Mutex;
 
     fn kb() -> Arc<Mutex<KnowledgeBase>> {
         Arc::new(Mutex::new(KnowledgeBase::in_memory(crate::kb::default_embedder())))

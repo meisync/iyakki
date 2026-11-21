@@ -98,6 +98,27 @@ fn a_helper_that_ran_long_enough_starts_the_failure_count_over() {
 }
 
 #[test]
+fn an_account_without_a_uid_in_its_setting_is_allowed_as_its_own_user_and_not_as_the_core() {
+    let passwd = "root:x:0:0:root:/root:/bin/sh\n# comment\nada:x:1001:1001::/home/ada:/bin/sh\nbob:x:1002:1002::/home/bob:/bin/sh\nbroken:x:notanumber:1::/:/bin/sh\n";
+    assert_eq!((account_uid(passwd, "ada"), account_uid(passwd, "root"), account_uid(passwd, "nobody"), account_uid(passwd, "broken"), account_uid(passwd, "ad")), (Some(1001), Some(0), None, None, None));
+    #[cfg(feature = "headless")]
+    {
+        let data = temp("acct-uid");
+        let exe = PathBuf::from("/opt/iyakki");
+        for (who, uid) in [("ada", None), ("bob", Some(7)), ("eve", None)] {
+            let sock = format!("/run/x/{who}.sock");
+            iyakki_agent::vpn_helper::write_setting(&data.join("vpn").join(who), &iyakki_agent::vpn_helper::HelperSetting { enabled: true, socket: sock, allow_uid: uid }).unwrap();
+        }
+        let v = wanted_with(&exe, "/sys", &data, 0, passwd);
+        let uid_of = |sock: &str| v.iter().find(|s| s.args.last().map(String::as_str) == Some(sock)).map(|s| s.args[2].clone());
+        assert_eq!(uid_of("/run/x/ada.sock").as_deref(), Some("1001"), "the account's own id, not the core's (root)");
+        assert_eq!(uid_of("/run/x/bob.sock").as_deref(), Some("7"), "an id written in the setting wins");
+        assert_eq!(uid_of("/run/x/eve.sock").as_deref(), Some("0"), "no passwd entry: the core's own id as before");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+}
+
+#[test]
 fn settings_decide_what_is_started_and_the_reconciler_follows_them() {
     let data = temp("wanted");
     let exe = PathBuf::from("/opt/iyakki");

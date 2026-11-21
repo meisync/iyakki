@@ -7,7 +7,7 @@ fn a_live_page_never_repaints_over_the_open_consent_dialog() {
     ask_for(&mut a, &cx, 2);
     let (w, h) = (1280u32, 720u32);
     let mut g = frame(&mut a, &cx, w, h);
-    let base = g.pm.data().to_vec();
+    let base = g.pm_mut().data().to_vec();
     let backdrop = g.hits.iter().find(|x| x.label == "backdrop").map(|x| x.rect).expect("the scrim");
     let s = (w as f32 / 1280.0).min(h as f32 / 720.0).clamp(0.6, 3.0);
     let (dw, dh) = ((640.0 * s).min(backdrop.w - 40.0 * s), (250.0 * s).min(backdrop.h - 16.0 * s));
@@ -21,7 +21,7 @@ fn a_live_page_never_repaints_over_the_open_consent_dialog() {
                 live += 1;
                 if a.live_draw(&mut g).is_some() {
                     // the backend presents exactly this buffer: it must still be the scene with scrim and dialog
-                    assert_eq!(g.pm.data(), &base[..], "a partial repaint reached the screen under the dialog");
+                    assert_eq!(g.pm_mut().data(), &base[..], "a partial repaint reached the screen under the dialog");
                 }
             }
             Redraw::Full => {

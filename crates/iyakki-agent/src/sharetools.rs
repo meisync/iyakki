@@ -21,7 +21,7 @@ use crate::sharedfolder::{Access, Draft, Mode, Scope, ShareCfg, ShareInfo, Share
 pub use iyakki_shared::sharetools::{PROMPT_RULE};
 
 
-pub const WRITE_TOOLS: [&str; 5] = ["share_folder", "share_create", "share_start", "share_stop", "share_delete"];
+pub const WRITE_TOOLS: [&str; 6] = ["share_folder", "share_create", "share_start", "share_stop", "share_delete", "share_publish"];
 /// The one-step tool (F-SHARE-07, default of D-SHARE-07): make and start a read-only share in one card. Only `link` or `local` access, never `open`, a password or uploads.
 pub const ONE_STEP: &str = "share_folder";
 pub const READ_TOOL: &str = "share_list";
@@ -41,6 +41,11 @@ pub trait Api: Send + Sync {
     fn delete(&self, id: &str) -> Result<(), String>;
     /// The password stored under this vault entry of the person (never shown to the assistant).
     fn vault_password(&self, entry: &str) -> Result<String, String>;
+    /// Add a domain route `host` -> this share's port (the domain listener serves it; HTTPS and a `.local` name come from there, D-SHARE-07).
+    /// Administrators only; the default refuses.
+    fn publish(&self, _port: u16, _host: &str) -> Result<String, String> {
+        Err("publishing a share under a name uses the domain listener, which only an administrator manages".into())
+    }
 }
 
 /// The real manager and the person's vault.
@@ -48,6 +53,8 @@ pub struct RealApi {
     pub shares: Arc<Shares>,
     pub svc: Arc<crate::services::Services>,
     pub user: String,
+    /// The domain manager, for an administrator (`share_publish`).
+    pub domains: Option<Arc<crate::domains::Manager>>,
 }
 
 impl Api for RealApi {
@@ -73,9 +80,33 @@ impl Api for RealApi {
     fn delete(&self, id: &str) -> Result<(), String> {
         self.shares.delete(id)
     }
+    fn publish(&self, port: u16, host: &str) -> Result<String, String> {
+        let m = self.domains.as_ref().ok_or("publishing a share under a name uses the domain listener, which only an administrator manages")?;
+        publish_route(m.as_ref(), port, host)
+    }
     fn vault_password(&self, entry: &str) -> Result<String, String> {
         self.svc.user_get(&self.user, entry).map(|z| z.to_string()).map_err(|_| format!("there is no usable vault entry \"{entry}\" (the vault may be locked). Ask the person to store the password with vault_request, then pass its name as password_entry."))
     }
+}
+
+/// The route `host` -> `127.0.0.1:port` over plain http. The share keeps its own secret link or password: the route is public because
+/// the share is what asks, not because the route lets anyone in a second time.
+pub fn publish_route(m: &crate::domains::Manager, port: u16, host: &str) -> Result<String, String> {
+    use crate::cloudroute::{Access as RAccess, Route, RouteTable, Scheme, Target};
+    let route = Route { host: host.to_ascii_lowercase(), path_prefix: "/".into(), target: Target::Local { port }, scheme: Scheme::Http, listen: None, websocket: false, redirect_http: false, cert: None, access: RAccess::Public, client_ca: None };
+    RouteTable { routes: vec![route.clone()], ingress_class: None }.check(&[])?;
+    m.save_route(None, route, None)?;
+    let st = m.status();
+    Ok(if st.running { format!("The domain listener is on: {host} reaches the share through it.") } else { format!("The domain listener is OFF, so {host} does not answer yet: turn it on in Settings -> Domains (domains_listener_set); opening the firewall is a separate step.") })
+}
+
+/// `docs` for “My Docs!”: a name that is one DNS label, for the default host of `share_publish`.
+fn label_of(name: &str) -> String {
+    let mut s: String = name.to_ascii_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    while s.contains("--") {
+        s = s.replace("--", "-");
+    }
+    s.trim_matches('-').chars().take(40).collect()
 }
 
 pub struct ShareTools {
@@ -191,6 +222,23 @@ impl ShareTools {
         Ok(d)
     }
 
+    /// The share and the host name a `share_publish` call means. A share for this computer only is refused: the domain listener
+    /// would hand it to the network.
+    fn publish_target(&self, args: &Value) -> Result<(ShareInfo, String), String> {
+        let i = self.find(args)?;
+        if i.cfg.access == Access::Local {
+            return Err(format!("“{}” is for this computer only; publishing it under a name would make it reachable from the network. Change it to a secret link or a password first.", i.cfg.name));
+        }
+        let host = match text(args, "host") {
+            h if h.is_empty() => format!("{}.local", label_of(&i.cfg.name)),
+            h => h.to_ascii_lowercase(),
+        };
+        if label_of(&i.cfg.name).is_empty() && text(args, "host").is_empty() {
+            return Err("give a host name, for example docs.local".into());
+        }
+        Ok((i, host))
+    }
+
     fn address_lines(&self, info: &ShareInfo) -> String {
         let c = &info.cfg;
         let urls: Vec<String> = info.urls.iter().map(|u| masked(u, &c.token)).collect();
@@ -232,6 +280,15 @@ impl ShareTools {
                     expiry(&c),
                     c.port,
                     if c.access == Access::Password { format!("\n• The password is read from your vault entry {} (the assistant never sees it).", text(args, "password_entry")) } else { String::new() }
+                ))
+            }
+            "share_publish" => {
+                let (i, host) = self.publish_target(args)?;
+                Ok(format!(
+                    "Publish the shared folder “{}” under the name {host}.\n• Adds the domain route {host} -> this share (port {}), plain http.\n• {} still decides who gets in; the name only gives it a shorter address.\n• The name is announced on the local network while the domain listener runs (a `.local` name); the listener and the firewall opening are separate steps this does not change.\n• Remove it later with domain_route_remove.",
+                    i.cfg.name,
+                    i.cfg.port,
+                    match i.cfg.access { Access::Password => "The share's password", Access::Open => "Nothing (the share is open to everyone who reaches it)", _ => "The share's secret link" },
                 ))
             }
             "share_start" => {
@@ -306,6 +363,11 @@ impl Tools for ShareTools {
                 "expires": {"type": "string", "enum": ["1 hour", "1 day", "7 days", "never"], "description": "How long a start lasts (default 1 day)."}
             }, "required": ["name", "folder"]}),
         ));
+        v.push(ask(
+            "share_publish",
+            "Give a shared folder a name on the network in one step: adds the domain route (for example docs.local) to the share. Administrators only. The share's own secret link or password still decides who gets in; a share for this computer only is refused. The person approves a card.",
+            json!({"type": "object", "properties": {"share": {"type": "string", "description": "The share's id or name."}, "host": {"type": "string", "description": "The name to serve, for example docs.local (default: the share's name followed by .local)."}}, "required": ["share"]}),
+        ));
         v.push(ask("share_start", "Start a shared folder so it can be opened. The person approves a card with who can open it and the address.", share.clone()));
         v.push(ask("share_stop", "Stop a shared folder (it is kept).", share.clone()));
         v.push(ask("share_delete", "Delete a shared folder (stops it; the files are not touched).", share));
@@ -351,6 +413,12 @@ impl Tools for ShareTools {
                 let i = self.find(args)?;
                 self.api.stop(&i.cfg.id);
                 Ok(format!("Stopped “{}”; it is kept.", i.cfg.name))
+            }
+            "share_publish" => {
+                self.card(name, args)?;
+                let (i, host) = self.publish_target(args)?;
+                let said = self.api.publish(i.cfg.port, &host)?;
+                Ok(format!("“{}” is published as {host}. {said}", i.cfg.name))
             }
             "share_delete" => {
                 let i = self.find(args)?;

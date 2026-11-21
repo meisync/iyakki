@@ -156,6 +156,108 @@ pub fn pause_body() -> String {
     envelope("Pause", "")
 }
 
+/// `H:MM:SS` for a number of seconds (what `Seek` with the unit `REL_TIME` takes).
+pub fn hms(secs: u64) -> String {
+    format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+}
+
+/// Seconds out of a renderer's `H:MM:SS` or `H:MM:SS.fff` (also a leading sign or `NOT_IMPLEMENTED`, which are not a time and give `None`).
+pub fn parse_hms(s: &str) -> Option<u64> {
+    let s = s.trim().split('.').next()?;
+    let mut p = s.split(':');
+    let (h, m, sec) = (p.next()?, p.next()?, p.next()?);
+    if p.next().is_some() || [h, m, sec].iter().any(|x| x.is_empty() || x.len() > 6 || !x.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    let (h, m, sec): (u64, u64, u64) = (h.parse().ok()?, m.parse().ok()?, sec.parse().ok()?);
+    if m > 59 || sec > 59 {
+        return None;
+    }
+    Some(h * 3600 + m * 60 + sec)
+}
+
+/// Jump to `secs` seconds from the start of what is playing (the longest jump is one day).
+pub fn seek_body(secs: u64) -> String {
+    envelope("Seek", &format!("<Unit>REL_TIME</Unit><Target>{}</Target>", hms(secs.min(86_399))))
+}
+
+pub fn position_body() -> String {
+    envelope("GetPositionInfo", "")
+}
+
+pub fn transport_body() -> String {
+    envelope("GetTransportInfo", "")
+}
+
+/// How far a cast has come: what the renderer says about its state and its position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Progress {
+    /// `PLAYING`, `PAUSED_PLAYBACK`, `STOPPED`, `TRANSITIONING`, `NO_MEDIA_PRESENT` ... as the renderer names it (letters and underscores only).
+    pub state: String,
+    pub position_secs: Option<u64>,
+    pub duration_secs: Option<u64>,
+}
+
+impl Progress {
+    /// One line for a person: `playing 1:02:03 of 1:30:00 (68 %)`.
+    pub fn line(&self) -> String {
+        let state = match self.state.as_str() {
+            "PLAYING" => "playing",
+            "PAUSED_PLAYBACK" | "PAUSED_RECORDING" => "paused",
+            "STOPPED" => "stopped",
+            "TRANSITIONING" => "starting",
+            "NO_MEDIA_PRESENT" => "nothing loaded",
+            _ => "state unknown",
+        };
+        match (self.position_secs, self.duration_secs) {
+            (Some(p), Some(d)) if d > 0 => format!("{state} {} of {} ({} %)", hms(p), hms(d), (p.min(d) * 100 / d)),
+            (Some(p), _) => format!("{state} {}", hms(p)),
+            _ => state.to_string(),
+        }
+    }
+}
+
+fn soap_ok(wire: &dyn Wire, r: &Renderer, name: &str, body: &str) -> Result<String, String> {
+    let (st, ans) = wire.soap(r.control, &r.control_path, &format!("\"{AVTRANSPORT}#{name}\""), body)?;
+    if (200..300).contains(&st) {
+        Ok(ans)
+    } else {
+        let why = between(&ans, "<errorDescription>", "</errorDescription>").map(unesc).unwrap_or_default();
+        Err(format!("{} refused {name} ({st}{}{})", r.name, if why.is_empty() { "" } else { ": " }, why.chars().filter(|c| !c.is_control()).take(100).collect::<String>()))
+    }
+}
+
+/// Pause what the renderer is playing.
+pub fn pause(wire: &dyn Wire, r: &Renderer) -> Result<(), String> {
+    soap_ok(wire, r, "Pause", &pause_body()).map(|_| ())
+}
+
+/// Play on (after a pause).
+pub fn resume(wire: &dyn Wire, r: &Renderer) -> Result<(), String> {
+    soap_ok(wire, r, "Play", &play_body()).map(|_| ())
+}
+
+/// Jump to a place in what is playing.
+pub fn seek(wire: &dyn Wire, r: &Renderer, secs: u64) -> Result<(), String> {
+    soap_ok(wire, r, "Seek", &seek_body(secs)).map(|_| ())
+}
+
+/// Ask the renderer how far it is (two questions: its state and its position). A renderer that does not answer one of them still gives the other.
+pub fn progress(wire: &dyn Wire, r: &Renderer) -> Result<Progress, String> {
+    let info = soap_ok(wire, r, "GetTransportInfo", &transport_body());
+    let pos = soap_ok(wire, r, "GetPositionInfo", &position_body());
+    if let (Err(e), Err(_)) = (&info, &pos) {
+        return Err(e.clone());
+    }
+    let state = info.ok().and_then(|a| between(&a, "<CurrentTransportState>", "</CurrentTransportState>").map(|s| s.chars().filter(|c| c.is_ascii_uppercase() || *c == '_').take(30).collect::<String>())).unwrap_or_default();
+    let (mut position_secs, mut duration_secs) = (None, None);
+    if let Ok(a) = pos {
+        position_secs = between(&a, "<RelTime>", "</RelTime>").and_then(parse_hms);
+        duration_secs = between(&a, "<TrackDuration>", "</TrackDuration>").and_then(parse_hms);
+    }
+    Ok(Progress { state, position_secs, duration_secs })
+}
+
 /// The HTTP port: what the controller needs of the network (a test puts its own).
 pub trait Wire {
     /// GET `path` from `addr`; the body (limited) and the status.

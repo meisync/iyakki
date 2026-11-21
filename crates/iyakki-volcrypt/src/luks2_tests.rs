@@ -96,3 +96,81 @@ fn a_volume_with_an_argon2i_slot_and_a_pbkdf2_slot_opens_with_either_passphrase_
     assert_eq!(hex(&b), want);
     assert_eq!(l.unlock(b"third one", &mut reader(TWO_SLOTS)), Err(LuksError::WrongPassword));
 }
+
+mod export_tests {
+    use crate::luks2::{header_size, parse_header};
+    use crate::luks2_export::*;
+
+    fn counter() -> impl FnMut(&mut [u8]) {
+        let mut n = 0u8;
+        move |b: &mut [u8]| {
+            for x in b.iter_mut() {
+                n = n.wrapping_mul(31).wrapping_add(7);
+                *x = n;
+            }
+        }
+    }
+
+    const UUID: &str = "11111111-2222-4333-8444-555555555555";
+
+    fn made(key: &[u8; 64], pw: &[u8]) -> Vec<u8> {
+        export_header(key, pw, UUID, "home", Costs::light(), &mut counter()).unwrap()
+    }
+
+    fn reader(img: Vec<u8>) -> impl FnMut(u64, usize) -> Option<Vec<u8>> {
+        move |o, n| img.get(o as usize..o as usize + n).map(<[u8]>::to_vec)
+    }
+
+    #[test]
+    fn an_exported_header_opens_with_the_password_and_gives_the_volume_key_back() {
+        let key: [u8; 64] = std::array::from_fn(|i| (i * 3 + 1) as u8);
+        let img = made(&key, b"correct horse");
+        assert_eq!(img.len() as u64, DATA_OFFSET);
+        let h = parse_header(&img[..HEADER_COPY]).unwrap();
+        assert_eq!((h.uuid.as_str(), h.label.as_str()), (UUID, "home"));
+        assert_eq!(h.data_segment().unwrap().offset, DATA_OFFSET);
+        assert_eq!(&*h.unlock(b"correct horse", &mut reader(img.clone())).unwrap(), &key[..]);
+        assert!(h.unlock(b"wrong", &mut reader(img)).is_err());
+    }
+
+    #[test]
+    fn the_second_copy_is_complete_and_has_the_other_signature_and_its_own_offset() {
+        let key = [9u8; 64];
+        let img = made(&key, b"pw");
+        assert_eq!(&img[HEADER_COPY..HEADER_COPY + 6], b"SKUL\xba\xbe");
+        assert_eq!(header_size(&img[HEADER_COPY..HEADER_COPY + 4096]).unwrap(), HEADER_COPY as u64);
+        let h = parse_header(&img[HEADER_COPY..2 * HEADER_COPY]).unwrap();
+        assert_eq!(&*h.unlock(b"pw", &mut reader(img)).unwrap(), &key[..]);
+    }
+
+    #[test]
+    fn one_flipped_bit_in_either_copy_breaks_its_checksum() {
+        let img = made(&[1u8; 64], b"pw");
+        for at in [4200usize, HEADER_COPY + 4200, 30, HEADER_COPY + 30] {
+            let mut bad = img.clone();
+            bad[at] ^= 1;
+            let copy = at / HEADER_COPY * HEADER_COPY;
+            assert!(parse_header(&bad[copy..copy + HEADER_COPY]).is_err(), "{at}");
+        }
+    }
+
+    #[test]
+    fn the_same_inputs_give_the_same_bytes_and_other_random_gives_other_bytes() {
+        let key = [5u8; 64];
+        assert_eq!(made(&key, b"pw"), made(&key, b"pw"));
+        let mut n = 99u8;
+        let mut other = move |b: &mut [u8]| b.iter_mut().for_each(|x| { n = n.wrapping_add(13); *x = n });
+        assert_ne!(made(&key, b"pw"), export_header(&key, b"pw", UUID, "home", Costs::light(), &mut other).unwrap());
+    }
+
+    #[test]
+    fn a_bad_uuid_label_or_empty_password_is_refused_and_the_key_is_not_in_the_header() {
+        let key: [u8; 64] = std::array::from_fn(|i| 200u8.wrapping_add(i as u8));
+        let mut r = counter();
+        assert!(export_header(&key, b"pw", "nope", "", Costs::light(), &mut r).is_err());
+        assert!(export_header(&key, b"pw", UUID, "bad\nlabel", Costs::light(), &mut r).is_err());
+        assert!(export_header(&key, b"", UUID, "", Costs::light(), &mut r).is_err());
+        let img = made(&key, b"pw");
+        assert!(!img.windows(16).any(|w| w == &key[..16]), "the volume key never appears in the clear");
+    }
+}

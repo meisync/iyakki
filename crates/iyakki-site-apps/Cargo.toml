@@ -1,0 +1,11 @@
+[package]
+name = "iyakki-site-apps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sites installed as app tiles (F-BROW-100): the record, the manifest reader, the origin rules, the profile naming and the protected-video message. Decides and stores nothing on its own; the shell reads and writes the person's file (apps/site_apps.rs)."
+
+[dependencies]
+iyakki-shared = { path = "../iyakki-shared" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

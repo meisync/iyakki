@@ -357,7 +357,7 @@ fn connections_lists_the_saved_ones_remembers_the_choice_and_browses_repos_branc
     // nothing on screen or in the audit holds the token
     let g = render(&mut app, &w.cx, 1280, 720);
     assert!(!labels(&g).iter().any(|l| l.contains(TOK)));
-    assert!(!std::fs::read_to_string(w.cx.audit.path()).unwrap_or_default().contains(TOK));
+    assert!(!std::fs::read_to_string(w.cx.audit.path_buf()).unwrap_or_default().contains(TOK));
     let _ = (a, b);
 }
 

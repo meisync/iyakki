@@ -37,7 +37,7 @@ class SessionGuest(qemu_guest.Guest):
                 subprocess.run(["mkfs.ext4", "-q", "-F", "-L", "IYAKKI-DATA", disk], check=True)
             drive = ["-drive", "file=%s,format=raw,if=virtio" % disk]
             self.disk = True
-        elif os.access(usb, os.X_OK) and os.path.isfile(os.path.join(out, "images", "iyakki-install-x86_64.img")):
+        elif os.environ.get("IYAKKI_SESSION_INSTALL_DISK") and os.access(usb, os.X_OK) and os.path.isfile(os.path.join(out, "images", "iyakki-install-x86_64.img")):
             disk = os.path.join(self.work, "disk.img")
             subprocess.run(["truncate", "-s", "1G", disk], check=True)
             r = subprocess.run([usb, os.path.join(out, "images", "iyakki-install-x86_64.img"), "--target-file", disk, "--erase", "testfile", "--table", "mbr"], capture_output=True, text=True)
@@ -54,15 +54,20 @@ class SessionGuest(qemu_guest.Guest):
                "-append", ("console=ttyS0 panic=-1 " + ("iyakki.disk=vda " if self.disk and not self.data_disk else "") + self.append).strip()] + drive + [
                "-netdev", "user,id=n0,hostfwd=tcp:127.0.0.1:%d-:7979" % self.port, "-device", "e1000e,netdev=n0",
                "-serial", "file:" + os.path.join(self.work, "ser.log"), "-monitor", "unix:%s,server,nowait" % mon] + self.extra
-        self.qemu = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(100):
-            try:
-                self.mon = socket.socket(socket.AF_UNIX)
-                self.mon.connect(mon)
-                return
-            except OSError:
-                time.sleep(0.1)
-        raise devui.DevError("QEMU monitor did not come up")
+        # the shared Vm (dist/qemu/dev-pair-test.py) runs this command line, so the keys, screenshots and pairing steps of qemu_guest.Guest work on it
+        if self.vm is None:
+            self.pair_script = qemu_guest.load_pair_script()
+            self.vm = self.pair_script.Vm(out, usb, sound=True, tag="qemu-guest", port=self.port, tmpdir=self.work)
+            shutil.rmtree(self.vm.work, ignore_errors=True)
+            self.vm.work = self.work
+        self.vm.cmdline_fn = lambda: cmd
+        self.vm.boot()
+        if self.vm.mon is None:
+            raise devui.DevError("QEMU monitor did not come up")
+
+    @property
+    def mon(self):
+        return self.vm.mon if self.vm else None
 
 
 def _variants(code):
@@ -82,7 +87,7 @@ def _pair_by_screen_retrying(self):
     """qemu_guest.Guest._pair_by_screen with retries: the code is read off the screen by OCR, a wrong reading is tried again with look-alike characters."""
     g = self
     g._cmd("sendkey s", 2.0)
-    g._cmd("sendkey slash", 0.5); g._cmd("sendkey ctrl-a", 0.2); g._type("developer mode"); g._cmd("sendkey down", 0.4); g._cmd("sendkey ret", 1.8)
+    g._cmd("sendkey slash", 0.5); g._cmd("sendkey ctrl-a", 0.2); g.vm.typ("developer mode"); g._cmd("sendkey down", 0.4); g._cmd("sendkey ret", 1.8)
     for _try in range(4):
         g._cmd("sendkey n", 1.0)               # the time-zone card, if it is up, would swallow the next key
         g._cmd("sendkey e", 2.5)
@@ -224,7 +229,7 @@ class Session:
                 self.banner = st
                 break
         g._cmd("sendkey s", 2.0)
-        g._cmd("sendkey slash", 0.5); g._cmd("sendkey ctrl-a", 0.2); g._type("developer mode"); g._cmd("sendkey down", 0.4); g._cmd("sendkey ret", 1.8)
+        g._cmd("sendkey slash", 0.5); g._cmd("sendkey ctrl-a", 0.2); g.vm.typ("developer mode"); g._cmd("sendkey down", 0.4); g._cmd("sendkey ret", 1.8)
         deadline = time.time() + 90
         while time.time() < deadline and p.poll() is None:
             g._cmd("sendkey 8", 1.0)
@@ -265,12 +270,12 @@ class Session:
             if re.search(r"password|sign in|Welcome", ocr, re.I):
                 break
             time.sleep(5)
-        g._type(password)
+        g.vm.typ(password)
         g._cmd("sendkey ret", 6.0)
         for _ in range(3):
             g._cmd("sendkey n", 1.0)
         g._cmd("sendkey s", 2.0)
-        g._cmd("sendkey slash", 0.5); g._cmd("sendkey ctrl-a", 0.2); g._type("developer mode"); g._cmd("sendkey down", 0.4); g._cmd("sendkey ret", 1.8)
+        g._cmd("sendkey slash", 0.5); g._cmd("sendkey ctrl-a", 0.2); g.vm.typ("developer mode"); g._cmd("sendkey down", 0.4); g._cmd("sendkey ret", 1.8)
         for _ in range(4):
             g._cmd("sendkey e", 2.5)
             rc, out = self.dev("whoami", timeout=20)

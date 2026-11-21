@@ -135,7 +135,7 @@ fn walk(blocks: &mut [Block], links: &[String], a: &Adapt, min_pct: u16, visited
                     }
                 }
             }
-            Block::Pre(_) | Block::Rule => {}
+            Block::Pre(_) | Block::Rule | Block::Mark { .. } => {}
         }
     }
 }

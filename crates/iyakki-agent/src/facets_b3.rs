@@ -73,6 +73,12 @@ impl iyakki_agent_api::VpnManager for VpnHandle {
     fn ensure_supervised(&self) {
         self.0.ensure_supervised()
     }
+    fn set_credentials(&self, id: &str, user: &str, pass: &str) -> Result<(), String> {
+        self.0.set_credentials(id, user, pass)
+    }
+    fn has_credentials(&self, id: &str) -> bool {
+        self.0.has_credentials(id)
+    }
     fn helper_on(&self) -> Option<bool> {
         Some(self.0.helper_enabled())
     }
@@ -112,6 +118,12 @@ impl ClientMediaFacet for RealClientMedia {
     }
     fn set_permission(&self, data: &Path, device_id: &str, name: &str, on: bool, by: &str, now: i64) -> Result<&'static str, String> {
         crate::clientmedia::set_permission(data, device_id, name, on, by, now)
+    }
+    fn device_role(&self, data: &Path, device_id: &str) -> String {
+        crate::clientmedia::role_of(data, device_id).to_string()
+    }
+    fn set_device_role(&self, data: &Path, device_id: &str, role: &str, by: &str, now: i64) -> Result<(), String> {
+        crate::clientmedia::apply_role(data, device_id, role, by, now)
     }
     fn indicator(&self) -> Indicator {
         crate::clientmedia::indicator()

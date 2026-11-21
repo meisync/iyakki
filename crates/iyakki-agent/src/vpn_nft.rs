@@ -305,7 +305,7 @@ mod tests {
     fn vpn08_the_policy_table_marks_chosen_destinations_and_accounts_after_the_excluded_ones() {
         use iyakki_vpn::policyroute::{plan_policy_routes, PolicyInput};
         let (inc, exc) = (vec![Cidr::parse("198.51.100.0/24").unwrap(), Cidr::parse("2001:db8::/32").unwrap()], vec![Cidr::parse("198.51.100.7/32").unwrap()]);
-        let plan = plan_policy_routes(&PolicyInput { ifname: "iyvpn0", table: 0x4956, mark: 0x4956_0002, priority: 10_000, include: &inc, exclude: &exc, uids: &[4242] }).unwrap();
+        let plan = plan_policy_routes(&PolicyInput { ifname: "iyvpn0", table: 0x4956, mark: 0x4956_0002, priority: 10_000, include: &inc, exclude: &exc, uids: &[4242], app_sockets: false }).unwrap();
         let t = policy_table(&plan).unwrap();
         let c = &t.chains[0];
         assert_eq!(c.kind, ChainKind::Route);

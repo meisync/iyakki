@@ -1100,9 +1100,9 @@ fn switching_the_mode_during_an_external_run_applies_to_the_waiting_card_and_the
 fn a_failed_agent_run_names_the_lost_drive_only_while_it_is_lost() {
     let healthy = classify_failure("Claude Code", "Sign in.", "EIO: Input/output error, open '/home/admin/.claude/x'");
     assert!(healthy.contains("stopped with an error"), "{healthy}");
-    iyakki_storage::loss::set_thread_override(Some(iyakki_storage::loss::Snapshot { state: iyakki_storage::loss::State::Lost, ..Default::default() }));
+    iyakki_core_local::storage::loss::set_thread_override(Some(iyakki_core_local::storage::loss::Snapshot { state: iyakki_core_local::storage::loss::State::Lost, ..Default::default() }));
     let lost = classify_failure("Claude Code", "Sign in.", "EIO: Input/output error, open '/home/admin/.claude/x'");
-    iyakki_storage::loss::set_thread_override(None);
+    iyakki_core_local::storage::loss::set_thread_override(None);
     assert!(lost.contains("Claude Code cannot work right now") && lost.contains("drive is not available"), "{lost}");
 }
 

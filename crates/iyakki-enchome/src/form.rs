@@ -21,6 +21,8 @@ pub enum Request {
     AdminSlotOn,
     AdminSlotOff,
     Migrate,
+    /// Export the locked home as a LUKS2 file (F-STORE-05).
+    Export,
 }
 
 impl Request {
@@ -32,10 +34,11 @@ impl Request {
             Request::AdminSlotOn => "admin-on",
             Request::AdminSlotOff => "admin-off",
             Request::Migrate => "migrate",
+            Request::Export => "export",
         }
     }
     pub fn from_word(w: &str) -> Option<Request> {
-        [Request::Create, Request::Unlock, Request::ChangeRecovery, Request::AdminSlotOn, Request::AdminSlotOff, Request::Migrate].into_iter().find(|r| r.word() == w.trim())
+        [Request::Create, Request::Unlock, Request::ChangeRecovery, Request::AdminSlotOn, Request::AdminSlotOff, Request::Migrate, Request::Export].into_iter().find(|r| r.word() == w.trim())
     }
 }
 
@@ -61,7 +64,10 @@ pub fn take_request(dir: &Path, user: &str) -> Option<Request> {
 }
 
 /// What a move is doing now, in plain words, once `step` is done (shown as progress while it runs).
-pub fn step_words(step: Step) -> &'static str {
+pub fn step_words(step: Step) -> String {
+    if let Step::CopyProgress(p) = step {
+        return format!("Copying your files, {p} percent (step 3 of 7)");
+    }
     match step {
         Step::Planned => "Making the encrypted container (step 1 of 7)",
         Step::ContainerMade => "Opening the new folder (step 2 of 7)",
@@ -71,7 +77,9 @@ pub fn step_words(step: Step) -> &'static str {
         Step::StagingUnmounted => "Putting the old folder aside (step 6 of 7)",
         Step::PlainRenamed => "Switching over (step 7 of 7)",
         Step::Switched => "Finishing",
+        Step::CopyProgress(_) => "Copying your files (step 3 of 7)",
     }
+    .to_string()
 }
 
 /// What the form needs from the rest of the system.
@@ -91,6 +99,8 @@ pub enum Purpose {
     ChangeRecovery,
     AdminSlot { enable: bool },
     Migrate,
+    /// Write the locked home as a standard LUKS2 file (password, then a copy of the encrypted payload).
+    Export,
 }
 
 /// Where the form is.
@@ -131,6 +141,9 @@ impl Form {
         let st = cx.env.status(cx.user);
         let refuse = match (p, st.state) {
             (Purpose::Create | Purpose::Migrate, State::Locked | State::Open | State::Damaged) => Some("This account already has an encrypted home."),
+            (Purpose::Export, State::NotSetUp) => Some("There is no encrypted home yet; make one first."),
+            (Purpose::Export, State::Open) => Some("The encrypted home is open. Lock it first (close the apps that use it), then export."),
+            (Purpose::Export, State::Damaged) => Some("The encrypted home's header is damaged."),
             (Purpose::Unlock | Purpose::UnlockWithRecovery | Purpose::ChangeRecovery | Purpose::AdminSlot { .. }, State::NotSetUp) => Some("There is no encrypted home yet; make one first."),
             (Purpose::ChangeRecovery | Purpose::AdminSlot { .. }, State::Damaged) => Some("The encrypted home's header is damaged."),
             (Purpose::Unlock | Purpose::UnlockWithRecovery, State::Open) => Some("The encrypted home is already open."),
@@ -202,13 +215,18 @@ impl Form {
 
     /// Like `submit`, and `step` hears each step of a move as it is done (return false to stop). Runs on any thread: nothing here draws.
     pub fn submit_with(&mut self, cx: &Ctx, step: &mut dyn FnMut(Step) -> bool) {
+        self.submit_with_cancel(cx, step, &|| false);
+    }
+
+    /// [`Form::submit_with`] and a cancel the person can press during a move (before the switch only; see `migrate::run_cancellable`).
+    pub fn submit_with_cancel(&mut self, cx: &Ctx, step: &mut dyn FnMut(Step) -> bool, cancel: &dyn Fn() -> bool) {
         self.failed = false;
         let flow = std::mem::replace(&mut self.flow, Flow::Idle);
         match flow {
             Flow::Idle | Flow::Done => {}
             Flow::Ask { purpose, stage, first, second } => self.submit_ask(cx, purpose, stage, first, second),
             Flow::MigratePlan { password, plan } => {
-                let r = migrate::run(cx.env, cx.user, &password, step);
+                let r = migrate::run_cancellable(cx.env, cx.user, &password, step, cancel);
                 match r {
                     Ok(rep) => {
                         self.notice = Some(format!("{} files ({}) were copied, checked one by one and switched over. Your old folder is kept as {}; remove it from this page once you have saved the recovery key and are happy with the new one.", rep.files, crate::human(rep.bytes), rep.plain_copy.display()));
@@ -318,6 +336,19 @@ impl Form {
                 }
                 Err(e) => self.back(purpose, 1, first, Zeroizing::new(String::new()), e),
             },
+            (Purpose::Export, _) => {
+                if !(cx.verify_signin)(&first) {
+                    return self.back(purpose, 0, Zeroizing::new(String::new()), second, wrong_signin());
+                }
+                let dest = cx.env.export_path(cx.user);
+                match cx.env.export_luks2(cx.user, &first, &dest, &mut |_, _| {}) {
+                    Ok(rep) => {
+                        self.notice = Some(format!("Your home was exported as a standard LUKS2 file: {} ({}, UUID {}). It opens with the same password on any Linux computer with `cryptsetup luksOpen`. Copy it somewhere safe; it holds all your files, encrypted. The recovery key and the administrator slot are not part of it.", dest.display(), crate::human(rep.bytes), rep.uuid));
+                        self.flow = Flow::Done;
+                    }
+                    Err(e) => self.back(purpose, 0, Zeroizing::new(String::new()), second, e),
+                }
+            }
             (Purpose::Migrate, _) => {
                 if !(cx.verify_signin)(&first) {
                     return self.back(purpose, 0, Zeroizing::new(String::new()), second, wrong_signin());

@@ -90,11 +90,17 @@ pub struct CoreTerminalPort {
     session: Option<String>,
     /// The whole-session terminal (F-SDK-103), separate from the line session.
     screen: Option<String>,
+    app: &'static str,
 }
 
 impl CoreTerminalPort {
     pub fn new(core: Arc<dyn Core>, user: String) -> CoreTerminalPort {
-        CoreTerminalPort { core, user, session: None, screen: None }
+        CoreTerminalPort::for_app(core, user, iyakki_app_sample::ID)
+    }
+
+    /// The port of another SDK app: the core's terminal knows the session by this app id (the audit says which app asked).
+    pub fn for_app(core: Arc<dyn Core>, user: String, app: &'static str) -> CoreTerminalPort {
+        CoreTerminalPort { core, user, session: None, screen: None, app }
     }
 
     fn screen_id(&self) -> Result<String, iyakki_ui_sdk::terminal::TermError> {
@@ -116,7 +122,7 @@ fn term_err(e: String) -> iyakki_ui_sdk::terminal::TermError {
 
 impl iyakki_ui_sdk::terminal::TerminalPort for CoreTerminalPort {
     fn open(&mut self) -> Result<iyakki_ui_sdk::terminal::Opened, iyakki_ui_sdk::terminal::TermError> {
-        let o = self.core.terminal().open(&self.user, iyakki_app_sample::ID).map_err(term_err)?;
+        let o = self.core.terminal().open(&self.user, self.app).map_err(term_err)?;
         self.session = Some(o.id);
         Ok(iyakki_ui_sdk::terminal::Opened { prompt: o.prompt, banner: o.banner })
     }
@@ -137,7 +143,7 @@ impl iyakki_ui_sdk::terminal::TerminalPort for CoreTerminalPort {
 
     fn screen_open(&mut self, cols: usize, rows: usize) -> Result<iyakki_ui_sdk::terminal::Question, iyakki_ui_sdk::terminal::TermError> {
         self.screen_close();
-        let o = self.core.terminal().pty_open(&self.user, iyakki_app_sample::ID, cols, rows).map_err(term_err)?;
+        let o = self.core.terminal().pty_open(&self.user, self.app, cols, rows).map_err(term_err)?;
         self.screen = Some(o.id);
         Ok(iyakki_ui_sdk::terminal::Question { call: o.approval.call, summary: o.approval.summary })
     }
@@ -208,11 +214,11 @@ impl iyakki_ui_sdk::terminal::TerminalPort for CoreTerminalPort {
 }
 
 /// The person's dock, through the core. A person who never chose has the Look's usual apps, which the first pin keeps.
-struct CoreDock {
-    core: Arc<dyn Core>,
-    cx: AppCx,
+pub(super) struct CoreDock {
+    pub(super) core: Arc<dyn Core>,
+    pub(super) cx: AppCx,
     /// The app the SDK app asked the dock to open; the tile hands it to the shell (`App::take_jump`), once.
-    asked: Arc<std::sync::Mutex<Option<String>>>,
+    pub(super) asked: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl CoreDock {
@@ -261,9 +267,9 @@ impl DockPort for CoreDock {
 }
 
 /// The person's wallpaper, through the core. One wallpaper for the person: every screen gets the same.
-struct CoreWallpaper {
-    core: Arc<dyn Core>,
-    cx: AppCx,
+pub(super) struct CoreWallpaper {
+    pub(super) core: Arc<dyn Core>,
+    pub(super) cx: AppCx,
 }
 
 impl WallpaperPort for CoreWallpaper {
@@ -436,6 +442,19 @@ impl App for SampleTile {
             _ => Flow::Stay,
         }
     }
+    fn list_frame(&mut self, w: f32, h: f32, cx: &AppCx) -> Option<String> {
+        self.bind(cx);
+        self.host.look = look_now();
+        self.host.type_style = type_now();
+        self.host.resize(w, h);
+        Some(self.host.record().to_text())
+    }
+    fn list_apply(&mut self, batch: &str, cx: &AppCx) -> Option<Result<(String, bool), String>> {
+        self.bind(cx);
+        self.host.look = look_now();
+        self.host.type_style = type_now();
+        Some(iyakki_ui_sdk::wire::apply_batch(&mut self.host, batch))
+    }
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, _tick: u64) {
         self.bind(cx);
         let want = (area.w.round() as u32, area.h.round() as u32, s);
@@ -569,7 +588,7 @@ mod tests {
         std::fs::write(home.join("note.txt"), "old words").unwrap();
         let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let l2 = lines.clone();
-        cx.browser().set_audit(Arc::new(move |u: &str, e: &str, d: &str| l2.lock().unwrap().push(format!("{u} {e} {d}"))));
+        cx.browser().set_audit_sink(Arc::new(move |u: &str, e: &str, d: &str| l2.lock().unwrap().push(format!("{u} {e} {d}"))));
         let mut p = CoreFilesPort { core: cx.core.clone(), user: user.clone() };
         // a new folder: asked, nothing made, then allowed
         let a = p.change(&Change::MakeDir { dir: String::new(), name: "Pictures".into() }).unwrap();

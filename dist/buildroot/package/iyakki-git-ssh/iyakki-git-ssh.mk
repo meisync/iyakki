@@ -26,6 +26,15 @@ IYAKKI_GIT_SSH_CONF_OPTS = \
 	--disable-lastlog --disable-utmp --disable-utmpx --disable-wtmp --disable-wtmpx \
 	--disable-strip
 
+# `ssh -J` starts the jump hop with the program at its compiled-in path (`_PATH_SSH_PROGRAM`, /usr/bin/ssh), which on an image is Dropbear's
+# client. The path is made this very program, and the build stops when the source no longer has the line that is changed (KI-112).
+define IYAKKI_GIT_SSH_JUMP_PROGRAM
+	sed -i 's|-D_PATH_SSH_PROGRAM=[^ ]*||' $(@D)/Makefile.in
+	sed -i 's|"/usr/bin/ssh"|"/usr/libexec/iyakki/git-ssh"|' $(@D)/pathnames.h
+	grep -q '"/usr/libexec/iyakki/git-ssh"' $(@D)/pathnames.h
+endef
+IYAKKI_GIT_SSH_POST_PATCH_HOOKS += IYAKKI_GIT_SSH_JUMP_PROGRAM
+
 define IYAKKI_GIT_SSH_BUILD_CMDS
 	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) ssh
 endef

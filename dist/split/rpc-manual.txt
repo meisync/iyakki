@@ -1,0 +1,31 @@
+# Methods of the traits in rpc-traits.txt written by hand in crates/iyakki-ui-rpc/src/served_apps.rs (D-SPLIT-03-APPS): gen_rpc.py makes the client call
+# `served_apps::c_<Trait>_<fn>(self, args)` and the core's dispatcher call `served_apps::s_<Trait>_<fn>(t, reg, a)`. The method keeps its entry in
+# rpc-unserved.txt when the real answer is a live object of the agent; here it is a pair of calls over the socket.
+ServicesFacetB5::lab_backends        # the picture and vision models as two remote objects with polled jobs
+ServicesFacetB5::story_store         # built in the UI over the core's file rules (scope_home_root, scope_roots_with_home)
+ServicesFacetB5::story_store_at
+PlatformApi::apply                   # a job on the core (served_jobs.rs): the UI polls it and hands each progress line to its closure
+PlatformApi::apply_with              # the same; the UI's registry object is dropped, the core's own transport is used
+PlatformApi::upgrade
+PlatformApi::plan_waiting
+PlatformApi::private_repair
+PlatformApi::private_store_state     # a job on the core over the core's own services (D-SPLIT-03-APPS2); the UI only says whether it had services
+PlatformApi::private_finish_local    # a job on the core over the core's own services
+PlatformApi::private_start_job       # the core starts the job with its own services and its own program; the UI's launch is dropped
+ServicesFacetB5::lab_frames_for     # the core's frame source as a remote object; every file is judged by the person's file rules in the core
+StoreApi::find_life           # a lifetime-generic lookup in the caller's own slice: no call at all, the UI finds it in the lives it holds
+StoreApi::add_license         # the signers come from the core's own catalogs (the UI's closure cannot cross)
+StoreApi::update_all          # a job on the core with the core's own fetch and audit; every progress line reaches the UI's closure
+StoreApi::keys_load           # the signing key never crosses: the UI gets a marker the core resolves by label (D-SPLIT-03-STORE)
+StoreApi::pf_card             # the key is named by its label; the core loads it
+StoreApi::pf_publish          # the key is named by its label; the core loads it
+StoreApi::author_pack_dir     # the key is named by its label; the core loads it
+StoreApi::official_store_url  # a fixed text of the core, read once and kept
+StoreApi::pf_yank_note        # a fixed text of the core, read once and kept
+ServicesFacetB5::radio_search        # the person's NAME crosses, never the policy: the core reads the account's own (D-SPLIT-03-POLICY)
+ServicesFacetB5::study_pdf_export    # the same, and the core's own data folder; the target is judged by the account's policy in the core
+DownloadQueueApi::set_context        # the person's name and folders cross: policy read from the core's accounts, folders judged by the file rules
+DownloadQueueApi::enqueue            # the same
+StoreApi::tile_open           # a running HTML app of the core: a remote TileRt over the core's own fetch (D-SPLIT-03-TILES)
+StoreApi::tile_open_wasm      # a running WebAssembly app of the core: a remote WasmTileRt, events and display lists in the tile ABI's binary form
+StoreApi::tile_pictures       # the pictures of a WebAssembly tile's bundle, base64 RGBA

@@ -9,6 +9,8 @@ use serde_json::Value;
 use std::sync::Arc;
 
 /// Builds the person's full tool set (the profile filter is applied on top, by name).
+pub use crate::flows::hookapi::HookOp;
+
 pub trait ToolSource: Send + Sync {
     fn tools_for(&self, p: &Principal) -> Arc<dyn Tools>;
 }
@@ -74,6 +76,12 @@ pub trait Extras: Send + Sync {
     fn hook_serve(&self, _auth: &dyn Authenticator, _audit: &dyn AuditSink, _rq: &crate::flows::webhook::HookRequest) -> Option<crate::flows::webhook::Answer> {
         None
     }
+    /// The person's webhooks (cloud profile, F-FLOW-15): list, make, renew, switch on and off, open to the public, and take the address that
+    /// waits to be shown. The answers are the person's own authenticated call, so a new address and secret are returned HERE, once, and
+    /// never to a model. The default has no webhooks.
+    fn hook_manage(&self, _p: &Principal, _op: HookOp<'_>) -> ApiResult<Value> {
+        Err(ApiError::Unsupported("this machine has no webhooks".into()))
+    }
     /// The paired computer a developer key belongs to and the account it acts as: `(computer, account)`. `None`: no such key (or this
     /// machine has no developer mode). Programs sign in to the service with such a key (`POST /api/v1/login`, signed).
     fn paired_program(&self, _key_hex: &str) -> Option<(String, String)> {
@@ -114,12 +122,25 @@ pub trait Extras: Send + Sync {
     fn cameras(&self) -> Arc<dyn iyakki_core_api::Cameras> {
         Arc::new(iyakki_core_api::NoCameras)
     }
+    /// The terminal sessions a tile may use (`terminal.*`, F-SDK-34). The default has none.
+    fn terminal(&self) -> Arc<dyn iyakki_core_api::Terminal> {
+        Arc::new(iyakki_core_api::NoTerminal)
+    }
     /// The core's app events as a tile may hear them (`appevents:<name>` entries of its manifest, tile ABI 3). The default has none.
     fn app_events(&self) -> Arc<dyn iyakki_core_api::AppEvents> {
         Arc::new(iyakki_core_api::NoAppEvents)
     }
     /// A tile sets the status of its own icon (`dock.status`). The default keeps nothing.
     fn set_tile_status(&self, _p: &Principal, _tile: &str, _badge: Option<u32>, _line: &str) {}
+    /// The audio address and the certificate offer (JSON text) for a connector that carries the person's microphone to My IYAKKI
+    /// (F-VOICE-38). Refused unless the cloud audio stream switch is on and an audio address is set.
+    fn voice_offer(&self, _p: &Principal) -> ApiResult<(String, String)> {
+        Err(ApiError::Unsupported("this machine does not take a microphone from a connector".into()))
+    }
+    /// The device's own audio address and certificate offer for the answer's sound (F-VOICE-61). Refused unless a cloud voice session listens.
+    fn voice_return(&self, _p: &Principal, _addr: &str, _offer: &str) -> ApiResult<()> {
+        Err(ApiError::Unsupported("this machine does not take a microphone from a connector".into()))
+    }
     fn web_access(&self, _p: &Principal) -> ApiResult<Value> {
         Err(ApiError::Unsupported("this machine has no desktop to serve to browsers".into()))
     }

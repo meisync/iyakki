@@ -6,6 +6,7 @@
 
 use std::io::Read;
 use std::path::Path;
+use iyakki_core_local::starters_launch::{Launch, Stream};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 pub use iyakki_shared::exec::{Sink};
@@ -113,33 +114,32 @@ pub fn run_with_env(extra: &[Extra], program: &str, args: &[String], cwd: &Path,
     if !cwd.is_dir() {
         return Err(crate::scope::explain_io(&std::io::Error::from_raw_os_error(if cwd.exists() { 20 } else { 2 }), cwd, "run a command in"));
     }
-    let mut cmd = Command::new(program);
-    cmd.args(args).current_dir(cwd).env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut cmd = Launch::new(program).args(args).cwd(cwd).env_clear().stdin(Stream::Null).stdout(Stream::Piped).stderr(Stream::Piped);
     // an explicit kubeconfig replaces whatever KUBE* the process inherited (a stale KUBECONTEXT must not steer the command elsewhere)
     let pinned = env.iter().any(|(k, _)| k == "KUBECONFIG");
     for (k, v) in std::env::vars() {
         if passes(&k) && !(pinned && k.starts_with("KUBE")) {
-            cmd.env(k, v);
+            cmd = cmd.env(k, v);
         }
     }
     if let Some(p) = path_prefix {
-        cmd.env("PATH", format!("{}:{}", p.display(), std::env::var("PATH").unwrap_or_default()));
+        cmd = cmd.env("PATH", format!("{}:{}", p.display(), std::env::var("PATH").unwrap_or_default()));
     }
     for (k, v) in env {
-        cmd.env(k, v);
+        cmd = cmd.env(k, v);
     }
     // a managed dev cluster is the default target of kubectl, k3s and helm in every program IYAKKI starts (no ~/.kube/config needed)
     if !pinned && !std::env::vars().any(|(k, _)| k == "KUBECONFIG") {
         if let Some(m) = crate::devcluster::machine_kubeconfig().filter(|m| m.is_file()) {
-            cmd.env("KUBECONFIG", m);
+            cmd = cmd.env("KUBECONFIG", m);
         }
     }
     if let Some(h) = home {
-        cmd.env("HOME", h);
+        cmd = cmd.env("HOME", h);
     } else if let Ok(h) = std::env::var("HOME") {
-        cmd.env("HOME", h);
+        cmd = cmd.env("HOME", h);
     }
-    run_prepared(cmd, program, seconds, None)
+    run_prepared(cmd.into_command(), program, seconds, None)
 }
 
 /// Starts a command that is already set up, waits for it for `seconds`, and returns what it printed with its exit status

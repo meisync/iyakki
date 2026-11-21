@@ -15,6 +15,8 @@ Evidence goes to `~/iyakki-work/hwtest/<date>/[<device>/]<ID>/`, outside the rep
 
 Run the tests: `python3 -I -m unittest discover -s dist/hwtest -p test_m14.py`.
 
+A recipe written for specific hardware (Mac mini 2014 / 2018, an Apple Mac, a touch screen, Broadcom Wi-Fi, an NVIDIA-free PC) ends NOT-APPLICABLE (skipped, with the reason; `hwmatch.py`, `require_hardware`) on a device that does not match, never FAIL. Tests: `python3 -I -m unittest discover -s dist/hwtest -p test_hwmatch.py`.
+
 A recipe that cannot tell (a format it did not recognise, a machine without the hardware) ends NEEDS-HUMAN, not FAIL.
 A PASS always lists what it did NOT cover; do not flip a whole FEATURES.md row on a narrow observation. Run one device at a time.
 

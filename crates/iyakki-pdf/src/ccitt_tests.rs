@@ -131,3 +131,35 @@ fn a_ccitt_picture_in_a_pdf_is_drawn_as_its_samples_and_a_stencil_works() {
         assert!(light_ok * 100 >= light_all * 97, "stencil {stencil}: light {light_ok}/{light_all}");
     }
 }
+
+#[test]
+fn group_3_mixed_pictures_made_by_the_real_encoder_decode_to_the_same_samples_for_any_k_above_zero() {
+    // the same encoder (libtiff through Pillow, T4Options bit 0), the same pictures: each end-of-line is followed by a tag bit that
+    // says whether the next row is coded on its own (one dimensional) or against the row above (two dimensional)
+    let fixtures: [(&str, &[u8], &[u8]); 4] = [
+        ("text", include_bytes!("../tests/ccitt/text.pbm"), include_bytes!("../tests/ccitt/text.g3m")),
+        ("runs", include_bytes!("../tests/ccitt/runs.pbm"), include_bytes!("../tests/ccitt/runs.g3m")),
+        ("noise", include_bytes!("../tests/ccitt/noise.pbm"), include_bytes!("../tests/ccitt/noise.g3m")),
+        ("blank", include_bytes!("../tests/ccitt/blank.pbm"), include_bytes!("../tests/ccitt/blank.g3m")),
+    ];
+    for (name, pic, g3m) in fixtures {
+        let (w, h, want) = pbm(pic);
+        for k in [1, 4, 100] {
+            let p = Params { k, columns: w, rows: h, black_is_1: true, byte_align: false };
+            let (got, rows) = decode(g3m, &p, 1 << 26);
+            assert_eq!(rows, h, "{name}, K {k}: rows decoded");
+            assert_eq!(got, want, "{name}, K {k}: samples");
+        }
+        // read as one dimensional the tag bits are not rows: the picture is not the same (the stream really is the mixed form)
+        let p = Params { k: 0, columns: w, rows: h, black_is_1: true, byte_align: false };
+        let (flat, _) = decode(g3m, &p, 1 << 26);
+        assert!(name == "blank" || flat != want, "{name}: the stream is mixed, a one dimensional read must differ");
+        // damage never panics
+        let mut bad = g3m.to_vec();
+        for i in (0..bad.len()).step_by(7) {
+            bad[i] ^= 0x5A;
+        }
+        let p = Params { k: 4, columns: w, rows: h, black_is_1: true, byte_align: false };
+        let _ = decode(&bad, &p, 1 << 26);
+    }
+}

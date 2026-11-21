@@ -4,7 +4,7 @@
 
 use super::deps::Deps;
 use super::tools::ProfileTools;
-use crate::agent::{RunEvent, RunLimits};
+use crate::agent::{RunEvent, RunLimits, Tools};
 use crate::chat::{ChatBackend, Message};
 use crate::runs::RunSession;
 use iyakki_core_api::{ApiError, ApiResult, Principal};
@@ -37,7 +37,12 @@ pub struct RunManager {
     states: Arc<Mutex<HashMap<String, Arc<Mutex<RunState>>>>>,
     /// Running totals for `/metrics` that outlive the runs (a run is forgotten, a counter is not): tool calls by outcome and model tokens.
     totals: Arc<Totals>,
+    /// Adds tools to the set of a run for a person (the tile host's bundle tools): set once at start.
+    wrap: Arc<Mutex<Option<ToolWrap>>>,
 }
+
+/// A function that puts more tools around a person's tool set.
+pub type ToolWrap = Arc<dyn Fn(Arc<dyn Tools>, &Principal) -> Arc<dyn Tools> + Send + Sync>;
 
 /// Counters kept since the service started (F-WEBSVC-10).
 #[derive(Default)]
@@ -163,7 +168,11 @@ impl RunManager {
 
 
     pub fn new(deps: Arc<Deps>, approval_timeout: Duration) -> RunManager {
-        RunManager { deps, approval_timeout, states: Arc::new(Mutex::new(HashMap::new())), totals: Arc::new(Totals::default()) }
+        RunManager { deps, approval_timeout, states: Arc::new(Mutex::new(HashMap::new())), totals: Arc::new(Totals::default()), wrap: Arc::new(Mutex::new(None)) }
+    }
+
+    pub fn set_tool_wrap(&self, w: ToolWrap) {
+        *lock(&self.wrap) = Some(w);
     }
 
     /// The runs held now by state, and the tool results they hold (ok, failed): for `/metrics`.
@@ -225,7 +234,11 @@ impl RunManager {
         if prompt.is_empty() || prompt.len() > MAX_PROMPT {
             return Err(ApiError::InvalidInput("the prompt is empty or too long".into()));
         }
-        let tools = Arc::new(ProfileTools::new(self.deps.tools.tools_for(p), allowed));
+        let mut base = self.deps.tools.tools_for(p);
+        if let Some(w) = lock(&self.wrap).clone() {
+            base = w(base, p);
+        }
+        let tools = Arc::new(ProfileTools::new(base, allowed));
         let history = vec![Message::system(self.deps.system_prompt.clone()), Message::user(prompt)];
         // approval stays per call: `auto` is false and nothing here can switch it on
         let limits = RunLimits { approval_timeout: self.approval_timeout, auto: false, ..RunLimits::for_budget(&p.policy.budget, 0) };

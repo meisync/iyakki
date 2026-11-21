@@ -37,7 +37,7 @@ impl State {
 }
 
 /// Who is told about a finished job: the chat (a visible event), the assistant (a note at its next turn) and the inbox are told once each.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Channel {
     Ui,
     Agent,
@@ -71,7 +71,7 @@ pub struct Spec {
 }
 
 /// A job as the tools and the screen see it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Job {
     pub id: String,
     pub label: String,

@@ -83,4 +83,6 @@ pub enum LayoutKey {
     /// Previous or next desktop view. `mac` is the Mac-style key (Control+Command+Left/Right); otherwise the browser-style
     /// key (Ctrl+Alt+PageUp/PageDown). Which sets are on is the person's choice in Settings.
     ViewStep { back: bool, mac: bool },
+    /// The previous or the next view on the person's own step keys (Ctrl+Alt plus a key of their choice, Settings -> Desktop views).
+    ViewStepCustom { back: bool },
 }

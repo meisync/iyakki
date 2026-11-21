@@ -197,7 +197,7 @@ impl FlowsApp {
             None => "Flows".to_string(),
         };
         fl.button(g, size, &format!("{name}  \u{25be}"), CYAN, Event::Tab(id::FLOWS));
-        if self.env.engine().ticking() {
+        if self.env.ticking() {
             fl.chip(g, s, "scheduler running", OK, true);
         }
         if self.cur.is_some() {

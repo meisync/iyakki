@@ -28,6 +28,17 @@ pub const PER_RECIPIENT_PER_HOUR: usize = 20;
 const MAX_DIGEST: usize = 2000;
 const MAX_ESC: usize = 500;
 
+/// Web Push as the hub sees it (F-INBOX-09). The subscriptions and the VAPID key live in each person's own vault, so the tenant-wide hub
+/// cannot read them: whoever builds the hub brings a sender that can (only while that person's vault is open). A hub without one pushes
+/// nothing at all.
+pub trait PushSender: Send + Sync {
+    /// Whether this person has saved a browser and left push on.
+    fn can_push(&self, person: &str) -> bool;
+    /// Push one notification to the person's browsers; the person's own quiet hours and lowest severity apply here. `Ok(())` also when
+    /// the person's settings held it back (the notification is in their inbox in any case).
+    fn push(&self, person: &str, severity: Severity, title: &str, body: &str, now: u64) -> Result<(), String>;
+}
+
 /// What the hub reads from the rest of the tenant. The real one reads the volume (`DirEnv`); tests supply a fake.
 pub trait HubEnv: Send + Sync {
     fn roles(&self) -> Option<Roles>;
@@ -38,6 +49,10 @@ pub trait HubEnv: Send + Sync {
     fn approvals(&self) -> Vec<Pending>;
     fn tenant_name(&self) -> String {
         "your tenant".into()
+    }
+    /// The Web Push sender, if this process can reach the people's vaults; `None`: a `push` channel does nothing.
+    fn push_sender(&self) -> Option<Arc<dyn PushSender>> {
+        None
     }
 }
 
@@ -66,6 +81,10 @@ impl HubEnv for DirEnv {
     }
     fn approvals(&self) -> Vec<Pending> {
         crate::tenantconfig::approvals::snapshot(&self.dir)
+    }
+    fn push_sender(&self) -> Option<Arc<dyn PushSender>> {
+        // the open-vault registry of this process: only people signed in with an open vault can be pushed to
+        Some(crate::webpush::OpenVaults::global().sender(&self.dir))
     }
 }
 
@@ -265,12 +284,15 @@ impl Hub {
         let rules = self.env.rules(n.team.as_deref());
         let channels = self.env.channels();
         let tenant_name = self.env.tenant_name();
+        let push = self.env.push_sender();
         let queued = self.with_state(|st| {
             let mut queued = 0;
             for ch in channels.iter().filter(|c| c.team.is_none() || c.team == n.team) {
                 let targets: Vec<String> = match ch.kind {
                     ChKind::Webhook => vec!["*".into()],
                     ChKind::Email => people.iter().filter(|p| ch.addresses.contains_key(*p)).cloned().collect(),
+                    // only people who saved a browser and left push on, and only when there is a sender at all (fails closed)
+                    ChKind::Push => push.as_ref().map(|s| people.iter().filter(|p| s.can_push(p)).cloned().collect()).unwrap_or_default(),
                 };
                 for person in targets {
                     if st.optout.get(&person).is_some_and(|s| s.contains(&ch.key)) {
@@ -557,6 +579,11 @@ impl Hub {
                 let status = net.post(ch.team.as_deref(), &req)?;
                 if super::webhook::status_ok(status) { Ok(()) } else { Err(format!("the receiver answered {status}")) }
             }
+            ChKind::Push => {
+                let sender = self.env.push_sender().ok_or("push is not available here (no vault is open for the sender)")?;
+                let p: serde_json::Value = serde_json::from_str(&d.body).map_err(|_| "bad payload".to_string())?;
+                sender.push(&d.person, d.severity, p["title"].as_str().unwrap_or(""), p["body"].as_str().unwrap_or(""), now)
+            }
             ChKind::Email => {
                 let to = ch.addresses.get(&d.person).ok_or("no address for this person")?.clone();
                 let pass = if ch.password.is_empty() { None } else { Some(self.env.secret(&ch.password).ok_or("the mail password is not available (vault locked or missing)")?) };
@@ -584,6 +611,11 @@ fn render(ch: &Channel, n: &Notification, tenant_name: &str, id: &str, _person: 
             } else {
                 ("[IYAKKI] You have a notification".into(), format!("{summary}\nTenant: {tenant_name}\nSign in to read it: {link}\n"))
             }
+        }
+        // the text goes through a push service run by a browser maker: only the short summary unless the channel lets details out
+        ChKind::Push => {
+            let (title, body) = if ch.include_details { (n.title.clone(), n.body.clone()) } else { ("IYAKKI".to_string(), summary) };
+            ("notification".into(), json!({"title": title, "body": body}).to_string())
         }
         ChKind::Webhook => {
             let mut p = json!({"v": 1, "id": id, "severity": n.severity.name(), "tenant": tenant_name, "summary": summary, "link": link});

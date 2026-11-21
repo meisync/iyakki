@@ -1,0 +1,16 @@
+scenario: DISP-BRIGHT-01
+title: Brightness keys and slider
+area: Display
+rows: F-DISP-01, F-KBD-03
+machines: any
+needs: person
+prereq: A laptop or a screen with brightness control.
+step: Press the brightness up key three times, then down three times.
+expect: The screen gets brighter then dimmer in steps, with an indicator.
+clause: F-KBD-03.keys
+step: Move the brightness slider in Settings, Display.
+expect: The screen follows the slider and the keys show the same level.
+clause: F-DISP-01.slider
+step: Set the lowest level.
+expect: The screen is dim but you can still read it; it does not go fully black.
+clause: F-KBD-03.floor

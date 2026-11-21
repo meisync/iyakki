@@ -75,6 +75,12 @@ impl DevCluster for K3sDev {
     fn set_autostart(&self, on: bool, user: &str) -> Result<(), String> {
         K3sDev::set_autostart(self, on, user)
     }
+    fn set_offline_on_purpose(&self, on: bool, user: &str) -> Result<(), String> {
+        K3sDev::set_offline_on_purpose(self, on, user)
+    }
+    fn offline_on_purpose(&self) -> bool {
+        K3sDev::offline_on_purpose(self)
+    }
     fn kubectl(&self, args: &[&str]) -> Out {
         K3sDev::kubectl(self, args)
     }

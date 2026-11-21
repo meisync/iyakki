@@ -28,7 +28,7 @@ fn world(tag: &str, scan: &str) -> (WifiCtl, std::path::PathBuf) {
     script("wpa_cli", "exit 1");
     script("wpa_supplicant", "exit 0");
     script("udhcpc", "exit 0");
-    let roots = iyakki_devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") };
+    let roots = iyakki_core_local::devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") };
     let mut mac = MacEnv::real();
     mac.roots = roots.clone();
     mac.host_managed = true;
@@ -103,5 +103,68 @@ fn the_hotspot_country_security_and_band_are_changed_checked_and_never_show_the_
     assert!(!out.contains(&pass) && !t.call("hotspot_status", &json!({})).unwrap().contains(&pass));
     assert!(t.call("hotspot_set", &json!({"country": ""})).unwrap().contains("none chosen"));
     assert!(r.audits.lock().unwrap().iter().any(|l| l.starts_with("settings.share.hotspot")));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn the_wifi_adapter_is_chosen_by_chat_with_a_card_and_only_among_adapters_that_exist() {
+    let r = rig("wifiadapter", true);
+    let (c, d) = world("adapter", SCAN);
+    // a second adapter next to the first
+    let net = d.join("sys/class/net/wlan1");
+    std::fs::create_dir_all(net.join("device")).unwrap();
+    std::fs::create_dir_all(net.join("wireless")).unwrap();
+    std::fs::write(net.join("type"), "1\n").unwrap();
+    let t = tools(&r, entries(&r.env, c.clone(), reader()));
+    assert_policy(&t, &["wifi_status"], &["wifi_adapter_set"]);
+    let st = t.call("wifi_status", &json!({})).unwrap();
+    assert!(st.contains("WiFi adapter: wlan0") && st.contains("wlan0, wlan1"), "{st}");
+    assert!(t.call("wifi_adapter_set", &json!({"adapter": "wlan9"})).is_err());
+    assert!(t.call("wifi_adapter_set", &json!({"adapter": "../x"})).is_err());
+    assert_eq!(c.known.chosen_adapter(), None, "a refusal writes nothing");
+    t.call("wifi_adapter_set", &json!({"adapter": "wlan1"})).unwrap();
+    assert_eq!(c.iface().as_deref(), Some("wlan1"));
+    assert!(t.call("wifi_status", &json!({})).unwrap().contains("WiFi adapter: wlan1"));
+    assert!(r.audits.lock().unwrap().iter().any(|a| a == "settings.wifi.adapter wlan1"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn internet_sharing_is_started_and_stopped_by_chat_with_the_same_checks_as_the_page_and_asks_every_time() {
+    use crate::sharing::control::{Backend, MemBackend};
+    use crate::sharing::{IfaceInfo, LinkKind};
+    let r = rig("share", true);
+    let (c, d) = world("sh", SCAN);
+    let t = tools(&r, entries(&r.env, c, reader()));
+    assert_policy(&t, &["internet_share_status"], &["internet_share_set"]);
+    // an ordinary account has neither
+    let user = tools(&rig("share-user", false), entries(&r.env, world("sh2", SCAN).0, reader()));
+    assert!(user.call("internet_share_status", &json!({})).is_err() && user.call("internet_share_set", &json!({"action": "stop"})).is_err());
+    // the pure part, against a made-up machine
+    let mut up = IfaceInfo::new("eth0", LinkKind::Ethernet);
+    up.default_route = true;
+    up.cidrs = vec![iyakki_hotspot::subnet::Cidr::parse("192.168.1.5/24").unwrap()];
+    let b = MemBackend::new(vec![up, IfaceInfo::new("enx0", LinkKind::Usb)], false);
+    let said = share_status_text(&b);
+    assert!(said.contains("Sharing is off") && said.contains("internet can come from: Ethernet eth0") && said.contains("Bluetooth tethering (phones connect to this computer) (cannot be used:"), "{said}");
+    // phones over Bluetooth: refused with the reason while it is not possible, no request written
+    let e = share_apply(&b, &json!({"action": "start", "through": "bluetooth"}), 0).unwrap_err();
+    assert!(e.contains("not built yet"), "{e}");
+    assert_eq!(b.request().id, 0);
+    b.set_nap_why(None);
+    assert!(share_status_text(&b).contains("share through: Bluetooth - phones connect to this computer"));
+    let ok = share_apply(&b, &json!({"action": "start", "through": "bluetooth", "hours": 4, "isolate": false}), 0).unwrap();
+    assert!(ok.contains("did not answer yet"), "{ok}");
+    let req = b.request();
+    assert!(req.on && req.nap && !req.wifi && req.idle_hours == 4 && !req.isolate && req.id == 1, "{req:?}");
+    // a mistake is explained before anything is written
+    assert!(share_apply(&b, &json!({"action": "start", "hours": 99}), 0).unwrap_err().contains("1 to 72"));
+    assert!(share_apply(&b, &json!({"action": "start", "through": "nonexistent0"}), 0).unwrap_err().contains("nonexistent0"));
+    assert!(share_apply(&b, &json!({"action": "pause"}), 0).is_err());
+    assert_eq!(b.request().id, 1);
+    // a cable by name, then stop
+    assert!(share_apply(&b, &json!({"action": "start", "through": "enx0"}), 0).is_ok());
+    assert!(share_apply(&b, &json!({"action": "stop"}), 0).is_ok());
+    assert!(!b.request().on);
     let _ = std::fs::remove_dir_all(&d);
 }

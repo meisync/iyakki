@@ -52,3 +52,24 @@ mod tests {
         assert_eq!(c.now_ms(), 1);
     }
 }
+
+/// CPU time used so far by the calling thread. A test that asserts "this call is cheap on the UI thread" measures THIS, not the wall
+/// clock: a loaded machine makes the wall time of a call huge, but not the CPU time the thread itself spent.
+#[cfg(unix)]
+pub fn thread_cpu_time() -> std::time::Duration {
+    #[repr(C)]
+    struct Timespec {
+        tv_sec: i64,
+        tv_nsec: i64,
+    }
+    extern "C" {
+        fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32;
+    }
+    // CLOCK_THREAD_CPUTIME_ID is 16 on macOS and 3 on Linux
+    const ID: i32 = if cfg!(target_os = "macos") { 16 } else { 3 };
+    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: `ts` is a valid, writable timespec of the layout the C library expects (64-bit targets)
+    let ok = unsafe { clock_gettime(ID, &mut ts) };
+    assert_eq!(ok, 0, "the thread CPU clock is not available");
+    std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}

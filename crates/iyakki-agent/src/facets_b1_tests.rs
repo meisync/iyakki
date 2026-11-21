@@ -54,6 +54,7 @@ impl HeaderValues for Mem {
 
 #[test]
 fn the_real_header_store_keeps_rules_in_a_file_and_values_behind_the_trait() {
+    let _rules = iyakki_testkit::process_lock(iyakki_testkit::names::BROWSER_HEADERS);
     let a = AgentApiImpl;
     let dir = tmp("hdr");
     let s = a.browser_headers().open(&dir.join("rules.json"), Arc::new(Mem(Default::default())));

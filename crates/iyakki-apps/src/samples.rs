@@ -6,7 +6,6 @@ use iyakki_shared::mcp::StoredServer;
 use iyakki_shared::skills::Scope;
 use iyakki_sec::policy::Policy;
 
-use crate::accounts::AuditLog;
 
 const MARKER: &str = "samples.done";
 
@@ -67,7 +66,7 @@ pub const BUILTIN_SKILLS: [(&str, &str); 21] = [
 ];
 
 /// Puts the examples in place once. Only for accounts that manage the system (they own the shared things).
-pub fn seed(data_dir: &std::path::Path, skills: &dyn iyakki_agent_api::SkillApi, mcp: &dyn iyakki_agent_api::McpApi, audit: &AuditLog, rag_docs: &str, user: &str, policy: &Policy) {
+pub fn seed(data_dir: &std::path::Path, skills: &dyn iyakki_agent_api::SkillApi, mcp: &dyn iyakki_agent_api::McpApi, audit: &dyn iyakki_agent_api::AuditApi, rag_docs: &str, user: &str, policy: &Policy) {
     if !policy.manage_settings {
         return;
     }

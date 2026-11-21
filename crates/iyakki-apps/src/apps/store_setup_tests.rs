@@ -10,7 +10,7 @@ fn cx(tag: &str, role: Role) -> AppCx {
 }
 
 fn full_machine() -> Machine {
-    Machine { model: "MacBookPro14,1".into(), gpus: 1, nvidia: true, ram_mb: 16_000, camera: true, fw: Item::ALL.into_iter().filter(|i| i.fw_def().is_some() || *i == Item::FwHardware).collect(), ..Default::default() }
+    Machine { model: "MacBookPro14,1".into(), gpus: 1, nvidia: true, amd_rocm: true, ram_mb: 16_000, camera: true, fw: Item::ALL.into_iter().filter(|i| i.fw_def().is_some() || *i == Item::FwHardware).collect(), ..Default::default() }
 }
 
 /// A PC with nothing special: no hardware tile, nothing recommended once k3s is there.
@@ -640,7 +640,7 @@ fn install_all_in_this_category_has_the_same_review() {
     let items: Vec<Item> = qi::install_jobs(&cx.services.real().jobs, "root").iter().filter_map(qi::item_of).collect();
     assert!(items.contains(&Item::K3s) && items.contains(&Item::Elasticsearch) && items.contains(&Item::Registry), "{items:?}");
     // a category with nothing missing: a plain answer
-    let (mut b, cxb) = rig("su-cat-all2", Role::Admin, full_machine(), facts(&[(Item::Ffmpeg, Presence::Installed("v7".into())), (Item::FfmpegLibs, Presence::Installed("6.1.5".into()))]));
+    let (mut b, cxb) = rig("su-cat-all2", Role::Admin, full_machine(), facts(&[(Item::Ffmpeg, Presence::Installed("v7".into())), (Item::FfmpegLibs, Presence::Installed("6.1.5".into())), (Item::BrowserPackage, Presence::Installed("version 1".into())), (Item::YtDlp, Presence::Installed("yt-dlp".into()))]));
     b.setup.ask_category(Gk::Media);
     assert!(b.setup.confirm.is_none() && b.setup.note.as_ref().is_some_and(|n| n.1 && n.0.contains("Nothing in Media tools")));
     let _ = cxb;
@@ -1430,34 +1430,34 @@ fn pictures() {
     for (name, w, h) in [("phone", 360u32, 740u32), ("small", 800, 480), ("wide", 1280, 720), ("full", 1920, 1080), ("big", 2560, 1600)] {
         let (mut a, cx) = mixed(&format!("su-pic-{name}"), Role::Admin);
         let g = draw(&mut a, &cx, w, h);
-        g.pm.save_png(dir.join(format!("{name}-tiles.png"))).unwrap();
+        g.pm_ref().save_png(dir.join(format!("{name}-tiles.png"))).unwrap();
         a.setup.cat = Some(Gk::Data);
         let g = draw(&mut a, &cx, w, h);
-        g.pm.save_png(dir.join(format!("{name}-category.png"))).unwrap();
+        g.pm_ref().save_png(dir.join(format!("{name}-category.png"))).unwrap();
         a.setup.cat = None;
         for (tag, it) in [("k3s", Item::K3s), ("claude", Item::ClaudeCode), ("es", Item::Elasticsearch), ("registry", Item::Registry), ("camera", Item::MacCamera)] {
             a.setup.open_popup(it);
             let g = draw(&mut a, &cx, w, h);
-            g.pm.save_png(dir.join(format!("{name}-popup-{tag}.png"))).unwrap();
+            g.pm_ref().save_png(dir.join(format!("{name}-popup-{tag}.png"))).unwrap();
         }
         a.setup.popup = None;
     }
     // read-only, the review, and the two panes
     let (mut a, cx) = mixed("su-pic-user", Role::User);
     a.setup.open_popup(Item::K3s);
-    draw(&mut a, &cx, 1280, 720).pm.save_png(dir.join("readonly-popup.png")).unwrap();
+    draw(&mut a, &cx, 1280, 720).pm_mut().save_png(dir.join("readonly-popup.png")).unwrap();
     let (mut a, cx) = mixed("su-pic-review", Role::Admin);
     a.setup.confirm = Some(a.setup.plan_all());
-    draw(&mut a, &cx, 1280, 720).pm.save_png(dir.join("review.png")).unwrap();
+    draw(&mut a, &cx, 1280, 720).pm_mut().save_png(dir.join("review.png")).unwrap();
     let (w, h) = (1920u32, 1080u32);
     for (frac, left, tag) in [(0.5f32, true, "pane-5050-left"), (0.3, true, "pane-3070-left"), (0.7, false, "pane-3070-right")] {
         let pw = (w as f32 * frac).round();
         let s = crate::ui::scale_for(pw as u32, h);
         let (mut a, cx) = mixed(&format!("su-pic-{tag}"), Role::Admin);
         let area = R::new(if left { 0.0 } else { w as f32 - pw }, 46.0 * s, pw, h as f32 - 46.0 * s);
-        draw_in(&mut a, &cx, area, w, h).pm.save_png(dir.join(format!("{tag}.png"))).unwrap();
+        draw_in(&mut a, &cx, area, w, h).pm_mut().save_png(dir.join(format!("{tag}.png"))).unwrap();
         a.setup.open_popup(Item::K3s);
-        draw_in(&mut a, &cx, area, w, h).pm.save_png(dir.join(format!("{tag}-popup.png"))).unwrap();
+        draw_in(&mut a, &cx, area, w, h).pm_mut().save_png(dir.join(format!("{tag}-popup.png"))).unwrap();
     }
 }
 

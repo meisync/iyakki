@@ -3,7 +3,7 @@ cannot judge. Nothing here changes a setting: the only things pressed are view s
 are undone, and every shell command is a read (`dev shell` runs under the standing grant the owner gave on the device, as `nobody`).
 A PASS always prints what is NOT COVERED. Row texts: FEATURES.md. (Named recipes6.py because recipes4.py is batch 4.)"""
 import re, time, datetime
-from hwcheck import recipe, fail, human, dev, Verdict, Ctx
+from hwcheck import require_hardware, not_applicable, recipe, fail, human, dev, Verdict, Ctx
 import recipes as _r1  # gives Ctx.notcovered
 
 
@@ -37,7 +37,7 @@ def fw07(c):
     line. Nothing is pressed except Advanced and Simple view."""
     st = c.settings_page("firewall"); c.shot("simple")
     _page_pass(c, st, [r"^FIREWALL ON$", r"^Everything that comes in from the network is blocked, except what is allowed below",
-                       r"^Standard: block everything coming in", r"^Remote desktop$", r"^File sharing$", r"^allowed$",
+                       r"^Standard: block everything coming in", r"^Remote desktop$", r"^allowed$",   # the "File sharing" rule exists only where sharing was switched on
                        r"UDP port 5353 · device name \(mDNS\)", r"IP: TCP port 7979 · developer mode",
                        r"^\d+ connection attempts blocked so far"])
     for b in ("Add…", "Remove", "Advanced…", "Standard", "Open", "Locked down"):
@@ -46,7 +46,7 @@ def fw07(c):
     try:
         c.shot("advanced")
         _page_pass(c, st, [r"^FIREWALL ON$", r"^Incoming connections are blocked unless allowed below", r"^Presets on: ",
-                           r"^Blocked connections since the rules were applied: \d+", r"^CIDR  10\.0\.0\.0/8$", r"^IP  192\.168\.68\.103$"])
+                           r"^Blocked connections since the rules were applied: \d+", r"^CIDR  10\.0\.0\.0/8$", r"^IP  \d+\.\d+\.\d+\.\d+$"])
         for b in ("Add rule…", "Edit", "Allow on/off", "Delete", "Presets…", "Apply", "Look up names", "Copy rules", "Import", "Clear log", "On/off", "Disable now", "Simple view"):
             if b not in c.buttons(st): fail("advanced button %r missing" % b)
         w = c.has(st, r"^Rule \d+: /\d+ is a very large network")
@@ -61,6 +61,7 @@ def hw05(c):
     """PASS when the page names this model, says 'Started N times on it · first seen <date> · last seen <date>', lists the six category
     switches (Sound, Display, Keyboard and pointer, Microphone, GPU, Power and battery) as 'per computer' or 'shared', shows this
     computer in the known list and has Copy settings from, Reset this computer and Forget a computer buttons. No button pressed."""
+    require_hardware(c, "macmini2018")
     st = c.settings_page("computer"); c.shot("page")
     _page_pass(c, st, [r"^This computer$", r"^Apple Macmini8,1$", r"^Started \d+ times on it · first seen \d{4}-\d\d-\d\d · last seen \d{4}-\d\d-\d\d$",
                        r"^Apple Macmini8,1  \(this computer\) · last seen \d{4}-\d\d-\d\d"])
@@ -107,7 +108,7 @@ def voice22(c):
     found = False
     for i in range(4):
         if c.has(st, r"^Highlight timing offset$"): found = True; break
-        dev("input", "swipe", 1200, 900, 1200, 200); time.sleep(1.5); st = c.state("scroll%d" % i)
+        [dev("input", "key", "Down") for _ in range(12)]; time.sleep(1.5); st = c.state("scroll%d" % i)
     if not found: fail("no 'Highlight timing offset' row after Advanced and scrolling")
     c.shot("advanced-rows")
     c.expect(st, r"^Highlight timing offset$"); c.expect(st, r"^0\s+ms$"); c.expect(st, r"^Advanced sound rows shown\.$")
@@ -133,6 +134,10 @@ def brow54(c):
 def brow58(c):
     """PASS when the Browser page reads 'Smooth pages (faster, softer): off. Press m to change.' Nothing is switched."""
     st = c.settings_page("browser")
+    if not c.has(st, r"^Smooth pages \(faster, softer\): (on|off)\. Press m to change\.$") and c.has(st, r"^Smooth pages \(faster, softer\)$"):
+        # a window with room shows a switch row (label and blurb; the on/off position is only in the picture); the sentence is for small windows
+        c.shot("browser-page")
+        human("the Browser page shows Smooth pages as a switch row whose position is not in `dev state`; look at the screenshot (the sentence form appears only in a small window)")
     c.expect(st, r"^Smooth pages \(faster, softer\): off\. Press m to change\.$")
     c.notcovered("the half-size drawing with 2x stretch, the llvmpipe thread count, web-tuning, tile-only painting and any speed gain were not measured; the switch was left off")
 
@@ -141,7 +146,10 @@ def brow58(c):
 def vault06(c):
     """PASS when the Browser page reads 'Protect browser data: off. Press P to change.' Nothing is switched."""
     st = c.settings_page("browser")
-    c.expect(st, r"^Protect browser data: off\. Press P to change\.$")
+    if c.has(st, r"^Protect browser data$"):   # the card form: the state is the 'Now: ...' end of its blurb
+        c.expect(st, r"Encrypts cookies and site data .*Now: off: browser data is plain files")
+    else:
+        c.expect(st, r"^Protect browser data: off\. Press P to change\.$")
     c.notcovered("sealing, key in the vault, RAM folder, sign-out write-back, migration and Reset browser data were not run; switching it on needs the person's vault and password")
 
 
@@ -168,7 +176,7 @@ def websvc03(c):
 @recipe("F-DEVMODE-14", "iyakki dev whoami lists every scope with its line and held state; Developer mode page has Grant all / Extend 4 h (read-only)")
 def devmode14(c):
     """PASS when `dev whoami` prints the 12 scopes (install, debug, files, files:system, config, input, input:password, shell, power,
-    update, forward, kube) each with [x] or [ ] and a one-line explanation, 'files' is NOT held (withdrawn on this computer), and the
+    update, forward, kube) each with [x] or [ ] and a one-line explanation, the 'Scopes this computer holds' line agrees with the [x] marks, and the
     Developer mode page has the buttons Grant all diagnostic scopes and Extend 4 h. Neither is pressed."""
     rc, out = c.run("whoami", name="whoami")
     names = ("install", "debug", "files", "files:system", "config", "input", "input:password", "shell", "power", "update", "forward", "kube")
@@ -178,8 +186,12 @@ def devmode14(c):
         if not m: fail("scope %s is not listed with an explanation in `dev whoami`" % n)
         held[n] = m[1] == "x"
     c.log("held: " + ", ".join(k for k, v in held.items() if v) + " | not held: " + ", ".join(k for k, v in held.items() if not v))
-    if held["files"]: fail("files is held; this computer should have it withdrawn")
-    if not re.search(r"^Scopes this computer holds: ", out, re.M): fail("no 'Scopes this computer holds' line")
+    m = re.search(r"^Scopes this computer holds: (.*)$", out, re.M)
+    if not m: fail("no 'Scopes this computer holds' line")
+    # the summary line and the [x] marks must agree; which scopes are held is the owner's choice per computer (a test computer may hold all)
+    line = {x.strip() for x in m[1].split(",")}
+    if line != {k for k, v in held.items() if v}: fail("'Scopes this computer holds' says %s but the [x] marks are %s" % (sorted(line), sorted(k for k, v in held.items() if v)))
+    c.log("files %s on this computer; held list and [x] marks agree" % ("held" if held["files"] else "withdrawn"))
     st = c.settings_page("developer"); c.shot("page")
     for b in ("Grant all diagnostic scopes", "Extend 4 h"):
         if b not in c.buttons(st): fail("Developer mode button %r missing" % b)
@@ -276,6 +288,7 @@ def drivers03(c):
     rc, dm2 = c.run("dmesg", "--grep", "brcmfmac", "-n", 400, name="dmesg-brcmfmac"); dm += "\n" + dm2
     ln = re.search(r"\[\s*([\d.]+)\] iyakki: .*driver pack (\S+): (\d+) file\(s\) linked.*reloaded", dm)
     fw = re.search(r"\[\s*([\d.]+)\] brcmfmac: brcmf_c_preinit_dcmds: Firmware: (BCM\S+)", dm)
+    if "brcmfmac" not in dm2: not_applicable("no Broadcom Wi-Fi (brcmfmac) on this machine; the row is about the firmware pack for it")
     if not ln: fail("no 'driver pack ... file(s) linked ... reloaded' line in the kernel log")
     if not fw: fail("brcmfmac did not report a firmware version")
     if float(ln[1]) > float(fw[1]): fail("the pack was linked after brcmfmac loaded firmware")
@@ -318,6 +331,8 @@ def kbd18(c):
     st = c.settings_page("startup"); c.shot("startup")
     names = [t.strip() for t in c.texts(st)]
     if "Touch screen" not in names: fail("no 'Touch screen' item in the Startup list")
+    import hwmatch
+    if hwmatch.startup_item_absent(names, "Touch screen"): not_applicable("no touch screen on this machine (Startup says 'not on this machine')")
     i = names.index("Touch screen")
     if "ready" not in names[i + 1:i + 3]: fail("Touch screen is not 'ready' in the Startup list: %r" % names[i:i + 3])
     c.log("Startup: Touch screen -> ready")

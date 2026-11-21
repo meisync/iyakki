@@ -26,7 +26,7 @@ fn unlock_with(sh: &mut Shell, pw: &str) {
 }
 
 fn audit_text(sh: &Shell) -> String {
-    std::fs::read_to_string(sh.env.audit.path()).unwrap_or_default()
+    std::fs::read_to_string(sh.env.audit.path_buf()).unwrap_or_default()
 }
 
 /// A signed-in shell with a fake clock, no screen saver of its own and `lock_min` as the person's automatic lock.
@@ -367,10 +367,10 @@ fn the_automatic_lock_is_not_halved_on_battery() {
 #[test]
 fn the_drive_banner_holds_the_automatic_lock_off() {
     let (mut sh, clock) = timed("lk-holds", 5);
-    iyakki_storage::loss::set_thread_override(Some(iyakki_storage::loss::Snapshot { state: iyakki_storage::loss::State::Lost, since: 10, lost_at: Some(10), ..Default::default() }));
+    iyakki_core_local::storage::loss::set_thread_override(Some(iyakki_core_local::storage::loss::Snapshot { state: iyakki_core_local::storage::loss::State::Lost, since: 10, lost_at: Some(10), ..Default::default() }));
     run(&mut sh, &clock, 20 * MIN);
     assert!(!sh.is_locked(), "the drive banner holds the lock off");
-    iyakki_storage::loss::set_thread_override(None);
+    iyakki_core_local::storage::loss::set_thread_override(None);
     run(&mut sh, &clock, 4 * MIN);
     assert!(!sh.is_locked(), "the count began when the last hold ended");
     run(&mut sh, &clock, 2 * MIN);

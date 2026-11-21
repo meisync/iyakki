@@ -62,7 +62,7 @@ pub fn band_levels(pcm: &[i16], channels: usize, rate: u32) -> [f32; BANDS] {
     out
 }
 
-pub use iyakki_tile_api::radio::{CertPin, CertProblem, Holder, Language, RadioState, SoundGate, Station, BANDS};
+pub use iyakki_tile_api::radio::{Around, CertPin, CertProblem, Holder, Language, RadioState, SoundGate, Station, BANDS};
 
 /// `(host, port)` of an https address (port 443 when none); `None` for anything else.
 pub fn https_endpoint(url: &str) -> Option<(String, u16)> {
@@ -266,7 +266,20 @@ struct Inner {
     hls_scale: std::sync::atomic::AtomicU32,
     /// Set when the last start failed on a server certificate the person could decide about.
     problem: Mutex<Option<CertProblem>>,
+    /// Retries and switching (`(retries, auto_switch)`), read at every start; `None` is the defaults (2, on).
+    recover: Mutex<Option<RecoverSource>>,
+    /// Time for the recovery; tests put a manual one here.
+    clock: Mutex<Arc<dyn crate::radio_recover::RecoverClock>>,
+    /// What the status line adds while the radio recovers ("Reconnecting 1 of 2", "Switched to NAME").
+    notice: Mutex<Option<String>>,
+    /// When the current connection made its first sound (the recovery clock's milliseconds).
+    first_sound: AtomicU64,
+    /// Where the sound output's device, generation and gain come from (the process-wide selector; tests put a made-up state here).
+    output: Mutex<Arc<dyn crate::audioout::OutputState>>,
 }
+
+/// Where the retry count and the auto-switch choice come from (the machine settings).
+pub type RecoverSource = Arc<dyn Fn() -> (u32, bool) + Send + Sync>;
 
 /// Reads (`None`) or sets (`Some(percent)`) the master volume; returns the volume in percent.
 pub type MasterLink = Arc<dyn Fn(Option<u8>) -> u8 + Send + Sync>;
@@ -281,7 +294,7 @@ type Allow = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 impl Default for RadioPlayer {
     fn default() -> Self {
-        RadioPlayer { inner: Arc::new(Inner { state: Mutex::new(RadioState::Idle), generation: AtomicU64::new(0), paused: std::sync::atomic::AtomicBool::new(false), volume: AtomicU8::new(80), link: Mutex::new(None), streamer: Mutex::new(None), retry_wait: Mutex::new(Duration::from_secs(2)), levels: Mutex::new([0.0; BANDS]), aac: Mutex::new(None), hls_scale: std::sync::atomic::AtomicU32::new(1), problem: Mutex::new(None) }) }
+        RadioPlayer { inner: Arc::new(Inner { state: Mutex::new(RadioState::Idle), generation: AtomicU64::new(0), paused: std::sync::atomic::AtomicBool::new(false), volume: AtomicU8::new(80), link: Mutex::new(None), streamer: Mutex::new(None), retry_wait: Mutex::new(Duration::from_secs(2)), levels: Mutex::new([0.0; BANDS]), aac: Mutex::new(None), hls_scale: std::sync::atomic::AtomicU32::new(1), problem: Mutex::new(None), recover: Mutex::new(None), clock: Mutex::new(Arc::new(crate::radio_recover::RealClock::default())), notice: Mutex::new(None), first_sound: AtomicU64::new(0), output: Mutex::new(crate::audioout::output_state()) }) }
     }
 }
 
@@ -299,6 +312,16 @@ fn resolve(base: &str, loc: &str) -> Option<String> {
 }
 
 impl RadioPlayer {
+    /// Read the sound output's state (device change, volume) from `o` instead of the process-wide selector.
+    pub fn set_output_state(&self, o: Arc<dyn crate::audioout::OutputState>) {
+        *self.inner.output.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = o;
+    }
+
+    /// The generation of the sound output now (changes when the device does: the sink starts again).
+    fn output_generation(&self) -> u64 {
+        self.inner.output.lock().unwrap_or_else(std::sync::PoisonError::into_inner).generation()
+    }
+
     pub fn set_streamer(&self, s: Arc<dyn Streamer>) {
         *self.inner.streamer.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(s);
     }
@@ -342,6 +365,31 @@ impl RadioPlayer {
     /// How long to wait before reconnecting a stream that dropped.
     pub fn set_retry_wait(&self, d: Duration) {
         *self.inner.retry_wait.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = d;
+    }
+
+    /// Where the retry count and the auto-switch choice come from (read at every start).
+    pub fn set_recover_source(&self, f: RecoverSource) {
+        *self.inner.recover.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(f);
+    }
+
+    /// Time for the recovery (tests: a manual clock; real use: the system clock).
+    pub fn set_recover_clock(&self, c: Arc<dyn crate::radio_recover::RecoverClock>) {
+        *self.inner.clock.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = c;
+    }
+
+    fn clock(&self) -> Arc<dyn crate::radio_recover::RecoverClock> {
+        self.inner.clock.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    /// What the status line adds while the radio recovers, if anything.
+    pub fn notice(&self) -> Option<String> {
+        self.inner.notice.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    fn set_notice(&self, gen: u64, n: Option<String>) {
+        if self.current(gen) {
+            *self.inner.notice.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = n;
+        }
     }
 
     pub fn state(&self) -> RadioState {
@@ -421,6 +469,7 @@ impl RadioPlayer {
     }
 
     pub fn stop(&self) {
+        *self.inner.notice.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         *self.inner.problem.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.inner.paused.store(false, Ordering::SeqCst);
         self.inner.generation.fetch_add(1, Ordering::SeqCst);
@@ -430,13 +479,20 @@ impl RadioPlayer {
 
     /// Start (or switch to) a station. `allow` is the account's host policy; `play_cmd` takes WAV on its stdin.
     pub fn play(&self, station: &Station, allow: Allow, play_cmd: &str) {
+        self.play_in(station, allow, play_cmd, Around::default())
+    }
+
+    /// [`play`](Self::play) with the person's current list: when the station drops and its retries fail, the radio goes on to the next
+    /// one of `around.list` and writes one audit line per switch through `around.audit` (see [`crate::radio_recover`]).
+    pub fn play_in(&self, station: &Station, allow: Allow, play_cmd: &str, around: Around) {
+        *self.inner.notice.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.inner.paused.store(false, Ordering::SeqCst);
         let gen = self.inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *self.inner.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = RadioState::Connecting(station.name.clone());
         *self.inner.problem.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         let me = self.clone();
         let (station, play_cmd) = (station.clone(), play_cmd.to_string());
-        std::thread::Builder::new().name("iyakki-radio".into()).spawn(move || me.run(gen, &station, allow, &play_cmd)).ok();
+        std::thread::Builder::new().name("iyakki-radio".into()).spawn(move || me.run(gen, &station, allow, &play_cmd, around)).ok();
     }
 
     fn current(&self, gen: u64) -> bool {
@@ -449,14 +505,18 @@ impl RadioPlayer {
         }
     }
 
-    fn run(&self, gen: u64, station: &Station, allow: Allow, play_cmd: &str) {
-        let mut played = false;
-        let plan = TlsPlan::new(station.cert_pin.as_ref().map(|p| (p.host.as_str(), p.port, p.sha256.as_str())));
-        for attempt in 0..4 {
+    fn run(&self, gen: u64, first: &Station, allow: Allow, play_cmd: &str, around: Around) {
+        let (retries, auto) = self.inner.recover.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().map_or((iyakki_shared::radiorecover::DEFAULT_RETRIES, true), |f| f());
+        let mut rec = crate::radio_recover::Recovery::new(retries, auto, &around.list);
+        let clock = self.clock();
+        let mut station = first.clone();
+        loop {
             if !self.current(gen) {
                 return;
             }
-            match self.stream_once(gen, station, &allow, &plan, play_cmd, &mut played) {
+            let mut played = false;
+            let plan = TlsPlan::new(station.cert_pin.as_ref().map(|p| (p.host.as_str(), p.port, p.sha256.as_str())));
+            match self.stream_once(gen, &station, &allow, &plan, play_cmd, &mut played) {
                 Ok(()) => {
                     // a file that has played to its end
                     self.set_state(gen, RadioState::Idle);
@@ -465,19 +525,30 @@ impl RadioPlayer {
                 }
                 Err(StreamEnd::Stopped) => return,
                 Err(StreamEnd::Failed(why)) => {
-                    // a stream that was playing is worth reconnecting; one that never started is not
-                    if !played || attempt == 3 {
-                        self.set_state(gen, RadioState::Failed { station: station.name.clone(), why });
-                        return;
-                    }
-                    self.set_state(gen, RadioState::Connecting(station.name.clone()));
-                    let wait = *self.inner.retry_wait.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let t0 = std::time::Instant::now();
-                    while t0.elapsed() < wait {
-                        if !self.current(gen) {
+                    let played_ms = played.then(|| clock.now_ms().saturating_sub(self.inner.first_sound.load(Ordering::SeqCst)));
+                    match rec.on_end(&station, played_ms, &why) {
+                        crate::radio_recover::Step::GiveUp(why) => {
+                            self.set_notice(gen, None);
+                            self.set_state(gen, RadioState::Failed { station: station.name.clone(), why });
                             return;
                         }
-                        std::thread::sleep(Duration::from_millis(20).min(wait));
+                        crate::radio_recover::Step::Retry { n, of } => {
+                            self.set_notice(gen, Some(format!("Reconnecting {n} of {of}")));
+                            self.set_state(gen, RadioState::Connecting(station.name.clone()));
+                            let wait = *self.inner.retry_wait.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            clock.wait(wait, &|| self.current(gen));
+                        }
+                        crate::radio_recover::Step::Switch { from, to } => {
+                            if !self.current(gen) {
+                                return;
+                            }
+                            if let Some(audit) = &around.audit {
+                                audit("radio.switch", &format!("{} -> {} ({})", host_of(&station.url), host_of(&to.url), from));
+                            }
+                            self.set_notice(gen, Some(format!("Switched to {}", to.name)));
+                            self.set_state(gen, RadioState::Connecting(to.name.clone()));
+                            station = to;
+                        }
                     }
                 }
             }
@@ -696,14 +767,16 @@ impl RadioPlayer {
             }
         });
         let c = Ctx { gen, station, play_cmd, rx, title, kbps_hint, said };
-        let mut sink = Sink { out: None, out_gen: crate::audioout::global().generation() };
+        let mut sink = Sink { out: None, out_gen: self.output_generation() };
         let result = match aac {
             Some(d) => self.aac_loop(&c, d, &mut sink, played),
             None => self.mp3_loop(&c, &mut sink, played),
         };
         if let Some((mut out, _, _)) = sink.out.take() {
             // a file that played to its end: let the sound command play what it has buffered before it is stopped
-            if result.is_ok() {
+            // a stream that ended or dropped is no reason to cut what was already handed over: it plays out too (only a stop or a
+            // new station, which turns `current` false, ends it at once)
+            if !matches!(result, Err(StreamEnd::Stopped)) {
                 out.finish(Duration::from_secs(4), &|| self.current(gen));
             } else {
                 out.stop();
@@ -717,7 +790,7 @@ impl RadioPlayer {
     fn emit(&self, c: &Ctx, sink: &mut Sink, pcm: &[i16], ch: u16, rate: u32, bitrate: u32, played: &mut bool) -> Result<(), StreamEnd> {
         // the sound output changed (a monitor plugged in or moved, another output chosen): the player starts
         // again on the new device, after a short gap
-        let sound_gen = crate::audioout::global().generation();
+        let sound_gen = self.output_generation();
         if sink.out.as_ref().is_none_or(|o| o.1 != rate || o.2 != ch) || sink.out_gen != sound_gen {
             if let Some((mut old, _, _)) = sink.out.take() {
                 old.stop();
@@ -744,6 +817,13 @@ impl RadioPlayer {
         }
         let t = c.title.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         let kbps = if bitrate > 0 { bitrate } else { c.kbps_hint };
+        if !*played {
+            self.inner.first_sound.store(self.clock().now_ms(), Ordering::SeqCst);
+            let mut n = self.inner.notice.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if n.as_deref().is_some_and(|t| t.starts_with("Reconnecting")) {
+                *n = Some("Reconnected".into());
+            }
+        }
         *played = true;
         self.set_state(c.gen, RadioState::Playing { station: c.station.name.clone(), title: t, kbps });
         Ok(())
@@ -907,6 +987,28 @@ enum StreamEnd {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_radio_reads_the_sound_outputs_generation_from_the_state_it_was_given() {
+        struct Made(AtomicU64);
+        impl crate::audioout::OutputState for Made {
+            fn device(&self) -> Option<String> {
+                None
+            }
+            fn generation(&self) -> u64 {
+                self.0.load(Ordering::SeqCst)
+            }
+            fn gain(&self) -> u32 {
+                100
+            }
+        }
+        let made = Arc::new(Made(AtomicU64::new(7)));
+        let r = RadioPlayer::default();
+        r.set_output_state(made.clone());
+        assert_eq!(r.output_generation(), 7);
+        made.0.store(8, Ordering::SeqCst);
+        assert_eq!(r.output_generation(), 8, "a changed device is a new generation for the radio");
+    }
+
     #[test]
     fn a_player_that_says_why_it_stopped_is_quoted_and_a_silent_one_gets_the_old_hint() {
         assert!(player_stopped_message("").contains("Settings → Voice"));

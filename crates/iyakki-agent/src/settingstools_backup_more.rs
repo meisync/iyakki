@@ -191,6 +191,10 @@ mod tests {
     #[test]
     fn share_system_and_chain_backups_keep_secrets_out_of_the_chat_and_ask_every_time() {
         let r = rig("backup-more", true);
+        // the tools find the person's home through $HOME (or /home/<user>): without this the test wrote and deleted `b`, `Documents` and the
+        // key files in the REAL home of whoever runs it, shared by every parallel run. The home is this test's own folder, set under the env lock.
+        let rig_dir = r.env.dir.to_string_lossy().to_string();
+        let _home = iyakki_testkit::EnvGuard::set(&[("HOME", Some(rig_dir.as_str()))]);
         let fm = Arc::new(backup_share::FakeMounter::default());
         let t = tools(&r, entries_with(&r.env, fm.clone()));
         assert_policy(&t, &[], &TOOLS);

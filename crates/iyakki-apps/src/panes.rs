@@ -24,14 +24,56 @@ pub fn chord_from_name(code: &str, shift: bool) -> Option<LayoutKey> {
         "Tab" => Some(LayoutKey::Cycle { back: shift }),
         "KeyM" => Some(LayoutKey::NextDisplay),
         "Digit0" => Some(LayoutKey::Picker),
-        // desktop views, browser-style: Ctrl+Alt+PageUp / PageDown (the jump keys need Super and come from the local keyboard only)
+        // desktop views, browser-style: Ctrl+Alt+PageUp / PageDown step, Ctrl+Alt+Shift+1..9 jump (the local jump chord needs Super)
         "PageUp" => Some(LayoutKey::ViewStep { back: true, mac: false }),
         "PageDown" => Some(LayoutKey::ViewStep { back: false, mac: false }),
+        c if !shift && custom_step(c).is_some() => custom_step(c),
         c => {
             let d = c.strip_prefix("Digit")?.parse::<u8>().ok()?;
-            (1..=9).contains(&d).then_some(LayoutKey::Apply(d))
+            if !(1..=9).contains(&d) {
+                return None;
+            }
+            // with Shift the digit jumps to that desktop view: a browser cannot send the Super key of the local jump chord
+            Some(if shift { LayoutKey::View(d) } else { LayoutKey::Apply(d) })
         }
     }
+}
+
+/// The person's own step keys (Ctrl+Alt plus the key), as DOM key names: the shell sets them when the person's views are read.
+static CUSTOM_STEP: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+
+/// Set (or clear) the own step keys. Names that are not allowed (`iyakki_shared::views::custom_key_ok`) clear them.
+pub fn set_custom_step(keys: Option<(&str, &str)>) {
+    let ok = keys.filter(|(p, n)| iyakki_shared::views::custom_key_ok(p) && iyakki_shared::views::custom_key_ok(n) && p != n);
+    *CUSTOM_STEP.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = ok.map(|(p, n)| (p.to_string(), n.to_string()));
+}
+
+fn custom_step(name: &str) -> Option<LayoutKey> {
+    let g = CUSTOM_STEP.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    custom_step_in(g.as_ref(), name)
+}
+
+/// What key `name` does under the given own step keys.
+pub fn custom_step_in(keys: Option<&(String, String)>, name: &str) -> Option<LayoutKey> {
+    let (p, n) = keys?;
+    if name == p {
+        Some(LayoutKey::ViewStepCustom { back: true })
+    } else if name == n {
+        Some(LayoutKey::ViewStepCustom { back: false })
+    } else {
+        None
+    }
+}
+
+/// The DOM key name of a Linux evdev key code that may be an own step key.
+pub fn custom_name_of_evdev(code: u16) -> Option<&'static str> {
+    Some(match code {
+        16 => return None, // Q
+        30 => "KeyA", 48 => "KeyB", 46 => "KeyC", 32 => "KeyD", 18 => "KeyE", 33 => "KeyF", 34 => "KeyG", 35 => "KeyH", 23 => "KeyI", 36 => "KeyJ", 37 => "KeyK",
+        49 => "KeyN", 24 => "KeyO", 25 => "KeyP", 19 => "KeyR", 20 => "KeyT", 22 => "KeyU", 47 => "KeyV", 17 => "KeyW", 45 => "KeyX", 21 => "KeyY", 44 => "KeyZ",
+        26 => "BracketLeft", 27 => "BracketRight", 51 => "Comma", 52 => "Period",
+        _ => return None,
+    })
 }
 
 /// The chord for a Linux evdev key code with Ctrl and Alt held.
@@ -47,7 +89,7 @@ pub fn chord_from_evdev(code: u16, shift: bool) -> Option<LayoutKey> {
         106 => "ArrowRight",
         103 => "ArrowUp",
         108 => "ArrowDown",
-        _ => return None,
+        c => custom_name_of_evdev(c)?,
     };
     chord_from_name(name, shift)
 }

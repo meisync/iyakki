@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use super::{Checksum, FileSum, Store};
+use super::{Checksum, FileSum, Kind, Store};
 
 fn entry(s: &Store, id: &str, version: &str) -> Option<Vec<FileSum>> {
     let it = s.active().items.into_iter().find(|i| i.id == format!("cli:{id}"))?;
@@ -26,6 +26,26 @@ pub fn sha256_for(dir: &Path, id: &str, version: &str, file: &str) -> Option<Str
 
 pub fn sha256_with(s: &Store, id: &str, version: &str, file: &str) -> Option<String> {
     entry(s, id, version)?.into_iter().find(|f| f.file == file).map(|f| f.sha256)
+}
+
+/// The exact version a pinned item (`CliDef::pin` in the code) is installed at, step 3 and 4 of the migration (docs/development/DOWNLOADS-MANIFEST.md
+/// section 8). The code's pin stands, unless the active manifest (signed, and checked by the rules against the bundled copy) names ANOTHER exact
+/// version for a `none-vendor` item AND carries our own SHA-256 values for it: a version never moves without hashes, so the check of the download
+/// can only get as strong as before, never weaker. An item with no code pin (a floating one) is not touched here. The caller applies this only
+/// to sources that can be checked against such values (a file, an archive, a pip package).
+pub fn effective_pin(dir: &Path, id: &str, code_pin: &str) -> String {
+    effective_pin_with(&Store::new(dir), id, code_pin)
+}
+
+pub fn effective_pin_with(s: &Store, id: &str, code_pin: &str) -> String {
+    if code_pin.is_empty() {
+        return String::new();
+    }
+    let Some(it) = s.active().items.into_iter().find(|i| i.id == format!("cli:{id}")) else { return code_pin.to_string() };
+    match it.checksum {
+        Some(Checksum::Sha256 { files, .. }) if it.kind == Kind::NoneVendor && !it.version.is_empty() && !files.is_empty() => it.version,
+        _ => code_pin.to_string(),
+    }
 }
 
 /// (normalised project name, version) from a wheel (`name-1.2-py3-none-any.whl`) or source archive (`name-1.2.tar.gz`) file name.

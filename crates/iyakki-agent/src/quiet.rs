@@ -35,14 +35,7 @@ pub struct System;
 
 impl Env for System {
     fn amixer(&self, args: &[String]) -> Result<(), String> {
-        let st = std::process::Command::new("amixer")
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_err(|e| format!("amixer: {e}"))?;
-        if st.success() { Ok(()) } else { Err(format!("amixer ended with {st}")) }
+        iyakki_core_local::starters::amixer_quiet(args)
     }
 
     fn signal(&self, pid: u32, sig: i32) {
@@ -58,16 +51,7 @@ impl Env for System {
 
     fn silence(&self, max: Duration) {
         use std::io::Write;
-        let Ok(mut child) = {
-            let argv = crate::voice::sound_player_argv(&["aplay", "-q", "-D", crate::softvol::PCM, "-t", "raw", "-f", "S16_LE", "-r", "48000", "-c", "2", "-"].map(String::from));
-            let mut c = std::process::Command::new(&argv[0]);
-            c.args(&argv[1..]);
-            c
-        }
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
+        let Ok(mut child) = iyakki_core_local::starters::spawn_raw_player(&crate::voice::sound_player_argv(&["aplay", "-q", "-D", crate::softvol::PCM, "-t", "raw", "-f", "S16_LE", "-r", "48000", "-c", "2", "-"].map(String::from)))
         else {
             return;
         };
@@ -196,6 +180,23 @@ pub fn playback_streams(root: &Path) -> Vec<Stream> {
                 let Ok(status) = std::fs::read_to_string(sub.join("status")) else { continue };
                 let (state, owner) = parse_status(&status);
                 out.push(Stream { card: n, name: format!("{}/{}/{}", file_name(&card), file_name(&pcm), file_name(&sub)), state, owner });
+            }
+        }
+    }
+    out
+}
+
+/// [`playback_streams`] over the kernel facts of an [`AudioRoute`] (the machine's, or a made-up tree in a test).
+pub fn playback_streams_via(route: &dyn iyakki_core_api::AudioRoute) -> Vec<Stream> {
+    let all_digits = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+    let mut out = Vec::new();
+    for card in route.asound_dir("").into_iter().filter(|d| numbered(d, "card")) {
+        let Some(n) = card.strip_prefix("card").and_then(|n| n.parse().ok()) else { continue };
+        for pcm in route.asound_dir(&card).into_iter().filter(|d| d.strip_prefix("pcm").and_then(|r| r.strip_suffix('p')).is_some_and(all_digits)) {
+            for sub in route.asound_dir(&format!("{card}/{pcm}")).into_iter().filter(|d| numbered(d, "sub")) {
+                let Some(status) = route.asound_text(&format!("{card}/{pcm}/{sub}/status")) else { continue };
+                let (state, owner) = parse_status(&status);
+                out.push(Stream { card: n, name: format!("{card}/{pcm}/{sub}"), state, owner });
             }
         }
     }

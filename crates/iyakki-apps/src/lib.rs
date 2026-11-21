@@ -73,6 +73,19 @@ pub fn new_reader() -> std::sync::Arc<dyn iyakki_agent_api::StoryReader> {
     agent().story().new_reader()
 }
 
+/// The runs of the core, when this program has no agent of its own to run the assistant in (`iyakki-ui --socket`): the chat sends a request as data and
+/// the core builds the tool chain and drives the run ([`apps::core_run::remote_run`]). `None` in the program that has the agent linked in.
+pub fn chat_runs() -> Option<std::sync::Arc<dyn iyakki_agent_api::ChatRuns>> {
+    CHAT_RUNS.get().cloned()
+}
+
+/// Put the core's runs in place. Only the first call takes effect; returns whether it did.
+pub fn install_chat_runs(r: std::sync::Arc<dyn iyakki_agent_api::ChatRuns>) -> bool {
+    CHAT_RUNS.set(r).is_ok()
+}
+
+static CHAT_RUNS: std::sync::OnceLock<std::sync::Arc<dyn iyakki_agent_api::ChatRuns>> = std::sync::OnceLock::new(); // flaky-ok: set once at start-up by the program, a one-shot cell like AGENT
+
 pub fn agent() -> &'static dyn iyakki_agent_api::AgentApi {
     agent_cell().as_ref()
 }

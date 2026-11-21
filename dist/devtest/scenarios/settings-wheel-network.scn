@@ -1,0 +1,20 @@
+# a text scenario: Settings, the Network page (long: Wi-Fi, firewall, sharing), skipped when it fits; the wheel scrolls it down and then back up (nothing is changed)
+name: settings-wheel-network
+devices: real qemu
+restore: none (read-only)
+doc: opens the Network page of Settings; when it shows a scrollbar the wheel must move it down and the opposite turn must move it back
+key s
+wait app=Settings
+skip-unless-button Network
+click-sidebar Network
+wait app=Settings page=Network
+shot top
+skip-unless-scrollbar
+scroll down
+shot lower
+expect-changed
+expect-scrollbar
+scroll up
+shot back
+expect-changed
+expect-scrollbar

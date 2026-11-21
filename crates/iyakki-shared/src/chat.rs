@@ -36,7 +36,7 @@ pub struct ToolCall {
 }
 
 /// What the model is told about a tool.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolSpec {
     pub name: String,
     pub description: String,
@@ -84,7 +84,7 @@ impl Message {
 }
 
 /// One model response: text and/or tool requests.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct ModelTurn {
     pub text: String,
     pub calls: Vec<ToolCall>,

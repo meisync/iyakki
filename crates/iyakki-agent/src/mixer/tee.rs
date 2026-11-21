@@ -290,4 +290,59 @@ mod tests {
         drop(g);
         m.shutdown();
     }
+
+    /// The real tap and listener check of the browser wiring (`browsermedia::broadcast_audio` and `audio_listeners`) against a
+    /// registered page, with a fake card: the whole chain from the mixer's period to the framed message for the page.
+    fn browser_tee(card: &FakeSink) -> TeeSink {
+        TeeSink::new(Box::new(card.clone()), Box::new(crate::browsermedia::broadcast_audio), Box::new(crate::browsermedia::audio_listeners))
+    }
+
+    fn page() -> std::sync::Arc<crate::browsermedia::BrowserMedia> {
+        crate::browsermedia::isolate_for_this_thread();
+        let p = crate::browsermedia::BrowserMedia::new(crate::browsermedia::Policy::allow_all(), Arc::new(|_, _| {}), None);
+        crate::browsermedia::register("ann", p.clone());
+        p
+    }
+
+    #[test]
+    fn a_page_that_pressed_start_sound_gets_each_period_framed_and_numbered_and_the_card_gets_it_too() {
+        let card = FakeSink::new();
+        let p = page();
+        let mut t = browser_tee(&card);
+        t.open(48_000, 2).unwrap();
+        t.write(&[1, 2]).unwrap();
+        assert!(p.take_audio().is_empty(), "the page has not started its sound: nothing is kept");
+        assert_eq!((t.offered, t.taken), (1, 0));
+        p.set_audio_out(true);
+        t.write(&[3, 4, 5, 6]).unwrap();
+        t.write(&[7, 8]).unwrap();
+        let frames = p.take_audio();
+        assert_eq!(frames.len(), 1, "two periods queued since the last pull leave as one chunk");
+        let f = &frames[0];
+        assert_eq!((f[1], u32::from_le_bytes(f[2..6].try_into().unwrap())), (2, 48_000));
+        assert_eq!(&f[10..], &[3i16, 4, 5, 6, 7, 8].iter().flat_map(|s| s.to_le_bytes()).collect::<Vec<u8>>()[..]);
+        assert_eq!((t.offered, t.taken), (3, 2));
+        assert_eq!(card.lock().samples, vec![1, 2, 3, 4, 5, 6, 7, 8], "the card is not affected");
+        p.set_audio_out(false);
+        t.write(&[9, 9]).unwrap();
+        assert!(p.take_audio().is_empty(), "a page that stopped its sound is not fed");
+    }
+
+    #[test]
+    fn a_machine_without_a_card_is_paced_by_the_page_and_a_page_that_leaves_ends_the_stand_in() {
+        let card = FakeSink::new();
+        card.lock().fail_open = Some("no card".into());
+        let p = page();
+        let mut t = browser_tee(&card);
+        assert_eq!(t.open(44_100, 1), Err("no card".to_string()), "nobody listens: the card's failure is told as before");
+        p.set_audio_out(true);
+        t.open(44_100, 1).unwrap();
+        assert_eq!(t.name(), "the browser");
+        t.write(&[5, 6]).unwrap();
+        assert_eq!(p.take_audio().len(), 1);
+        t.close();
+        assert!(!t.is_open());
+        crate::browsermedia::unregister("ann");
+        assert!(!crate::browsermedia::audio_listeners(), "nothing is kept for a page that went away");
+    }
 }

@@ -58,7 +58,7 @@ impl Trial for EngineTrial<'_> {
 
 /// What a whole-flow trial did: which steps were tried read-only with the recorded inputs, which were refused because they have effects
 /// (a message, a write, a camera, a browser, a remote call, a model), and which failed.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WholeTrial {
     pub tried: Vec<String>,
     /// (step, why it was not run)

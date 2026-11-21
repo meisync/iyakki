@@ -136,6 +136,11 @@ impl ScreenCapture {
         !g.waiting.is_empty() && g.waiting.iter().any(|(_, u)| u == user)
     }
 
+    /// [`ScreenCapture::serve`] with the frame already drawn (the caller asked `wanted` first), the form the trait object and the socket carry.
+    pub fn serve_frame(&self, user: &str, frame: Option<Frame>) -> usize {
+        self.serve(user, || frame)
+    }
+
     /// The shell side: answer every waiting request of this person with the frame it just drew.
     pub fn serve(&self, user: &str, frame: impl FnOnce() -> Option<Frame>) -> usize {
         let ids: Vec<u64> = {

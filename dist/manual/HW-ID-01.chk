@@ -1,0 +1,16 @@
+scenario: HW-ID-01
+title: This computer page
+area: Hardware
+rows: F-HW-05, F-HW-04
+machines: any
+needs: person
+prereq: Signed in as an administrator.
+step: Open Settings, This computer.
+expect: The page shows a label, the number of boots, first and last seen, and the model read from the computer.
+clause: F-HW-05.facts
+step: Change the label and press Save.
+expect: The label is kept after you leave and come back.
+clause: F-HW-05.label
+step: Compare the model on the page with the sticker or the box.
+expect: They agree (or the page says unknown without guessing).
+clause: F-HW-04.model

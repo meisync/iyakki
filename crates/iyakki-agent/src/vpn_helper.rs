@@ -204,6 +204,9 @@ pub enum Req {
     /// Policy routing for the tunnel (F-VPN-08): the plan is made from these numbers inside the helper, never taken as text.
     InstallPolicy { spec: PolicyWire },
     RemovePolicy { spec: PolicyWire },
+    /// Open a TCP connection that carries the mark of the installed policy and hand the open socket back over the Unix socket
+    /// (`SCM_RIGHTS`): the session needs no rights to mark a socket. Only the mark of a policy installed through this helper is accepted.
+    MarkedConnect { ip: IpAddr, port: u16, mark: u32, timeout_ms: u64 },
 }
 
 /// What policy routing is made from. The helper checks every field and builds the `ip` and marking-table steps itself.
@@ -215,6 +218,9 @@ pub struct PolicyWire {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub uids: Vec<u32>,
+    /// The session marks its own sockets (reader browser, HTTP client): policy routing is wanted even with nothing else chosen.
+    #[serde(default)]
+    pub app_sockets: bool,
 }
 
 impl PolicyWire {
@@ -222,7 +228,7 @@ impl PolicyWire {
     pub fn plan(&self) -> Result<iyakki_vpn::policyroute::PolicyPlan, String> {
         let cidrs = |v: &[String]| v.iter().map(|c| Cidr::parse(c).ok_or_else(|| "not a network".to_string())).collect::<Result<Vec<_>, _>>();
         let (inc, exc) = (cidrs(&self.include)?, cidrs(&self.exclude)?);
-        iyakki_vpn::policyroute::plan_policy_routes(&iyakki_vpn::policyroute::PolicyInput { ifname: IFNAME, table: self.table, mark: self.mark, priority: self.priority, include: &inc, exclude: &exc, uids: &self.uids }).map_err(|e| e.to_string())
+        iyakki_vpn::policyroute::plan_policy_routes(&iyakki_vpn::policyroute::PolicyInput { ifname: IFNAME, table: self.table, mark: self.mark, priority: self.priority, include: &inc, exclude: &exc, uids: &self.uids, app_sockets: self.app_sockets }).map_err(|e| e.to_string())
     }
 }
 
@@ -250,6 +256,7 @@ impl Req {
             Req::GuardSet { .. } => "guard_set",
             Req::InstallPolicy { .. } => "install_policy",
             Req::RemovePolicy { .. } => "remove_policy",
+            Req::MarkedConnect { .. } => "marked_connect",
         }
     }
 }
@@ -440,6 +447,7 @@ pub fn dispatch(sys: &dyn Sys, req: Req) -> Resp {
             }
             Err(e) => Resp::err(e),
         },
+        Req::MarkedConnect { .. } => Resp::err("a marked connection is made by the connection itself, with its descriptor"),
         Req::GuardSet { ip, expires_in, add } => unit(sys.guard_set(ip, expires_in.map(|s| s.min(86_400)), add)),
     }
 }
@@ -505,6 +513,7 @@ pub fn serve(listener: UnixListener, path: PathBuf, policy: PeerPolicy, sys: Arc
     let (st, lg) = (stop.clone(), log.clone());
     let active = Arc::new(AtomicUsize::new(0));
     let act = active.clone();
+    let marks: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
     let handle = std::thread::Builder::new().name("vpn-helper".into()).spawn(move || {
         let active = act;
         while !st.load(Ordering::SeqCst) {
@@ -521,9 +530,9 @@ pub fn serve(listener: UnixListener, path: PathBuf, policy: PeerPolicy, sys: Arc
                         continue;
                     }
                     active.fetch_add(1, Ordering::SeqCst);
-                    let (sys, lg, st, active) = (sys.clone(), lg.clone(), st.clone(), active.clone());
+                    let (sys, lg, st, active, marks) = (sys.clone(), lg.clone(), st.clone(), active.clone(), marks.clone());
                     std::thread::spawn(move || {
-                        conn(s, &*sys, &lg, &st);
+                        conn(s, &*sys, &lg, &st, &marks);
                         active.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
@@ -535,7 +544,7 @@ pub fn serve(listener: UnixListener, path: PathBuf, policy: PeerPolicy, sys: Arc
     Ok(Helper { stop, handle: Some(handle), path, log, active })
 }
 
-fn conn(s: UnixStream, sys: &dyn Sys, log: &Mutex<Vec<String>>, stop: &AtomicBool) {
+fn conn(s: UnixStream, sys: &dyn Sys, log: &Mutex<Vec<String>>, stop: &AtomicBool, marks: &Mutex<Vec<u32>>) {
     let _ = s.set_nonblocking(false);
     let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
     let _ = s.set_write_timeout(Some(Duration::from_secs(10)));
@@ -563,9 +572,43 @@ fn conn(s: UnixStream, sys: &dyn Sys, log: &Mutex<Vec<String>>, stop: &AtomicBoo
         let parsed = serde_json::from_slice::<Req>(&line);
         line.clear();
         let resp = match parsed {
+            Ok(Req::MarkedConnect { ip, port, mark, timeout_ms }) => {
+                log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push("marked_connect".into());
+                let allowed = marks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&mark);
+                let reply = if port == 0 {
+                    Err("port 0 is not a destination".to_string())
+                } else if !allowed {
+                    Err("that mark does not belong to a policy installed through this helper".to_string())
+                } else {
+                    sys.marked_connect(SocketAddr::new(ip, port), mark, Duration::from_millis(timeout_ms.clamp(100, 30_000))).map_err(|e| e.to_string())
+                };
+                let (resp, fd) = match &reply {
+                    Ok(t) => (Resp::ok(json!("fd")), Some(t.as_raw_fd())),
+                    Err(e) => (Resp::err(e.clone()), None),
+                };
+                let mut out = serde_json::to_vec(&resp).unwrap_or_else(|_| b"{\"ok\":false}".to_vec());
+                out.push(b'\n');
+                if send_with_fd(w.as_raw_fd(), &out, fd).is_err() {
+                    return;
+                }
+                continue; // the descriptor was copied by the kernel; ours closes when `reply` drops
+            }
             Ok(req) => {
                 log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(req.name().to_string());
-                dispatch(sys, req)
+                let policy = match &req {
+                    Req::InstallPolicy { spec } => Some((true, spec.mark)),
+                    Req::RemovePolicy { spec } => Some((false, spec.mark)),
+                    _ => None,
+                };
+                let resp = dispatch(sys, req);
+                if let (Some((install, mark)), true) = (policy, resp.ok) {
+                    let mut m = marks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    m.retain(|x| *x != mark);
+                    if install {
+                        m.push(mark);
+                    }
+                }
+                resp
             }
             Err(_) => {
                 log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push("bad request".into());
@@ -578,6 +621,90 @@ fn conn(s: UnixStream, sys: &dyn Sys, log: &Mutex<Vec<String>>, stop: &AtomicBoo
             return;
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
+#[cfg(not(target_os = "linux"))]
+const SEND_FLAGS: libc::c_int = 0;
+#[cfg(target_os = "linux")]
+const RECV_FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
+#[cfg(not(target_os = "linux"))]
+const RECV_FLAGS: libc::c_int = 0;
+
+/// Send `data` and, when given, one descriptor with it in the same message (`SCM_RIGHTS`).
+fn send_with_fd(sock: std::os::fd::RawFd, data: &[u8], fd: Option<std::os::fd::RawFd>) -> std::io::Result<()> {
+    let mut iov = libc::iovec { iov_base: data.as_ptr() as *mut libc::c_void, iov_len: data.len() };
+    // SAFETY: a zeroed msghdr is valid; the pointers set below outlive the call.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    // room for one descriptor, aligned for cmsghdr
+    let mut space = [0u64; 8];
+    if let Some(fd) = fd {
+        // SAFETY: CMSG_SPACE/LEN are pure size computations; `space` is large enough and 8-byte aligned.
+        unsafe {
+            let len = libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) as usize;
+            debug_assert!(len <= std::mem::size_of_val(&space));
+            msg.msg_control = space.as_mut_ptr().cast();
+            msg.msg_controllen = len as _;
+            let c = libc::CMSG_FIRSTHDR(&msg);
+            (*c).cmsg_level = libc::SOL_SOCKET;
+            (*c).cmsg_type = libc::SCM_RIGHTS;
+            (*c).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) as _;
+            std::ptr::copy_nonoverlapping((&fd as *const libc::c_int).cast::<u8>(), libc::CMSG_DATA(c), std::mem::size_of::<libc::c_int>());
+        }
+    }
+    // SAFETY: msg describes live buffers for the duration of the call.
+    let n = unsafe { libc::sendmsg(sock, &msg, SEND_FLAGS) };
+    if n < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if n as usize != data.len() {
+        return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "the answer was cut"));
+    }
+    Ok(())
+}
+
+/// Receive one message of at most `buf.len()` bytes and the descriptor that came with it, if any (close-on-exec). More than one
+/// descriptor, or a cut control message, closes them all and is an error.
+fn recv_with_fd(sock: std::os::fd::RawFd, buf: &mut [u8]) -> std::io::Result<(usize, Option<std::os::fd::OwnedFd>)> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    let mut iov = libc::iovec { iov_base: buf.as_mut_ptr().cast(), iov_len: buf.len() };
+    // SAFETY: as above.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    let mut space = [0u64; 8];
+    msg.msg_control = space.as_mut_ptr().cast();
+    msg.msg_controllen = std::mem::size_of_val(&space) as _;
+    // SAFETY: msg describes live buffers for the duration of the call.
+    let n = unsafe { libc::recvmsg(sock, &mut msg, RECV_FLAGS) };
+    if n < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut fds: Vec<OwnedFd> = Vec::new();
+    // SAFETY: the control buffer was filled by the kernel; each header is read within msg_controllen.
+    unsafe {
+        let mut c = libc::CMSG_FIRSTHDR(&msg);
+        while !c.is_null() {
+            if (*c).cmsg_level == libc::SOL_SOCKET && (*c).cmsg_type == libc::SCM_RIGHTS {
+                let bytes = (*c).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
+                for k in 0..bytes / std::mem::size_of::<libc::c_int>() {
+                    let mut fd: libc::c_int = 0;
+                    std::ptr::copy_nonoverlapping(libc::CMSG_DATA(c).add(k * std::mem::size_of::<libc::c_int>()), (&mut fd as *mut libc::c_int).cast::<u8>(), std::mem::size_of::<libc::c_int>());
+                    // close-on-exec whatever the platform's receive flag did
+                    libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                    fds.push(OwnedFd::from_raw_fd(fd));
+                }
+            }
+            c = libc::CMSG_NXTHDR(&msg, c);
+        }
+    }
+    if msg.msg_flags & libc::MSG_CTRUNC != 0 || fds.len() > 1 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "the helper sent more descriptors than asked for"));
+    }
+    Ok((n as usize, fds.pop()))
 }
 
 /// One line, at most [`MAX_LINE`] bytes. `Ok(None)` when the peer closed; an over-long line is an error (the connection ends).
@@ -649,13 +776,32 @@ impl RemoteSys {
         Err("the VPN helper did not answer".into())
     }
 
+    /// Ask the helper for a TCP connection with the mark and take the open socket it hands over. A connection of its own, so the
+    /// ordinary request channel is not disturbed.
+    pub fn marked_connect_fd(&self, addr: SocketAddr, mark: u32, timeout: Duration) -> Result<std::net::TcpStream, String> {
+        let mut line = serde_json::to_vec(&Req::MarkedConnect { ip: addr.ip(), port: addr.port(), mark, timeout_ms: timeout.as_millis().min(30_000) as u64 }).map_err(|e| e.to_string())?;
+        line.push(b'\n');
+        let s = UnixStream::connect(&self.path).map_err(|e| format!("the VPN helper is not reachable ({e})"))?;
+        s.set_read_timeout(Some(timeout + Duration::from_secs(5))).map_err(|e| e.to_string())?;
+        s.set_write_timeout(Some(Duration::from_secs(10))).map_err(|e| e.to_string())?;
+        (&s).write_all(&line).map_err(|e| format!("the VPN helper did not take the request ({e})"))?;
+        let mut buf = vec![0u8; 4096];
+        let (n, fd) = recv_with_fd(s.as_raw_fd(), &mut buf).map_err(|e| format!("the VPN helper did not answer ({e})"))?;
+        let r: Resp = serde_json::from_slice(&buf[..n]).map_err(|_| "the VPN helper sent something that is not an answer".to_string())?;
+        if !r.ok {
+            return Err(r.error.unwrap_or_else(|| "the VPN helper refused".into()));
+        }
+        let fd = fd.ok_or("the VPN helper said yes but sent no socket")?;
+        Ok(std::net::TcpStream::from(fd))
+    }
+
     fn typed<T: for<'de> Deserialize<'de>>(&self, req: Req) -> Result<T, String> {
         serde_json::from_value(self.call(&req)?).map_err(|e| format!("unexpected answer from the VPN helper ({e})"))
     }
 }
 
 fn wire_of_plan(p: &iyakki_vpn::policyroute::PolicyPlan) -> PolicyWire {
-    PolicyWire { table: p.table(), mark: p.mark(), priority: p.priority(), include: p.include().iter().map(|c| c.to_string()).collect(), exclude: p.exclude().iter().map(|c| c.to_string()).collect(), uids: p.uids().to_vec() }
+    PolicyWire { table: p.table(), mark: p.mark(), priority: p.priority(), include: p.include().iter().map(|c| c.to_string()).collect(), exclude: p.exclude().iter().map(|c| c.to_string()).collect(), uids: p.uids().to_vec(), app_sockets: p.app_sockets() }
 }
 
 fn wire_of(d: &DeviceSet) -> WgWire {
@@ -733,6 +879,9 @@ impl Sys for RemoteSys {
     }
     fn remove_policy(&self, plan: &iyakki_vpn::policyroute::PolicyPlan) {
         let _ = self.call(&Req::RemovePolicy { spec: wire_of_plan(plan) });
+    }
+    fn marked_connect(&self, addr: SocketAddr, mark: u32, timeout: Duration) -> std::io::Result<std::net::TcpStream> {
+        self.marked_connect_fd(addr, mark, timeout).map_err(std::io::Error::other)
     }
     fn guard_set(&self, ip: IpAddr, expires_in: Option<u64>, add: bool) -> Result<(), String> {
         self.call(&Req::GuardSet { ip, expires_in, add }).map(|_| ())

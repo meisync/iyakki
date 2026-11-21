@@ -13,6 +13,11 @@ impl PtyLink {
 }
 
 impl PtyLink {
+    /// The process id of the program on this terminal.
+    pub fn pid(&self) -> u32 {
+        self.0.pid()
+    }
+
     /// As [`PtyLink::spawn`], in a folder and as a user.
     pub fn spawn_with(program: &str, args: &[String], env: &[(String, String)], cols: usize, rows: usize, opts: &crate::pty::SpawnOpts) -> std::io::Result<PtyLink> {
         Ok(PtyLink(Pty::spawn_with(program, args, env, cols.clamp(1, 500) as u16, rows.clamp(1, 200) as u16, opts)?))

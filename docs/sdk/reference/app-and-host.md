@@ -350,3 +350,44 @@ pub struct MemStorage
 Public fields:
 
 - `pub map: BTreeMap<String, String>`
+
+## `zoom`  (`crates/iyakki-ui-sdk/src/zoom.rs`)
+
+`TextZoom`: the text size an app lets the person change with a pinch and with two buttons (F-SDK-26, F-SDK-34). The size is a thousandth of
+the person's own text size (1000 is as set in the Look), kept between [`TextZoom::MIN`] and [`TextZoom::MAX`]. A pinch reports a scale since
+the fingers landed, so the new size is counted from the size the pinch began at, not from the last report; the end of the pinch is the moment
+to keep the size (one storage write, not one per report). An app that builds its [`crate::size::Metrics`] with [`TextZoom::metrics`] draws every
+widget and view at the new size.
+
+### enum `ZoomChange`
+
+What a gesture did to the zoom.
+
+```rust
+pub enum ZoomChange
+```
+
+Variants:
+
+- `None`: Not a pinch (or a scale that cannot be one): nothing happened.
+- `Moving`: The size moved while the fingers are on the screen.
+- `Ended`: The fingers lifted: the size is final, keep it.
+
+### struct `TextZoom`
+
+```rust
+pub struct TextZoom
+```
+
+Methods:
+
+- `pub fn from_text(t: Option<&str>) -> TextZoom`: The size kept as text (what [`TextZoom::keep_text`] gave); anything that is not a number is the start size, a number out of range is held inside it.
+- `pub fn keep_text(&self) -> String`
+- `pub fn milli(&self) -> u32`: The size as a thousandth of the person's own size.
+- `pub fn factor(&self) -> f32`: The factor to multiply the person's text size with.
+- `pub fn label(&self) -> String`: A short name for the size, for a screen reader: "Text size 115%".
+- `pub fn set(&mut self, milli: u32)`
+- `pub fn bigger(&mut self)`
+- `pub fn smaller(&mut self)`
+- `pub fn gesture(&mut self, g: &Gesture) -> ZoomChange`: A gesture: a pinch moves the size, the end of it fixes it. Every other gesture is none of this.
+- `pub fn metrics(&self, cx: &crate::cx::UiCx) -> crate::size::Metrics`: The pane's metrics with the person's own text size and this zoom applied (what `UiCx::metrics` gives, at the zoomed size).

@@ -3,7 +3,7 @@
 //! outside the area it was given.
 
 use iyakki_shared::disks::{Fs, Table, Transport};
-use iyakki_disksx::disks::{Disk, Part};
+use iyakki_core_api::diskmodel::{Disk, Part};
 use iyakki_diskcrypt::CryptKind;
 
 use super::disks_tile::*;
@@ -227,7 +227,7 @@ impl DisksApp {
                 // eject on the right (only where it can be done)
                 let eject_w = 34.0 * s;
                 let mut right_edge = row.x + row.w - 10.0 * s;
-                let can_eject = !d.system && iyakki_disksx::disks::may_use(&who, d).is_ok();
+                let can_eject = !d.system && iyakki_core_api::diskmodel::may_use(&who, d).is_ok();
                 if can_eject {
                     let b = R::new(right_edge - eject_w, row.y + (row.h - eject_w) / 2.0, eject_w, eject_w);
                     let hot = g.hovered(b);
@@ -508,7 +508,7 @@ impl DisksApp {
                 y += 18.0 * s;
             }
             y += 4.0 * s;
-        } else if let Err(e) = iyakki_disksx::disks::may_use(&self.who, d) {
+        } else if let Err(e) = iyakki_core_api::diskmodel::may_use(&self.who, d) {
             for l in g.wrap(13.0 * s, &e, Face::Sans, w).into_iter().take(3) {
                 g.text(x, y, 13.0 * s, MUTED, &l, Face::Sans);
                 y += 18.0 * s;
@@ -784,7 +784,7 @@ impl DisksApp {
         y = box_.y + box_.h + 10.0 * s;
         // the typed confirmation
         let ask = match &disk {
-            Some(d) => format!("Type one of these exactly to confirm: {}.", iyakki_disksx::disks_part::accepted_names(d, &r.op).join(", ")),
+            Some(d) => format!("Type one of these exactly to confirm: {}.", iyakki_core_api::diskmodel::accepted_names(d, &r.op).join(", ")),
             None => "The drive is gone.".to_string(),
         };
         g.text(x, y, 13.0 * s, TEXT, &ask, Face::Bold);

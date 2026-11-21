@@ -67,9 +67,7 @@ pub struct Gauges {
 
 /// The resident memory of this process (Linux: `/proc/self/status`); `None` where the system does not say.
 pub fn resident_memory() -> Option<u64> {
-    let t = std::fs::read_to_string("/proc/self/status").ok()?;
-    let kb: u64 = t.lines().find_map(|l| l.strip_prefix("VmRSS:"))?.split_whitespace().next()?.parse().ok()?;
-    Some(kb * 1024)
+    iyakki_core_local::procfacts::resident_bytes()
 }
 
 impl Default for Metrics {

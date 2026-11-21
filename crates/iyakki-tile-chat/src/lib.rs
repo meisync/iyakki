@@ -12,7 +12,7 @@ mod guest;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub const TILE_WASM: &[u8] = include_bytes!("../tile.wasm");
-pub const CAPS: [&str; 5] = ["chat.send", "chat.models", "chat.stop", "runs.get", "runs.list"];
+pub const CAPS: [&str; 7] = ["chat.send", "chat.models", "chat.stop", "runs.get", "runs.list", "clipboard.copy", "clipboard.paste"];
 
 pub const MAX_PROMPT: usize = 2000;
 const POLL_MS: u32 = 2000;
@@ -41,6 +41,24 @@ pub struct ChatTile<S: Source> {
     attach: Vec<String>,
     attach_input: String,
     attach_focus: bool,
+    /// Tools chosen by name for the next run (tools mode 3) and the line being typed for them.
+    names: Vec<String>,
+    names_input: String,
+    names_focus: bool,
+    /// The answer was copied to the person's copy slot (the Copy button says so until the next message).
+    copied: bool,
+}
+
+/// The tool names in a typed line: split at commas and spaces, only letters, digits and underscores, 8 at most, no repeats.
+pub fn tool_names_of(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for w in text.split(|c: char| c == ',' || c.is_whitespace()).map(str::trim).filter(|w| !w.is_empty()) {
+        let w: String = w.chars().take(64).collect();
+        if w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && out.len() < 8 && !out.contains(&w) {
+            out.push(w);
+        }
+    }
+    out
 }
 
 impl<S: Source> ChatTile<S> {
@@ -51,7 +69,7 @@ impl<S: Source> ChatTile<S> {
     }
 
     fn bare(src: S) -> Self {
-        ChatTile { src, size: (360, 480), dark: false, input: String::new(), run: None, models: vec![], sel: 0, status: String::new(), lines: vec![], error: String::new(), scroll: 0, since: 0, history: None, tools: 0, attach: vec![], attach_input: String::new(), attach_focus: false }
+        ChatTile { src, size: (360, 480), dark: false, input: String::new(), run: None, models: vec![], sel: 0, status: String::new(), lines: vec![], error: String::new(), scroll: 0, since: 0, history: None, tools: 0, attach: vec![], attach_input: String::new(), attach_focus: false, names: vec![], names_input: String::new(), names_focus: false, copied: false }
     }
 
     fn load_models(&mut self) {
@@ -80,6 +98,50 @@ impl<S: Source> ChatTile<S> {
         (((self.size.1 - TOP - INPUT_H - 8) / 16).max(1)) as usize
     }
 
+    /// The assistant's words of the conversation on the tile: every line that is not the person's own message or a question.
+    fn answer_text(&self) -> String {
+        self.lines.iter().filter(|t| !t.starts_with("you: ") && !t.starts_with("asks: ")).map(|t| t.trim_end()).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Copy the answer to the person's copy slot on the service (Ctrl+C or the Copy button); a refusal is one red line and loses nothing.
+    fn copy_answer(&mut self) -> bool {
+        let t = self.answer_text();
+        if t.trim().is_empty() {
+            return false;
+        }
+        match call_json(&mut self.src, "clipboard", "copy", &json!({"text": t}).to_string()) {
+            Ok(v) if v["ok"] == true => {
+                self.copied = true;
+                self.error.clear();
+            }
+            Ok(v) => self.error = v["error"].as_str().unwrap_or("the clipboard refused").chars().take(160).collect(),
+            Err(e) => self.error = e.chars().take(160).collect(),
+        }
+        true
+    }
+
+    /// Ctrl+V: the person's copy slot goes at the end of the message being typed.
+    fn paste_into_message(&mut self) -> bool {
+        match call_json(&mut self.src, "clipboard", "paste", "{}") {
+            Ok(v) if v["ok"] == true => {
+                let t = v["text"].as_str().unwrap_or("");
+                if t.is_empty() {
+                    self.error = "the clipboard is empty".into();
+                } else {
+                    for c in t.chars().map(|c| if c.is_control() { ' ' } else { c }) {
+                        if self.input.len() < MAX_PROMPT {
+                            self.input.push(c);
+                        }
+                    }
+                    self.error.clear();
+                }
+            }
+            Ok(v) => self.error = v["error"].as_str().unwrap_or("the clipboard refused").chars().take(160).collect(),
+            Err(e) => self.error = e.chars().take(160).collect(),
+        }
+        true
+    }
+
     fn going(&self) -> bool {
         self.run.is_some() && (self.status.is_empty() || self.status == "running")
     }
@@ -93,7 +155,13 @@ impl<S: Source> ChatTile<S> {
         if !self.attach.is_empty() {
             args["attach"] = json!(self.attach);
         }
-        if self.tools > 0 {
+        if self.tools == 3 {
+            if self.names.is_empty() {
+                self.error = "Type the names of the tools first (a comma between them), or choose another tools mode.".into();
+                return true;
+            }
+            args["tools"] = json!(self.names);
+        } else if self.tools > 0 {
             args["tools"] = json!(if self.tools == 1 { "reading" } else { "none" });
         }
         if let Some((p, m)) = self.sel.checked_sub(1).and_then(|i| self.models.get(i)) {
@@ -108,6 +176,7 @@ impl<S: Source> ChatTile<S> {
                     self.status = "running".into();
                     self.input.clear();
                     self.attach.clear();
+                    self.copied = false;
                     self.error.clear();
                     self.scroll = 0;
                     self.poll();
@@ -172,6 +241,29 @@ impl<S: Source> App for ChatTile<S> {
                 self.dark = *dark;
                 true
             }
+            Event::TextInput { text } if self.names_focus => {
+                for c in text.chars().filter(|c| !c.is_control()) {
+                    if self.names_input.len() < 300 {
+                        self.names_input.push(c);
+                    }
+                }
+                true
+            }
+            Event::Key { code: 8, down: true, .. } if self.names_focus => {
+                self.names_input.pop();
+                true
+            }
+            Event::Key { code: 27, down: true, .. } if self.names_focus => {
+                self.names_focus = false;
+                self.names_input = self.names.join(", ");
+                true
+            }
+            Event::Key { code: 13, down: true, .. } if self.names_focus => {
+                self.names = tool_names_of(&self.names_input);
+                self.names_input = self.names.join(", ");
+                self.names_focus = false;
+                true
+            }
             Event::TextInput { text } if self.attach_focus => {
                 for c in text.chars().filter(|c| !c.is_control()) {
                     if self.attach_input.len() < 300 {
@@ -200,6 +292,9 @@ impl<S: Source> App for ChatTile<S> {
                 }
                 true
             }
+            Event::Key { code, mods, down: true } if mods & 2 != 0 && !self.attach_focus && !self.names_focus && (*code == 'v' as u32 || *code == 'V' as u32) => self.paste_into_message(),
+            Event::Key { code, mods, down: true } if mods & 2 != 0 && !self.attach_focus && !self.names_focus && (*code == 'c' as u32 || *code == 'C' as u32) => self.copy_answer(),
+            Event::Hit { id: 11 } => self.copy_answer(),
             Event::Hit { id: 9 } => {
                 self.attach_focus = true;
                 true
@@ -234,7 +329,12 @@ impl<S: Source> App for ChatTile<S> {
                 true
             }
             Event::Hit { id: 8 } => {
-                self.tools = (self.tools + 1) % 3;
+                self.tools = (self.tools + 1) % 4;
+                self.names_focus = self.tools == 3;
+                if self.names_focus {
+                    self.names_input.clear();
+                }
+                self.attach_focus = false;
                 true
             }
             Event::Hit { id: 5 } => {
@@ -258,6 +358,7 @@ impl<S: Source> App for ChatTile<S> {
                 self.status.clear();
                 self.lines.clear();
                 self.attach.clear();
+                self.copied = false;
                 self.error.clear();
                 self.scroll = 0;
                 true
@@ -308,6 +409,9 @@ impl<S: Source> App for ChatTile<S> {
         // the list of earlier conversations: not while a run goes on (the person looks at that one)
         if !self.going() {
             button(&mut l, 7, Rect::new(bx - 62, 4, 64, 24), if self.history.is_some() { "Close" } else { "Earlier" }, &p);
+        }
+        if !self.going() && !self.answer_text().trim().is_empty() && self.history.is_none() {
+            button(&mut l, 11, Rect::new(bx - 62 - 58, 4, 54, 24), if self.copied { "Copied" } else { "Copy" }, &p);
         }
         // the model line: a press chooses the next model (the first is the machine's own)
         l.push(Op::Outline { r: Rect::new(6, 36, w - 12, 20), thickness: 1, color: p.mute });
@@ -365,11 +469,15 @@ impl<S: Source> App for ChatTile<S> {
         let by = h - INPUT_H - 4;
         // the files that go with the next message, and the line for one more
         // the tools the assistant may use in the next run: all, only the ones that read, or none
-        let tools_label = ["all", "read", "none"][self.tools as usize % 3];
+        let tools_label = ["all", "read", "none", "pick"][self.tools as usize % 4];
         let tools_x = w - 150;
         button(&mut l, 8, Rect::new(tools_x, by - 22, 92, 18), &format!("tools: {tools_label}"), &p);
-        if self.attach_focus {
-            l.push(text(8, by - 18, 11, p.accent, &clip(&format!("file: {}|", self.attach_input), tools_x - 14, 11)));
+        if self.names_focus {
+            l.push(text(8, by - 18, 11, p.accent, &clip(&format!("tools: {}|", self.names_input), tools_x - 14, 11)));
+        } else if self.tools == 3 {
+            l.push(text(8, by - 18, 11, p.mute, &clip(&format!("only: {}", if self.names.is_empty() { "(none named)".to_string() } else { self.names.join(", ") }), tools_x - 14, 11)));
+        } else if self.attach_focus {
+            l.push(text(8, by - 18, 11, p.accent, &clip(&format!("file or png: {}|", self.attach_input), tools_x - 14, 11)));
         } else if !self.attach.is_empty() {
             l.push(text(8, by - 18, 11, p.mute, &clip(&format!("with: {}", self.attach.join(", ")), tools_x - 14, 11)));
             button(&mut l, 10, Rect::new(w - 54, by - 22, 48, 18), "None", &p);
@@ -674,6 +782,9 @@ mod tests {
         t.event(&Event::Hit { id: 1 });
         assert_eq!(serde_json::from_str::<serde_json::Value>(&t.source().calls.iter().find(|c| c.1 == "send").unwrap().2).unwrap()["tools"], "none");
         t.event(&Event::Hit { id: 8 });
+        assert!(texts(&t.frame()).contains(&"tools: pick".to_string()));
+        t.event(&Event::Key { code: 27, down: true, mods: 0 });
+        t.event(&Event::Hit { id: 8 });
         assert!(texts(&t.frame()).contains(&"tools: all".to_string()), "it wraps around");
     }
 
@@ -682,7 +793,7 @@ mod tests {
         let mut t = tile_with_models(vec![Ok(r#"{"id":"r1"}"#.into()), got(&[], "running"), Ok(r#"{"id":"r2"}"#.into()), got(&[], "running")]);
         t.event(&Event::Hit { id: 9 });
         type_in(&mut t, "/a");
-        assert!(texts(&t.frame()).iter().any(|s| s.starts_with("file: /a")));
+        assert!(texts(&t.frame()).iter().any(|s| s.starts_with("file or png: /a")));
         t.event(&Event::Key { code: 13, mods: 0, down: true });
         assert!(texts(&t.frame()).iter().any(|s| s == "with: /a"));
         // Esc drops a line being typed; the same name twice is one file; four are too many
@@ -710,5 +821,57 @@ mod tests {
         type_in(&mut t, "hi");
         t.event(&Event::Hit { id: 1 });
         assert_eq!(t.source().calls.iter().find(|c| c.1 == "send").unwrap().2, r#"{"prompt":"hi"}"#);
+    }
+
+    #[test]
+    fn single_tools_are_chosen_by_name_in_the_pick_mode_and_go_as_a_list() {
+        assert_eq!(tool_names_of("web_search, read_file  now ,web_search; bad name!"), vec!["web_search", "read_file", "now", "bad"]);
+        assert!(tool_names_of(&"a,".repeat(20)).len() <= 8 && tool_names_of("\u{7}x, ../etc").is_empty());
+        let mut t = tile_with_models(vec![Ok(r#"{"id":"r1"}"#.into()), got(&[], "running")]);
+        type_in(&mut t, "hello");
+        for _ in 0..3 {
+            t.event(&Event::Hit { id: 8 });
+        }
+        assert!(texts(&t.frame()).contains(&"tools: pick".to_string()));
+        // nothing named: no run is started and the person is told
+        t.event(&Event::Key { code: 13, mods: 0, down: true });
+        t.event(&Event::Hit { id: 1 });
+        assert!(t.error().starts_with("Type the names"), "{}", t.error());
+        assert!(!t.source().calls.iter().any(|c| c.1 == "send"));
+        // name two tools: Enter keeps them, the message goes with the list
+        for _ in 0..4 {
+            t.event(&Event::Hit { id: 8 });
+        }
+        t.event(&Event::TextInput { text: "now, web_search".into() });
+        t.event(&Event::Key { code: 13, mods: 0, down: true });
+        assert!(texts(&t.frame()).contains(&"only: now, web_search".to_string()), "{:?}", texts(&t.frame()));
+        t.event(&Event::Hit { id: 1 });
+        let send = t.source().calls.iter().find(|c| c.1 == "send").unwrap().2.clone();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&send).unwrap()["tools"], json!(["now", "web_search"]));
+    }
+
+    #[test]
+    fn the_answer_is_copied_to_the_persons_slot_and_a_paste_goes_into_the_message_and_a_refusal_loses_nothing() {
+        let ok = || Ok(r#"{"ok":true}"#.to_string());
+        let mut t = tile_with_models(vec![Ok(r#"{"id":"r1"}"#.into()), got(&["answer: it is noon", "and sunny"], "completed"), ok(), Ok(r#"{"ok":false,"error":"the clipboard is full"}"#.into()), Ok(r#"{"ok":true,"text":"pasted\ntext"}"#.into()), Ok(r#"{"ok":true,"text":""}"#.into())]);
+        assert!(!t.frame().ops.iter().any(|o| matches!(o, Op::Hit { id: 11, .. })), "no Copy before there is an answer");
+        assert!(!t.event(&Event::Key { code: 'c' as u32, mods: 2, down: true }), "nothing to copy");
+        type_in(&mut t, "time?");
+        t.event(&Event::Hit { id: 1 });
+        assert!(t.frame().ops.iter().any(|o| matches!(o, Op::Hit { id: 11, .. })));
+        assert!(t.event(&Event::Hit { id: 11 }));
+        let copy = t.source().calls.iter().find(|c| c.0 == "clipboard" && c.1 == "copy").unwrap().clone();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&copy.2).unwrap()["text"], "answer: it is noon\nand sunny", "the person's own message is not copied");
+        assert!(texts(&t.frame()).contains(&"Copied".to_string()));
+        // a refusal is a red line and the tile goes on
+        assert!(t.event(&Event::Key { code: 'c' as u32, mods: 2, down: true }));
+        assert_eq!(t.error(), "the clipboard is full");
+        // paste goes at the end of the message, controls become spaces; an empty slot is said
+        type_in(&mut t, "see: ");
+        assert!(t.event(&Event::Key { code: 'v' as u32, mods: 2, down: true }));
+        assert!(t.input.ends_with("see: pasted text"), "{}", t.input);
+        assert!(t.event(&Event::Key { code: 'v' as u32, mods: 2, down: true }));
+        assert_eq!(t.error(), "the clipboard is empty");
+        assert!(t.source().calls.iter().all(|c| c.0 != "clipboard" || c.1 == "copy" || c.1 == "paste"));
     }
 }

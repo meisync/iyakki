@@ -104,6 +104,17 @@ is weaker than a signed unified kernel image; GRUB's `grub.cfg` is not verified 
 (kernel + initrd + command line in one signed file) for beta, which also removes the need for the monolithic GRUB. Protect the
 boot partition physically on machines that matter.
 
+### Unified kernel image (code written, never booted)
+
+`secureboot.sh uki STUB KERNEL INITRD CMDLINE OUT` builds the signed unified kernel image: the sections `.osrel`, `.cmdline`, `.initrd` and
+`.linux` are appended to an UNSIGNED EFI stub by our own writer (`iyakki-usb --uki`, `crates/iyakki-usb/src/uki.rs`: pure Rust, no
+`objcopy` or `ukify`; it refuses a stub that is already signed, a header without room, a duplicate section, an empty payload) and the result
+is signed once with the image key (`sign-pe`), so one signature covers the kernel, the initial RAM disk and the command line. `post-image.sh`
+builds one into the install template (`EFI/IYAKKI/iyakki-uki.efi`) only when `IYAKKI_UKI_STUB` (the stub) is set, with `IYAKKI_UKI_CMDLINE`
+for the command line; without the stub the image is built exactly as before and GRUB stays the default way in. The stub (the program that
+starts `.linux` with `.initrd`) is an input: our own boot loader (iyakki-boot) or a distribution's. NOT done: choosing and building the
+stub, making the unified image the default entry (which also removes the monolithic GRUB), and a QEMU/OVMF boot of it.
+
 ## Tests
 
 `dist/buildroot/qemu-secureboot-test.py` (docs/BOOT-TEST.md), kernel kit by `secureboot-testkit.sh`, plus the repo test

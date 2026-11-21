@@ -2,7 +2,7 @@
 //! from Apple's own files, at the person's request. One detached job (`iyakki quick-install mac-camera`):
 //!
 //! 1. Three byte ranges (about 17 MB in all) of Apple's macOS 10.12.6 combo update are fetched from Apple's update CDN over HTTPS,
-//!    resumable, each checked for its size and SHA-256 (`iyakki_drivers::facetime::PARTS`). The whole 1.9 GB image is never downloaded:
+//!    resumable, each checked for its size and SHA-256 (`iyakki_core_local::driver_packs::facetime::PARTS`). The whole 1.9 GB image is never downloaded:
 //!    the update's payload is a series of xz streams stored as they are, so the camera's driver file and the helper that carries
 //!    the sensor files are cut out by range, the way facetimehd-firmware's Makefile does it.
 //! 2. The xz streams are decoded with the in-house reader (`xz.rs`), the driver file `AppleCameraInterface` is put together and
@@ -19,7 +19,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use iyakki_drivers::{apply, facetime, pack};
+use iyakki_core_local::driver_packs::{apply, facetime, pack};
 pub use iyakki_shared::camfw::{Outcome, Seen};
 
 pub const NOTICE: &str = "These files are Apple's, downloaded from Apple, stay on this machine, are never uploaded and are not part of IYAKKI.";
@@ -396,7 +396,7 @@ pub struct RealEnv {
 
 impl RealEnv {
     pub fn new(data: &Path, streamer: std::sync::Arc<dyn iyakki_proxy::Streamer>) -> RealEnv {
-        RealEnv { data: data.to_path_buf(), streamer, sys: "/sys".into() }
+        RealEnv { data: data.to_path_buf(), streamer, sys: iyakki_core_local::kernelfacts::SYS.into() }
     }
 }
 
@@ -413,7 +413,7 @@ impl Env for RealEnv {
         crate::k3sdev::space(dir).map(|s| s.0)
     }
     fn data_in_memory(&self) -> bool {
-        crate::macfw::in_memory(&iyakki_storage::read_mounts().unwrap_or_default(), &self.data)
+        crate::macfw::in_memory(&iyakki_core_local::kernelfacts::mounts_text(), &self.data)
     }
     fn fetch_part(&mut self, part: &facetime::Part, dest: &Path) -> Result<(), String> {
         let st = self.streamer.clone();
@@ -425,11 +425,11 @@ impl Env for RealEnv {
     }
     fn install(&mut self, version: &str, source: &str, p: &pack::Pack) -> Result<apply::Report, String> {
         let (fs, real) = apply::Fs::for_data(&self.data);
-        let run: Box<dyn iyakki_drivers::run::Runner> = if real { Box::new(iyakki_drivers::run::System) } else { Box::new(iyakki_drivers::run::Dry) };
+        let run = iyakki_core_local::kmodpack::runner(real);
         crate::fwpack::install_checked(&fs, run.as_ref(), PACK_ID, version, "LicenseRef-Apple-firmware-supplied-by-the-user", source, p)
     }
     fn look(&mut self) -> Seen {
-        Seen { devices: video_devices_in(&self.sys, Path::new("/dev")) }
+        Seen { devices: video_devices_in(&self.sys, Path::new(iyakki_core_local::kernelfacts::DEV)) }
     }
     fn kernel_lines(&mut self) -> Vec<String> {
         let r = crate::wsexec::run_argv(&self.data, &["dmesg".to_string()], &[], Duration::from_secs(10), 2 << 20);

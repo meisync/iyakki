@@ -149,7 +149,7 @@ impl FlowsApp {
         let head_h = 24.0 * s;
         let mut hx = inner.x;
         hx += fx::chip(g, hx, inner.y, s, run.status.label(), st_color, true) + 8.0 * s;
-        if let Some(b) = self.env.host().browser_session(&run.id) {
+        if let Some(b) = self.env.browser_session(&run.id) {
             // a browser session is open for this run: say so, with what it has done
             let w = fx::chip(g, hx, inner.y, s, &format!("Browser session · {} actions · {}", b.actions, if b.profile == "person" { "your profile" } else { "private" }), CYAN, true);
             g.hit(R::new(hx, inner.y, w, 20.0 * s), Event::Tab(id::R_TAB_PICS), "Browser session");
@@ -391,7 +391,7 @@ impl FlowsApp {
 
     /// The live picture of the run's browser session, read again about once a second while the session is open.
     fn live_preview(&mut self, run_id: &str) -> Option<(Arc<tiny_skia::Pixmap>, String)> {
-        let info = self.env.host().browser_session(run_id)?;
+        let info = self.env.browser_session(run_id)?;
         let path = info.preview?;
         let now = self.now();
         let stale = self.rv.preview.as_ref().is_none_or(|(t, p, _)| *p != path || now - *t > 900);
@@ -580,7 +580,7 @@ fn blit(g: &mut Gfx, pm: &tiny_skia::Pixmap, r: R) -> R {
     let (w, h) = (pm.width() as f32 * k, pm.height() as f32 * k);
     let (x, y) = (r.x + (r.w - w) / 2.0, r.y);
     let paint = tiny_skia::PixmapPaint { opacity: 1.0, quality: tiny_skia::FilterQuality::Bilinear, ..tiny_skia::PixmapPaint::default() };
-    g.pm.draw_pixmap(0, 0, pm.as_ref(), &paint, tiny_skia::Transform::from_translate(x, y).pre_scale(k, k), None);
+    g.pm_mut().draw_pixmap(0, 0, pm.as_ref(), &paint, tiny_skia::Transform::from_translate(x, y).pre_scale(k, k), None);
     R::new(x, y, w, h)
 }
 

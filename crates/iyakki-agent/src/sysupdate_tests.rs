@@ -260,3 +260,74 @@ fn an_update_from_a_channel_address_is_fetched_with_its_signature_checked_before
     assert_eq!(std::fs::read_dir(staged_root(&data)).unwrap().count(), 0, "the refused update replaced the staged copy of the same file and is removed");
     assert!(!data.join("updates/download").exists());
 }
+
+/// Interop with the real GNU `tar` and `gzip` (not the test's own hand-made archive): a bundle packed by the real tools, with real
+/// compression and the `./` names tar gives a folder, opens like one packed by `pack`, and the owner's `pack` makes an archive the real
+/// `tar` reads. A machine without them fails loudly.
+fn run_ok(cmd: &mut std::process::Command) -> Vec<u8> {
+    let o = cmd.output().expect("tar and gzip must be installed for the interop test");
+    assert!(o.status.success(), "{:?}: {}", cmd, String::from_utf8_lossy(&o.stderr));
+    o.stdout
+}
+
+fn real_folder(d: &Path) -> (PathBuf, Vec<(String, Vec<u8>)>) {
+    let folder = d.join("folder");
+    std::fs::create_dir_all(folder.join("boot/grub")).unwrap();
+    // compressible, several deflate blocks long, and not a multiple of 512 bytes
+    let kernel: Vec<u8> = (0..400_017u32).map(|i| b"kernel text kernel data "[(i % 24) as usize] ^ ((i / 5000) as u8 & 3)).collect();
+    let initrd: Vec<u8> = (0..150_001u32).map(|i| (i.wrapping_mul(2654435761) >> 20) as u8).collect();
+    let files = vec![("boot/bzImage".to_string(), kernel), ("boot/initrd".to_string(), initrd), ("boot/grub/grub.cfg".to_string(), b"menuentry".to_vec())];
+    let list: Vec<Value> = files.iter().map(|(p, c)| serde_json::json!({"path": p, "size": c.len(), "sha256": hex(&Sha256::digest(c))})).collect();
+    for (p, c) in &files {
+        std::fs::write(folder.join(p), c).unwrap();
+    }
+    let rel = serde_json::json!({"schema": 1, "version": "0.4.0", "variant": "pc", "min_base": "", "notes": "real tools", "files": list});
+    std::fs::write(folder.join(RELEASE_FILE), rel.to_string()).unwrap();
+    (folder, files)
+}
+
+#[test]
+fn a_bundle_packed_by_the_real_tar_and_gzip_is_checked_and_unpacked_and_ours_is_read_by_the_real_tar() {
+    let d = tmp("realtools");
+    let (sk, vk) = keys();
+    let (folder, files) = real_folder(&d);
+    use std::process::Command;
+    // three shapes real tools give: names with `./` at the best gzip level, bare names at the fastest level, and an archive from the whole folder
+    for (tag, level, dotted) in [("dot", "-9", true), ("bare", "-1", false)] {
+        let out = d.join(format!("{tag}.tgz"));
+        let mut c = Command::new("tar");
+        c.arg("--owner=0").arg("--group=0").arg("-I").arg(format!("gzip {level}")).arg("-cf").arg(&out).arg("-C").arg(&folder);
+        if dotted {
+            c.arg(".");
+        } else {
+            c.arg(RELEASE_FILE).arg("boot");
+        }
+        run_ok(&mut c);
+        let sig = sign(&out, &sk).unwrap();
+        let s = open(&out, &sig, &vk, &d.join(format!("scratch-{tag}")), &d.join(format!("stage-{tag}"))).unwrap_or_else(|e| panic!("{tag}: {e}"));
+        assert_eq!(s.release.version, "0.4.0", "{tag}");
+        for (p, c) in &files {
+            assert_eq!(&std::fs::read(d.join(format!("stage-{tag}")).join(p)).unwrap(), c, "{tag}: {p}");
+        }
+        up::verify_payload(&d.join(format!("stage-{tag}")), &s.manifest).unwrap();
+        // one changed byte in the real archive is stopped before anything is unpacked
+        let mut bytes = std::fs::read(&out).unwrap();
+        let at = bytes.len() / 3;
+        bytes[at] ^= 0x20;
+        let bad = d.join(format!("{tag}-bad.tgz"));
+        std::fs::write(&bad, bytes).unwrap();
+        assert!(open(&bad, &sig, &vk, &d.join(format!("scratch-bad-{tag}")), &d.join(format!("stage-bad-{tag}"))).err().unwrap().contains("Nothing was unpacked"));
+        assert!(!d.join(format!("stage-bad-{tag}")).exists());
+    }
+    // the other direction: the real tar lists and extracts what the owner's pack wrote
+    let ours = d.join("ours.tgz");
+    pack(&folder, &ours).unwrap();
+    let listing = String::from_utf8(run_ok(Command::new("tar").arg("-tzf").arg(&ours))).unwrap();
+    assert!(listing.lines().any(|l| l.trim_start_matches("./") == RELEASE_FILE) && listing.contains("boot/bzImage"), "{listing}");
+    let back = d.join("back");
+    std::fs::create_dir_all(&back).unwrap();
+    run_ok(Command::new("tar").arg("-xzf").arg(&ours).arg("-C").arg(&back));
+    for (p, c) in &files {
+        assert_eq!(&std::fs::read(back.join(p)).unwrap(), c, "{p}");
+    }
+}

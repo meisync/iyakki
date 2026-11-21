@@ -159,12 +159,22 @@ fn forward_unknown_fields_in_every_recorded_message_are_ignored_and_change_nothi
 }
 
 #[test]
-fn forward_a_message_type_this_release_does_not_know_is_a_bad_message_value_never_a_panic_or_a_close_by_itself() {
-    // The decoder returns a value the caller can report and skip; open message enums (an Unknown case) are the charter's target and are
-    // finding F-5 in its section 9.
-    for text in [r#"{"t":"hologram","id":1}"#, r#"{"t":"call","id":"not a number","capability":"x"}"#, r#"{"no_tag":true}"#, "[1,2]", "not json", ""] {
+fn forward_a_message_type_this_release_does_not_know_is_an_unknown_value_and_malformed_ones_are_a_bad_message_never_a_panic_or_a_close_by_itself() {
+    // Open message enums (charter rule 3, finding F-5): a type a newer release added decodes as `Unknown`, which the caller ignores and reports;
+    // a message that is not JSON, has no tag or has a field of the wrong kind is still a `bad_message` value.
+    assert_eq!(decode_client(r#"{"t":"hologram","id":1}"#).unwrap(), client::ClientMsg::Unknown);
+    assert_eq!(decode_server(r#"{"t":"hologram","id":1}"#).unwrap(), client::ServerMsg::Unknown);
+    for text in [r#"{"no_tag":true}"#, "[1,2]", "not json", ""] {
         assert_eq!(decode_client(text).unwrap_err().code, ErrorCode::BadMessage, "{text}");
         assert_eq!(decode_server(text).unwrap_err().code, ErrorCode::BadMessage, "{text}");
+    }
+    // a known type with a field of the wrong kind is still malformed
+    assert_eq!(decode_client(r#"{"t":"call","id":"not a number","capability":"x"}"#).unwrap_err().code, ErrorCode::BadMessage);
+    assert_eq!(decode_server(r#"{"t":"call_ok","id":"not a number","detail":""}"#).unwrap_err().code, ErrorCode::BadMessage);
+    // an error code a newer instance added is read as `Unknown` and keeps its message
+    match decode_server(r#"{"t":"error","code":"quota_full","message":"no room"}"#).unwrap() {
+        client::ServerMsg::Error { code, message } => assert_eq!((code, message.as_str()), (ErrorCode::Unknown, "no room")),
+        other => panic!("{other:?}"),
     }
     let huge = "x".repeat(client::MAX_TEXT + 1);
     assert_eq!(decode_client(&huge).unwrap_err().code, ErrorCode::TooBig);

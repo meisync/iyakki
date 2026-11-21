@@ -7,7 +7,7 @@
 
 use serde_json::{json, Value};
 
-use iyakki_zram::compressed::{self, Experiment};
+use iyakki_core_local::memconf::{self, Config, Experiment, MemConf, Size, ZramMode};
 
 use crate::settingstools::{arg_bool, no_args, Entry, Env};
 pub use iyakki_shared::settingstools_memory::{PROMPT_RULE};
@@ -18,7 +18,7 @@ pub const TOOLS: [&str; 6] = ["compressed_memory_status", "compressed_memory_set
 
 
 fn state(env: &Env, cmdline: &str) -> (Experiment, bool) {
-    compressed::resolve_experiment(cmdline, &std::fs::read_to_string(env.dir.join("system.conf")).unwrap_or_default())
+    MemConf::in_dir(&env.dir).experiment(cmdline)
 }
 
 fn describe(e: Experiment, locked: bool) -> String {
@@ -29,8 +29,7 @@ fn describe(e: Experiment, locked: bool) -> String {
     )
 }
 
-fn size_words(s: iyakki_zram::config::Size) -> String {
-    use iyakki_zram::config::Size;
+fn size_words(s: Size) -> String {
     match s {
         Size::Auto => "auto".into(),
         Size::Percent(p) => format!("{p}%"),
@@ -40,9 +39,7 @@ fn size_words(s: iyakki_zram::config::Size) -> String {
 
 /// The memory choices in force, in words, with the ones a boot option fixes named.
 fn memory_text(env: &Env, cmdline: &str) -> String {
-    use iyakki_zram::config::ZramMode;
-    let conf = std::fs::read_to_string(env.dir.join("system.conf")).unwrap_or_default();
-    let r = iyakki_zram::config::resolve(cmdline, &conf);
+    let r = MemConf::in_dir(&env.dir).resolve(cmdline);
     let c = &r.config;
     let lock = |b: bool| if b { " (fixed by a boot option)" } else { "" };
     format!(
@@ -60,16 +57,16 @@ fn memory_text(env: &Env, cmdline: &str) -> String {
 }
 
 /// The new configuration the arguments ask for, or the sentence that says why not. Nothing is written here.
-fn wanted(env: &Env, cmdline: &str, a: &Value) -> Result<iyakki_zram::Config, String> {
-    use iyakki_zram::config::{parse_bytes, parse_zram_value};
-    let conf = std::fs::read_to_string(env.dir.join("system.conf")).unwrap_or_default();
-    let r = iyakki_zram::config::resolve(cmdline, &conf);
+fn wanted(env: &Env, cmdline: &str, a: &Value) -> Result<Config, String> {
+    use memconf::{parse_bytes, parse_zram_value};
+    let conf = MemConf::in_dir(&env.dir);
+    let r = conf.resolve(cmdline);
     // the file's own values are what gets changed and written; the command line only wins at boot
-    let mut c = iyakki_zram::config::resolve("", &conf).config;
+    let mut c = conf.file_config();
     let mut any = false;
     if let Some(v) = a.get("zram") {
         let v = v.as_str().ok_or("zram is a word: off, auto, or a size like 4G or 50%")?;
-        let (mode, size, _) = parse_zram_value(v).ok_or("zram is off, auto, or a size like 4G or 50%")?;
+        let (mode, size) = parse_zram_value(v).ok_or("zram is off, auto, or a size like 4G or 50%")?;
         if r.zram_locked {
             return Err("a boot option fixes zram; edit the boot entry to change it".into());
         }
@@ -118,7 +115,7 @@ fn wanted(env: &Env, cmdline: &str, a: &Value) -> Result<iyakki_zram::Config, St
 }
 
 fn boot_speed_text(env: &Env, cmdline: &str) -> String {
-    let b = iyakki_zram::bootspeed::resolve(cmdline, &std::fs::read_to_string(env.dir.join("system.conf")).unwrap_or_default());
+    let b = MemConf::in_dir(&env.dir).boot_speed(cmdline);
     let one = |on: bool, locked: bool| format!("{}{}", if on { "on" } else { "off" }, if locked { " (fixed by a boot option)" } else { "" });
     format!(
         "Record the boot order: {}. Read the recorded boot files ahead into memory: {}. Both are developer options and off by default; reading ahead is not measured to make a start faster. Used from the next start.",
@@ -128,7 +125,7 @@ fn boot_speed_text(env: &Env, cmdline: &str) -> String {
 }
 
 fn boot_speed_wanted(env: &Env, cmdline: &str, a: &Value) -> Result<(Option<bool>, Option<bool>), String> {
-    let b = iyakki_zram::bootspeed::resolve(cmdline, &std::fs::read_to_string(env.dir.join("system.conf")).unwrap_or_default());
+    let b = MemConf::in_dir(&env.dir).boot_speed(cmdline);
     let get = |k: &str, locked: bool, opt: &str| -> Result<Option<bool>, String> {
         match a.get(k) {
             None => Ok(None),
@@ -160,13 +157,7 @@ pub fn entries_with(env: &Env, cmdline: String) -> Vec<Entry> {
         v.push(
             Entry::change(TAB, "boot_speed_set", "Switch the boot-order recording and the read-ahead of the boot files on or off, from the next start (developer options, off by default). The person approves a card first.", schema, |_| "Change the boot-speed developer options".into(), move |a| {
                 let (rec, pre) = boot_speed_wanted(&e, &c, a)?;
-                let path = e.dir.join("system.conf");
-                if let Some(r) = rec {
-                    iyakki_zram::set_conf_key(&path, iyakki_zram::bootspeed::KEY_RECORD, Some(iyakki_zram::bootspeed::conf_value(r)))?;
-                }
-                if let Some(p) = pre {
-                    iyakki_zram::set_conf_key(&path, iyakki_zram::bootspeed::KEY_PREFETCH, Some(iyakki_zram::bootspeed::conf_value(p)))?;
-                }
+                MemConf::in_dir(&e.dir).set_boot_speed(rec, pre)?;
                 e.audit("memory.save", &format!("boot-record={rec:?} boot-prefetch={pre:?}"));
                 Ok(format!("Saved. {}", boot_speed_text(&e, &c4)))
             })
@@ -194,7 +185,7 @@ pub fn entries_with(env: &Env, cmdline: String) -> Vec<Entry> {
         v.push(
             Entry::change(TAB, "memory_settings_set", "Change the memory choices (zram size, compressor, swappiness, swap file, zswap), used from the next start. The person approves a card first.", schema, |_| "Change the memory settings".into(), move |a| {
                 let cfg = wanted(&e, &c, a)?;
-                iyakki_zram::save_conf(&e.dir.join("system.conf"), &cfg)?;
+                MemConf::in_dir(&e.dir).save(&cfg)?;
                 e.audit("memory.save", &format!("zram={:?} swappiness={} zswap={}", cfg.zram, cfg.swappiness, cfg.zswap));
                 Ok(format!("Saved. {}", memory_text(&e, &c4)))
             })
@@ -228,7 +219,7 @@ pub fn entries_with(env: &Env, cmdline: String) -> Vec<Entry> {
                     return Err(m);
                 }
                 let x = if arg_bool(a, "enabled")? { Experiment::On } else { Experiment::Off };
-                iyakki_zram::set_conf_key(&e.dir.join("system.conf"), "compressed-memory", Some(compressed::conf_value(x)))?;
+                MemConf::in_dir(&e.dir).set_experiment(x)?;
                 e.audit("memory.save", &format!("compressed-memory={}", x.id()));
                 Ok(format!("Saved. {}", describe(x, false)))
             })

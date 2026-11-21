@@ -6,7 +6,8 @@
 //!   The answer to `get` is the stored text or null; an object `{"value":..}` is read too.
 //! * dock: `dock.pinned`, `dock.pin`, `dock.unpin`, `dock.open`, `dock.status` with `{"app":..}`. The browser tile host answers `pinned`,
 //!   `pin` and `unpin` through the person's chat tools `display_dock` and `display_dock_set` (`iyakki-agent`, `webservice/tiledock.rs`;
-//!   pin and unpin ask first). `open` and `status` have no answer yet (the framebuffer shell's act), and a host that does not know
+//!   pin and unpin ask first). `open` is answered by the device's WASM tile screen (it keeps the request for the shell, D-SDK-34-03);
+//!   the browser host and `status` have no answer yet (the framebuffer shell's act), and a host that does not know
 //!   the domain refuses the call: the port answers [`DeskError::Unavailable`], which the app already handles (SAMPLE says "The dock did
 //!   not allow that").
 use iyakki_tile_kit::Source;
@@ -16,6 +17,7 @@ use iyakki_ui_sdk::assistant::{AssistError, AssistResult, AssistantPort, ChatEve
 use iyakki_ui_sdk::canvas::{Image, ImageFormat};
 use iyakki_ui_sdk::cameras::{CamAction, CamEvent, CamInfo, CamResult, CamStatus, CameraPort, Mark, Overlay, Phase, Ptz, Shape, ViewState};
 use iyakki_ui_sdk::files::{DirListing, EntryInfo, FilesError, FilesPort};
+use iyakki_ui_sdk::terminal::{Frame as TermFrame, Opened as TermOpened, Question as TermQuestion, Reply as TermReply, ScreenCell, ScreenColor, ScreenKey, TermError, TerminalPort};
 use iyakki_ui_sdk::wallpaper;
 use iyakki_ui_sdk::ports::{check_key, PortError, StoragePort, MAX_VALUE};
 use serde_json::{json, Value};
@@ -105,7 +107,9 @@ impl<S: Source> CoreDock<S> {
 
     fn act(&self, method: &str, app: &str) -> Result<(), DeskError> {
         self.src.call("dock", method, &json!({ "app": app })).map(|_| ()).map_err(|e| {
-            if e.contains("not allowed") || e.contains("denied") || e.contains("declined") {
+            if e.contains("unknown app") {
+                DeskError::UnknownApp
+            } else if e.contains("not allowed") || e.contains("denied") || e.contains("declined") {
                 DeskError::Refused(e)
             } else {
                 DeskError::Unavailable
@@ -139,6 +143,294 @@ impl<S: Source> DockPort for CoreDock<S> {
     }
 }
 
+/// The IYAKKI command line over the tile's `call` (`terminal.open`, `run`, `decide`, `close`) and the whole-session terminal (`screen_open`,
+/// `screen_decide`, `screen_key`, `screen_text`, `screen_resize`, `screen_scroll`, `screen_frame`, `screen_close`): the host maps them onto the
+/// core's terminal facet for this tile's id, one line session and one whole session per tile, checked by the person's policy. A line that
+/// changes something comes back as a question and the person answers it with the view's Allow and Deny; nothing runs before, and the yes also
+/// needs the person's own card in their page. A refusal comes as `{"error": sentence}` (a failed host call carries no sentence), which says
+/// "unavailable" when the core has no terminal. The screen comes as runs of text with a colour pair and attributes (see the host's
+/// `tileterminal.rs`).
+pub struct CoreTerminal<S: Source> {
+    src: Shared<S>,
+}
+
+impl<S: Source> CoreTerminal<S> {
+    pub fn new(s: Shared<S>) -> CoreTerminal<S> {
+        CoreTerminal { src: s }
+    }
+
+    fn call(&self, method: &str, args: &Value) -> Result<Value, TermError> {
+        let unavailable = |e: &str| e.contains("unknown service") || e.contains("no terminal") || e.contains("not allowed to do that");
+        let v = self.src.call("terminal", method, args).map_err(|e| if unavailable(&e) { TermError::Unavailable } else { TermError::Refused(e) })?;
+        match v.get("error").and_then(Value::as_str) {
+            Some(e) if unavailable(e) => Err(TermError::Unavailable),
+            Some(e) => Err(TermError::Refused(e.to_string())),
+            None => Ok(v),
+        }
+    }
+}
+
+fn screen_colour(v: &Value) -> ScreenColor {
+    match v {
+        Value::Number(n) => ScreenColor::Indexed(n.as_u64().unwrap_or(0).min(255) as u8),
+        Value::String(s) if s.len() == 6 && s.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            let h = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or(0);
+            ScreenColor::Rgb(h(0), h(2), h(4))
+        }
+        _ => ScreenColor::Default,
+    }
+}
+
+fn screen_frame_of(v: &Value) -> TermFrame {
+    let (cols, rows) = (v["cols"].as_u64().unwrap_or(0) as usize, v["rows"].as_u64().unwrap_or(0) as usize);
+    let mut cells: Vec<Vec<ScreenCell>> = Vec::new();
+    for row in v["lines"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+        let mut cs: Vec<ScreenCell> = Vec::new();
+        for run in row.as_array().map(Vec::as_slice).unwrap_or(&[]) {
+            let (fg, bg, attrs) = (screen_colour(&run[1]), screen_colour(&run[2]), run[3].as_u64().unwrap_or(0) as u8);
+            for ch in run[0].as_str().unwrap_or("").chars() {
+                let tail = ch == '\0';
+                cs.push(ScreenCell { ch: if tail { ' ' } else { ch }, fg, bg, attrs, tail });
+            }
+        }
+        cs.resize(cols, ScreenCell::default());
+        cells.push(cs);
+    }
+    cells.resize(rows, vec![ScreenCell::default(); cols]);
+    TermFrame {
+        seq: v["seq"].as_u64().unwrap_or(0),
+        cols,
+        rows,
+        cells,
+        cursor: (v["cursor"][0].as_u64().unwrap_or(0) as usize, v["cursor"][1].as_u64().unwrap_or(0) as usize),
+        cursor_visible: v["cursor_visible"].as_bool().unwrap_or(false),
+        back: v["back"].as_u64().unwrap_or(0) as usize,
+        history: v["history"].as_u64().unwrap_or(0) as usize,
+        exited: v["exited"].as_i64().map(|n| n as i32),
+    }
+}
+
+fn key_args(key: ScreenKey, ctrl: bool, alt: bool) -> Value {
+    let named = |n: &str| json!({"key": n, "ctrl": ctrl, "alt": alt});
+    match key {
+        ScreenKey::Char(c) => json!({"key": "char", "ch": c.to_string(), "ctrl": ctrl, "alt": alt}),
+        ScreenKey::F(n) => json!({"key": "f", "n": n, "ctrl": ctrl, "alt": alt}),
+        ScreenKey::Enter => named("enter"),
+        ScreenKey::Tab => named("tab"),
+        ScreenKey::BackTab => named("backtab"),
+        ScreenKey::Backspace => named("backspace"),
+        ScreenKey::Esc => named("esc"),
+        ScreenKey::Up => named("up"),
+        ScreenKey::Down => named("down"),
+        ScreenKey::Left => named("left"),
+        ScreenKey::Right => named("right"),
+        ScreenKey::Home => named("home"),
+        ScreenKey::End => named("end"),
+        ScreenKey::PageUp => named("pageup"),
+        ScreenKey::PageDown => named("pagedown"),
+        ScreenKey::Insert => named("insert"),
+        ScreenKey::Delete => named("delete"),
+    }
+}
+
+fn term_reply(v: &Value) -> TermReply {
+    TermReply {
+        text: v["text"].as_str().unwrap_or("").to_string(),
+        prompt: v["prompt"].as_str().unwrap_or("").to_string(),
+        clear: v["clear"].as_bool().unwrap_or(false),
+        cut: v["cut"].as_bool().unwrap_or(false),
+        question: v["question"].as_object().and_then(|q| Some(TermQuestion { call: q.get("call")?.as_str()?.to_string(), summary: q.get("summary").and_then(Value::as_str).unwrap_or("").to_string() })),
+    }
+}
+
+impl<S: Source> TerminalPort for CoreTerminal<S> {
+    fn open(&mut self) -> Result<TermOpened, TermError> {
+        let v = self.call("open", &json!({}))?;
+        Ok(TermOpened { prompt: v["prompt"].as_str().unwrap_or("$ ").to_string(), banner: v["banner"].as_str().unwrap_or("").to_string() })
+    }
+
+    fn run(&mut self, line: &str) -> Result<TermReply, TermError> {
+        Ok(term_reply(&self.call("run", &json!({ "line": line }))?))
+    }
+
+    fn decide(&mut self, call: &str, approve: bool) -> Result<TermReply, TermError> {
+        Ok(term_reply(&self.call("decide", &json!({ "call": call, "approve": approve }))?))
+    }
+
+    fn close(&mut self) {
+        let _ = self.call("close", &json!({}));
+    }
+
+    fn screen_open(&mut self, cols: usize, rows: usize) -> Result<TermQuestion, TermError> {
+        let v = self.call("screen_open", &json!({"cols": cols, "rows": rows}))?;
+        match v["call"].as_str() {
+            Some(c) => Ok(TermQuestion { call: c.to_string(), summary: v["summary"].as_str().unwrap_or("").to_string() }),
+            None => Err(TermError::Refused("the host gave no question".into())),
+        }
+    }
+
+    fn screen_decide(&mut self, call: &str, approve: bool) -> Result<(), TermError> {
+        self.call("screen_decide", &json!({"call": call, "approve": approve})).map(|_| ())
+    }
+
+    fn screen_key(&mut self, key: ScreenKey, ctrl: bool, alt: bool) -> Result<(), TermError> {
+        self.call("screen_key", &key_args(key, ctrl, alt)).map(|_| ())
+    }
+
+    fn screen_text(&mut self, text: &str) -> Result<(), TermError> {
+        self.call("screen_text", &json!({"text": text})).map(|_| ())
+    }
+
+    fn screen_resize(&mut self, cols: usize, rows: usize) -> Result<(), TermError> {
+        self.call("screen_resize", &json!({"cols": cols, "rows": rows})).map(|_| ())
+    }
+
+    fn screen_scroll(&mut self, lines: isize) -> Result<(), TermError> {
+        self.call("screen_scroll", &json!({"lines": lines})).map(|_| ())
+    }
+
+    fn screen_frame(&mut self) -> Result<TermFrame, TermError> {
+        Ok(screen_frame_of(&self.call("screen_frame", &json!({}))?))
+    }
+
+    fn screen_close(&mut self) {
+        let _ = self.call("screen_close", &json!({}));
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Host {
+        log: Vec<String>,
+        gone: bool,
+    }
+
+    impl Source for Host {
+        fn call(&mut self, domain: &str, method: &str, json: &str) -> Result<String, String> {
+            assert_eq!(domain, "terminal");
+            self.log.push(format!("{method} {json}"));
+            let a: Value = serde_json::from_str(json).unwrap();
+            match method {
+                _ if self.gone => Err("unknown service".into()),
+                "open" => Ok(r#"{"prompt":"iyakki> ","banner":"IYAKKI command line"}"#.into()),
+                "run" if a["line"] == "pwd" => Ok(r#"{"text":"/home\n","prompt":"iyakki> "}"#.into()),
+                "run" if a["line"] == "clear" => Ok(r#"{"text":"","clear":true}"#.into()),
+                "run" if a["line"] == "big" => Ok(r#"{"text":"x","cut":true}"#.into()),
+                "run" if a["line"] == "refuse" => Err("your account may not run that".into()),
+                "run" => Ok(json!({"text": "", "question": {"call": "t1", "summary": format!("Run `{}`?", a["line"].as_str().unwrap())}}).to_string()),
+                "decide" if a["approve"] == true => Ok(r#"{"text":"done\n"}"#.into()),
+                "decide" => Ok(r#"{"text":"Not run.\n"}"#.into()),
+                _ => Ok("{}".into()),
+            }
+        }
+    }
+
+    #[test]
+    fn every_call_reaches_the_host_in_the_wire_form_and_the_answers_are_read_back() {
+        let shared = Shared::new(Host::default());
+        let mut p = CoreTerminal::new(shared.clone());
+        let o = p.open().unwrap();
+        assert_eq!((o.prompt.as_str(), o.banner.as_str()), ("iyakki> ", "IYAKKI command line"));
+        let r = p.run("pwd").unwrap();
+        assert_eq!((r.text.as_str(), r.prompt.as_str(), r.clear, r.cut, r.question.is_none()), ("/home\n", "iyakki> ", false, false, true));
+        assert!(p.run("clear").unwrap().clear);
+        assert!(p.run("big").unwrap().cut);
+        let q = p.run("rm x").unwrap().question.expect("a line that changes something asks first");
+        assert_eq!((q.call.as_str(), q.summary.as_str()), ("t1", "Run `rm x`?"));
+        assert_eq!(p.decide("t1", true).unwrap().text, "done\n");
+        assert_eq!(p.decide("t1", false).unwrap().text, "Not run.\n");
+        p.close();
+        let log = shared.0.borrow().log.join("\n");
+        assert!(log.contains(r#"run {"line":"rm x"}"#) && log.contains(r#"decide {"approve":true,"call":"t1"}"#) && log.ends_with("close {}"), "{log}");
+    }
+
+    #[derive(Default)]
+    struct Screen {
+        log: Vec<String>,
+        none: bool,
+    }
+
+    impl Source for Screen {
+        fn call(&mut self, domain: &str, method: &str, json: &str) -> Result<String, String> {
+            assert_eq!(domain, "terminal");
+            self.log.push(format!("{method} {json}"));
+            if self.none {
+                return Ok(r#"{"error":"this core has no terminal"}"#.into());
+            }
+            Ok(match method {
+                "screen_open" => r#"{"call":"pc1","summary":"Open a full terminal?"}"#.into(),
+                "screen_frame" => r#"{"seq":7,"cols":5,"rows":2,"cursor":[2,0],"cursor_visible":true,"back":0,"history":3,"exited":null,"lines":[[["ab",1,"0a0b0c",1],["\u5b57\u0000",null,null,0]]]}"#.into(),
+                "screen_text" => r#"{"error":"the terminal waits for your yes"}"#.into(),
+                _ => r#"{"ok":true}"#.into(),
+            })
+        }
+    }
+
+    #[test]
+    fn the_whole_session_calls_reach_the_host_in_the_wire_form_and_the_screen_is_read_back_cell_by_cell() {
+        let shared = Shared::new(Screen::default());
+        let mut p = CoreTerminal::new(shared.clone());
+        let q = p.screen_open(80, 24).unwrap();
+        assert_eq!((q.call.as_str(), q.summary.as_str()), ("pc1", "Open a full terminal?"));
+        p.screen_decide("pc1", true).unwrap();
+        p.screen_key(ScreenKey::Char('x'), true, false).unwrap();
+        p.screen_key(ScreenKey::F(5), false, true).unwrap();
+        p.screen_key(ScreenKey::PageUp, false, false).unwrap();
+        p.screen_resize(100, 30).unwrap();
+        p.screen_scroll(-3).unwrap();
+        assert_eq!(p.screen_text("hi"), Err(TermError::Refused("the terminal waits for your yes".into())), "the host's sentence is kept");
+        let f = p.screen_frame().unwrap();
+        assert_eq!((f.seq, f.cols, f.rows, f.cursor, f.cursor_visible, f.history, f.exited), (7, 5, 2, (2, 0), true, 3, None));
+        assert_eq!(f.cells.len(), 2);
+        assert!(f.cells.iter().all(|r| r.len() == 5), "rows are padded to the width");
+        let a = f.cells[0][0];
+        assert_eq!((a.ch, a.fg, a.bg, a.attrs, a.tail), ('a', ScreenColor::Indexed(1), ScreenColor::Rgb(10, 11, 12), 1, false));
+        assert_eq!((f.cells[0][2].ch, f.cells[0][2].tail, f.cells[0][3].tail), ('\u{5b57}', false, true), "the right half of a wide character is a tail");
+        assert_eq!(f.text(), "ab\u{5b57}\n", "two rows, the second blank");
+        p.screen_close();
+        let log = shared.0.borrow().log.join("\n");
+        for want in [r#"screen_open {"cols":80,"rows":24}"#, r#"screen_decide {"approve":true,"call":"pc1"}"#, r#"screen_key {"alt":false,"ch":"x","ctrl":true,"key":"char"}"#, r#"screen_key {"alt":true,"ctrl":false,"key":"f","n":5}"#, r#""key":"pageup""#, r#"screen_resize {"cols":100,"rows":30}"#, r#"screen_scroll {"lines":-3}"#, "screen_close {}"] {
+            assert!(log.contains(want), "{want}\n{log}");
+        }
+    }
+
+    #[test]
+    fn a_host_with_no_terminal_makes_every_whole_session_call_unavailable() {
+        let shared = Shared::new(Screen { none: true, ..Screen::default() });
+        let mut p = CoreTerminal::new(shared);
+        assert_eq!(p.screen_open(80, 24), Err(TermError::Unavailable));
+        assert_eq!(p.screen_frame().unwrap_err(), TermError::Unavailable);
+        assert_eq!(p.open(), Err(TermError::Unavailable));
+    }
+
+    #[test]
+    fn a_refusal_is_the_hosts_sentence_and_a_host_without_a_terminal_is_unavailable() {
+        let shared = Shared::new(Host::default());
+        let mut p = CoreTerminal::new(shared.clone());
+        assert_eq!(p.run("refuse"), Err(TermError::Refused("your account may not run that".into())));
+        shared.0.borrow_mut().gone = true;
+        assert_eq!(p.open(), Err(TermError::Unavailable));
+        assert_eq!(p.run("pwd"), Err(TermError::Unavailable));
+    }
+
+    #[test]
+    fn an_answer_that_is_not_what_it_should_be_gives_empty_fields_not_a_panic() {
+        struct Odd;
+        impl Source for Odd {
+            fn call(&mut self, _: &str, m: &str, _: &str) -> Result<String, String> {
+                Ok(if m == "open" { "[1,2]".into() } else { r#"{"question":{"summary":"no call id"},"text":5}"#.into() })
+            }
+        }
+        let mut p = CoreTerminal::new(Shared::new(Odd));
+        assert_eq!(p.open().unwrap().prompt, "$ ");
+        let r = p.run("x").unwrap();
+        assert!(r.question.is_none() && r.text.is_empty());
+    }
+}
+
 /// The wallpaper port over the tile's `call`: `wallpaper.get` answers the key of the person's wallpaper, `wallpaper.set {wallpaper}` changes it
 /// (the host asks the person first). The screen number does not matter to the host (one wallpaper per person); a refusal is
 /// [`DeskError::Refused`] when the host says declined or not allowed, [`DeskError::Unavailable`] otherwise (including "the person was asked").
@@ -163,7 +455,9 @@ impl<S: Source> WallpaperPort for CoreWallpaper<S> {
 
     fn set(&mut self, _screen: u32, id: wallpaper::Id) -> Result<(), DeskError> {
         self.src.call("wallpaper", "set", &json!({ "wallpaper": id.key() })).map(|_| self.known.set(id)).map_err(|e| {
-            if e.contains("not allowed") || e.contains("denied") || e.contains("declined") {
+            if e.contains("unknown app") {
+                DeskError::UnknownApp
+            } else if e.contains("not allowed") || e.contains("denied") || e.contains("declined") {
                 DeskError::Refused(e)
             } else {
                 DeskError::Unavailable
@@ -952,6 +1246,7 @@ impl<S: Source> CameraPort for CoreCameras<S> {
     fn ptz(&mut self, camera: &str, cmd: Ptz) -> CamResult<Option<String>> {
         let a = match cmd {
             Ptz::Move { pan, tilt, zoom } => json!({"camera": camera, "cmd": "move", "pan": pan, "tilt": tilt, "zoom": zoom}),
+            Ptz::Absolute { pan, tilt, zoom } => json!({"camera": camera, "cmd": "absolute", "pan": pan, "tilt": tilt, "zoom": zoom}),
             Ptz::Stop => json!({"camera": camera, "cmd": "stop"}),
         };
         let v = self.with_view("ptz", a)?;

@@ -407,15 +407,15 @@ fn redraws_happen_only_on_change_and_at_most_ten_times_a_second() {
 #[test]
 fn the_changed_part_of_a_picture_is_found() {
     let a = Picture::black(100, 10);
-    assert_eq!(a.damage(None), Some(iyakki_drivers::touchbar::Rect { x: 0, y: 0, w: 100, h: 10 }));
+    assert_eq!(a.damage(None), Some(iyakki_core_api::device_types::driver_packs::touchbar::Rect { x: 0, y: 0, w: 100, h: 10 }));
     assert_eq!(a.damage(Some(&a.clone())), None);
     let mut b = a.clone();
     for (x, y) in [(10u32, 2u32), (40, 7)] {
         let at = (y as usize * 100 + x as usize) * 4;
         b.rgba[at] = 200;
     }
-    assert_eq!(b.damage(Some(&a)), Some(iyakki_drivers::touchbar::Rect { x: 10, y: 2, w: 31, h: 6 }));
-    assert_eq!(b.damage(Some(&Picture::black(50, 10))), Some(iyakki_drivers::touchbar::Rect { x: 0, y: 0, w: 100, h: 10 }), "another size: all of it");
+    assert_eq!(b.damage(Some(&a)), Some(iyakki_core_api::device_types::driver_packs::touchbar::Rect { x: 10, y: 2, w: 31, h: 6 }));
+    assert_eq!(b.damage(Some(&Picture::black(50, 10))), Some(iyakki_core_api::device_types::driver_packs::touchbar::Rect { x: 0, y: 0, w: 100, h: 10 }), "another size: all of it");
 }
 
 #[test]

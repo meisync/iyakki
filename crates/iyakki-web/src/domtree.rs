@@ -410,6 +410,17 @@ impl Tree {
 
     fn match_rest(&self, n: usize, comb: Combinator, rest: &[(Combinator, Compound)], scope: usize) -> bool {
         let Some(((prev_comb, c), before)) = rest.split_last() else { return true };
+        // the common descendant case walks up the ancestors without collecting them
+        if comb == Combinator::Descendant {
+            let mut cur = self.parent_of(n);
+            while let Some(p) = cur {
+                if self.is_element(p) && self.tag(p) != Some("#root") && self.matches_compound(p, c) && self.match_rest(p, *prev_comb, before, scope) {
+                    return true;
+                }
+                cur = self.parent_of(p);
+            }
+            return false;
+        }
         let candidates: Vec<usize> = match comb {
             Combinator::Child => self.parent_of(n).into_iter().collect(),
             Combinator::Descendant => {

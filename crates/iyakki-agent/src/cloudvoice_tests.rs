@@ -1,6 +1,10 @@
 use super::*;
 use crate::audiostream::{FRAME_SAMPLES, RATE};
+use crate::cloudstream::Gate;
 use crate::voiceassist::AudioIn;
+use iyakki_shared::wakelisten::Mic;
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 use std::sync::Mutex;
 
 fn tone(n: usize, seed: i32) -> Vec<i16> {
@@ -173,4 +177,104 @@ fn a_certificate_offer_is_read_with_its_limits_and_the_wrong_certificate_never_g
     assert!(matches!(dev.step(), Step::LinkDown(w) if w.contains("refused")), "the secure link was refused in the handshake");
     assert!(rx.join().unwrap().is_err() || *got.lock().unwrap() == 0);
     assert_eq!(*got.lock().unwrap(), 0, "nothing was delivered");
+}
+
+#[test]
+fn the_listener_thread_offers_its_certificate_only_while_the_switch_is_on_and_takes_the_frames_only_then() {
+    use std::sync::atomic::Ordering;
+    let on = Arc::new(AtomicBool::new(true));
+    let on2 = on.clone();
+    let l = CloudListener::start("127.0.0.1:0", "", "tenant-a", Arc::new(move || on2.load(Ordering::SeqCst))).unwrap();
+    let (addr, offer) = l.offer().unwrap();
+    assert_eq!(addr, l.local_addr().to_string(), "nothing advertised: the bound address");
+    let offer = CertOffer::from_json(&offer).unwrap();
+    assert_eq!(offer.machine, "tenant-a");
+    let mut ear = l.take_audio().unwrap();
+    assert!(l.take_audio().is_none(), "the assistant's microphone is handed out once");
+    ear.open().unwrap();
+    // a device sends a batch while the switch is on: it is heard
+    let mic = FakeMic::default();
+    let mut dev = DeviceClient::new(allowed_gate(), Box::new(mic.clone()), l.local_addr(), &offer.cert_der).unwrap();
+    dev.step();
+    let first = tone(FRAME_SAMPLES * BATCH_FRAMES, 50);
+    mic.feed(&first);
+    assert_eq!(dev.step(), Step::Sent(BATCH_FRAMES));
+    iyakki_testkit::wait::wait_until(Duration::from_secs(30), || l.served() >= 1);
+    assert_eq!(ear.take().unwrap(), first);
+    // the switch goes off: no offer, and a batch that still arrives is dropped
+    on.store(false, Ordering::SeqCst);
+    assert!(l.offer().unwrap_err().contains("off"));
+    mic.feed(&tone(FRAME_SAMPLES * BATCH_FRAMES, 70));
+    assert_eq!(dev.step(), Step::Sent(BATCH_FRAMES));
+    iyakki_testkit::wait::wait_until(Duration::from_secs(30), || l.served() >= 2);
+    assert!(ear.take().map_or(true, |v| v.is_empty()), "nothing was heard while the switch was off");
+    // a peer that does not speak TLS does not stop the listener
+    drop(std::net::TcpStream::connect(l.local_addr()).unwrap());
+    iyakki_testkit::wait::wait_until(Duration::from_secs(30), || l.served() >= 3);
+    // and the listener still takes a device after that: the switch on again, the offer is made again
+    on.store(true, Ordering::SeqCst);
+    assert!(l.offer().is_ok());
+    drop(l);
+}
+
+#[test]
+fn the_cloud_assistant_answers_through_the_devices_speaker_only_with_the_switch_on_and_a_return_link() {
+    use crate::voiceassist::Speaker;
+    use std::sync::atomic::Ordering;
+    let on = Arc::new(AtomicBool::new(true));
+    let on2 = on.clone();
+    let l = Arc::new(CloudListener::start("127.0.0.1:0", "", "tenant-a", Arc::new(move || on2.load(Ordering::SeqCst))).unwrap());
+    let dev_id = crate::audiotls::Identity::make().unwrap();
+    let dev_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let dev_addr = dev_listener.local_addr().unwrap();
+    let dcfg = crate::audiotls::server_config(&dev_id).unwrap();
+    let wav = crate::voice::encode_wav(&tone(FRAME_SAMPLES * 5, 300), 16_000);
+    let l2 = l.clone();
+    let mut mouth = CloudSpeaker::new(Arc::new(move |_| Ok(wav.clone())), Arc::new(move || l2.return_target()));
+    assert!(mouth.say("hello").unwrap_err().contains("not offered"), "no return link yet: said in words, nothing sent");
+    let offer = CertOffer { machine: "my-laptop".into(), cert_der: dev_id.cert_der.clone() }.to_json();
+    assert!(l.set_return("not-an-address", &offer).is_err());
+    assert!(l.set_return(&dev_addr.to_string(), "{}").is_err());
+    on.store(false, Ordering::SeqCst);
+    assert!(l.set_return(&dev_addr.to_string(), &offer).unwrap_err().contains("off"));
+    assert!(l.return_target().is_none());
+    on.store(true, Ordering::SeqCst);
+    l.set_return(&dev_addr.to_string(), &offer).unwrap();
+    let rx = std::thread::spawn(move || {
+        let mut p = AnswerPlayer::new();
+        p.receive(&dev_listener, dcfg).unwrap();
+        p.take()
+    });
+    mouth.say("hello").unwrap();
+    let got = rx.join().unwrap();
+    assert_eq!(got.len(), FRAME_SAMPLES * 5, "the answer's sound reached the device's listener");
+    iyakki_testkit::wait::wait_until(Duration::from_secs(30), || !mouth.busy());
+    on.store(false, Ordering::SeqCst);
+    assert!(mouth.say("again").is_err(), "the switch off: the return link is closed at once");
+}
+
+#[test]
+fn the_machines_offer_needs_the_switch_and_an_address_then_starts_the_listener_once() {
+    struct Off;
+    impl iyakki_proxy::Upstream for Off {
+        fn request(&self, _: &str, _: &str, _: &[(String, String)], _: &[u8]) -> Result<iyakki_proxy::UpstreamResponse, String> {
+            Err("offline".into())
+        }
+    }
+    let d = crate::testdir::unique("cloudvoice", "offer");
+    let svc = crate::services::Services::open(&d, Arc::new(Off), Arc::new(Off)).unwrap();
+    let set = |on: bool| svc.settings.lock().unwrap_or_else(|e| e.into_inner()).update(|s| s.voice.my_cloud_stream = on).unwrap();
+    // the switch is off by default: no offer, nothing listens
+    assert!(svc.cloud_voice_offer().unwrap_err().contains("off"));
+    assert!(svc.cloud_voice.lock().unwrap().is_none());
+    set(true);
+    assert!(svc.cloud_voice_offer_at("no-port-here").unwrap_err().contains("no audio address"));
+    assert!(svc.cloud_voice.lock().unwrap().is_none(), "no address: still nothing listens");
+    let (addr, offer) = svc.cloud_voice_offer_at("127.0.0.1:0").unwrap();
+    let first = CertOffer::from_json(&offer).unwrap();
+    assert!(addr.starts_with("127.0.0.1:") && !first.machine.is_empty());
+    let (_, again) = svc.cloud_voice_offer_at("127.0.0.1:0").unwrap();
+    assert_eq!(CertOffer::from_json(&again).unwrap().cert_der, first.cert_der, "one listener, one certificate");
+    set(false);
+    assert!(svc.cloud_voice_offer().unwrap_err().contains("off"), "off again: the offer is withdrawn");
 }

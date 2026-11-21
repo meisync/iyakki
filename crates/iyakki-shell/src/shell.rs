@@ -32,8 +32,8 @@ use crate::launcher::tile_rects;
 use crate::ui::*;
 
 pub struct ShellEnv {
-    pub store: Arc<Mutex<UserStore>>,
-    pub audit: Arc<AuditLog>,
+    pub store: crate::accounts::UsersRef,
+    pub audit: Arc<dyn iyakki_agent_api::AuditApi>,
     pub host: Arc<dyn HostApi>,
     pub cfg: AiConfig,
     pub chat: Arc<dyn ChatBackend>,
@@ -65,6 +65,45 @@ impl Default for ShellPaths {
     fn default() -> Self {
         Self { users: "/var/lib/iyakki/users.json".into(), audit: "/var/lib/iyakki/audit.log".into(), ai_conf: "/etc/iyakki/ai.conf".into(), data: "/var/lib/iyakki".into(), hwcheck: false, headless: false }
     }
+}
+
+/// The real `RunStarter` of the core (F-SPLIT-03): a chat run asked for over the UI socket is built here, from the account's own session, with the
+/// machine's services, the model and the metered chat, exactly as the CHAT tile builds it. The accounts are read at each start, so a role or
+/// policy change applies to the next run.
+pub fn core_run_starter(env: &ShellEnv) -> Arc<dyn iyakki_agent_api::RunStarter> {
+    let (store, audit, host, cfg, chat, services, web) = (env.store.clone(), env.audit.clone(), env.host.clone(), env.cfg.clone(), env.chat.clone(), env.services.clone(), env.web.clone());
+    let mcp_servers = env.mcp_servers.clone();
+    let accounts = env.store.clone();
+    let policy_of: crate::wiring::PolicyOf = Arc::new(move |user: &str| accounts.lock().ok().and_then(|s| s.get(user).map(|r| r.policy())));
+    let core: Arc<dyn iyakki_core_api::Core> = crate::wiring::make_core(env, crate::wiring::CoreInputs { policies: Arc::new(crate::apps::StorePolicies(env.store.clone())), audit: Arc::new(crate::apps::assistant_port::AuditLogSink(env.audit.clone())), policy_of });
+    let osguard = Arc::new(osguard_impl::OsGuard::new(env.data_dir()));
+    let agent: Arc<dyn iyakki_agent_api::AgentApi> = iyakki_apps::agent_arc();
+    let cx_for: iyakki_apps::apps::core_run::CxFor = Arc::new(move |user: &str| {
+        let session = {
+            let s = store.lock().ok()?;
+            let r = s.get(user)?;
+            iyakki_accounts::Session { user: r.name.clone(), role: r.role, policy: r.policy() }
+        };
+        let stored = services.mcp().list();
+        let mut servers: Vec<_> = mcp_servers.iter().filter(|s| !stored.iter().any(|x| x.name == s.name)).cloned().collect();
+        servers.extend(stored.iter().map(iyakki_shared::mcp::StoredServer::spec));
+        Some(AppCx {
+            session: session.clone(),
+            host: host.clone(),
+            cfg: cfg.clone(),
+            chat: services.b4().metered_chat(chat.clone(), &session.user),
+            audit: audit.clone(),
+            store: store.clone(),
+            mcp_servers: servers,
+            services: services.clone(),
+            web: web.clone(),
+            os: osguard.os_for("chat", &session.user),
+            core: core.clone(),
+            agent: agent.clone(),
+            store_facets: None,
+        })
+    });
+    Arc::new(crate::apps::core_run::CoreRunStarter::new(cx_for))
 }
 
 impl ShellEnv {
@@ -112,28 +151,37 @@ impl ShellEnv {
     }
 
     /// The stores whose type is already shared data (no agent type): the settings, the inbox, the calendar, the study plans, the secrets, the knowledge base.
-    pub fn settings(&self) -> &Arc<Mutex<iyakki_shared::settings::SettingsStore>> {
-        &self.services.settings()
+    pub fn settings(&self) -> iyakki_agent_api::SettingsRef {
+        self.services.settings()
     }
 
-    pub fn inbox(&self) -> &iyakki_shared::inbox::Inbox {
-        &self.services.inbox()
+    pub fn inbox(&self) -> Arc<dyn iyakki_agent_api::InboxApi> {
+        self.services.inbox()
     }
 
-    pub fn calendar(&self) -> &iyakki_shared::calendar::CalendarStore {
-        &self.services.calendar()
+    pub fn calendar(&self) -> Arc<dyn iyakki_agent_api::CalendarApi> {
+        self.services.calendar()
     }
 
-    pub fn study(&self) -> &iyakki_shared::study::StudyStore {
-        &self.services.study()
+    pub fn study(&self) -> Arc<dyn iyakki_agent_api::StudyApi> {
+        self.services.study()
+    }
+
+    pub fn study_calendar(&self) -> Arc<dyn iyakki_agent_api::StudyCalendarApi> {
+        self.services.study_calendar()
     }
 
     pub fn secrets(&self) -> &iyakki_shared::vault::Secrets {
         &self.services.secrets()
     }
 
-    pub fn kb(&self) -> &Arc<Mutex<iyakki_memx::kb::KnowledgeBase>> {
-        &self.services.kb()
+    pub fn kb(&self) -> Arc<dyn iyakki_agent_api::KnowledgeBaseApi> {
+        self.services.kb()
+    }
+
+    /// The knowledge base as the source of the workspace history.
+    pub fn kb_source(&self) -> Arc<dyn iyakki_memx::kb::KbSource> {
+        self.services.kb_source()
     }
 
     /// The voice and sound settings, a copy of what the settings hold.
@@ -150,8 +198,8 @@ impl ShellEnv {
     }
 
     /// What the last look at each external coding agent found (shared data type).
-    pub fn ext_status(&self) -> &Arc<iyakki_shared::extagent::StatusCache> {
-        &self.services.ext_status()
+    pub fn ext_status(&self) -> Arc<dyn iyakki_agent_api::ExtStatusApi> {
+        self.services.ext_status()
     }
 
     // ---- split G: the model and speech side
@@ -171,13 +219,13 @@ impl ShellEnv {
     }
 
     /// The secrets the assistant asked the person for and that wait for an answer (shared data type).
-    pub fn secret_requests(&self) -> &iyakki_shared::secretreq::SecretRequests {
-        &self.services.secret_requests()
+    pub fn secret_requests(&self) -> Arc<dyn iyakki_agent_api::SecretRequestsApi> {
+        self.services.secret_requests()
     }
 
     /// The token usage log (shared data type, a file in the data folder).
-    pub fn usage(&self) -> &iyakki_shared::usagelog::UsageLog {
-        &self.services.usage()
+    pub fn usage(&self) -> Arc<dyn iyakki_agent_api::UsageLogApi> {
+        self.services.usage()
     }
 
     /// Put a note into the person's inbox (the INBOX tile and the badge show it).
@@ -196,21 +244,31 @@ impl ShellEnv {
 
     /// The store, the update check and the system components as narrow facets.
     /// The device watch (the things plugged in and the ones the person trusts).
-    pub fn devwatch(&self) -> &Arc<iyakki_shared::devwatch::DeviceWatch> {
-        &self.services.devwatch()
+    pub fn devwatch(&self) -> Arc<dyn iyakki_agent_api::DevWatchApi> {
+        self.services.devwatch()
     }
 
     /// The browser state (the person's consent, the jobs the shell serves) and the screen and camera hubs.
-    pub fn browser(&self) -> &iyakki_shared::browserconsent::BrowserState {
-        &self.services.browser()
+    pub fn browser(&self) -> Arc<dyn iyakki_agent_api::BrowserStateApi> {
+        self.services.browser()
     }
 
-    pub fn screen(&self) -> &iyakki_shared::screencap::ScreenCapture {
-        &self.services.screen()
+    /// The questions the assistant asks about the person's browser and their answers.
+    pub fn browser_consent(&self) -> Arc<dyn iyakki_agent_api::ConsentApi> {
+        self.services.browser_consent()
     }
 
-    pub fn camera(&self) -> &iyakki_shared::camtools::CameraHub {
-        &self.services.camera()
+    /// The queue between the assistant's browser tools and the page engine the shell services.
+    pub fn browser_jobs(&self) -> Arc<dyn iyakki_agent_api::BrowserJobsApi> {
+        self.services.browser_jobs()
+    }
+
+    pub fn screen(&self) -> Arc<dyn iyakki_agent_api::ScreenCaptureApi> {
+        self.services.screen()
+    }
+
+    pub fn camera(&self) -> Arc<dyn iyakki_agent_api::CameraHubApi> {
+        self.services.camera()
     }
 
     /// The chat sessions, skills, runs, MCP servers, skill packages and background jobs of the person (stores that stay in the agent).
@@ -244,8 +302,8 @@ impl ShellEnv {
     }
 
     /// The developer tools (the browser's console and network log).
-    pub fn devtools(&self) -> &iyakki_shared::devtools::DevTools {
-        &self.services.devtools()
+    pub fn devtools(&self) -> Arc<dyn iyakki_agent_api::DevToolsApi> {
+        self.services.devtools()
     }
 
     // --- the small reads of the person's services that no store owns (piece 10): one accessor each, so the day `services` goes only these bodies change.
@@ -382,7 +440,7 @@ impl ShellEnv {
         let audit = Arc::new(AuditLog::new(std::path::Path::new(&p.audit)));
         audit.flush_notes();
         Ok(ShellEnv {
-            store: Arc::new(Mutex::new(store)),
+            store: crate::accounts::UsersRef::of_store(&Arc::new(Mutex::new(store))),
             audit,
             host,
             cfg,
@@ -390,9 +448,59 @@ impl ShellEnv {
             mcp_servers,
             services,
             web: browser_web(std::path::Path::new(&p.data)),
-            hostname: std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()).unwrap_or_else(|_| "iyakki".into()),
+            hostname: iyakki_core_local::machinefacts::hostname("iyakki"),
             hwcheck: p.hwcheck,
-            data_volatile: iyakki_storage::data_location(&iyakki_storage::Roots::real(), std::path::Path::new(&p.data)) == iyakki_storage::DataLocation::Memory,
+            data_volatile: iyakki_core_local::storage::data_location(&iyakki_core_local::storage::Roots::real(), std::path::Path::new(&p.data)) == iyakki_core_local::storage::DataLocation::Memory,
+        })
+    }
+}
+
+/// What a UI program that reaches the core over its socket (`iyakki-ui --socket`, F-SPLIT-03) gives the shell instead of letting it open the
+/// machine itself: the services, the audit log and the accounts are the core's, seen through remote objects; the host is the program's own
+/// quiet one. The machine-level start-up (sound output, streamers, the CLI path, the computer announcement, the legacy chat migration) is the
+/// core's and is never repeated here.
+pub struct RemoteParts {
+    pub services: Arc<dyn iyakki_agent_api::ServicesHandle>,
+    pub audit: Arc<dyn iyakki_agent_api::AuditApi>,
+    pub users: crate::accounts::UsersRef,
+    pub host: Arc<dyn HostApi>,
+    /// The ai.conf path (read-only text the UI may read: the MCP servers file and the chat defaults).
+    pub ai_conf: String,
+    pub hostname: String,
+    pub hwcheck: bool,
+}
+
+impl ShellEnv {
+    /// The environment of a UI program over the core's socket. The services must be the core's (`is_real`), the process-wide agent handle
+    /// must be the real one too (a fake never wins, KI-1010): both are asked, and a core that does not answer is an error naming why.
+    pub fn from_remote(p: RemoteParts) -> Result<ShellEnv, AccountError> {
+        if !iyakki_apps::ensure_real_agent() {
+            return Err(AccountError::Storage("the agent handle is not the real implementation".into()));
+        }
+        if !p.services.is_real() {
+            return Err(AccountError::Storage("the core does not answer over the UI socket".into()));
+        }
+        let cfg = AiConfig::load(&p.ai_conf);
+        iyakki_uikit::uisize::set_computer_hooks(|d, u| iyakki_apps::agent().computer_hooks().display_size_get(d, u), |d, u, l| iyakki_apps::agent().computer_hooks().display_size_set(d, u, l));
+        // the time zone the person chose in Settings -> Time applies to every front end from the start
+        if let Ok(st) = p.services.settings().lock() {
+            iyakki_clock::set_chosen_zone(&st.get().time.zone);
+        }
+        let chat = p.services.chat_backend();
+        let mcp_servers = mcp::load_config(&cfg.mcp_config);
+        let data = p.services.dir().to_path_buf();
+        Ok(ShellEnv {
+            store: p.users,
+            audit: p.audit,
+            host: p.host,
+            cfg,
+            chat,
+            mcp_servers,
+            web: browser_web(&data),
+            hostname: p.hostname,
+            hwcheck: p.hwcheck,
+            data_volatile: iyakki_core_local::storage::data_location(&iyakki_core_local::storage::Roots::real(), &data) == iyakki_core_local::storage::DataLocation::Memory,
+            services: p.services,
         })
     }
 }
@@ -433,7 +541,12 @@ pub(crate) fn wants_system_camera(in_test: bool, mode: &iyakki_cloudmode::CloudM
 /// Requests that do not say who they are (the assistant's web tools) are never cached.
 fn browser_web(data: &std::path::Path) -> Arc<dyn iyakki_web::Fetch> {
     use iyakki_web::net::{LimitedFetch, Limiter, GLOBAL, PER_HOST};
-    let limited: Arc<dyn iyakki_web::Fetch> = Arc::new(LimitedFetch::new(iyakki_proxy::https::BrowserFetch::default(), Arc::new(Limiter::new(PER_HOST, GLOBAL))));
+    // the person's proxy (chat tool `browser_proxy_set`): HTTP/2 and HTTP/1.1 both go through its CONNECT tunnel; a saved text that no longer parses is ignored (the file is written only after it parsed)
+    let fetch = match iyakki_proxy::proxyset::load(data) {
+        Some(px) => iyakki_proxy::https::BrowserFetch::default().with_proxy(px).expect("a proxy setting that was accepted builds a client"),
+        None => iyakki_proxy::https::BrowserFetch::default(),
+    };
+    let limited: Arc<dyn iyakki_web::Fetch> = Arc::new(LimitedFetch::new(fetch, Arc::new(Limiter::new(PER_HOST, GLOBAL))));
     let base = data.join("cache").join("web");
     let budget = crate::apps::browser_speed::budget_for(iyakki_web::net::CacheSize::Auto, &crate::apps::browser_speed::machine(data));
     // the person's custom request headers (Settings -> Browser -> Custom headers) are added here, on the way to the network, for the requests
@@ -551,7 +664,7 @@ const TILES: &[Tile] = &[
     Tile { app: PApp::Camera, icon: Icon::Camera, label: "CAMERA", sub: "Photos, video", accent: crate::apps::camera::ACCENT, group: Some(Group::WebMedia) },
     Tile { app: PApp::Voice, icon: Icon::Speaker, label: "VOICE", sub: "Read, dictate", accent: crate::apps::voice::ACCENT, group: Some(Group::Home) },
     Tile { app: PApp::Disks, icon: Icon::Disks, label: "DISKS", sub: "Drives, partitions", accent: crate::apps::disks_tile::ACCENT, group: Some(Group::System) },
-    Tile { app: PApp::K8s, icon: Icon::Mesh, label: "K8S", sub: "Explore the cluster", accent: crate::apps::k8s_tile::ACCENT, group: Some(Group::Work) },
+    Tile { app: PApp::K8s, icon: Icon::K8s, label: "K8S", sub: "Explore the cluster", accent: crate::apps::k8s_tile::ACCENT, group: Some(Group::Work) },
     Tile { app: PApp::LinuxWin, icon: Icon::Cli, label: "LINUX WINDOW", sub: "Linux programs", accent: crate::apps::linuxwin::ACCENT, group: Some(Group::System) },
     Tile { app: PApp::Lab, icon: Icon::Lab, label: "LAB", sub: "Try picture models", accent: crate::apps::lab::ACCENT, group: Some(Group::Home) },
     Tile { app: PApp::Git, icon: Icon::Git, label: "GIT", sub: "Browse repositories", accent: crate::apps::git_tile::ACCENT, group: Some(Group::Work) },
@@ -564,6 +677,7 @@ const TILES: &[Tile] = &[
     Tile { app: PApp::Auth, icon: Icon::Lock, label: "AUTH", sub: "One-time codes", accent: crate::apps::auth::ACCENT, group: Some(Group::System) },
     Tile { app: PApp::Sample, icon: Icon::Clipboard, label: "SAMPLE", sub: "Built on the UI SDK", accent: crate::apps::sample::ACCENT, group: Some(Group::Work) },
     Tile { app: PApp::Markdown, icon: Icon::Data, label: "MARKDOWN", sub: "Documents to read", accent: crate::apps::markdown::ACCENT, group: Some(Group::Work) },
+    Tile { app: PApp::Firewall, icon: Icon::Lock, label: "FIREWALL", sub: "Rules in and out", accent: crate::apps::firewall_tile::ACCENT, group: Some(Group::System) },
     Tile { app: PApp::Checkup, icon: Icon::Checkup, label: "CHECK-UP", sub: "Test the hardware", accent: crate::apps::checkup::ACCENT, group: Some(Group::System) },
 ];
 
@@ -738,6 +852,8 @@ pub struct Shell {
     battery: crate::batterybar::BatteryBar,
     /// The banner shown while the drive the data lives on is lost or failing (`lossbar.rs`, `shell_loss.rs`).
     loss: crate::lossbar::LossBar,
+    /// The SDK app a client shows in display-list mode (`shell_listapp.rs`, F-SDK-29): its own tile, never the one on the shell's screen.
+    list_app: Option<(Box<dyn App>, PApp)>,
     /// "<app> stopped because of an internal error" with a button that opens it again (`crashcard.rs`, `shell_crashcard.rs`).
     crash: Option<crate::crashcard::CrashCard>,
     /// Replaces the program Quick install runs as its jobs (tests).
@@ -871,7 +987,7 @@ impl Shell {
         crate::apps::set_layout_tiles(layout_tiles);
         crate::apps::set_pinnable(pinnable_apps);
         // the toolkit has no storage dependency: it asks the shell how to word a failure line (a lost boot drive is named)
-        crate::fx::set_failure_rewriter(iyakki_storage::loss::reword);
+        crate::fx::set_failure_rewriter(iyakki_core_local::storage::loss::reword);
         #[cfg(test)]
         crate::testmem::start();
         let first_run = env.store.lock().map(|s| s.is_empty()).unwrap_or(false);
@@ -894,7 +1010,7 @@ impl Shell {
         let agent: Arc<dyn iyakki_agent_api::AgentApi> = iyakki_apps::agent_arc();
         assert!(iyakki_agent_api::AgentFacets::is_real(iyakki_apps::agent()), "the agent handle is not the real implementation");
         assert!(env.services.is_real(), "the services handle is not the real implementation");
-        let mut sh = Shell { env, core, agent, resuming: false, resume_tried: false, osguard, acc: Default::default(), hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, gv: Default::default(), look: Default::default(), pinned: None, dock_focus: None, dock_press: None, dock_moved: false, bar_peek: false, machine: false, anim_at: None, slide: None, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), fg_seen: None, stash: None, badge: Badge::default(), update_count: 0, app_status: Vec::new(), bd: Default::default(), cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), crash: None, quick_launch: None, dev_sign: None, devask: Default::default(), tzask: Default::default(), camera: if wants_system_camera(cfg!(test), &cloud) { crate::camera::Presence::system() } else { crate::camera::Presence::none() }, cam_sign: false, cam_views_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), osk: Default::default(), tenants: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), views: Default::default(), bksched: Default::default(), saver: Default::default(), lockui: Default::default(), signout: Default::default(), wake: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
+        let mut sh = Shell { env, core, agent, resuming: false, resume_tried: false, osguard, acc: Default::default(), hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, gv: Default::default(), look: Default::default(), pinned: None, dock_focus: None, dock_press: None, dock_moved: false, bar_peek: false, machine: false, anim_at: None, slide: None, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), fg_seen: None, stash: None, badge: Badge::default(), update_count: 0, app_status: Vec::new(), bd: Default::default(), cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), list_app: None, crash: None, quick_launch: None, dev_sign: None, devask: Default::default(), tzask: Default::default(), camera: if wants_system_camera(cfg!(test), &cloud) { crate::camera::Presence::system() } else { crate::camera::Presence::none() }, cam_sign: false, cam_views_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), osk: Default::default(), tenants: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), views: Default::default(), bksched: Default::default(), saver: Default::default(), lockui: Default::default(), signout: Default::default(), wake: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
         if cloud.on {
             sh.apply_cloud(cloud);
         }
@@ -905,6 +1021,19 @@ impl Shell {
     #[cfg(test)]
     pub(crate) fn set_core_for_test(&mut self, core: Arc<dyn iyakki_core_api::Core>) {
         self.core = core;
+    }
+
+    /// The page or tab the open app is showing (empty on the launcher and the login): what the harness of a UI program over the core's socket reads
+    /// to find the page it wants.
+    pub fn app_is_unserved(&self) -> bool {
+        matches!(&self.screen, Screen::App(a, _) if a.is_unserved())
+    }
+
+    pub fn app_page(&self) -> String {
+        match &self.screen {
+            Screen::App(a, _) => a.page(),
+            _ => String::new(),
+        }
     }
 
     pub fn screen_name(&self) -> String {
@@ -923,7 +1052,7 @@ impl Shell {
     }
 
     /// The user store, for tools that need to seed accounts (screenshot demo, provisioning).
-    pub fn store_for_demo(&self) -> &Arc<Mutex<UserStore>> {
+    pub fn store_for_demo(&self) -> &crate::accounts::UsersRef {
         &self.env.store
     }
 
@@ -1203,6 +1332,9 @@ impl Shell {
         };
         self.custom_at = self.tick.max(1);
         self.custom = self.env.storeapi().tiles(&s.policy, &s.user);
+        // the native tiles of the tenant that is shown (F-CLOUD-76) follow the person's own apps
+        let cloud = self.tenant_tile_entries();
+        self.custom.extend(cloud);
         if self.sel >= self.group_items().len() {
             self.sel = 0;
         }
@@ -1278,8 +1410,8 @@ impl Shell {
     }
 
     fn say(&mut self, s: impl Into<String>) {
-        // a failure caused by a lost drive says so (iyakki_storage::loss::reword leaves every other message alone)
-        self.toast = Some((iyakki_storage::loss::reword(&s.into()), self.tick + 120, false));
+        // a failure caused by a lost drive says so (iyakki_core_local::storage::loss::reword leaves every other message alone)
+        self.toast = Some((iyakki_core_local::storage::loss::reword(&s.into()), self.tick + 120, false));
     }
 
     fn say_info(&mut self, s: impl Into<String>) {
@@ -1363,6 +1495,14 @@ impl Shell {
             let _ = self.env.notify_once(&s.user, iyakki_shared::inbox::Kind::Warning, "The system vault is locked", "Model API keys are unavailable until an administrator with access signs in.", Some(iyakki_shared::inbox::Link::new("settings", "")));
             self.say("The system vault is locked: model API keys are unavailable until an admin with access signs in.");
         }
+        // a release image has no vendor firmware: an administrator gets one note that says where to fetch it (F-REL-09)
+        if s.policy.manage_settings {
+            let rel = iyakki_shared::relinfo::ReleaseInfo::load(std::path::Path::new(iyakki_shared::relinfo::RELEASE_FILE));
+            let text = std::fs::read_to_string(iyakki_shared::relinfo::FIRMWARE_NOTICE_FILE).ok();
+            if let Some((title, body)) = iyakki_shared::relinfo::firmware_notice(rel.as_ref(), text.as_deref()) {
+                let _ = self.env.notify_once(&s.user, iyakki_shared::inbox::Kind::Info, &title, &body, Some(iyakki_shared::inbox::Link::new("store", iyakki_shared::relinfo::FIRMWARE_NOTICE_ITEM)));
+            }
+        }
         // documents embedded by a model that is no longer the chosen one are brought up to date, quietly
         if s.policy.manage_settings {
             // the browser add-on built here no longer matches this image: a note, never an automatic rebuild
@@ -1377,7 +1517,7 @@ impl Shell {
             }
         }
         // examples to try (once, for administrators): an MCP server, documents and skills
-        crate::samples::seed(self.env.data_dir(), &*self.env.skills(), self.env.mcp(), &self.env.audit, &self.env.cfg.rag_docs, &s.user, &s.policy);
+        crate::samples::seed(self.env.data_dir(), &*self.env.skills(), self.env.mcp(), &*self.env.audit, &self.env.cfg.rag_docs, &s.user, &s.policy);
         crate::uisize::apply(Some(crate::uisize::load(self.env.data_dir(), &s.user)));
         crate::theme::apply_for(self.env.data_dir(), &s.user);
         iyakki_uikit::wallpaper::apply_for(self.env.data_dir(), &s.user);
@@ -1397,6 +1537,10 @@ impl Shell {
         self.views_sign_in();
         self.cues.badge_seen = false;
         self.refresh_badge();
+        // a private folder that stayed sealed is said on the home screen at once (F-STORE-05); the Settings page keeps the full words
+        if let Some(b) = iyakki_enchome::peek_banner(&who) {
+            self.say(b);
+        }
         // the sign-in sound plays by itself while the home screen appears
         let _ = crate::cues::start(&*self.core, &self.cloud, iyakki_core_api::soundtypes::Cue::Login);
     }
@@ -1423,7 +1567,10 @@ impl Shell {
         self.sign_in(sess, "");
         self.resuming = false;
         let apps = self.core.session_resume().apps();
-        if !apps.is_empty() && self.session.is_some() {
+        // a window arrangement with several panes came back from the person's views file (kept with every ticket refresh): the apps of the
+        // ticket would only be stacked on it
+        let panes_back = self.panes.ws.is_some();
+        if !apps.is_empty() && self.session.is_some() && !panes_back {
             self.reopen_apps(&apps);
         }
         self.say_info("Welcome back: you were signed in when the desktop restarted. Your vault stays locked until you sign in with your password.");
@@ -1443,13 +1590,34 @@ impl Shell {
         v
     }
 
+    /// What each open app holds (its `resume_item`), by app id, for the ticket.
+    fn open_app_items(&self) -> Vec<(String, String)> {
+        let mut v = Vec::new();
+        let mut add = |app: &dyn App, id: &str| {
+            if let Some(i) = app.resume_item() {
+                v.push((id.to_string(), i));
+            }
+        };
+        if let Some((a, pa)) = &self.stash {
+            add(a.as_ref(), pa.id());
+        }
+        if let Screen::App(a, pa) = &self.screen {
+            if *pa != PApp::Inbox {
+                add(a.as_ref(), pa.id());
+            }
+        }
+        v
+    }
+
     /// Open the apps the ticket names again (F-SHELL-65): the one held aside first, then the front one. Only apps this person's role may open
     /// are opened (`open` checks), and only ids the shell knows; the apps start fresh (their own content is not in the ticket).
     fn reopen_apps(&mut self, ids: &[String]) {
         let apps: Vec<PApp> = ids.iter().filter_map(|id| PApp::from_id(id)).filter(|a| !matches!(a, PApp::Inbox | PApp::Settings)).collect();
+        let items = self.core.session_resume().items();
         for (n, app) in apps.iter().copied().enumerate() {
             if n + 1 < apps.len() {
                 self.open(app);
+                self.hand_back_item(app, &items);
                 if let Screen::App(a, pa) = std::mem::replace(&mut self.screen, Screen::Launcher) {
                     if self.stash.is_none() {
                         self.stash = Some((a, pa));
@@ -1457,6 +1625,18 @@ impl Shell {
                 }
             } else {
                 self.open(app);
+                self.hand_back_item(app, &items);
+            }
+        }
+    }
+
+    /// The app just opened is told what it held before the restart (the file an editor had open), through its ordinary `open_item`.
+    fn hand_back_item(&mut self, app: PApp, items: &[(String, String)]) {
+        let Some((_, item)) = items.iter().find(|(id, _)| id == app.id()) else { return };
+        let Some(cx) = self.cx() else { return };
+        if let Screen::App(a, pa) = &mut self.screen {
+            if *pa == app {
+                a.open_item(item, &cx);
             }
         }
     }
@@ -1492,7 +1672,7 @@ impl Shell {
             let mut who = iyakki_shared::disks::Actor::new(&s.user, s.role);
             who.home = iyakki_apps::agent().scope_home_root(&s.user, std::path::Path::new("/var/lib/iyakki")).display().to_string();
             let (audit, user) = (self.env.audit.clone(), s.user.clone());
-            drives_note = iyakki_disksx::disks::Disks::real().at_sign_out(&who, &|a, d| audit.record(&user, a, d));
+            drives_note = self.osguard.os_for("shell", &s.user).disk_engine().at_sign_out(&who, &|a, d| audit.record(&user, a, d));
         }
         if let Some(s) = self.session.take() {
             self.env.audit.record(&s.user, "logout", "");
@@ -1504,9 +1684,9 @@ impl Shell {
             self.env.services.domains_logout(&s.user);
             self.env.services.on_logout(&s.user, s.policy.manage_settings);
             self.env.b3().kube_resolver(None);
-            iyakki_apps::agent().btaudiotools_clear_remote();
+            self.osguard.os_for("shell", &s.user).bt_audio().clear_remote();
             // the assistant's browser tab goes with the session (jobs still running are answered)
-            crate::apps::web_agent::close(self.env.browser(), &s.user);
+            crate::apps::web_agent::close(&*self.env.browser_jobs(), &s.user);
             // protected browser data is written back and the decrypted copy wiped (a failure keeps it and is audited)
             iyakki_apps::agent().profilepolicy_timer_reset(self.env.data_dir(), &s.user);
             match iyakki_apps::agent().profile_store().on_sign_out(self.env.data_dir(), &s.user) {
@@ -1567,7 +1747,10 @@ impl Shell {
             self.say("Low memory: close an app or use a smaller layout");
             return;
         }
-        let boxed: Box<dyn App> = match app {
+        // an app whose core object this program is not given (the UI over the core's socket) opens as a screen that says so
+        let unserved = crate::apps::unserved::missing(app, &cx).and_then(|what| TILES.iter().find(|t| t.app == app).map(|t| Box::new(crate::apps::unserved::UnservedApp::new(t.label, t.icon, t.accent, what)) as Box<dyn App>));
+        // EDIT and CLI have a version on the UI SDK next to the old screen: the person's own choice (Settings -> Appearance, `display_sdk_apps_set`) opens it under the same app
+        let boxed: Box<dyn App> = if let Some(u) = unserved { u } else if let Some(t) = crate::apps::sdk_apps::tile_for(&cx, app) { t } else { match app {
             PApp::Chat => Box::new(ChatApp::new().with_agent(cx.session.policy.agent).resumed(&cx)),
             PApp::Rag => Box::new(RagApp::new(&cx)),
             PApp::Mcp => Box::new(McpApp::new(&crate::apps::mcp_port::CxPort(&cx))),
@@ -1608,8 +1791,9 @@ impl Shell {
             PApp::Pdf => Box::new(crate::apps::pdfview::PdfApp::new(&cx)),
             PApp::Sample => Box::new(crate::apps::sample::SampleTile::new()),
             PApp::Markdown => Box::new(crate::apps::markdown::MarkdownTile::new()),
+            PApp::Firewall => Box::new(crate::apps::firewall_tile::FirewallApp::new(&cx)),
             PApp::Inbox => Box::new(crate::apps::inbox::InboxApp::new(&cx)),
-        };
+        } };
         self.env.audit.record(&cx.session.user, "app.open", app.id());
         self.custom_open = None;
         self.screen = Screen::App(boxed, app);
@@ -1632,9 +1816,11 @@ impl Shell {
         if let Some(p) = &self.devprobe {
             return p.clone();
         }
-        let drivers = self.env.storeapi().drivers();
+        let os = self.osguard.os_for("shell", self.session.as_ref().map_or("", |s| s.user.as_str()));
+        let drivers = os.drivers();
         let mut p = crate::devpop::Probe::real(self.core.clone(), crate::apps::devices::DeviceEnv::real(), Some(drivers), self.env.data_dir().to_path_buf(), self.env.hostname.clone(), self.env.data_volatile);
         p.screen = self.size;
+        p.hardware = Some(os.hardware());
         p
     }
 
@@ -1725,6 +1911,7 @@ impl Shell {
             _ => (34.0 * s, iyakki_uikit::barside::bar_dy() + 76.0 * s),
         };
         self.brand.admin = self.session.as_ref().is_some_and(|x| x.policy.manage_settings);
+        self.apply_look_menu(w as f32);
         self.brand.toggle();
         mark_stale!(self);
     }
@@ -1765,8 +1952,8 @@ impl Shell {
                 let p = self.dev_probe();
                 self.devpop.refresh_in_background(&p);
                 self.brand.mac = self.devpop.snapshot();
-                self.brand.mac_model = std::fs::read_to_string("/sys/class/dmi/id/product_name").map(|m| m.trim().to_string()).unwrap_or_default();
-                self.brand.mac_board = std::fs::read_to_string("/sys/class/dmi/id/board_name").map(|m| m.trim().to_string()).unwrap_or_default();
+                self.brand.mac_model = iyakki_core_local::machinefacts::product_name();
+                self.brand.mac_board = iyakki_core_local::machinefacts::board_name();
                 self.refresh_mac_firmware();
             }
             _ => {}
@@ -1800,6 +1987,7 @@ impl Shell {
                 self.refresh_mac_firmware();
             }
             Outcome::MacBtLoad => self.mac_bt_load(),
+            Outcome::Act(p) => self.brand_act(p),
             Outcome::Play(path) => self.brand_play(&path),
             Outcome::StopMedia => {
                 iyakki_apps::agent().b0().media().player().stop();
@@ -2240,7 +2428,7 @@ impl Shell {
                     let _ = self.env.inbox().maintain(&s.user, iyakki_clock::now_unix());
                 }
                 let c = self.env.inbox().counts(&s.user, iyakki_clock::now_unix());
-                Badge { unread: c.attention, other: c.other, approvals: self.env.services.approvals(&s.user).len() + self.env.secret_requests().pending(&s.user).len() + self.env.services.browser().consent.pending(&s.user).len(), overdue: c.overdue }
+                Badge { unread: c.attention, other: c.other, approvals: self.env.services.approvals(&s.user).len() + self.env.secret_requests().pending(&s.user).len() + self.env.services.browser_consent().pending(&s.user).len(), overdue: c.overdue }
             }
             None => Badge::default(),
         };
@@ -2553,6 +2741,7 @@ impl Shell {
             self.check_alarms(iyakki_clock::now_unix());
             self.tick_stash();
             self.panes_tick();
+            self.views_hidden_beat();
             // developer mode: a paired computer asked for an app on the screen (`iyakki dev run`); it waits for someone to sign in
             if self.tick % 10 == 3 && self.session.is_some() {
                 for name in iyakki_apps::agent().devmode().take_open(self.env.data_dir()) {
@@ -2580,7 +2769,7 @@ impl Shell {
                 for e in iyakki_apps::agent().devmode().take_input(&dd) {
                     self.saver.injecting = true; // it wakes the screen and still reaches the app
                     // a permission is the person's own: developer-mode input cannot answer a flow's permission request
-                    self.env.services.browser().consent.set_synthetic(true);
+                    self.env.services.browser_consent().set_synthetic(true);
                     for ev in crate::devinput::events(&e) {
                         // an approval or power card is answered by a person at the screen: a paired computer's key or tap never
                         // reaches it (checked per event: an earlier key of the same batch may have opened one)
@@ -2592,14 +2781,14 @@ impl Shell {
                         // not `handle`: that would let this press answer a hard-ask card (the Auto-mode ticket is for a person's own press)
                         self.handle_event(&ev);
                     }
-                    self.env.services.browser().consent.set_synthetic(false);
+                    self.env.services.browser_consent().set_synthetic(false);
                     self.saver.injecting = false;
                     mark_stale!(self);
                 }
             }
             // the assistant's browser tab (the engine behind the browser_* tools) is serviced whichever app is open
             if let Some(sess) = &self.session {
-                crate::apps::web_agent::tick(self.env.browser(), self.env.data_dir(), &self.env.audit, sess);
+                crate::apps::web_agent::tick(&*self.env.browser(), &*self.env.browser_jobs(), self.env.data_dir(), &self.env.audit, sess);
             }
             self.login_bar_tick();
             if self.tick % 5 == 1 {
@@ -2707,7 +2896,7 @@ impl Shell {
             // a device that wants to pair while Settings is not open: say who and where to answer (the popup opens on the page)
             #[cfg(not(test))]
             if self.tick % 30 == 10 && !matches!(self.screen, Screen::App(_, PApp::Settings)) {
-                if let Some(n) = crate::btmodel::next_pairing_notice(&iyakki_devctl::System) {
+                if let Some(n) = crate::btmodel::next_pairing_notice(&iyakki_core_local::devctl::System) {
                     self.say_info(n);
                 }
             }
@@ -2815,6 +3004,11 @@ impl Shell {
                         self.core.session_resume().remember(&s.user);
                         let apps = self.open_app_ids();
                         self.core.session_resume().remember_apps(&apps);
+                        let items = self.open_app_items();
+                        self.core.session_resume().remember_items(&items);
+                        if self.core.session_resume().allowed() {
+                            self.views_remember_for_resume();
+                        }
                     }
                 }
                 self.scroll_sync();
@@ -2995,6 +3189,7 @@ impl Shell {
             // the Home icon and F11: back to the tiles from any app; the gear: Settings (the app you were in is kept aside)
             Event::Tab(volbar_impl::HOME_TAB) | Event::Key(Key::F(11)) if self.session.is_some() && self.clip.is_none() => self.go_home(),
             Event::Tab(volbar_impl::GEAR_TAB) if self.session.is_some() && self.clip.is_none() => self.open_settings_from_bar(),
+            Event::Tab(volbar_impl::NET_TAB) if self.session.is_some() && self.clip.is_none() => self.toggle_network_panel(),
             Event::Tab(volbar_impl::MIC_TAB) if self.session.is_some() && self.clip.is_none() => self.open(PApp::Voice),
             // the startup strip and its list
             Event::Tab(n) if startup_impl::is_tab(*n) && self.session.is_some() && self.clip.is_none() => self.startup_tab(*n),
@@ -3160,7 +3355,7 @@ impl Shell {
             return;
         };
         let now = iyakki_clock::now_unix();
-        let consent = &self.env.services.browser().consent;
+        let consent = &self.env.services.browser_consent();
         let fresh = |r: &iyakki_shared::browserconsent::ConsentRequest| permpop_fresh(r, now);
         if let Some(d) = &self.permpop {
             if !consent.get(&user, &d.req.id).is_some_and(|r| fresh(&r)) {
@@ -3291,7 +3486,7 @@ impl Shell {
 
     #[cfg(test)]
     pub(crate) fn audit_log_path(&self) -> std::path::PathBuf {
-        self.env.audit.path().to_path_buf()
+        self.env.audit.path_buf().to_path_buf()
     }
 
     pub fn clipboard_scan(&self) -> Option<&crate::clip_scan::ClipScan> {
@@ -3369,7 +3564,7 @@ impl Shell {
             return;
         }
         let Some(cx) = self.cx() else { return };
-        self.hostdlg = Some(Box::new(crate::apps::hostfiles::HostDialog::mount_menu(crate::apps::hostfiles::HostEnv::for_cx(&cx), rgb(238, 226, 112), name)));
+        self.hostdlg = Some(Box::new(crate::apps::hostfiles::HostDialog::mount_menu(crate::apps::hostfiles::env_for_cx(&cx), rgb(238, 226, 112), name)));
         mark_stale!(self);
     }
 
@@ -3380,7 +3575,7 @@ impl Shell {
             return;
         }
         let Some(cx) = self.cx() else { return };
-        self.hostdlg = Some(Box::new(crate::apps::hostfiles::HostDialog::save_bytes(crate::apps::hostfiles::HostEnv::for_cx(&cx), rgb(238, 226, 112), name, bytes)));
+        self.hostdlg = Some(Box::new(crate::apps::hostfiles::HostDialog::save_bytes(crate::apps::hostfiles::env_for_cx(&cx), rgb(238, 226, 112), name, bytes)));
         mark_stale!(self);
     }
 
@@ -3510,7 +3705,7 @@ impl Shell {
             Screen::App(app, _) => app.on_drop(&paths, &cx),
             _ => crate::apps::DropAction::Uploads,
         };
-        let env = crate::apps::hostfiles::HostEnv::for_cx(&cx);
+        let env = crate::apps::hostfiles::env_for_cx(&cx);
         let accent = rgb(238, 226, 112);
         match action {
             crate::apps::DropAction::Taken => {}
@@ -3856,6 +4051,10 @@ impl Shell {
     /// Open a custom app in its own tile.
     fn open_custom(&mut self, entry: iyakki_shared::store_tilehub::TileEntry) {
         let Some(cx) = self.cx() else { return };
+        if let Some((tenant, id)) = shell_tenant::cloud_key(&entry.key) {
+            self.open_tenant_tile(&tenant, &id, &entry.title);
+            return;
+        }
         if !iyakki_shared::store_tilehub::allowed(&cx.session.policy) {
             self.env.audit.record(&cx.session.user, "app.denied", &format!("tile:{}", entry.name));
             self.say(format!("Your role ({}) can't run custom apps", cx.session.role.name()));
@@ -4003,7 +4202,7 @@ impl Shell {
                 } else if self.bar_visible() && self.settings_rect().is_some_and(|r| r.contains(*x, *y)) {
                     self.open_settings_from_bar();
                 } else if let Some(b) = self.bar_visible().then(|| self.bar_order()).unwrap_or_default().iter().enumerate().find(|(i, b)| {
-                    matches!(b, BarButton::Logout | BarButton::Power | BarButton::Shot | BarButton::Devices | BarButton::Clipboard | BarButton::Bell | BarButton::Network | BarButton::Apps) && header_button_at(w, s, *i).contains(*x, *y)
+                    matches!(b, BarButton::Logout | BarButton::Power | BarButton::Shot | BarButton::Devices | BarButton::Clipboard | BarButton::Bell | BarButton::Network | BarButton::Apps | BarButton::GemVoice) && header_button_at(w, s, *i).contains(*x, *y)
                 }).map(|(_, b)| *b) {
                     match b {
                         BarButton::Logout => {
@@ -4014,8 +4213,9 @@ impl Shell {
                         BarButton::Shot => self.start_shot(),
                         BarButton::Devices => self.toggle_devices(),
                         BarButton::Clipboard => self.open_clipboard_picker(),
-                        BarButton::Network => self.open_settings_from_bar(),
+                        BarButton::Network => self.toggle_network_panel(),
                         BarButton::Apps => self.go_home(),
+                        BarButton::GemVoice => self.gv_toggle(),
                         _ => {
                             if self.inbox_allowed() {
                                 self.open_inbox();
@@ -4259,7 +4459,8 @@ impl Shell {
         self.loss_render(g, w, h, s);
         if self.session.is_some() {
             crate::devask::render(&mut self.devask, g, w, h, s, self.tick);
-            gv_impl::render(&self.gv, g, w, h, s);
+            let in_bar = matches!(self.screen, Screen::Launcher) && self.bar_visible() && !self.panes.compact;
+            gv_impl::render(&self.gv, g, w, h, s, in_bar);
             self.draw_tzask(g, w, h, s);
         }
         if let Some((t, _, info)) = &self.toast {
@@ -4390,7 +4591,7 @@ impl Shell {
     /// user's screenshot, the assistant's `screen_capture` and developer mode's `iyakki dev screenshot` all read it here, never mid-render.
     pub(super) fn capture_final_frame(&mut self, g: &mut Gfx) {
         if matches!(self.shot, Shot::Snap) {
-            self.shot = Shot::Select { snap: g.pm.clone(), first: None };
+            self.shot = Shot::Select { snap: g.pm_mut().clone(), first: None };
         }
         // the assistant's `screen_capture`: this frame is "the person's screen" (answered here because only the shell can see it)
         {
@@ -4406,12 +4607,12 @@ impl Shell {
             }
             if let Some(sess) = &self.session {
                 if svc.screen().wanted(&sess.user) {
-                    svc.screen().serve(&sess.user, || Some(iyakki_shared::screencap::Frame { w: g.pm.width(), h: g.pm.height(), rgba: g.pm.data().to_vec() }));
+                    svc.screen().serve_frame(&sess.user, Some(iyakki_shared::screencap::Frame { w: g.pm_mut().width(), h: g.pm_mut().height(), rgba: g.pm_mut().data().to_vec() }));
                 }
             }
             // developer mode's `iyakki dev screenshot` (only reachable from a paired computer while developer mode is on): whatever is drawn
             if svc.screen().wanted(iyakki_shared::devmode::SCREEN_ANY) {
-                svc.screen().serve(iyakki_shared::devmode::SCREEN_ANY, || Some(iyakki_shared::screencap::Frame { w: g.pm.width(), h: g.pm.height(), rgba: g.pm.data().to_vec() }));
+                svc.screen().serve_frame(iyakki_shared::devmode::SCREEN_ANY, Some(iyakki_shared::screencap::Frame { w: g.pm_mut().width(), h: g.pm_mut().height(), rgba: g.pm_mut().data().to_vec() }));
             }
         }
     }
@@ -4674,6 +4875,13 @@ impl Shell {
                 BarButton::Clipboard => Icon::Clipboard,
                 BarButton::Network => Icon::Mesh,
                 BarButton::Apps => Icon::Home,
+                BarButton::GemVoice => {
+                    let hover = g.hovered(r);
+                    crate::fx::chrome_button(g, r, s * 2.5, hover || self.gv.open(), crate::fx::CYAN);
+                    g.icon(Icon::Mic, r.x + r.w / 2.0, r.y + r.h / 2.0, 22.0 * s, if self.gv.open() { crate::fx::CYAN } else { MUTED });
+                    g.hit(r, Event::Tab(gv_impl::MIC), "Gemini voice (EXPERIMENTAL)");
+                    continue;
+                }
                 BarButton::Bell => {
                     draw_bell(g, r, 22.0 * s, s, self.badge, false);
                     continue;
@@ -5151,8 +5359,8 @@ fn draw_auth(g: &mut Gfx, w: u32, h: u32, s: f32, f: &Form, setup: bool, tick: u
     }
     g.text(24.0 * s, h as f32 - 34.0 * s, 14.0 * s, DIM, hostname, Face::Sans);
     // remote diagnostics (boot entry with iyakki.ssh=1): say how to reach this machine
-    if let Ok(note) = std::fs::read_to_string("/run/iyakki-ssh") {
-        let note = format!("Remote diagnostics ON · {}", note.trim());
+    if let Some(note) = iyakki_core_local::machinefacts::ssh_note() {
+        let note = format!("Remote diagnostics ON · {note}");
         let nw = g.text_width(14.0 * s, &note, Face::Sans);
         g.text(w as f32 - nw - 24.0 * s, h as f32 - 34.0 * s, 14.0 * s, rgb(255, 196, 94), &note, Face::Sans);
     }
@@ -5253,7 +5461,7 @@ fn draw_shot_review(g: &mut Gfx, w: u32, h: u32, s: f32, img: &tiny_skia::Pixmap
     g.text(x + 28.0 * s, y + 54.0 * s, 14.0 * s, MUTED, &format!("{} × {} pixels. Keep a file as well?", img.width(), img.height()), Face::Sans);
     let (ix, iy) = (x + (bw - pw) / 2.0, y + 84.0 * s);
     let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
-    g.pm.draw_pixmap(0, 0, img.as_ref(), &paint, tiny_skia::Transform::from_translate(ix, iy).pre_scale(k, k), None);
+    g.pm_mut().draw_pixmap(0, 0, img.as_ref(), &paint, tiny_skia::Transform::from_translate(ix, iy).pre_scale(k, k), None);
     g.rrect_outline(ix, iy, pw, ph, 0.0, 1.5 * s, rgb(70, 82, 120));
     let by = y + bh - 62.0 * s;
     let w1 = g.button(x + 28.0 * s, by, 15.0 * s, "Save to disk (S)", OK, Event::Key(Key::Char('s')));
@@ -5339,11 +5547,18 @@ pub(crate) mod tests {
     use iyakki_sec::policy::Role;
 
     pub fn env(tag: &str) -> (ShellEnv, Arc<MockHost>) {
+        let (e, _, h) = env_store(tag);
+        (e, h)
+    }
+
+    /// The same, and the store itself, for a test that has to hold the raw lock (to poison it).
+    pub fn env_store(tag: &str) -> (ShellEnv, Arc<Mutex<UserStore>>, Arc<MockHost>) {
         let d = temp_dir(tag);
         let host = Arc::new(MockHost::default());
+        let raw = Arc::new(Mutex::new(UserStore::open(&d.join("users.json")).unwrap()));
         (
             ShellEnv {
-                store: Arc::new(Mutex::new(UserStore::open(&d.join("users.json")).unwrap())),
+                store: crate::accounts::UsersRef::of_store(&raw),
                 audit: Arc::new(AuditLog::new(&d.join("audit.log"))),
                 host: host.clone(),
                 cfg: AiConfig::parse("").unwrap(),
@@ -5355,6 +5570,7 @@ pub(crate) mod tests {
                 data_volatile: false,
                 hwcheck: false,
             },
+            raw,
             host,
         )
     }
@@ -5483,7 +5699,12 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn shell_with_users(tag: &str) -> (Shell, Arc<MockHost>) {
-        let (e, h) = env(tag);
+        let (sh, _, h) = shell_with_users_store(tag);
+        (sh, h)
+    }
+
+    pub(crate) fn shell_with_users_store(tag: &str) -> (Shell, Arc<Mutex<UserStore>>, Arc<MockHost>) {
+        let (e, raw, h) = env_store(tag);
         {
             let mut st = e.store.lock().unwrap();
             st.create_first_admin("root", "rootpass12").unwrap();
@@ -5492,26 +5713,25 @@ pub(crate) mod tests {
             st.create_user(&admin, "gus", "guestpass1", Role::Guest).unwrap();
             st.create_user(&admin, "oscar", "operpass12", Role::Operator).unwrap();
         }
-        (Shell::new(e), h)
+        (Shell::new(e), raw, h)
     }
 
     #[test]
     fn a_poisoned_account_store_lock_does_not_lock_everyone_out_of_signing_in_or_changing_a_password() {
-        let (mut sh, _) = shell_with_users("poisoned-store");
-        let store = sh.env.store.clone();
+        let (mut sh, store, _) = shell_with_users_store("poisoned-store");
+        let raw = store.clone();
         let died = std::thread::spawn(move || {
             let _held = store.lock().unwrap(); // poison-ok: the test makes the lock poisoned on purpose
             panic!("a thread of an app died while it held the account store");
         })
         .join();
-        assert!(died.is_err() && sh.env.store.is_poisoned(), "the lock is poisoned");
+        assert!(died.is_err() && raw.is_poisoned(), "the lock is poisoned");
         // a person can still sign in (a poisoned lock used to answer every sign-in with a 'lock' storage error)
         login(&mut sh, "alice", "alicepass1");
         assert_ne!(sh.screen_name(), "login", "signed in: {}", sh.screen_name());
         assert_eq!(sh.session.as_ref().map(|s| s.user.as_str()), Some("alice"));
         // and a wrong password is still refused for the right reason
-        let (mut sh2, _) = shell_with_users("poisoned-store-2");
-        let store = sh2.env.store.clone();
+        let (mut sh2, store, _) = shell_with_users_store("poisoned-store-2");
         let _ = std::thread::spawn(move || {
             let _held = store.lock().unwrap(); // poison-ok: the test makes the lock poisoned on purpose
             panic!("again");
@@ -5709,7 +5929,7 @@ pub(crate) mod tests {
         for (file, _) in crate::samples::DOCS {
             assert!(docs.join("shared").join(file).is_file(), "{file}");
         }
-        let log = std::fs::read_to_string(sh.env.audit.path()).unwrap();
+        let log = std::fs::read_to_string(sh.env.audit.path_buf()).unwrap();
         assert!(log.contains("samples.seed"));
         // every skill (including the shared samples) can be seen by everyone, and the sample MCP server reaches the chat
         assert!(svc.skills().list("alice").iter().any(|s| s.name == "sample-python-practice"));
@@ -5769,7 +5989,7 @@ pub(crate) mod tests {
         sh.check_alarms(at + 1);
         assert_eq!(sh.ringing(), Some(vec!["Tea".to_string()]));
         assert!(!cal.alarms("alice")[0].enabled);
-        let log = std::fs::read_to_string(sh.env.audit.path()).unwrap();
+        let log = std::fs::read_to_string(sh.env.audit.path_buf()).unwrap();
         assert!(log.contains("calendar.reminder") && log.contains("alarm.ring"), "{log}");
         sh.render(&mut g);
         // nobody is signed in: nothing rings and the clock restarts
@@ -5981,7 +6201,7 @@ pub(crate) mod tests {
         sh.render(&mut g);
         // the badge is red while an approval waits
         let r = bell_hit(&sh).unwrap().rect;
-        let red = (r.x as u32..(r.x + r.w) as u32).any(|x| (0..r.y as u32 + 20).any(|y| g.pm.pixel(x, y).is_some_and(|p| p.red() > 190 && p.green() < 80 && p.blue() < 100)));
+        let red = (r.x as u32..(r.x + r.w) as u32).any(|x| (0..r.y as u32 + 20).any(|y| g.pm_mut().pixel(x, y).is_some_and(|p| p.red() > 190 && p.green() < 80 && p.blue() < 100)));
         assert!(red, "a red badge near the bell");
         // open the inbox from the app, go to approvals and approve with y
         key(&mut sh, Key::F(9));
@@ -6003,7 +6223,7 @@ pub(crate) mod tests {
         // finishing left a note for alice (and the audit log has the decision)
         sh.refresh_badge();
         assert!(sh.env.inbox().list("alice").iter().any(|n| n.kind == iyakki_shared::inbox::Kind::Agent && n.body == "ok"));
-        let log = std::fs::read_to_string(sh.env.audit.path()).unwrap();
+        let log = std::fs::read_to_string(sh.env.audit.path_buf()).unwrap();
         assert!(log.contains("inbox.approve") && log.contains("run_command"), "{log}");
     }
 
@@ -6866,7 +7086,7 @@ pub(crate) mod tests {
     fn lock_is_audited_with_who_and_where_a_guest_is_signed_out_by_it_and_the_power_key_card_takes_l() {
         let (mut sh, _host) = shell_with_users("pwr-lock-audit");
         let mut g = Gfx::new(1280, 720);
-        let audit = |sh: &Shell| std::fs::read_to_string(sh.env.audit.path()).unwrap_or_default();
+        let audit = |sh: &Shell| std::fs::read_to_string(sh.env.audit.path_buf()).unwrap_or_default();
         // an operator presses Lock in the dropdown: locked, still signed in, one audit line naming the person and the menu
         login(&mut sh, "oscar", "operpass12");
         sh.screen = Screen::PowerMenu;
@@ -6993,7 +7213,7 @@ pub(crate) mod tests {
         let mut plain = Gfx::new(1280, 720);
         sh.help = false;
         sh.render(&mut plain);
-        assert_ne!(g.pm.data(), plain.pm.data(), "the popup changes the picture");
+        assert_ne!(g.pm_mut().data(), plain.pm_mut().data(), "the popup changes the picture");
         // a click closes it (and does nothing else)
         sh.help = true;
         sh.handle(&Event::MouseDown(10, 10));
@@ -7617,9 +7837,18 @@ mod osk_impl;
 #[cfg(test)]
 #[path = "shell_osk_tests.rs"]
 mod osk_tests;
+#[cfg(test)]
+#[path = "shell_sdkapps_tests.rs"]
+mod sdkapps_tests;
 
 #[path = "shell_battery.rs"]
 mod battery_impl;
+#[path = "shell_listapp.rs"]
+mod listapp_impl;
+pub use listapp_impl::{ListError, LIST_APPS};
+#[cfg(test)]
+#[path = "shell_listapp_tests.rs"]
+mod listapp_tests;
 #[path = "shell_saver.rs"]
 mod saver_impl;
 #[path = "shell_wake.rs"]
@@ -7840,6 +8069,10 @@ pub(crate) fn draw_remote_capture_sign(g: &mut Gfx, w: u32, h: u32, s: f32, text
 #[cfg(test)]
 #[path = "shell_overlap_tests.rs"]
 mod overlap_tests;
+
+#[cfg(test)]
+#[path = "shell_parallel_draw_tests.rs"]
+mod parallel_draw_tests;
 
 #[cfg(test)]
 #[path = "shell_remote_sign_tests.rs"]

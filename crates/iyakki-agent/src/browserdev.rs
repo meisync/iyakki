@@ -21,7 +21,7 @@ mod tests;
 
 /// Where the kernel's device tables live (a function so tiles ask core instead of naming a kernel path themselves).
 pub fn sys_root() -> std::path::PathBuf {
-    std::path::PathBuf::from("/sys")
+    std::path::PathBuf::from(iyakki_core_local::kernelfacts::SYS)
 }
 
 #[cfg(test)]

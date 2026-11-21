@@ -15,7 +15,7 @@ use crate::planner::{DiskModel, Part};
 use crate::ui::human_size;
 use iyakki_storage::gpt;
 use std::fs::File;
-use std::os::unix::fs::FileExt;
+use crate::posix::FileExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -87,7 +87,7 @@ pub fn check_shrink_confirmation(plan: &ShrinkPlan, c: &ShrinkConfirmation) -> R
 
 /// Is `fs` one the installer can shrink?
 pub fn supported(fs: &str) -> bool {
-    matches!(fs, "ext2" | "ext3" | "ext4" | "ntfs")
+    matches!(fs, "ext2" | "ext3" | "ext4" | "ntfs" | "fat32" | "exfat" | "btrfs")
 }
 
 /// The pure part: decide whether the request may be carried out. `min_bytes` is what the file system's own tool says it needs at
@@ -119,8 +119,11 @@ pub fn plan_shrink(d: &DiskModel, req: &ShrinkRequest, min_bytes: Option<u64>) -
     if p.is_esp() {
         return Err(format!("{} is an EFI System Partition (it holds boot loaders); it is never shrunk", p.name));
     }
+    if p.fs == "xfs" {
+        return Err(crate::btrfsshrink::xfs_refusal(&p.name));
+    }
     if !supported(&p.fs) {
-        return Err(format!("{}: {} cannot be shrunk by the installer (supported: ext2, ext3, ext4 and NTFS). Use that system's own disk tool", p.name, if p.fs.is_empty() { "an unknown or blank file system".to_string() } else { format!("a {} file system", p.fs) }));
+        return Err(format!("{}: {} cannot be shrunk by the installer (supported: ext2, ext3, ext4, NTFS, FAT32, exFAT and btrfs). Use that system's own disk tool", p.name, if p.fs.is_empty() { "an unknown or blank file system".to_string() } else { format!("a {} file system", p.fs) }));
     }
     let ss = d.sector as u64;
     let new_bytes = req.new_bytes / MIB * MIB;
@@ -146,7 +149,19 @@ pub fn plan_shrink(d: &DiskModel, req: &ShrinkRequest, min_bytes: Option<u64>) -
         warnings.push("Windows may check this volume at its next start (fast start must be off and it must have been shut down fully); that is normal".into());
     }
     let new_sectors = new_bytes / ss;
-    let tool = if p.fs == "ntfs" { "ntfsresize" } else { "e2fsck and resize2fs" };
+    let tool = match p.fs.as_str() {
+        "ntfs" => "ntfsresize",
+        "fat32" => "the installer's own FAT32 code",
+        "exfat" => "the installer's own exFAT code",
+        "btrfs" => "btrfs (mounted for the resize)",
+        _ => "e2fsck and resize2fs",
+    };
+    if p.fs == "fat32" {
+        warnings.push("files that lie beyond the new end are moved to free space before the volume shrinks (power cut safe: nothing is lost, at worst the other system's disk check frees a few unused clusters); the other system may check the volume at its next start".into());
+    }
+    if p.fs == "exfat" {
+        warnings.push("files that lie beyond the new end are moved to free space before the volume shrinks (power cut safe: nothing is lost, at worst the other system's disk check frees a few unused clusters); the other system may check the volume at its next start".into());
+    }
     Ok(ShrinkPlan {
         disk_path: d.path.clone(),
         disk_name: d.name.clone(),
@@ -212,6 +227,15 @@ pub fn number_after(text: &str, label: &str) -> Option<u64> {
 impl FsTool for HostTools {
     fn minimum(&self, fs: &str, dev: &Path) -> Result<u64, String> {
         let d = dev.to_str().ok_or("path")?;
+        if fs == "fat32" {
+            return crate::fatshrink::minimum(dev);
+        }
+        if fs == "exfat" {
+            return crate::exfatshrink::minimum(dev);
+        }
+        if fs == "btrfs" {
+            return crate::btrfsshrink::minimum(&crate::btrfsshrink::HostSys, dev);
+        }
         if fs == "ntfs" {
             let t = run("ntfsresize", &["--info", "--force", "--no-progress-bar", d], &[0])?;
             // "You might resize at 25165824 bytes or 25 MB (freeing 1 MB)."
@@ -224,6 +248,15 @@ impl FsTool for HostTools {
     }
     fn check(&self, fs: &str, dev: &Path) -> Result<(), String> {
         let d = dev.to_str().ok_or("path")?;
+        if fs == "fat32" {
+            return crate::fatshrink::check(dev);
+        }
+        if fs == "exfat" {
+            return crate::exfatshrink::check(dev);
+        }
+        if fs == "btrfs" {
+            return crate::btrfsshrink::check(&crate::btrfsshrink::HostSys, dev);
+        }
         if fs == "ntfs" {
             run("ntfsresize", &["--info", "--force", "--no-progress-bar", d], &[0]).map(|_| ())
         } else {
@@ -233,6 +266,15 @@ impl FsTool for HostTools {
     }
     fn shrink(&self, fs: &str, dev: &Path, bytes: u64) -> Result<(), String> {
         let d = dev.to_str().ok_or("path")?;
+        if fs == "fat32" {
+            return crate::fatshrink::shrink(dev, bytes);
+        }
+        if fs == "exfat" {
+            return crate::exfatshrink::shrink(dev, bytes);
+        }
+        if fs == "btrfs" {
+            return crate::btrfsshrink::shrink(&crate::btrfsshrink::HostSys, dev, bytes);
+        }
         if fs == "ntfs" {
             run("ntfsresize", &["--force", "--no-progress-bar", "--size", &bytes.to_string(), d], &[0]).map(|_| ())
         } else {

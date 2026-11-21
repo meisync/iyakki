@@ -35,4 +35,31 @@ pub trait Hardware: Send + Sync {
     fn mac_summary(&self) -> Option<String>;
     /// The Hardware page of System as text lines: the machine report, the PCI devices with their drivers and the loaded drivers.
     fn hardware_report(&self) -> Vec<String>;
+    /// First use of a hardware class (`audio`, `gpu`, `bluetooth`) by `who` (an app id or `core`): the core's lazy device broker
+    /// (F-BOOT-04) loads the class's drivers once when the asker is allowed, and answers with one plain sentence. With the broker
+    /// off (the default) every driver is loaded already and the answer says so.
+    fn request_class(&self, class: &str, who: &str) -> String;
+    /// The playback volume of one sound card (a read; `None` when the card has no volume control).
+    fn volume(&self, _card: u32) -> Option<Volume> {
+        None
+    }
+    /// Set the playback level of a card (0 to 100) and give back what the mixer says afterwards (`system.volume.set`).
+    fn set_volume(&self, _card: u32, _percent: u32) -> Result<Volume, String> {
+        Err(NOT_HERE.into())
+    }
+    /// Move the level of a card by `delta` percent points, or toggle its mute when `delta` is `None` (`system.volume.set`).
+    fn change_volume(&self, _card: u32, _delta: Option<i32>) -> Result<Volume, String> {
+        Err(NOT_HERE.into())
+    }
+    /// Bring a network interface up or down (`system.link.set`; the person's tap or the chat card is the approval).
+    fn set_link(&self, _name: &str, _up: bool) -> Result<(), String> {
+        Err(NOT_HERE.into())
+    }
+    /// Ask for an address on an interface that was just brought up (`system.link.set`).
+    fn dhcp(&self, _name: &str) -> Result<(), String> {
+        Err(NOT_HERE.into())
+    }
 }
+
+/// What a machine without a way to do it answers.
+pub const NOT_HERE: &str = "not available here";

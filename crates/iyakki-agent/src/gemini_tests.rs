@@ -370,7 +370,7 @@ fn the_test_request_is_tiny_and_returns_the_short_answer() {
 fn settings_turn_it_on_and_off_and_put_the_earlier_choices_back() {
     use crate::settings::SettingsStore;
     let d = dir("apply");
-    let st = Mutex::new(SettingsStore::open(&d.join("settings.json")).unwrap());
+    let st = iyakki_shared::settings_ref::SettingsRef::of_store(&std::sync::Arc::new(Mutex::new(SettingsStore::open(&d.join("settings.json")).unwrap())));
     st.lock().unwrap().update(|s| {
         s.providers.push(ProviderCfg::new("local", Kind::Ollama));
         s.chat = Some(ModelChoice { provider: "local".into(), model: "qwen".into() });

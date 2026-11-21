@@ -64,10 +64,12 @@ fn a_whole_frame_of_a_long_story_with_a_big_picture_is_cheap_and_an_animation_fr
     settled(&mut a, &cx, &mut g, w, h, 900);
     assert!(a.anim.is_some(), "a story being read, with nothing else going on, is repainted in parts");
     // a whole frame (what scrolling and the first frame cost)
+    // CPU time of this thread, not wall time: a loaded machine stretches the wall time of both kinds of frame by whatever the other
+    // processes take, the work done by the thread stays the same
     let full = least((0..8).map(|_| {
-        let t0 = Instant::now();
+        let t0 = iyakki_testkit::thread_cpu_time();
         whole_frame(&mut a, &cx, &mut g, w, h, 900);
-        t0.elapsed()
+        iyakki_testkit::thread_cpu_time().saturating_sub(t0)
     }).collect());
     // the next word is said: the animation frames
     move_word_to(&mut a, &cx, &at, 3);
@@ -77,9 +79,9 @@ fn a_whole_frame_of_a_long_story_with_a_big_picture_is_cheap_and_an_animation_fr
     let mut part = Vec::new();
     let mut first_area = 0;
     for k in 0..6 {
-        let t0 = Instant::now();
+        let t0 = iyakki_testkit::thread_cpu_time();
         let r = a.live_draw(&mut g);
-        part.push(t0.elapsed());
+        part.push(iyakki_testkit::thread_cpu_time().saturating_sub(t0));
         assert!(r.is_some(), "partial frame {k} was painted");
         if k == 0 {
             first_area = area_of(&a.live_rects());

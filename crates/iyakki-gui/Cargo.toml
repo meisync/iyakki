@@ -21,6 +21,10 @@ name = "iyakki-sdk-emulate-window"
 path = "src/sdk_emulate.rs"
 
 [[bin]]
+name = "iyakki-writer"
+path = "src/writer_window.rs"
+
+[[bin]]
 name = "iyakki-installer"
 path = "src/installer.rs"
 

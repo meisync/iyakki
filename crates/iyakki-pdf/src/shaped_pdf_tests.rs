@@ -122,6 +122,38 @@ fn indic_and_thai_text_embeds_noto_subsets_and_copies_out_as_typed() {
 }
 
 #[test]
+fn sinhala_khmer_lao_myanmar_and_tibetan_embed_their_fonts_and_copy_out_as_typed() {
+    if !tools() {
+        return;
+    }
+    let d = dir("rare");
+    let samples = [
+        ("\u{0DC1}\u{0DCA}\u{200D}\u{0DBB}\u{0DD3}\u{0DBD}\u{0D82}\u{0D9A}\u{0DCF}", "NotoSansSinhala"),
+        ("\u{1781}\u{17D2}\u{1798}\u{17C2}\u{179A}\u{1797}\u{17B6}\u{179F}\u{17B6}", "NotoSansKhmer"),
+        ("\u{0EA5}\u{0EB2}\u{0EA7}\u{0E9E}\u{0EB2}\u{0EAA}\u{0EB2}", "NotoSansLao"),
+        ("\u{1019}\u{103C}\u{1014}\u{103A}\u{1019}\u{102C}\u{1018}\u{102C}\u{101E}\u{102C}", "NotoSansMyanmar"),
+        ("\u{0F56}\u{0F7C}\u{0F51}\u{0F0B}\u{0F61}\u{0F72}\u{0F42}", "NotoSerifTibetan"),
+    ];
+    let blocks: Vec<Block> = samples.iter().map(|(t, _)| Block::Para(format!("Latin and {t} mixed."))).collect();
+    let (bytes, replaced) = make(blocks);
+    assert_eq!(replaced, 0);
+    let out = text_of(&d, &bytes);
+    let flat = squash(&out);
+    for (t, _) in &samples {
+        assert!(flat.contains(&squash(t)), "{t:?} not found in {out:?}");
+    }
+    let f = d.join("t.pdf");
+    let fonts = Command::new("pdffonts").arg(&f).output().unwrap();
+    let listing = String::from_utf8_lossy(&fonts.stdout);
+    for (_, name) in &samples {
+        let row = listing.lines().find(|l| l.contains(name)).unwrap_or_else(|| panic!("{name} missing from\n{listing}"));
+        assert!(row.contains("yes yes"), "embedded and subset: {row}");
+    }
+    render(&d, &bytes);
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
 fn hebrew_and_arabic_copy_out_in_logical_order_and_sit_against_the_right_margin() {
     if !tools() {
         return;
@@ -189,7 +221,7 @@ fn dark(w: usize, px: &[u8]) -> usize {
 
 #[test]
 fn a_heading_in_a_shaped_script_is_heavier_than_the_same_words_in_a_paragraph() {
-    // the bundled fonts have one weight; the heading is filled and stroked, so its letters carry more ink
+    // the heading is set in the designed bold face, so its letters carry more ink than the regular weight
     let text = "हिन्दी भाषा सुंदर है";
     if !tools() {
         return;
@@ -213,6 +245,9 @@ fn a_heading_in_a_shaped_script_is_heavier_than_the_same_words_in_a_paragraph() 
     let (_, d_heavy) = size_of(&heavy);
     let (_, d_light) = size_of(&light);
     assert!(d_heavy * 100 > d_light * 112, "heavy {d_heavy} light {d_light}");
+    // the heading uses the designed bold face: it is embedded by name, and the page is not stroked as the synthetic weight was
+    assert!(String::from_utf8_lossy(&heavy).contains("NotoSansDevanagari-Bold"), "the bold font is embedded");
+    assert!(!String::from_utf8_lossy(&light).contains("NotoSansDevanagari-Bold"));
     // and the words still copy out as typed
     let d = dir("boldtext");
     assert!(squash(&text_of(&d, &heavy)).contains(&squash(text)));
@@ -296,4 +331,20 @@ fn right_to_left_lines_are_read_back_in_the_order_they_were_typed() {
     let (bytes, _) = make(vec![Block::Para("Plain English, 123.".into())]);
     assert!(Document::open(bytes).unwrap().page_text(0).unwrap().contains("Plain English, 123."));
     assert_eq!(crate::text::visual_to_logical("abc 123"), "abc 123");
+}
+
+#[test]
+fn khmer_lao_and_myanmar_without_spaces_wrap_inside_the_margins_and_lose_no_letter() {
+    for sc in [crate::thai::Script::Khmer, crate::thai::Script::Lao, crate::thai::Script::Myanmar] {
+        let text = crate::thai::tests::words_of(sc, 60).concat();
+        let mut replaced = 0;
+        let lines = crate::shaped::layout(&text, 11.0, 150.0, &mut replaced);
+        assert_eq!(replaced, 0, "{sc:?}");
+        assert!(lines.len() > 2, "{sc:?} wraps");
+        let all: String = lines.iter().map(|l| l.clusters.iter().map(|c| c.text.as_str()).collect::<String>()).collect();
+        assert_eq!(squash(&all), squash(&text), "{sc:?}: no letter lost");
+        for l in &lines {
+            assert!(l.width <= 150.0 + 0.5, "{sc:?}: line of {} points", l.width);
+        }
+    }
 }

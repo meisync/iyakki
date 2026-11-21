@@ -446,8 +446,14 @@
 
   // scripts added by other scripts run when they are attached
   const run = (code, name) => { try { __eval(String(code), String(name)); } catch (e) { report(e); } };
+  // while the page's own scripts run in turn, a script added by one waits until the adder (and the other blocking scripts) are done
+  let queueing = false; let addedQueue = [];
   const afterInsert = (child, found) => {
     if (!(child instanceof Element)) return;
+    if (queueing) { addedQueue.push([child, found]); return; }
+    doInsert(child, found);
+  };
+  const doInsert = (child, found) => {
     // `found`: what the host said about an insert (null: the node is not in the page; else the scripts that came with it)
     if (found === undefined) { if (!child.isConnected) return; found = H('scripts', { n: child._id }); }
     else if (found === null) return;
@@ -832,6 +838,8 @@
   g.Option = function (text, value) { const o = doc.createElement('option'); o.textContent = text || ''; if (value !== undefined) o.value = value; return o; };
 
   g.__dom = {
+    queueAdded(on) { queueing = !!on; },
+    flushAdded() { queueing = false; let n = 0; while (addedQueue.length && n++ < 10000) { const [c, f] = addedQueue.shift(); queueing = true; try { doInsert(c, f); } finally { queueing = false; } } addedQueue = []; },
     setCurrent(id) { hide(doc, '_cur', id === null ? null : wrap(id)); },
     fireLoad() {
       doc._ready = 'interactive'; doc.dispatchEvent(new Event('readystatechange'));
@@ -843,7 +851,22 @@
     // an element by the id of its node in the page tree (a host that keeps the page alive acts on controls this way)
     byNode(id) { return wrap(id, H1('info', id).name); },
     // a click from the person: true when a handler stopped the default action (the host then does not follow a link)
-    click(id) { const e = this.byNode(id); const ok = e.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); if (ok) e._defaultAction(); return ok ? 'ok' : 'prevented'; },
+    // (a person's click is the whole sequence: pointerdown, mousedown, pointerup, mouseup, then click; a handler that stops a press does not stop the click)
+    click(id) { const e = this.byNode(id); this.pointer(id, 'down', 0, 0); this.pointer(id, 'up', 0, 0); const ok = e.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); if (ok) e._defaultAction(); return ok ? 'ok' : 'prevented'; },
+    // the pointer did something over `id` other than click: down, up, move, over (also enter) or out (also leave); each reaches the page as the
+    // pointer event and then the mouse event of the same name; 'prevented' when a handler stopped one of them
+    pointer(id, kind, x, y) {
+      const e = this.byNode(id);
+      const names = { down: ['pointerdown', 'mousedown'], up: ['pointerup', 'mouseup'], move: ['pointermove', 'mousemove'], over: ['pointerover', 'mouseover'], out: ['pointerout', 'mouseout'] }[kind];
+      if (!names) return 'ok';
+      const init = { bubbles: true, cancelable: true, clientX: x | 0, clientY: y | 0, button: 0 };
+      let ok = true;
+      for (const n of names) ok = e.dispatchEvent(new MouseEvent(n, init)) && ok;
+      if (kind === 'over' || kind === 'out') {
+        for (const n of kind === 'over' ? ['pointerenter', 'mouseenter'] : ['pointerleave', 'mouseleave']) e.dispatchEvent(new MouseEvent(n, { bubbles: false, cancelable: false, clientX: x | 0, clientY: y | 0 }));
+      }
+      return ok ? 'ok' : 'prevented';
+    },
     // a key pressed while `id` (or, for -1, the focused element or the body) has the focus: keydown, keypress for a printable key, keyup;
     // Enter in a one-line field sends its form
     key(id, type, key, code, mods) {

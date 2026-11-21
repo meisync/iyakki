@@ -2,7 +2,7 @@
 
 
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ContextOptions {
     /// Most recent non-system messages sent verbatim.
     pub window: usize,
@@ -20,7 +20,7 @@ impl Default for ContextOptions {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ContextInfo {
     pub skills: Vec<String>,
     pub recalled: usize,

@@ -23,7 +23,7 @@ fn plain_user(tag: &str) -> AppCx {
 }
 
 fn remember(cx: &AppCx, ws: &str, chat: &str, n: usize) {
-    let h = History::new(cx.kb().clone(), &cx.session.user, ws, Some(chat));
+    let h = History::new(cx.kb_source(), &cx.session.user, ws, Some(chat));
     for i in 0..n {
         h.record("turn", "", &format!("{ws} {chat} step {i}: the registry address is 10.0.0.{i}"));
     }
@@ -95,7 +95,7 @@ fn forgetting_a_workspace_or_one_chat_needs_the_same_key_twice_and_touches_only_
     assert!(status(&a).contains("Press F again"), "a key in between cancelled the first press: {}", status(&a));
     key(&mut a, &cx, Key::Char('f'));
     assert!(status(&a).contains("Forgot 3 entries"), "{}", status(&a));
-    let w = |name: &str| History::workspaces_of(&cx.kb(), "root").into_iter().find(|w| w.name == name).map(|w| w.entries);
+    let w = |name: &str| History::workspaces_of(&*cx.kb_source(), "root").into_iter().find(|w| w.name == name).map(|w| w.entries);
     assert_eq!(w("web-shop"), Some(2));
     assert_eq!(w("data-lab"), Some(4), "another workspace is untouched");
     // a whole workspace
@@ -109,7 +109,7 @@ fn forgetting_a_workspace_or_one_chat_needs_the_same_key_twice_and_touches_only_
     // another person's history is never listed or forgotten here
     let amy = plain_user("asst-forget-amy");
     remember(&amy, "web-shop", "s_x", 2);
-    assert_eq!(History::workspaces_of(&cx.kb(), "root").len(), 1);
+    assert_eq!(History::workspaces_of(&*cx.kb_source(), "root").len(), 1);
 }
 
 #[test]
@@ -279,4 +279,76 @@ fn the_waiting_rows_are_drawn_and_switch_and_step_the_ledger_settings_with_an_au
     key(&mut a, &cx, Key::Down);
     key(&mut a, &cx, Key::Enter);
     assert!(ledger().settings().separate_thread);
+}
+
+fn bring_presets(cx: &AppCx) {
+    use iyakki_shared::bundle_members::put_data_member;
+    use serde_json::json;
+    put_data_member(cx.data_dir(), "agent", None, "rev", &json!({"name": "Reviewer", "prompt": "Review the change like a careful colleague.", "summary": "Careful code review"})).unwrap();
+    put_data_member(cx.data_dir(), "agent", None, "tutor", &json!({"name": "Tutor", "prompt": "Explain step by step."})).unwrap();
+}
+
+#[test]
+fn the_picker_lists_the_presets_bundles_brought_and_a_choice_needs_the_card_first_then_the_second_press() {
+    let cx = plain_user("asst-picker");
+    let mut a = SettingsApp::new(&cx);
+    a.open_item("tab:assistant", &cx);
+    // no bundle brought one: no picker rows
+    assert!(!rows(&mut a, &cx).iter().any(|r| matches!(r, assistant_page::Row::Preset(_))));
+    bring_presets(&cx);
+    let all = rows(&mut a, &cx);
+    let at = all.iter().position(|r| matches!(r, assistant_page::Row::Preset(Some(n)) if n == "Reviewer")).expect("the preset is a row");
+    assert!(matches!(all[at - 1], assistant_page::Row::Preset(None)), "the assistant as it is comes first");
+    let g = {
+        let mut g = Gfx::new(1280, 1200);
+        g.clear(crate::gfx::rgb(0, 0, 0));
+        let s = crate::ui::scale_for(1280, 1200);
+        a.render(&mut g, R::new(0.0, 46.0 * s, 1280.0, 1200.0 - 46.0 * s), s, &cx, 0);
+        g
+    };
+    assert!(g.text_log.iter().any(|(_, _, t)| t.contains("Assistant preset")) && g.hits.iter().any(|h| h.label == "Reviewer"), "the heading and the row are drawn");
+    // choose it: the first Enter shows the card and keeps nothing
+    for _ in 0..at {
+        key(&mut a, &cx, Key::Down);
+    }
+    key(&mut a, &cx, Key::Enter);
+    assert!(status(&a).contains("Reviewer") && status(&a).contains("cannot give it a tool") && status(&a).contains("Press Enter again"), "{}", status(&a));
+    assert!(iyakki_shared::bundle_members::chosen_agent_preset(cx.data_dir(), "amy").is_none());
+    // another key cancels the card
+    key(&mut a, &cx, Key::Down);
+    key(&mut a, &cx, Key::Up);
+    key(&mut a, &cx, Key::Enter);
+    assert!(iyakki_shared::bundle_members::chosen_agent_preset(cx.data_dir(), "amy").is_none(), "a cancelled card keeps nothing");
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(iyakki_shared::bundle_members::chosen_agent_preset(cx.data_dir(), "amy").unwrap().name, "Reviewer");
+    assert!(status(&a).contains("now follows"), "{}", status(&a));
+    assert!(cx.audit.recent(20).iter().any(|l| l.contains("settings.assistant.preset") && l.contains("Reviewer")));
+    assert!(iyakki_shared::bundle_members::preset_note(cx.data_dir(), "amy").contains("Review the change"));
+    // back to the assistant as it is
+    key(&mut a, &cx, Key::Up);
+    key(&mut a, &cx, Key::Enter);
+    key(&mut a, &cx, Key::Enter);
+    assert!(iyakki_shared::bundle_members::chosen_agent_preset(cx.data_dir(), "amy").is_none());
+}
+
+#[test]
+fn the_chat_tools_list_and_choose_a_preset_and_ask_with_what_it_says() {
+    use iyakki_shared::agent::Risk;
+    use serde_json::json;
+    let cx = plain_user("asst-picker-tools");
+    let t = crate::apps::chat_settings::wrap(&cx, Arc::new(NoTools));
+    let risk = |n: &str| t.defs().into_iter().find(|d| d.spec.name == n).map(|d| d.risk);
+    assert_eq!((risk("assistant_preset_status"), risk("assistant_preset_set")), (Some(Risk::Safe), Some(Risk::Ask)));
+    assert!(t.call("assistant_preset_status", &json!({})).unwrap().contains("No installed bundle brought"));
+    bring_presets(&cx);
+    let st = t.call("assistant_preset_status", &json!({})).unwrap();
+    assert!(st.contains("No preset is in use") && st.contains("Reviewer: Careful code review") && st.contains("- Tutor"), "{st}");
+    let p = t.preview("assistant_preset_set", &json!({"name": "Reviewer"})).unwrap();
+    assert!(p.contains("Careful code review") && p.contains("no tool or permission"), "{p}");
+    assert!(t.preview("assistant_preset_set", &json!({"name": "Nope"})).unwrap().contains("refused"));
+    assert!(t.call("assistant_preset_set", &json!({"name": "Nope"})).is_err());
+    t.call("assistant_preset_set", &json!({"name": "Tutor"})).unwrap();
+    assert!(t.call("assistant_preset_status", &json!({})).unwrap().contains("In use: Tutor"));
+    t.call("assistant_preset_set", &json!({"name": ""})).unwrap();
+    assert!(iyakki_shared::bundle_members::chosen_agent_preset(cx.data_dir(), "amy").is_none());
 }

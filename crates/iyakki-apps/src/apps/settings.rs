@@ -75,6 +75,8 @@ pub enum Tab {
     Battery,
     /// Settings -> Power: power profile and sleep after idle (F-PWR-01).
     Power,
+    /// Settings -> Radio: reconnect tries and moving on to the next station when a live station drops (F-RADIO-17).
+    Radio,
     /// Settings -> This computer: which settings are kept per computer (`hwprofile`), the computers this install has seen.
     Computer,
     HostName,
@@ -119,6 +121,8 @@ pub enum Tab {
     ModelRouter,
     /// Settings -> Voice assistant (Gemini, experimental): the live voice session, its consent card, who speaks, the caps and Stop (docs/GEMINI-PROVIDER.md).
     GeminiVoice,
+    /// Settings -> Alexa (Amazon's assistant, optional, off by default): the owner's product, the machine's switch and the person's own yes (F-VOICE-43).
+    Alexa,
     /// Settings -> Fleet (experimental): the pair groups of this computer, members and their numbers, join codes and requests, work sent and received (F-FLEET-09).
     Fleet,
 }
@@ -129,7 +133,7 @@ impl Tab {
         match self {
             Tab::Overview => CATEGORIES[0],
             Tab::Account | Tab::Vault | Tab::SecretProviders | Tab::Notifications | Tab::Backup | Tab::EncHome => CATEGORIES[1],
-            Tab::Models | Tab::Agents | Tab::Skills | Tab::Rag | Tab::Assistant | Tab::ModelRouter | Tab::GeminiVoice | Tab::Voice | Tab::Browser | Tab::HostAccess | Tab::AppAccess | Tab::AppEvents => CATEGORIES[2],
+            Tab::Models | Tab::Agents | Tab::Skills | Tab::Rag | Tab::Assistant | Tab::ModelRouter | Tab::GeminiVoice | Tab::Alexa | Tab::Voice | Tab::Radio | Tab::Browser | Tab::HostAccess | Tab::AppAccess | Tab::AppEvents => CATEGORIES[2],
             Tab::Network | Tab::SshTunnels | Tab::Vpn | Tab::Remote | Tab::Domains | Tab::Firewall | Tab::Shares | Tab::Fleet => CATEGORIES[3],
             Tab::Display | Tab::Displays | Tab::ScreenSaver | Tab::HomeLayout | Tab::Views | Tab::Sound | Tab::SystemSounds | Tab::Accessibility | Tab::Appearance => CATEGORIES[4],
             Tab::Bluetooth | Tab::Keyboard => CATEGORIES[5],
@@ -139,10 +143,10 @@ impl Tab {
     }
 
     /// Where the page sits in the left list: category first, then this order.
-    pub(crate) const ORDER: [Tab; 54] = [
+    pub(crate) const ORDER: [Tab; 56] = [
         Tab::Overview,
         Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::EncHome, Tab::SecretProviders,
-        Tab::Models, Tab::Agents, Tab::Skills, Tab::Rag, Tab::Assistant, Tab::ModelRouter, Tab::GeminiVoice, Tab::Voice, Tab::Browser, Tab::HostAccess, Tab::AppAccess, Tab::AppEvents,
+        Tab::Models, Tab::Agents, Tab::Skills, Tab::Rag, Tab::Assistant, Tab::ModelRouter, Tab::GeminiVoice, Tab::Alexa, Tab::Voice, Tab::Radio, Tab::Browser, Tab::HostAccess, Tab::AppAccess, Tab::AppEvents,
         Tab::Network, Tab::SshTunnels, Tab::Vpn, Tab::Remote, Tab::Domains, Tab::Firewall, Tab::Shares, Tab::Fleet,
         Tab::Display, Tab::Displays, Tab::ScreenSaver, Tab::HomeLayout, Tab::Views, Tab::Sound, Tab::SystemSounds, Tab::Appearance, Tab::Accessibility,
         Tab::Bluetooth, Tab::Keyboard,
@@ -159,7 +163,7 @@ impl Tab {
             Tab::Keyboard => Some("keyboard"),
             Tab::Computer => Some("display"),
             Tab::Bluetooth => Some("bluetooth"),
-            Tab::Overview | Tab::Assistant | Tab::ModelRouter | Tab::Fleet | Tab::GeminiVoice | Tab::Appearance | Tab::Models | Tab::Agents | Tab::Rag | Tab::Vault | Tab::Skills | Tab::Network | Tab::Browser | Tab::DevCluster | Tab::Storage | Tab::Memory | Tab::Firewall | Tab::SshTunnels | Tab::Domains | Tab::Vpn | Tab::Remote | Tab::Time | Tab::Battery | Tab::Power | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Install | Tab::Updates | Tab::Voice | Tab::SecretProviders | Tab::HostAccess | Tab::Developer | Tab::GitKeys | Tab::Shares | Tab::Account | Tab::HomeLayout | Tab::Views | Tab::Cloud | Tab::CloudRoles | Tab::Notifications | Tab::AppAccess | Tab::AppEvents | Tab::Backup | Tab::Accessibility | Tab::EncHome => None,
+            Tab::Overview | Tab::Assistant | Tab::ModelRouter | Tab::Fleet | Tab::GeminiVoice | Tab::Alexa | Tab::Appearance | Tab::Models | Tab::Agents | Tab::Rag | Tab::Vault | Tab::Skills | Tab::Network | Tab::Browser | Tab::DevCluster | Tab::Storage | Tab::Memory | Tab::Firewall | Tab::SshTunnels | Tab::Domains | Tab::Vpn | Tab::Remote | Tab::Time | Tab::Battery | Tab::Power | Tab::Radio | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Install | Tab::Updates | Tab::Voice | Tab::SecretProviders | Tab::HostAccess | Tab::Developer | Tab::GitKeys | Tab::Shares | Tab::Account | Tab::HomeLayout | Tab::Views | Tab::Cloud | Tab::CloudRoles | Tab::Notifications | Tab::AppAccess | Tab::AppEvents | Tab::Backup | Tab::Accessibility | Tab::EncHome => None,
         }
     }
 
@@ -168,6 +172,7 @@ impl Tab {
         match self {
             Tab::Overview => "overview home start summary attention recommended problems fix status",
             Tab::GeminiVoice => "gemini voice assistant live microphone talk speak google experimental consent yes wake phrase shortcut super v session limit cap stop red sign hands free press to talk",
+            Tab::Alexa => "alexa amazon voice assistant echo microphone consent yes client id product avs optional off by default",
             Tab::Models => "ai chat llm model provider openai claude anthropic gemini ollama openrouter api key endpoint",
             Tab::Agents => "claude code copilot github coding agent cli codex gemini aider anthropic external install login api key auto approval",
             Tab::Fleet => "fleet pair group pair computers join code members heartbeat disk cpu memory worker planner assign work accept work trusted fingerprint leave remove administrator experimental",
@@ -202,6 +207,7 @@ impl Tab {
             Tab::EncHome => "encrypted encryption encrypt home folder private files lock unlock password recovery key admin slot dm-crypt theft stolen lost drive protect move migrate",
             Tab::Appearance => "appearance look looks theme wallpaper background icons icon style shape size glass 3d flat outline launcher layout grid list columns dock pinned apps favourites top bar clock battery network volume menu personalise customise customize",
             Tab::Accessibility => "accessibility screen reader speak voice blind low vision high contrast text size bigger large pointer cursor focus ring motion animation sticky keys slow keys tremor mouse keyboard only",
+            Tab::Radio => "radio internet fm station stream drop dropped reconnect reconnecting retry retries switch next station auto switch lost connection stops",
             Tab::Power => "power profile performance balanced power saver battery life cpu governor frequency turbo fan sleep suspend idle lid power button energy",
             Tab::Battery => "battery charge charging percent percentage power adapter plug laptop low shutdown critical health cycles time left remaining",
             Tab::HostName => "host name hostname computer name rename network name dns mdns",
@@ -233,6 +239,7 @@ impl Tab {
             Tab::ModelRouter => "A bigger model plans the work and lighter models do the steps, asking the bigger one when stuck: which models take part, where they may run, the strategy, the limits and the run in progress.",
             Tab::Assistant => "What the assistant remembers of the work in a workspace, and how long a model may think or stay silent.",
             Tab::GeminiVoice => "A live voice session with Google Gemini (experimental, off by default): it needs your yes, shows a red sign while the microphone is open, and has its own limits and a Stop button.",
+            Tab::Alexa => "Amazon's voice assistant (optional, off by default): it needs the owner's Amazon product on this computer and your own yes before anything is sent.",
             Tab::Rag => "How documents are split and searched when the assistant looks things up.",
             Tab::Vault => "Secrets such as API keys, kept encrypted.",
             Tab::Backup => "Save your own data (settings, dashboards, flows, notes, recordings, bookmarks) to one file on a stick or folder you choose, and restore from such a file.",
@@ -262,6 +269,7 @@ impl Tab {
             Tab::EncHome => "Keep your private folder encrypted so a lost or stolen computer or drive does not give your files away: it opens at sign-in with your password and closes at sign-out.",
             Tab::Appearance => "How the desktop looks: the Look (icons, launcher layout, dock, top bar), the wallpaper and a live preview.",
             Tab::Accessibility => "Make the computer easier to use without seeing the screen well or without a mouse: a screen reader, high contrast, bigger text and pointer, sticky and slow keys.",
+            Tab::Radio => "What the radio does when a live station drops: how many times it reconnects, and whether it goes on to the next station of the list.",
             Tab::Power => "How fast the processor runs (performance, balanced, power saver) and whether the computer sleeps by itself when it is not used.",
             Tab::Battery => "How full the battery is, what it is doing, how worn it is, and the low-battery warnings.",
             Tab::HostName => "The name of this computer on the network.",
@@ -293,6 +301,7 @@ impl Tab {
             Tab::Fleet => "Fleet (experimental)",
             Tab::Assistant => "Assistant",
             Tab::GeminiVoice => "Gemini voice (experimental)",
+            Tab::Alexa => "Alexa (Amazon)",
             Tab::Vault => "Vault",
             Tab::Backup => "Backup and restore",
             Tab::Skills => "Skills",
@@ -319,6 +328,7 @@ impl Tab {
             Tab::Time => "Time",
             Tab::Battery => "Battery",
             Tab::Power => "Power",
+            Tab::Radio => "Radio",
             Tab::Appearance => "Appearance",
             Tab::Accessibility => "Accessibility",
             Tab::EncHome => "Encrypted home",
@@ -406,8 +416,12 @@ mod sound;
 #[path = "settings_keyboard.rs"]
 mod kbd_page;
 pub(crate) use kbd_page::apply_keyboard;
+#[cfg(test)]
+pub(crate) use kbd_page::live_input;
 #[path = "settings_battery.rs"]
 mod battery_page;
+#[path = "settings_radio.rs"]
+mod radio_page;
 #[path = "settings_assistant.rs"]
 mod assistant_page;
 #[path = "settings_power.rs"]
@@ -446,6 +460,8 @@ mod browserprotect_page;
 mod browsercert_page;
 #[path = "settings_browserbad.rs"]
 mod browserbad_page;
+#[path = "settings_browserproxy.rs"]
+mod browserproxy_page;
 #[path = "settings_browsermedia.rs"]
 mod browsermedia_page;
 #[cfg(test)]
@@ -454,6 +470,9 @@ mod browsermedia_tests;
 #[cfg(test)]
 #[path = "settings_browserbad_tests.rs"]
 mod browserbad_tests;
+#[cfg(test)]
+#[path = "settings_browserproxy_tests.rs"]
+mod browserproxy_tests;
 #[path = "settings_browserchoices.rs"]
 mod browserchoices_page;
 #[path = "settings_ragorder.rs"]
@@ -480,6 +499,8 @@ mod announce_page;
 mod gemini_page;
 #[path = "settings_geminivoice.rs"]
 mod geminivoice_page;
+#[path = "settings_alexa.rs"]
+mod alexa_page;
 #[path = "settings_homelayout.rs"]
 mod homelayout_page;
 #[path = "settings_views.rs"]
@@ -510,7 +531,6 @@ mod backup_page;
 pub(crate) mod access_page;
 #[path = "settings_modelhost.rs"]
 mod modelhost_page;
-pub use install_page::InstallEnv;
 
 /// One button of the theme card: a built-in theme or a theme file the person can use.
 struct ThemeChoice {
@@ -528,11 +548,15 @@ enum FormKind {
     /// Settings -> Browser: a site to put on the known-bad list / to take off it.
     BrowserBadAdd,
     BrowserBadRemove,
+    /// Settings -> Browser: the browser's HTTP proxy.
+    BrowserProxy,
     /// A question step of a setup wizard an app brought (F-CORE-24).
     BundleWizard,
     /// Settings -> System update: the folder to look for an update in.
     UpdateFolder,
     UpdateBundle,
+    /// Settings -> System update: download a signed update from an https address.
+    UpdateFetch,
     /// The address of the system update index an administrator sets (F-UPD-04).
     UpdateSource,
     Provider(Option<String>),
@@ -552,6 +576,8 @@ enum FormKind {
     FleetAddress(String, String),
     /// The consent card of the Gemini voice assistant: the open microphone and the tool results (Settings -> Gemini voice).
     GeminiLiveConsent,
+    /// The consent card of the Alexa provider: the voice goes to Amazon during a turn (Settings -> Alexa).
+    AlexaConsent,
     External(Option<String>),
     NewSecret(bool),
     /// Open the person's own vault with their login password (they signed in without typing one).
@@ -586,6 +612,8 @@ enum FormKind {
     HotspotCountry,
     /// Settings → Backup and restore.
     Backup(backup_page::BackupForm),
+    /// Settings -> Apps access: a time limit for one grant (installation, capability) (F-SDK-217).
+    AppAccessLimit(String, String),
     /// Settings -> Remote access: the port.
     Remote(remote_page::RemoteForm),
     /// Models → Model host on your network: nickname, address, key.
@@ -595,7 +623,7 @@ enum FormKind {
     /// Make a virtual disk (the size is asked).
     NewVirtualDisk,
     /// The passphrase of a WiFi network found by the scan (name, what it offers).
-    WifiJoin(String, iyakki_devctl::wifi::Security),
+    WifiJoin(String, iyakki_core_api::device_types::devctl::wifi::Security),
     /// A WiFi network that does not announce its name.
     WifiHidden,
     /// The login of a WPA enterprise network found by the scan (name).
@@ -636,6 +664,8 @@ enum FormKind {
     HomeGroup(Option<String>),
     /// Settings -> Desktop views: a new view (None) or the new name of this one.
     View(Option<u32>),
+    /// Settings -> Desktop views: the person's own step keys.
+    ViewKeys,
     /// Settings → Install to disk: the questions and the typed confirmation for this disk.
     Install(String),
 }
@@ -645,6 +675,8 @@ const AUTO_TYPE: &str = "Auto-detect (Ollama, Lemonade or OpenAI-compatible)";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PickKind {
+    /// Settings -> Sound: which paired headphones or speaker gets all of the computer's sound (F-NET-28).
+    BluetoothSink,
     /// Settings -> Model router: which strategy decides / which script to remove.
     RouterStrategy,
     RouterRemove,
@@ -671,7 +703,7 @@ enum PickKind {
     /// Settings → Models: a model of a Lemonade provider, then what to do with it, then the reading voice.
     Lemonade(lemonade_page::LemPick),
     /// Settings → Network: the private MAC address mode for every adapter of this kind.
-    MacMode(iyakki_devctl::LinkKind),
+    MacMode(iyakki_core_api::device_types::devctl::LinkKind),
     /// Settings → Sound: Automatic or one output.
     SoundOutput,
     /// Settings → Home layout: the group to move this tile (its layout key) to.
@@ -686,6 +718,8 @@ enum PickKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ConfirmKind {
+    /// Settings -> Sound: send all sound to the paired Bluetooth headphones or speaker (the address; empty: the only or remembered one).
+    BluetoothSound(String),
     /// Settings -> Model router: a change the card described (F-ROUTER-07).
     Router(router_page::RouterAct),
     /// Settings -> Fleet: a change the card described (F-FLEET-09).
@@ -766,9 +800,11 @@ enum JobOut {
     /// Settings -> Browser -> a site's certificate, as lines (F-BROW-98).
     Cert(Result<Vec<String>, String>),
     Msg(Result<String, String>),
+    /// A casting button's network call came back (Settings -> Shared folders, F-MEDIA-11).
+    Cast(shares_page::CastDone),
     /// A setup wizard's checks and moves came back (F-CORE-24).
     Wizard(Result<(), String>),
-    Wifi(Result<Vec<iyakki_devctl::wifi::Ap>, String>),
+    Wifi(Result<Vec<iyakki_core_api::device_types::devctl::wifi::Ap>, String>),
     Models { provider: String, models: Vec<String>, ms: u64 },
     Dc(devcluster::DcOut),
     Mh(modelhost_page::MhOut),
@@ -789,10 +825,10 @@ struct Job {
 /// What the Storage tab acts on. Real paths in production; tests point these at a fake machine.
 #[derive(Clone)]
 pub struct StorageEnv {
-    pub roots: iyakki_storage::Roots,
-    pub mounter: Arc<dyn iyakki_storage::Mounter>,
+    pub roots: iyakki_core_api::device_types::storage::Roots,
+    pub mounter: Arc<dyn iyakki_core_api::device_types::storage::Mounter>,
     /// Set when the disks are virtual (the desktop window): disks can be made and removed from the tab.
-    pub virtual_disks: Option<iyakki_storage::virt::VirtualDisks>,
+    pub virtual_disks: Option<iyakki_core_api::device_types::storage::virt::VirtualDisks>,
     pub mke2fs: std::path::PathBuf,
     pub scratch: std::path::PathBuf,
     /// The running data directory: copied onto the new disk so nothing is lost.
@@ -803,9 +839,9 @@ pub struct StorageEnv {
 /// links. Real in production; tests point it at stand-ins.
 #[derive(Clone)]
 pub struct WifiEnv {
-    pub wifi: Arc<iyakki_devctl::wifi::Wifi>,
-    pub known: Arc<iyakki_devctl::wifi::KnownStore>,
-    pub roots: iyakki_devctl::Roots,
+    pub wifi: Arc<iyakki_core_api::device_types::devctl::wifi::Wifi>,
+    pub known: Arc<iyakki_core_api::device_types::devctl::wifi::KnownStore>,
+    pub roots: iyakki_core_api::device_types::devctl::Roots,
 }
 
 impl WifiEnv {
@@ -813,15 +849,20 @@ impl WifiEnv {
         #[cfg(any(test, feature = "testing"))]
         {
             // unit tests never scan the real air or touch the real files
-            return WifiEnv { wifi: Arc::new(iyakki_devctl::wifi::Wifi { run_dir: "/nonexistent/run".into(), path: Some("/nonexistent/bin".into()) }), known: Arc::new(iyakki_devctl::wifi::KnownStore::new(std::path::Path::new("/nonexistent/wifi.json"))), roots: iyakki_devctl::Roots { sys: "/nonexistent/sys".into(), proc_: "/nonexistent/proc".into() } };
+            return WifiEnv { wifi: Arc::new(iyakki_core_api::device_types::devctl::wifi::Wifi { run_dir: "/nonexistent/run".into(), path: Some("/nonexistent/bin".into()) }), known: Arc::new(iyakki_core_api::device_types::devctl::wifi::KnownStore::new(std::path::Path::new("/nonexistent/wifi.json"))), roots: iyakki_core_api::device_types::devctl::Roots { sys: "/nonexistent/sys".into(), proc_: "/nonexistent/proc".into() } };
         }
         #[allow(unreachable_code)]
-        WifiEnv { wifi: Arc::new(iyakki_devctl::wifi::Wifi::real()), known: Arc::new(iyakki_devctl::wifi::KnownStore::new(std::path::Path::new("/var/lib/iyakki/wifi.json"))), roots: iyakki_devctl::Roots::real() }
+        WifiEnv { wifi: Arc::new(iyakki_core_api::device_types::devctl::wifi::Wifi::real()), known: Arc::new(iyakki_core_api::device_types::devctl::wifi::KnownStore::new(std::path::Path::new("/var/lib/iyakki/wifi.json"))), roots: iyakki_core_api::device_types::devctl::Roots::real() }
     }
 
-    /// The first WiFi adapter's interface name.
+    /// The WiFi adapters that can join networks (the hotspot's own interface never), in the order the machine lists them.
+    pub fn adapters(&self) -> Vec<String> {
+        iyakki_core_api::device_types::devctl::links(&self.roots).into_iter().filter(|l| l.kind == iyakki_core_api::device_types::devctl::LinkKind::Wifi && l.name != iyakki_core_api::device_types::devctl::HOTSPOT_IFACE).map(|l| l.name).collect()
+    }
+
+    /// The adapter in use: the person's choice while it is still there, else the first one.
     pub fn iface(&self) -> Option<String> {
-        iyakki_devctl::links(&self.roots).into_iter().find(|l| l.kind == iyakki_devctl::LinkKind::Wifi).map(|l| l.name)
+        iyakki_core_api::device_types::devctl::wifi::pick_adapter(&self.adapters(), self.known.chosen_adapter())
     }
 }
 
@@ -830,7 +871,7 @@ static VIRTUAL_STORAGE: std::sync::OnceLock<StorageEnv> = std::sync::OnceLock::n
 /// From now on the Storage tab shows only virtual disks kept in `dir` (sparse image files), never the machine's drives.
 /// Called once at start by the desktop window; `data_dir` is what making a data disk copies onto it.
 pub fn use_virtual_disks(dir: &std::path::Path, data_dir: &std::path::Path, mke2fs: Option<std::path::PathBuf>) -> Result<(), String> {
-    let v = iyakki_storage::virt::VirtualDisks::open(dir)?;
+    let v = iyakki_core_api::device_types::storage::virt::VirtualDisks::open(dir)?;
     let mke2fs = mke2fs.or_else(|| ["/sbin/mke2fs", "/usr/sbin/mke2fs"].iter().map(std::path::PathBuf::from).find(|p| p.exists())).unwrap_or_else(|| "/sbin/mke2fs".into());
     let env = StorageEnv { roots: v.roots(), mounter: Arc::new(v.mounter()), mke2fs, scratch: dir.to_path_buf(), data_dir: data_dir.to_path_buf(), virtual_disks: Some(v) };
     VIRTUAL_STORAGE.set(env).map_err(|_| "virtual disks are already set up".to_string())
@@ -841,14 +882,14 @@ impl StorageEnv {
         #[cfg(any(test, feature = "testing"))]
         {
             // unit tests never look at (or touch) the machine's real disks
-            return StorageEnv { roots: iyakki_storage::Roots { sys_block: "/nonexistent/sys".into(), dev: "/nonexistent/dev".into(), mounts: "/nonexistent/mounts".into(), require_block: true }, mounter: Arc::new(iyakki_storage::SysMounter), mke2fs: "/nonexistent/mke2fs".into(), scratch: "/nonexistent".into(), data_dir: "/nonexistent/data".into(), virtual_disks: None };
+            return StorageEnv { roots: iyakki_core_api::device_types::storage::Roots { sys_block: "/nonexistent/sys".into(), dev: "/nonexistent/dev".into(), mounts: "/nonexistent/mounts".into(), require_block: true }, mounter: Arc::new(iyakki_core_api::device_types::storage::SysMounter), mke2fs: "/nonexistent/mke2fs".into(), scratch: "/nonexistent".into(), data_dir: "/nonexistent/data".into(), virtual_disks: None };
         }
         #[allow(unreachable_code)]
         if let Some(v) = VIRTUAL_STORAGE.get() {
             return v.clone();
         }
         let mke2fs = ["/sbin/mke2fs", "/usr/sbin/mke2fs"].iter().map(std::path::PathBuf::from).find(|p| p.exists()).unwrap_or_else(|| "/sbin/mke2fs".into());
-        StorageEnv { roots: iyakki_storage::Roots::real(), mounter: Arc::new(iyakki_storage::SysMounter), mke2fs, scratch: "/run".into(), data_dir: "/var/lib/iyakki".into(), virtual_disks: None }
+        StorageEnv { roots: iyakki_core_api::device_types::storage::Roots::real(), mounter: Arc::new(iyakki_core_api::device_types::storage::SysMounter), mke2fs, scratch: "/run".into(), data_dir: "/var/lib/iyakki".into(), virtual_disks: None }
     }
 }
 
@@ -863,9 +904,9 @@ const SLIDER_HW: usize = 7100;
 pub struct SettingsApp {
     tabs: Vec<Tab>,
     tab: usize,
-    sel: [usize; 53],
+    sel: [usize; 56],
     /// Which rows of a long list are on the page, per page (a click leaves them, a key scrolls to the choice, the wheel scrolls).
-    win: [ListWindow; 53],
+    win: [ListWindow; 56],
     /// Network, Display and Sound pages.
     hw: DevicesPane,
     /// The Bluetooth page (its own view model; a popup for pairing).
@@ -916,11 +957,11 @@ pub struct SettingsApp {
     storage: StorageEnv,
     wifi: WifiEnv,
     /// The networks the last scan found, in the order the picker shows them (`None`: the extra choices below the list).
-    wifi_items: Vec<(String, Option<iyakki_devctl::wifi::Ap>)>,
+    wifi_items: Vec<(String, Option<iyakki_core_api::device_types::devctl::wifi::Ap>)>,
     /// The live signal and sign-in line of the joined WiFi network.
     link: iyakki_shared::wifilink::LinkWatch,
     link_t0: Option<std::time::Instant>,
-    devices: Vec<iyakki_storage::BlockDev>,
+    devices: Vec<iyakki_core_api::device_types::storage::BlockDev>,
     modal: Option<Modal>,
     job: Option<Job>,
     /// The Host access page's state.
@@ -1014,7 +1055,7 @@ impl SettingsApp {
             tabs.push(Tab::CloudRoles);
             tabs.push(Tab::AppAccess);
         }
-        if admin && !hf_on() && install_page::InstallEnv::real().available() {
+        if admin && !hf_on() && cx.os.installer().available() {
             tabs.push(Tab::Install);
         }
         if admin || cx.session.policy.voice {
@@ -1037,8 +1078,15 @@ impl SettingsApp {
         if admin || cx.session.policy.voice {
             tabs.push(Tab::GeminiVoice);
         }
+        // Alexa: an administrator always sees the page (to learn it needs the owner's product); others only once it is set up
+        if (admin || cx.session.policy.voice) && (admin || iyakki_shared::alexa::configured(cx.data_dir())) {
+            tabs.push(Tab::Alexa);
+        }
         tabs.push(Tab::ScreenSaver);
         tabs.push(Tab::Power);
+        if cx.session.policy.allows_app(iyakki_sec::policy::App::Radio) {
+            tabs.push(Tab::Radio);
+        }
         tabs.push(Tab::Appearance);
         tabs.push(Tab::Accessibility);
         tabs.push(Tab::Computer);
@@ -1054,9 +1102,11 @@ impl SettingsApp {
             tabs.push(Tab::EncHome);
         }
         tabs.sort_by_key(|t| Tab::ORDER.iter().position(|o| o == t).unwrap_or(usize::MAX));
-        let mut app = SettingsApp { tabs, tab: 0, sel: [0; 53], win: [ListWindow::default(); 53], hw: DevicesPane::new(DeviceEnv::real()), bt: BtPage::new(DeviceEnv::real()), ticks: 0, tip: Default::default(), test_record_ms: 2000, vo_lang: 0, vo_tight: false, vo_scroll: 0.0, vo_max: 0.0, lem_scroll: 0.0, lem_max: 0.0, lem_view_h: 0.0, lem_rect: R::new(0.0, 0.0, 0.0, 0.0), lem_s: 1.0, lem_focus: false, lem_query: TextField::new("Search models", false), lem_search: false, lem_texts: Vec::new(), section: if admin { 0 } else { 1 }, share_skills: cx.session.policy.manage_skills, nav_query: TextField::new("Search settings", false), nav_focus: false, nav_scroll: 0.0, narrow: false, show_list: false, nav_seen: usize::MAX, mouse: (0, 0), nav_rect: R::new(0.0, 0.0, 0.0, 0.0), nav_s: 1.0, slider_w: Vec::new(), storage: StorageEnv::real(), wifi: WifiEnv::real(), wifi_items: Vec::new(), link: Default::default(), link_t0: None, devices: vec![], modal: None, job: None, host: Default::default(), crash: Default::default(), router: Default::default(), backup: Default::default(), upd: Default::default(), status: None, dc: Default::default(), mem: memory::MemPanel::new(cx.os.memory()), disp: Default::default(), fw: Default::default(), tun: Default::default(), dom: Default::default(), vpn: Default::default(), remote: Default::default(), share: Default::default(), bh: Default::default(), time: Default::default(), hn: Default::default(), inst: Default::default(), devel: Default::default(), btn_bar: Default::default(), body_bar: Default::default(), body_tab: 0, git: Default::default(), matrix: Default::default(), shares: Default::default(), mh: Default::default(), kbd: Default::default(), bat: Default::default(), asst: Default::default(), pw: Default::default(), cloud: iyakki_cloudmode::CloudMode::desktop(), roles: Default::default(), ench: Default::default() };
+        let mut app = SettingsApp { tabs, tab: 0, sel: [0; 56], win: [ListWindow::default(); 56], hw: DevicesPane::new(DeviceEnv::real()), bt: BtPage::new(DeviceEnv::real()), ticks: 0, tip: Default::default(), test_record_ms: 2000, vo_lang: 0, vo_tight: false, vo_scroll: 0.0, vo_max: 0.0, lem_scroll: 0.0, lem_max: 0.0, lem_view_h: 0.0, lem_rect: R::new(0.0, 0.0, 0.0, 0.0), lem_s: 1.0, lem_focus: false, lem_query: TextField::new("Search models", false), lem_search: false, lem_texts: Vec::new(), section: if admin { 0 } else { 1 }, share_skills: cx.session.policy.manage_skills, nav_query: TextField::new("Search settings", false), nav_focus: false, nav_scroll: 0.0, narrow: false, show_list: false, nav_seen: usize::MAX, mouse: (0, 0), nav_rect: R::new(0.0, 0.0, 0.0, 0.0), nav_s: 1.0, slider_w: Vec::new(), storage: StorageEnv::real(), wifi: WifiEnv::real(), wifi_items: Vec::new(), link: Default::default(), link_t0: None, devices: vec![], modal: None, job: None, host: Default::default(), crash: Default::default(), router: Default::default(), backup: Default::default(), upd: Default::default(), status: None, dc: Default::default(), mem: memory::MemPanel::new(cx.os.memory()), disp: Default::default(), fw: Default::default(), tun: Default::default(), dom: Default::default(), vpn: Default::default(), remote: Default::default(), share: Default::default(), bh: Default::default(), time: Default::default(), hn: Default::default(), inst: install_page::InstallPanel::new(cx.os.installer()), devel: Default::default(), btn_bar: Default::default(), body_bar: Default::default(), body_tab: 0, git: Default::default(), matrix: Default::default(), shares: Default::default(), mh: Default::default(), kbd: Default::default(), bat: Default::default(), asst: Default::default(), pw: Default::default(), cloud: iyakki_cloudmode::CloudMode::desktop(), roles: Default::default(), ench: Default::default() };
         // the hardware pages go through the guarded handle: switching a radio or the brightness is asked of the broker
         app.hw.set_hardware(cx.os.hardware());
+        // Bluetooth audio too: the phone's connection and the pairing window are the core's, behind `bluetooth.use`
+        app.bt.model.set_bt_audio(cx.os.bt_audio());
         app.hw.set_core(cx.core.clone());
         app.bat_sync_tab();
         app.refresh_devices();
@@ -1089,7 +1139,7 @@ impl SettingsApp {
     }
 
     /// Replace what the private MAC address setting reads and changes (tests).
-    pub fn with_mac(mut self, mac: iyakki_devctl::mac::MacEnv) -> SettingsApp {
+    pub fn with_mac(mut self, mac: iyakki_core_api::device_types::devctl::mac::MacEnv) -> SettingsApp {
         self.hw.set_mac(mac);
         self
     }
@@ -1109,7 +1159,7 @@ impl SettingsApp {
 
     fn refresh_devices(&mut self) {
         if self.tabs.contains(&Tab::Storage) {
-            self.devices = iyakki_storage::list(&self.storage.roots);
+            self.devices = iyakki_core_api::device_types::storage::list(&self.storage.roots);
             self.sel[self.tabs.iter().position(|t| *t == Tab::Storage).unwrap_or(0)] = self.sel[self.tabs.iter().position(|t| *t == Tab::Storage).unwrap_or(0)].min(self.devices.len().saturating_sub(1));
         }
     }
@@ -1319,6 +1369,7 @@ impl SettingsApp {
                 self.mem_after_job();
                 self.refresh_devices();
             }
+            JobOut::Cast(r) => self.cast_done(r),
             JobOut::Wizard(r) => self.wiz_job_done(cx, r),
             JobOut::Cert(r) => self.cert_job_done(r),
             JobOut::HwCheck(card_id, r) => self.hw_check_done(card_id, r),
@@ -1597,10 +1648,14 @@ impl SettingsApp {
                 self.gv_consent_submit(cx, form);
                 return None;
             }
+            FormKind::AlexaConsent => {
+                self.alexa_consent_submit(cx, form);
+                return None;
+            }
             _ => {}
         }
         let result: Result<String, String> = match &kind {
-            FormKind::GeminiSetup | FormKind::GeminiConsent | FormKind::GeminiLiveConsent | FormKind::BundleWizard | FormKind::RouterBudget | FormKind::RouterScript | FormKind::FleetCreate | FormKind::FleetJoin | FormKind::FleetAddress(..) => return None, // answered above
+            FormKind::GeminiSetup | FormKind::GeminiConsent | FormKind::GeminiLiveConsent | FormKind::AlexaConsent | FormKind::BundleWizard | FormKind::RouterBudget | FormKind::RouterScript | FormKind::FleetCreate | FormKind::FleetJoin | FormKind::FleetAddress(..) => return None, // answered above
             FormKind::Provider(editing) => {
                 if !self.admin(cx) {
                     return None;
@@ -1708,7 +1763,7 @@ impl SettingsApp {
                     let (env, dev, force) = (self.storage.clone(), dev.clone(), *needs_force);
                     cx.audit.record(&cx.session.user, "storage.persist", &dev);
                     self.start("preparing the data disk", move || {
-                        JobOut::Msg(iyakki_storage::persist(&env.roots, env.mounter.as_ref(), &env.mke2fs, &env.scratch, &dev, force, Some(&env.data_dir)).map(|r| format!("{} is now the IYAKKI data disk ({} files copied). Reboot to start using it.", r.device, r.files_copied)))
+                        JobOut::Msg(iyakki_core_api::device_types::storage::persist(&env.roots, env.mounter.as_ref(), &env.mke2fs, &env.scratch, &dev, force, Some(&env.data_dir)).map(|r| format!("{} is now the IYAKKI data disk ({} files copied). Reboot to start using it.", r.device, r.files_copied)))
                     });
                     Ok("Working… this takes a few seconds.".to_string())
                 }
@@ -1717,7 +1772,7 @@ impl SettingsApp {
                 if !self.admin(cx) {
                     return None;
                 }
-                match iyakki_devctl::wifi::Known::new(ssid, &form.raw(0), *security, false, iyakki_clock::now_unix()) {
+                match iyakki_core_api::device_types::devctl::wifi::Known::new(ssid, &form.raw(0), *security, false, iyakki_clock::now_unix()) {
                     Ok(k) => {
                         self.join_wifi(cx, k);
                         Ok("Working… this takes a few seconds.".to_string())
@@ -1731,11 +1786,11 @@ impl SettingsApp {
                 }
                 let opt = |s: String| if s.trim().is_empty() { None } else { Some(s.trim().to_string()) };
                 let method = match form.choice_idx(0) {
-                    1 => iyakki_devctl::wifi_ext::EapMethod::Ttls,
-                    2 => iyakki_devctl::wifi_ext::EapMethod::Tls,
-                    _ => iyakki_devctl::wifi_ext::EapMethod::Peap,
+                    1 => iyakki_core_api::device_types::devctl::wifi_ext::EapMethod::Ttls,
+                    2 => iyakki_core_api::device_types::devctl::wifi_ext::EapMethod::Tls,
+                    _ => iyakki_core_api::device_types::devctl::wifi_ext::EapMethod::Peap,
                 };
-                let e = iyakki_devctl::wifi_ext::Enterprise {
+                let e = iyakki_core_api::device_types::devctl::wifi_ext::Enterprise {
                     method,
                     identity: form.value(1),
                     password: opt(form.raw(2)),
@@ -1747,7 +1802,7 @@ impl SettingsApp {
                     private_key: opt(form.value(7)),
                     private_key_password: opt(form.raw(8)),
                 };
-                match iyakki_devctl::wifi::Known::new_enterprise(ssid, false, e, iyakki_clock::now_unix()) {
+                match iyakki_core_api::device_types::devctl::wifi::Known::new_enterprise(ssid, false, e, iyakki_clock::now_unix()) {
                     Ok(k) => {
                         self.join_wifi(cx, k);
                         Ok("Working… this takes a few seconds.".to_string())
@@ -1760,9 +1815,9 @@ impl SettingsApp {
                     return None;
                 }
                 if form.choice_idx(1) != 1 {
-                    Err(iyakki_devctl::wifi_ext::wep_warning().to_string())
+                    Err(iyakki_core_api::device_types::devctl::wifi_ext::wep_warning().to_string())
                 } else {
-                match iyakki_devctl::wifi::Known::new_wep(ssid, &form.raw(0), false, iyakki_clock::now_unix()) {
+                match iyakki_core_api::device_types::devctl::wifi::Known::new_wep(ssid, &form.raw(0), false, iyakki_clock::now_unix()) {
                     Ok(k) => {
                         self.join_wifi(cx, k);
                         Ok("Working… this takes a few seconds.".to_string())
@@ -1776,8 +1831,8 @@ impl SettingsApp {
                     return None;
                 }
                 let (name, pass) = (form.value(0), form.raw(1));
-                let sec = if pass.is_empty() { iyakki_devctl::wifi::Security::Open } else { iyakki_devctl::wifi::Security::Wpa2 };
-                match iyakki_devctl::wifi::Known::new(name.trim(), &pass, sec, true, iyakki_clock::now_unix()) {
+                let sec = if pass.is_empty() { iyakki_core_api::device_types::devctl::wifi::Security::Open } else { iyakki_core_api::device_types::devctl::wifi::Security::Wpa2 };
+                match iyakki_core_api::device_types::devctl::wifi::Known::new(name.trim(), &pass, sec, true, iyakki_clock::now_unix()) {
                     Ok(k) => {
                         self.join_wifi(cx, k);
                         Ok("Working… this takes a few seconds.".to_string())
@@ -1790,12 +1845,12 @@ impl SettingsApp {
                     return None;
                 }
                 let Some(v) = self.storage.virtual_disks.clone() else { return None };
-                match iyakki_storage::virt::parse_size(&form.value(0)) {
+                match iyakki_core_api::device_types::storage::virt::parse_size(&form.value(0)) {
                     None => Err("Write a size such as 8G or 512M.".to_string()),
                     Some(bytes) => v.add(bytes).map(|name| {
                         cx.audit.record(&cx.session.user, "storage.virtual.add", &name);
                         self.refresh_devices();
-                        format!("Made the virtual disk {name} ({}).", iyakki_storage::human(bytes))
+                        format!("Made the virtual disk {name} ({}).", iyakki_core_api::device_types::storage::human(bytes))
                     }),
                 }
             }
@@ -1833,6 +1888,7 @@ impl SettingsApp {
             FormKind::HotspotWifi => self.hotspot_wifi_submit(cx, form),
             FormKind::HotspotCountry => self.hotspot_country_submit(cx, form),
             FormKind::Backup(k) => self.backup_submit(cx, &k, form),
+            FormKind::AppAccessLimit(i, c) => self.appaccess_limit_submit(cx, &i, &c, form),
             FormKind::Remote(k) => self.remote_submit(cx, &k, form),
             FormKind::Sftp(k) => self.sftp_submit(cx, &k, form),
             FormKind::Machine(k) => self.machine_submit(cx, &k, form),
@@ -1851,12 +1907,15 @@ impl SettingsApp {
             FormKind::TimeServer => self.time_submit(cx, form),
             FormKind::HomeGroup(id) => self.hl_submit(cx, id, form),
             FormKind::View(id) => self.vw_submit(cx, id, form),
+            FormKind::ViewKeys => self.vw_keys_submit(cx, form),
             FormKind::HostName => self.host_name_submit(cx, form),
             FormKind::BrowserCert => self.browser_cert_submit(cx, form),
             FormKind::BrowserBadAdd => self.browser_bad_add_submit(cx, form),
             FormKind::BrowserBadRemove => self.browser_bad_remove_submit(cx, form),
+            FormKind::BrowserProxy => self.browser_proxy_submit(cx, form),
             FormKind::UpdateFolder => self.upd_folder_submit(form),
             FormKind::UpdateBundle => self.upd_bundle_submit(form, cx),
+            FormKind::UpdateFetch => self.upd_fetch_submit(form, cx),
             FormKind::UpdateSource => self.upd_source_submit(cx, form),
             FormKind::Install(d) => self.inst_submit(cx, d, form),
             FormKind::AgentModel(_) | FormKind::AgentCustom(_) => match self.agents_submit(cx, &kind, form) {
@@ -1956,6 +2015,13 @@ impl SettingsApp {
         if kind == PickKind::SoundOutput {
             return self.sound_pick(cx, item);
         }
+        if kind == PickKind::BluetoothSink {
+            // the item reads `Name  [address]`: the address is what is sent on
+            let address = item.rsplit_once('[').and_then(|(_, a)| a.strip_suffix(']')).unwrap_or("").to_string();
+            let name = item.split("  [").next().unwrap_or(item).to_string();
+            self.modal = Some(Modal::Confirm(ConfirmKind::BluetoothSound(address), format!("Send all of this computer's sound to {name}? Its own speakers go silent until you stop it. Press y to start.")));
+            return;
+        }
         if let PickKind::Lemonade(p) = kind {
             return self.lem_pick(cx, p, item);
         }
@@ -1964,7 +2030,7 @@ impl SettingsApp {
                 let chosen = self.wifi_items.iter().find(|(t, _)| t == item).cloned();
                 match chosen {
                     Some((_, Some(ap))) => {
-                        if ap.security == iyakki_devctl::wifi::Security::Enterprise {
+                        if ap.security == iyakki_core_api::device_types::devctl::wifi::Security::Enterprise {
                             let f = Form::new(&format!("Join {} (enterprise)", ap.ssid))
                                 .choice("Method", &["PEAP", "TTLS", "TLS (certificate)"], 0)
                                 .text("User name", "", "your login at the school or company")
@@ -1978,13 +2044,13 @@ impl SettingsApp {
                             self.open_form(FormKind::WifiEnterprise(ap.ssid.clone()), f);
                             return;
                         }
-                        if ap.security == iyakki_devctl::wifi::Security::Wep {
+                        if ap.security == iyakki_core_api::device_types::devctl::wifi::Security::Wep {
                             let f = Form::new(&format!("Join {} (WEP: not safe)", ap.ssid)).secret("WEP key", "5 or 13 characters, or 10 or 26 hexadecimal digits").choice("WEP can be broken in minutes", &["No, do not join", "Yes, I understand"], 0);
                             self.open_form(FormKind::WifiWep(ap.ssid.clone()), f);
                             return;
                         }
-                        if ap.security == iyakki_devctl::wifi::Security::Open {
-                            match iyakki_devctl::wifi::Known::new(&ap.ssid, "", ap.security, false, iyakki_clock::now_unix()) {
+                        if ap.security == iyakki_core_api::device_types::devctl::wifi::Security::Open {
+                            match iyakki_core_api::device_types::devctl::wifi::Known::new(&ap.ssid, "", ap.security, false, iyakki_clock::now_unix()) {
                                 Ok(k) => self.join_wifi(cx, k),
                                 Err(e) => self.fail(e),
                             }
@@ -2020,9 +2086,9 @@ impl SettingsApp {
                 return;
             }
             PickKind::MacMode(k) => {
-                let Some(mode) = iyakki_devctl::mac::MacMode::ALL.into_iter().find(|m| m.label() == item) else { return };
+                let Some(mode) = iyakki_core_api::device_types::devctl::mac::MacMode::ALL.into_iter().find(|m| m.label() == item) else { return };
                 let mac = self.hw.mac().clone();
-                let name = if k == iyakki_devctl::LinkKind::Wifi { "WiFi" } else { "Ethernet" };
+                let name = if k == iyakki_core_api::device_types::devctl::LinkKind::Wifi { "WiFi" } else { "Ethernet" };
                 match mac.set_mode(Some(k), None, mode) {
                     Ok(_) => {
                         cx.audit.record(&cx.session.user, "settings.network.mac", &format!("{} {}", name.to_lowercase(), mode.key()));
@@ -2081,7 +2147,7 @@ impl SettingsApp {
                 "chat",
                 p,
             ),
-            PickKind::Wifi | PickKind::WifiForget | PickKind::Options(_) | PickKind::AgentKey(_) | PickKind::AgentModel(_) | PickKind::MacMode(_) | PickKind::Lemonade(_) | PickKind::SoundOutput | PickKind::HomeMove(_) | PickKind::ViewTemplate | PickKind::FwService | PickKind::Computer(_) => return,
+            PickKind::Wifi | PickKind::WifiForget | PickKind::Options(_) | PickKind::AgentKey(_) | PickKind::AgentModel(_) | PickKind::MacMode(_) | PickKind::Lemonade(_) | PickKind::SoundOutput | PickKind::BluetoothSink | PickKind::HomeMove(_) | PickKind::ViewTemplate | PickKind::FwService | PickKind::Computer(_) => return,
             PickKind::Embed(p) => {
                 let choice = if item.starts_with("(built-in") { None } else { Some(ModelChoice { provider: p.clone(), model: item.into() }) };
                 (cx.settings().lock().unwrap().set_embedding(choice), "embedding", p)
@@ -2106,6 +2172,9 @@ impl SettingsApp {
         }
         if matches!(kind, ConfirmKind::WizardRun | ConfirmKind::WizardFinish) {
             return self.wiz_confirm(cx, kind);
+        }
+        if let ConfirmKind::BluetoothSound(address) = &kind {
+            return self.sound_bluetooth_start(cx, address);
         }
         if matches!(kind, ConfirmKind::GeminiRevoke) {
             return self.gem_revoke(cx);
@@ -2792,6 +2861,7 @@ impl SettingsApp {
             Tab::ModelRouter => self.router_len(cx),
             Tab::Fleet => self.fleet_len(cx),
             Tab::GeminiVoice => self.gv_rows().len(),
+            Tab::Alexa => self.alexa_rows().len(),
             Tab::Vault => self.secret_names(cx).map_or(0, |n| n.len()),
             Tab::Backup => self.backup_len(),
             Tab::SecretProviders => Self::secret_providers(cx).len(),
@@ -2820,7 +2890,7 @@ impl SettingsApp {
             Tab::Displays => self.disp_len(),
             Tab::ScreenSaver => Self::ss_len(cx),
             Tab::Browser if self.bh.open => self.bh_len(cx),
-            Tab::Voice | Tab::Remote | Tab::Account | Tab::Browser | Tab::Memory | Tab::Time | Tab::Battery | Tab::Power | Tab::Accessibility | Tab::Appearance | Tab::EncHome | Tab::Computer | Tab::HostName | Tab::SessionLog | Tab::Cloud => 0,
+            Tab::Voice | Tab::Remote | Tab::Account | Tab::Browser | Tab::Memory | Tab::Time | Tab::Battery | Tab::Power | Tab::Radio | Tab::Accessibility | Tab::Appearance | Tab::EncHome | Tab::Computer | Tab::HostName | Tab::SessionLog | Tab::Cloud => 0,
             Tab::Startup => iyakki_shared::startup::CATALOGUE.len(),
             Tab::CloudRoles => self.roles_len(cx),
         }
@@ -2869,9 +2939,9 @@ impl SettingsApp {
             }
             // compatible USB mode (no UAS) for the next start: slower, steadier (docs/STORAGE-LOSS.md)
             Key::Char('u') if self.admin(cx) => {
-                let snap = iyakki_storage::loss::snapshot();
+                let snap = iyakki_core_api::device_types::storage::loss::snapshot();
                 let Some(link) = snap.link.clone() else { return self.fail("The drive IYAKKI runs from is not a USB drive (or its port could not be read), so there is nothing to change.") };
-                match iyakki_storage::loss::set_compat(!snap.compat, &link.id) {
+                match iyakki_core_api::device_types::storage::loss::set_compat(!snap.compat, &link.id) {
                     Ok(m) => {
                         cx.audit.record(&cx.session.user, "storage.usbcompat", if snap.compat { "off" } else { "on" });
                         self.ok(m)
@@ -2899,7 +2969,7 @@ impl SettingsApp {
             }
             Key::Char('m') if self.admin(cx) => {
                 let Some(dev) = self.devices.get(self.sel()).cloned() else { return };
-                match iyakki_storage::eligibility(&dev, &self.devices) {
+                match iyakki_core_api::device_types::storage::eligibility(&dev, &self.devices) {
                     Err(why) => self.fail(format!("Cannot use it: {why}.")),
                     Ok(what) => {
                         let mut f = Form::new(&format!("Erase /dev/{} and use it for IYAKKI data?", dev.name)).text(&format!("Type {} to confirm", dev.name), "", "everything on this disk will be lost");
@@ -2915,8 +2985,8 @@ impl SettingsApp {
     }
 
     fn render_storage(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        use iyakki_storage::DataLocation;
-        let loc = iyakki_storage::data_location(&self.storage.roots, &self.storage.data_dir);
+        use iyakki_core_api::device_types::storage::DataLocation;
+        let loc = iyakki_core_api::device_types::storage::data_location(&self.storage.roots, &self.storage.data_dir);
         let (text, col) = match &loc {
             DataLocation::Disk(d) => (format!("Saved to disk ({d}). Your accounts, settings, vaults, documents and chats survive power-off."), OK),
             DataLocation::Memory => ("Kept in RAM. Everything is forgotten at power-off. Pick a disk below to keep your data.".to_string(), crate::fx::AMBER),
@@ -2925,13 +2995,13 @@ impl SettingsApp {
         for (i, l) in g.wrap(15.0 * s, &text, Face::Bold, a.w).iter().take(2).enumerate() {
             g.text(a.x, a.y + i as f32 * 21.0 * s, 15.0 * s, col, l, Face::Bold);
         }
-        if let Some((free, total)) = iyakki_storage::space(&self.storage.data_dir) {
-            g.text(a.x, a.y + 46.0 * s, 13.0 * s, MUTED, &format!("{} free of {}", iyakki_storage::human(free), iyakki_storage::human(total)), Face::Sans);
+        if let Some((free, total)) = iyakki_core_api::device_types::storage::space(&self.storage.data_dir) {
+            g.text(a.x, a.y + 46.0 * s, 13.0 * s, MUTED, &format!("{} free of {}", iyakki_core_api::device_types::storage::human(free), iyakki_core_api::device_types::storage::human(total)), Face::Sans);
         }
         let mut y = a.y + 76.0 * s;
         // how the boot drive is connected (speed, port, hub) and the compatible USB mode (docs/STORAGE-LOSS.md)
         {
-            let snap = iyakki_storage::loss::snapshot();
+            let snap = iyakki_core_api::device_types::storage::loss::snapshot();
             if let Some(l) = &snap.link {
                 let name = if l.name.is_empty() { "The drive".to_string() } else { l.name.clone() };
                 let driver = if l.driver == "uas" { "UAS (fast)" } else if l.driver.is_empty() { "unknown driver" } else { "usb-storage (compatible)" };
@@ -2941,7 +3011,7 @@ impl SettingsApp {
                     g.text(a.x, y, 13.0 * s, col, t, Face::Sans);
                     y += 18.0 * s;
                 }
-                let advice = iyakki_storage::loss::link_advice(Some(l));
+                let advice = iyakki_core_api::device_types::storage::loss::link_advice(Some(l));
                 if !advice.is_empty() {
                     for t in g.wrap(13.0 * s, &advice, Face::Sans, a.w).iter().take(3) {
                         g.text(a.x, y, 13.0 * s, crate::fx::AMBER, t, Face::Sans);
@@ -2955,7 +3025,7 @@ impl SettingsApp {
                 y += 24.0 * s;
             }
             if !snap.state.healthy() {
-                let t = iyakki_storage::loss::unavailable_text(&snap);
+                let t = iyakki_core_api::device_types::storage::loss::unavailable_text(&snap);
                 for l in g.wrap(13.0 * s, &t, Face::Bold, a.w).iter().take(2) {
                     g.text(a.x, y, 13.0 * s, ERR, l, Face::Bold);
                     y += 18.0 * s;
@@ -2992,7 +3062,7 @@ impl SettingsApp {
                 break;
             }
             let indent = if d.parent.is_some() { 24.0 * s } else { 0.0 };
-            let verdict = match iyakki_storage::eligibility(d, &self.devices) {
+            let verdict = match iyakki_core_api::device_types::storage::eligibility(d, &self.devices) {
                 Err(why) => why,
                 Ok(None) => "empty — can be used".to_string(),
                 Ok(Some(what)) => format!("holds {what}"),
@@ -3003,7 +3073,7 @@ impl SettingsApp {
             if d.removable {
                 chips.push(("removable", ACCENT));
             }
-            if d.content == iyakki_storage::Content::Iyakki {
+            if d.content == iyakki_core_api::device_types::storage::Content::Iyakki {
                 chips.push(("IYAKKI data", OK));
             }
             if d.mounted_at.is_some() {
@@ -3038,10 +3108,10 @@ impl SettingsApp {
     }
 
     /// The adapter the selected Network row belongs to.
-    fn selected_adapter(&mut self) -> Option<(String, iyakki_devctl::LinkKind)> {
+    fn selected_adapter(&mut self) -> Option<(String, iyakki_core_api::device_types::devctl::LinkKind)> {
         match self.selected_target()? {
-            Target::Ethernet(n) => Some((n, iyakki_devctl::LinkKind::Ethernet)),
-            Target::Wifi(n, _) => Some((n, iyakki_devctl::LinkKind::Wifi)),
+            Target::Ethernet(n) => Some((n, iyakki_core_api::device_types::devctl::LinkKind::Ethernet)),
+            Target::Wifi(n, _) => Some((n, iyakki_core_api::device_types::devctl::LinkKind::Wifi)),
             Target::Mac(n, k) => Some((n, k)),
             _ => None,
         }
@@ -3056,8 +3126,8 @@ impl SettingsApp {
             return self.fail("The MAC address is managed by the host operating system here (this is a window on another computer).");
         }
         let Some((_, kind)) = self.selected_adapter() else { return self.fail("Select an Ethernet or WiFi row first.") };
-        let title = format!("Private MAC address for {}", if kind == iyakki_devctl::LinkKind::Wifi { "WiFi" } else { "Ethernet" });
-        let items = iyakki_devctl::mac::MacMode::ALL.iter().map(|m| m.label().to_string()).collect();
+        let title = format!("Private MAC address for {}", if kind == iyakki_core_api::device_types::devctl::LinkKind::Wifi { "WiFi" } else { "Ethernet" });
+        let items = iyakki_core_api::device_types::devctl::mac::MacMode::ALL.iter().map(|m| m.label().to_string()).collect();
         self.modal = Some(Modal::Pick(PickKind::MacMode(kind), Picker::new(&title, items)));
     }
 
@@ -3086,12 +3156,12 @@ impl SettingsApp {
         self.hw.invalidate();
         self.start("changing the MAC address", move || {
             JobOut::Msg((|| {
-                let wifi = iyakki_devctl::links(&mac.roots).iter().any(|l| l.name == iface && l.kind == iyakki_devctl::LinkKind::Wifi);
+                let wifi = iyakki_core_api::device_types::devctl::links(&mac.roots).iter().any(|l| l.name == iface && l.kind == iyakki_core_api::device_types::devctl::LinkKind::Wifi);
                 let ssid = if wifi { w.current_ssid(&iface) } else { None };
                 let said = mac.apply_now(&iface, ssid.as_deref(), true)?;
                 if wifi {
                     let eff = ssid.or_else(|| mac.preferred_ssid());
-                    let mode = mac.config().mode_for(iyakki_devctl::LinkKind::Wifi, &iface, eff.as_deref());
+                    let mode = mac.config().mode_for(iyakki_core_api::device_types::devctl::LinkKind::Wifi, &iface, eff.as_deref());
                     w.apply_with(&iface, &known.list(), mode, true)?;
                 } else {
                     w.dhcp(&iface, true)?;
@@ -3106,15 +3176,15 @@ impl SettingsApp {
         if !self.admin(cx) {
             return self.fail("Only administrators can change the network.");
         }
-        let Some(iface) = self.wifi.iface() else { return self.fail(if iyakki_devctl::broadcom_wifi_without_driver(&self.wifi.roots) { iyakki_devctl::BROADCOM_NO_DRIVER_TEXT } else { "This computer has no WiFi adapter." }) };
+        let Some(iface) = self.wifi.iface() else { return self.fail(if iyakki_core_api::device_types::devctl::broadcom_wifi_without_driver(&self.wifi.roots) { iyakki_core_api::device_types::devctl::BROADCOM_NO_DRIVER_TEXT } else { "This computer has no WiFi adapter." }) };
         let w = self.wifi.wifi.clone();
         cx.audit.record(&cx.session.user, "settings.wifi.scan", &iface);
         self.start("looking for WiFi networks", move || JobOut::Wifi(w.scan(&iface)));
     }
 
-    fn show_wifi_picker(&mut self, aps: Vec<iyakki_devctl::wifi::Ap>) {
+    fn show_wifi_picker(&mut self, aps: Vec<iyakki_core_api::device_types::devctl::wifi::Ap>) {
         let known: Vec<String> = self.wifi.known.list().into_iter().map(|k| k.ssid).collect();
-        let mut items: Vec<(String, Option<iyakki_devctl::wifi::Ap>)> = aps
+        let mut items: Vec<(String, Option<iyakki_core_api::device_types::devctl::wifi::Ap>)> = aps
             .into_iter()
             .map(|a| {
                 let bars = "▂▄▆█".chars().take(a.bars()).collect::<String>();
@@ -3132,14 +3202,14 @@ impl SettingsApp {
     }
 
     /// Remember a network and make the machine use it, in the background.
-    fn join_wifi(&mut self, cx: &AppCx, k: iyakki_devctl::wifi::Known) {
-        let Some(iface) = self.wifi.iface() else { return self.fail(if iyakki_devctl::broadcom_wifi_without_driver(&self.wifi.roots) { iyakki_devctl::BROADCOM_NO_DRIVER_TEXT } else { "This computer has no WiFi adapter." }) };
+    fn join_wifi(&mut self, cx: &AppCx, k: iyakki_core_api::device_types::devctl::wifi::Known) {
+        let Some(iface) = self.wifi.iface() else { return self.fail(if iyakki_core_api::device_types::devctl::broadcom_wifi_without_driver(&self.wifi.roots) { iyakki_core_api::device_types::devctl::BROADCOM_NO_DRIVER_TEXT } else { "This computer has no WiFi adapter." }) };
         let (w, store) = (self.wifi.wifi.clone(), self.wifi.known.clone());
-        let mac = iyakki_devctl::mac::MacEnv { roots: self.wifi.roots.clone(), ..self.hw.mac().clone() };
+        let mac = iyakki_core_api::device_types::devctl::mac::MacEnv { roots: self.wifi.roots.clone(), ..self.hw.mac().clone() };
         cx.audit.record(&cx.session.user, "settings.wifi.join", &k.ssid);
         let ssid = k.ssid.clone();
         let _ = ssid;
-        self.start("joining the network", move || JobOut::Msg(iyakki_devctl::wifi::join_now(&w, &store, &mac, &iface, k)));
+        self.start("joining the network", move || JobOut::Msg(iyakki_core_api::device_types::devctl::wifi::join_now(&w, &store, &mac, &iface, k)));
     }
 
     /// Bigger (`u`) or smaller (`U`) text and buttons, kept for this person.
@@ -3234,6 +3304,8 @@ impl SettingsApp {
             Key::Char('m') if tab == DevTab::Network => self.choose_mac_mode(cx),
             Key::Char('a') if tab == DevTab::Network => self.ask_mac_apply(cx),
             Key::Char('n') if tab == DevTab::Network => self.toggle_announce(cx),
+            Key::Char('o') if tab == DevTab::Network => self.open_sign_in(cx),
+            Key::Char('v') if tab == DevTab::Network => self.use_next_adapter(cx),
             Key::Enter | Key::Char(' ') if tab == DevTab::Network && matches!(self.selected_target(), Some(Target::Mac(..))) => self.choose_mac_mode(cx),
             Key::Char('u') if tab == DevTab::Display => self.change_ui_size(true, cx),
             Key::Char('U') if tab == DevTab::Display => self.change_ui_size(false, cx),
@@ -3410,7 +3482,7 @@ impl SettingsApp {
         if self.browser_scroll_key(k) {
             return;
         }
-        if self.handle_browser_short(k, cx) || self.handle_browser_graphics(k, cx) || self.handle_browser_speed(k, cx) || self.handle_browser_block(k, cx) || self.handle_browser_protect(k, cx) || self.handle_browser_cert(k, cx) || self.handle_browser_bad(k, cx) || self.handle_browser_media(k, cx) || self.handle_browser_choices(k, cx) || self.handle_browser_devices(k, cx) || self.handle_browser_sites(k, cx) {
+        if self.handle_browser_short(k, cx) || self.handle_browser_graphics(k, cx) || self.handle_browser_speed(k, cx) || self.handle_browser_block(k, cx) || self.handle_browser_protect(k, cx) || self.handle_browser_cert(k, cx) || self.handle_browser_bad(k, cx) || self.handle_browser_proxy(k, cx) || self.handle_browser_media(k, cx) || self.handle_browser_choices(k, cx) || self.handle_browser_devices(k, cx) || self.handle_browser_sites(k, cx) {
             return;
         }
         let mut c = super::browser_config::load(cx);
@@ -3538,6 +3610,7 @@ impl SettingsApp {
         y += self.render_browser_protect(g, a, y, s, cx);
         y += self.render_browser_cert(g, a, y, s, cx);
         y += self.render_browser_bad(g, a, y, s, cx);
+        y += self.render_browser_proxy(g, a, y, s, cx);
         y += self.render_browser_media(g, a, y, s, cx);
         y += self.render_browser_choices(g, a, y, s, cx);
         if y + 60.0 * s > a.y + a.h {
@@ -3881,7 +3954,7 @@ impl SettingsApp {
 
     fn own_namespaces(cx: &AppCx) -> Vec<String> {
         if cx.session.policy.manage_settings {
-            let mut v = cx.kb().lock().unwrap().namespaces();
+            let mut v = cx.kb().namespaces();
             for n in ["shared"] {
                 if !v.iter().any(|x| x == n) {
                     v.push(n.into());
@@ -3897,7 +3970,7 @@ impl SettingsApp {
         let svc = Self::svc(cx).clone();
         let nss = Self::own_namespaces(cx);
         self.start("re-embedding documents", move || {
-            let mut kb = svc.kb().lock().unwrap();
+            let kb = svc.kb();
             let mut done = 0;
             for ns in &nss {
                 if kb.stats(ns).is_some() {
@@ -3916,7 +3989,7 @@ impl SettingsApp {
         let base = std::path::PathBuf::from(&cx.cfg.rag_docs);
         let (ns, dir) = if cx.session.policy.manage_settings { ("shared".to_string(), base.join("shared")) } else { (format!("user/{}", cx.session.user), base.join(&cx.session.user)) };
         self.start("indexing documents", move || {
-            let (added, seen) = svc.kb().lock().unwrap().ingest_dir(&ns, &dir);
+            let (added, seen) = svc.kb().ingest_dir(&ns, &dir);
             JobOut::Msg(Ok(format!("{ns}: {added} new document(s) indexed ({seen} files scanned in {}).", dir.display())))
         });
     }
@@ -3935,7 +4008,7 @@ impl SettingsApp {
             Key::Char('t') => {
                 if let Some((a, _)) = list.get(self.sel()) {
                     let (svc, a) = (Self::svc(cx).clone(), a.clone());
-                    self.start("testing provider", move || JobOut::Msg(svc.secrets().test_provider(&a).map(|_| format!("{a}: reachable, token accepted")).map_err(|e| format!("{a}: {e}"))));
+                    self.start("testing provider", move || JobOut::Msg(svc.secrets_api().test_provider(&a).map(|_| format!("{a}: reachable, token accepted")).map_err(|e| format!("{a}: {e}"))));
                 }
             }
             _ => {}
@@ -4027,12 +4100,13 @@ impl App for SettingsApp {
             Tab::Models => "a add · N add NVIDIA NIM (free key) · g Google Gemini (experimental) · C its consent · f detect Ollama/Lemonade · H Mac or GPU host · e edit · d delete · t test · m chat model · v vision model · y tidy model (dictation wording) · b embeddings · k key · x on/off · c test chat · l Lemonade models · K check my models (NVIDIA)",
             Tab::Agents => "d detect · i install · l login · o logout · k API key · m model · a Auto · u use for new chats · t test · n add custom · e edit · x hide/show",
             Tab::Assistant => "h remember on/off · f forget the selected history (press twice) · o show chats · t/T think limit up/down · q/Q silence limit up/down · 0 default",
+            Tab::Alexa => "Up/Down choose · Enter or o on/off · C consent card (your own yes)",
             Tab::GeminiVoice => "Up/Down choose · Enter or +/- change · C consent card · v who speaks · k start key · w wake hand-off · o on/off · x Stop now",
             Tab::Rag => "a add backend · t test · r reindex · i ingest documents · o order passages · O reranking model · g Graph RAG · / find a page",
-            Tab::Backup => "b back up · o open a backup file · Space include/leave out or choose/skip · r restore the chosen things · c close the file · k look again · Up/Down choose",
+            Tab::Backup => "b back up · o open a backup file · Space include/leave out or choose/skip · r restore the chosen things · c close the file · k look again · n to a network share · l add a chain link · y machine data (admins) · Up/Down choose",
             Tab::Vault => "n new · d delete · Tab system/personal · l lock · f key file · u unlock my vault",
             Tab::Skills => "c add from clipboard · a quick create · i import file · d delete",
-            Tab::Network => "Enter turn on/off · w join a WiFi network · n announce this device's name · r look again",
+            Tab::Network => "Enter turn on/off · w join a WiFi network · o open the network's sign-in page · v use the other WiFi adapter · n announce this device's name · r look again",
             Tab::Bluetooth => "Up/Down choose · Enter does the main action (pair, connect) · e Bluetooth on/off · s scan or stop · / search · t phone tethering · u forget · a Advanced · r look again",
             Tab::Display => "u bigger text · U smaller text · + brighter · − dimmer · r look again",
             Tab::Sound => "o output · t test sound · + louder · − quieter · m mute · Enter use the selected output · A advanced · M mixer · r look again",
@@ -4047,6 +4121,7 @@ impl App for SettingsApp {
             Tab::EncHome => "c make my home encrypted · m move my existing files · u open · r open with the recovery key · l lock now · k new recovery key · a administrator slot · s close with the screen lock · x remove the old plain copy",
             Tab::Appearance => "[ ] Look · 1-5 or w wallpaper · f text font · p code font · s style · h shape · z size · i names · y layout · c columns · e spacing · d dock · a pin an app · x unpin · o usual apps · k g n v j top bar items",
             Tab::Accessibility => "r screen reader · t test the voice · n speak notices · c high contrast · u/U bigger/smaller text · p large pointer · f big focus ring · m reduce motion · k sticky keys · w slow keys",
+            Tab::Radio => "r reconnect tries (0 to 5) · + more · - fewer · a go on to the next station on or off (administrators)",
             Tab::Power => "e performance · b balanced · v power saver · s sleep after idle (next time) · w sleep while busy (administrators)",
             Tab::Battery => "p percentage in the top bar · w low battery warnings · s shut down at the critical level (administrators)",
             Tab::Browser if self.bh.open => "a add · e edit · x or Enter enable/disable · d delete · b or Esc back · Up/Down choose",
@@ -4063,7 +4138,7 @@ impl App for SettingsApp {
             Tab::SessionLog => "Up/Down/PageUp/PageDown/Home/End scroll · p other boot (crash, before, this one) · y I have seen it · r read again",
             Tab::GitKeys => "a connect Git or Gitea · T test · e edit · m make default · R remove a connection · n generate a key · i import · c copy the public key · u unlock · d delete · h host → key · t token · x remove a rule · f forget a known host · Up/Down choose",
             Tab::Developer if self.devel.usb_open => "r check again · z authorize · p pair (type the code, Enter) · s speed · c copy diagnostics · f fixed addresses · m allow more · u back · Up/Down scroll",
-            Tab::Developer => "Click or tap anything, or: e on/off · h switch-off time · p pair a computer · C copy the code · c cancel it · Up/Down choose · x revoke · l activity log · u USB-C · W WASM tiles (experimental)",
+            Tab::Developer => "Click or tap anything, or: e on/off · h switch-off time · p pair a computer · C copy the code · c cancel it · Up/Down choose · x revoke · l activity log · u USB-C · Y relay · F relay certificate · W WASM tiles (experimental)",
             Tab::Updates => "Up/Down choose an update · i install · r roll back to the kept version · y yes, do it · n no · f choose a folder · s look again · c check for updates now · m how often to check · u address of the update list (administrators)",
             Tab::Install => "Up/Down choose a disk · i install (erases it) · p show the plan · t partition table (Auto/GPT/MBR) · r look again · b restart",
             Tab::Voice => "E echo cancellation · s speech-to-text · v text-to-speech · c commands · m mic test · p speaker test · t STT test · y test voice · e engine · g voice · l language · f speed · k re-check · o voice helper",
@@ -4079,7 +4154,7 @@ impl App for SettingsApp {
             Tab::SshTunnels => "a add · e edit · x enable/disable · d delete · T test · r retry · c copy the address · k copy the public key · Up/Down choose",
             Tab::Shares => "n new share · s start/stop · c copy the link · q QR code · e edit · t new secret for the link · d delete · x stop all sharing · m media server (TVs and players) on/off · Up/Down choose",
             Tab::Account => "p change password · u bigger text · U smaller text",
-            Tab::Views => "Up/Down choose · n new view · t from a template · r rename · x delete · [ ] put in order · l lock on/off (asks for your password to switch) · k step keys · o after the lock",
+            Tab::Views => "Up/Down choose · n new view · t from a template · r rename · x delete · [ ] put in order · l lock on/off (asks for your password to switch) · k step keys · j your own step keys · o after the lock",
             Tab::HomeLayout => "Up/Down choose · n new group · r rename · x delete group · [ ] put your groups in order · m move the tile · p put it back · z reset layout",
         }
         .into()
@@ -4123,7 +4198,9 @@ impl App for SettingsApp {
                 "router" | "modelrouter" | "models-router" => Some(Tab::ModelRouter),
                 "fleet" | "pair" | "pairgroup" => Some(Tab::Fleet),
                 "geminivoice" | "gemini-voice" | "live" => Some(Tab::GeminiVoice),
+                "alexa" | "amazon" => Some(Tab::Alexa),
                 "power" => Some(Tab::Power),
+                "radio" => Some(Tab::Radio),
                 "accessibility" | "screenreader" | "access" => Some(Tab::Accessibility),
                 "appearance" | "look" | "looks" | "wallpaper" | "dock" | "icons" => Some(Tab::Appearance),
                 "encryptedhome" | "encrypted" | "encryption" | "enchome" => Some(Tab::EncHome),
@@ -4305,7 +4382,7 @@ impl App for SettingsApp {
         if self.tab() == Tab::Keyboard && self.kbd_test_event(ev) {
             return Flow::Stay;
         }
-        if self.tab() == Tab::Developer && self.usb_event(ev, cx) {
+        if self.tab() == Tab::Developer && (self.usb_event(ev, cx) || self.relay_pin_event(ev, cx)) {
             return Flow::Stay;
         }
         if self.tab() == Tab::Memory && self.memory_event(ev) {
@@ -4418,6 +4495,7 @@ impl App for SettingsApp {
                 Tab::ModelRouter => self.handle_router(other, cx),
                 Tab::Fleet => self.handle_fleet(other, cx),
                 Tab::GeminiVoice => self.handle_geminivoice(other, cx),
+                Tab::Alexa => self.handle_alexa(other, cx),
                 Tab::Vault => self.handle_vault(other, cx),
                 Tab::Backup => self.handle_backup(other, cx),
                 Tab::Skills => self.handle_skills(other, cx),
@@ -4445,6 +4523,7 @@ impl App for SettingsApp {
                 Tab::CloudRoles => self.handle_cloudroles(other, cx),
                 Tab::Battery => self.handle_battery(other, cx),
                 Tab::Power => self.handle_power(other, cx),
+                Tab::Radio => self.handle_radio(other, cx),
                 Tab::Accessibility => self.handle_access(other, cx),
                 Tab::Appearance => self.handle_appearance(other, cx),
                 Tab::EncHome => self.handle_ench(other, cx),
@@ -4624,6 +4703,7 @@ impl SettingsApp {
             Tab::ModelRouter => self.render_router(g, body, s, cx),
             Tab::Fleet => self.render_fleet(g, body, s, cx),
             Tab::GeminiVoice => self.render_geminivoice(g, body, s, cx),
+            Tab::Alexa => self.render_alexa(g, body, s, cx),
             Tab::Vault => self.render_vault(g, body, s, cx),
             Tab::Backup => self.render_backup(g, body, s, cx),
             Tab::Skills => self.render_skills(g, body, s, cx),
@@ -4651,6 +4731,7 @@ impl SettingsApp {
             Tab::CloudRoles => self.render_cloudroles(g, body, s, cx),
             Tab::Battery => self.render_battery(g, body, s, cx),
             Tab::Power => self.render_power(g, body, s, cx),
+            Tab::Radio => self.render_radio(g, body, s, cx),
             Tab::Accessibility => self.render_access(g, body, s, cx),
             Tab::Appearance => self.render_appearance(g, body, s, cx),
             Tab::EncHome => self.render_ench(g, body, s, cx),
@@ -4744,7 +4825,7 @@ impl SettingsApp {
             ],
             (Tab::Voice, false) => vec![("Test mic", mut_, 'm'), ("Test speaker", mut_, 'p'), ("Test STT", mut_, 't')],
             (Tab::Network, _) if self.share.open => self.share_buttons(),
-            (Tab::Network, _) => vec![("Share internet", mut_, 'i'), ("Turn on/off", acc, 'e'), ("Join WiFi", acc, 'w'), ("Private MAC", mut_, 'm'), ("Apply MAC now", mut_, 'a'), ("Device name", mut_, 'n'), ("Look again", mut_, 'r')],
+            (Tab::Network, _) => vec![("Share internet", mut_, 'i'), ("Turn on/off", acc, 'e'), ("Join WiFi", acc, 'w'), ("Sign-in page", mut_, 'o'), ("Other adapter", mut_, 'v'), ("Private MAC", mut_, 'm'), ("Apply MAC now", mut_, 'a'), ("Device name", mut_, 'n'), ("Look again", mut_, 'r')],
             // the Bluetooth page draws its own buttons on its rows
             (Tab::Bluetooth, _) => vec![],
             (Tab::Display, _) => vec![("Brighter", acc, '+'), ("Dimmer", mut_, '-'), ("Look again", mut_, 'r')],
@@ -4783,7 +4864,9 @@ impl SettingsApp {
             (Tab::ModelRouter, _) => self.router_buttons(),
             (Tab::Fleet, _) => self.fleet_buttons(),
             (Tab::GeminiVoice, _) => self.geminivoice_buttons(),
+            (Tab::Alexa, _) => self.alexa_buttons(),
             (Tab::Power, _) => self.power_buttons(),
+            (Tab::Radio, _) => self.radio_buttons(),
             (Tab::Accessibility, _) => self.access_buttons(),
             (Tab::Appearance, _) => self.appearance_buttons(),
             (Tab::EncHome, _) => self.ench_buttons(),
@@ -4998,7 +5081,7 @@ impl SettingsApp {
                 None => ("no key", DIM),
                 Some(r) if r.starts_with("ext:") => ("key: provider", MUTED),
                 Some(r) => {
-                    if cx.secrets().resolve(r, None).is_ok() { ("key ✓", OK) } else { ("key ✗ locked/missing", ERR) }
+                    if cx.secrets_api().has_ref(r) { ("key ✓", OK) } else { ("key ✗ locked/missing", ERR) }
                 }
             };
             let url = if admin { p.base_url.clone().unwrap_or_else(|| p.kind.default_base().unwrap_or("").to_string()) } else { String::new() };
@@ -5071,7 +5154,7 @@ impl SettingsApp {
             (st.get().rag.clone(), st.get().external_rag.clone())
         };
         let (embed_id, ns_stats) = {
-            let kb = cx.kb().lock().unwrap();
+            let kb = cx.kb();
             let nss = if admin { kb.namespaces() } else { vec![format!("user/{}", cx.session.user), "shared".to_string()] };
             (kb.embedder_id(), nss.into_iter().filter_map(|n| kb.stats(&n).map(|st| (n, st))).collect::<Vec<_>>())
         };
@@ -5785,7 +5868,7 @@ mod tests {
     fn non_admins_cannot_change_system_settings_and_it_is_audited() {
         let cx = user("set4");
         let mut a = SettingsApp::new(&cx).on(Tab::Models);
-        assert_eq!(a.tabs(), &[Tab::Overview, Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::EncHome, Tab::Models, Tab::Skills, Tab::Rag, Tab::Assistant, Tab::GeminiVoice, Tab::Voice, Tab::Browser, Tab::HostAccess, Tab::AppEvents, Tab::Shares, Tab::ScreenSaver, Tab::HomeLayout, Tab::Views, Tab::Appearance, Tab::Accessibility, Tab::Time, Tab::Power, Tab::Computer, Tab::GitKeys], "no secret-provider tab for users; everyone has Notifications, Screen saver, Time, Power, Accessibility, This computer and Home layout; whoever has the AI IDE has Git and SSH keys");
+        assert_eq!(a.tabs(), &[Tab::Overview, Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::EncHome, Tab::Models, Tab::Skills, Tab::Rag, Tab::Assistant, Tab::GeminiVoice, Tab::Voice, Tab::Radio, Tab::Browser, Tab::HostAccess, Tab::AppEvents, Tab::Shares, Tab::ScreenSaver, Tab::HomeLayout, Tab::Views, Tab::Appearance, Tab::Accessibility, Tab::Time, Tab::Power, Tab::Computer, Tab::GitKeys], "no secret-provider tab for users; everyone has Notifications, Screen saver, Time, Power, Accessibility, This computer and Home layout; whoever has the AI IDE has Git and SSH keys");
         for k in ['a', 'e', 'd', 'k', 'x'] {
             key(&mut a, &cx, Key::Char(k));
             assert!(!a.has_modal(), "{k}");
@@ -5905,7 +5988,7 @@ mod tests {
         key(&mut a, &cx, Key::Char('i'));
         settle(&mut a, &cx);
         assert!(status(&a).contains("1 new document"), "{}", status(&a));
-        assert_eq!(cx.kb().lock().unwrap().stats("shared").unwrap().docs, 1);
+        assert_eq!(cx.kb().stats("shared").unwrap().docs, 1);
         key(&mut a, &cx, Key::Char('i'));
         settle(&mut a, &cx);
         assert!(status(&a).contains("0 new document"), "idempotent: {}", status(&a));
@@ -6370,7 +6453,7 @@ mod tests {
     // ------------------------------------------------------------------ storage tab
 
     struct DirMounter;
-    impl iyakki_storage::Mounter for DirMounter {
+    impl iyakki_core_api::device_types::storage::Mounter for DirMounter {
         fn mount(&self, _dev: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
             std::fs::create_dir_all(target).map_err(|e| e.to_string())
         }
@@ -6402,7 +6485,7 @@ mod tests {
         let data = root.join("data");
         std::fs::create_dir_all(&data).unwrap();
         std::fs::write(data.join("users.json"), "{}").unwrap();
-        let env = StorageEnv { roots: iyakki_storage::Roots { sys_block: root.join("sys/block"), dev: root.join("dev"), mounts: root.join("mounts"), require_block: false }, mounter: Arc::new(DirMounter), mke2fs, scratch: root.clone(), data_dir: data, virtual_disks: None };
+        let env = StorageEnv { roots: iyakki_core_api::device_types::storage::Roots { sys_block: root.join("sys/block"), dev: root.join("dev"), mounts: root.join("mounts"), require_block: false }, mounter: Arc::new(DirMounter), mke2fs, scratch: root.clone(), data_dir: data, virtual_disks: None };
         Some((env, root))
     }
 
@@ -6425,7 +6508,7 @@ mod tests {
         typ(&mut a, &cx, "vda");
         key(&mut a, &cx, Key::Enter);
         assert!(a.has_modal(), "a wrong name keeps the confirmation open");
-        assert_eq!(iyakki_storage::probe(&root.join("dev/vdb")).unwrap(), iyakki_storage::Content::Empty, "nothing happened yet");
+        assert_eq!(iyakki_core_api::device_types::storage::probe(&root.join("dev/vdb")).unwrap(), iyakki_core_api::device_types::storage::Content::Empty, "nothing happened yet");
         for _ in 0..3 {
             key(&mut a, &cx, Key::Backspace);
         }
@@ -6433,8 +6516,8 @@ mod tests {
         key(&mut a, &cx, Key::Enter);
         settle(&mut a, &cx);
         assert!(status(&a).contains("vdb is now the IYAKKI data disk") && status(&a).contains("Reboot"), "{}", status(&a));
-        assert_eq!(iyakki_storage::probe(&root.join("dev/vdb")).unwrap(), iyakki_storage::Content::Iyakki);
-        assert!(a.devices.iter().find(|d| d.name == "vdb").unwrap().content == iyakki_storage::Content::Iyakki, "the list refreshed");
+        assert_eq!(iyakki_core_api::device_types::storage::probe(&root.join("dev/vdb")).unwrap(), iyakki_core_api::device_types::storage::Content::Iyakki);
+        assert!(a.devices.iter().find(|d| d.name == "vdb").unwrap().content == iyakki_core_api::device_types::storage::Content::Iyakki, "the list refreshed");
         assert!(cx.audit.recent(10).iter().any(|l| l.contains("storage.persist") && l.contains("vdb")));
     }
 
@@ -6443,7 +6526,7 @@ mod tests {
         let Some((_, _)) = machine("virt-probe") else { return eprintln!("mke2fs missing; skipping") };
         let root = std::env::temp_dir().join(format!("iyakki-ui-virtual-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let v = iyakki_storage::virt::VirtualDisks::open(&root).unwrap();
+        let v = iyakki_core_api::device_types::storage::virt::VirtualDisks::open(&root).unwrap();
         let data = root.join("data");
         std::fs::create_dir_all(&data).unwrap();
         std::fs::write(data.join("users.json"), "{}").unwrap();
@@ -6509,15 +6592,15 @@ mod tests {
         typ(&mut a, &cx, "erase");
         key(&mut a, &cx, Key::Enter);
         assert!(a.has_modal(), "lower-case erase is not enough");
-        assert_eq!(iyakki_storage::probe(&root.join("dev/vdc")).unwrap(), iyakki_storage::Content::Other("data of unknown type".into()));
+        assert_eq!(iyakki_core_api::device_types::storage::probe(&root.join("dev/vdc")).unwrap(), iyakki_core_api::device_types::storage::Content::Other("data of unknown type".into()));
         for _ in 0..5 {
             key(&mut a, &cx, Key::Backspace);
         }
         typ(&mut a, &cx, "ERASE");
         key(&mut a, &cx, Key::Enter);
         settle(&mut a, &cx);
-        assert_eq!(iyakki_storage::probe(&root.join("dev/vdc")).unwrap(), iyakki_storage::Content::Iyakki);
-        assert_eq!(iyakki_storage::probe(&root.join("dev/vdb")).unwrap(), iyakki_storage::Content::Empty, "other disks untouched");
+        assert_eq!(iyakki_core_api::device_types::storage::probe(&root.join("dev/vdc")).unwrap(), iyakki_core_api::device_types::storage::Content::Iyakki);
+        assert_eq!(iyakki_core_api::device_types::storage::probe(&root.join("dev/vdb")).unwrap(), iyakki_core_api::device_types::storage::Content::Empty, "other disks untouched");
     }
 
     #[test]
@@ -6548,7 +6631,7 @@ mod tests {
     // ---------------------------------------------------------------- hardware pages
 
     struct FakeCtl(Mutex<Vec<String>>);
-    impl iyakki_devctl::Control for FakeCtl {
+    impl iyakki_core_api::device_types::devctl::Control for FakeCtl {
         fn set_link(&self, n: &str, up: bool) -> Result<(), String> {
             self.0.lock().unwrap().push(format!("{n} {up}"));
             Ok(())
@@ -6556,13 +6639,13 @@ mod tests {
         fn ipv4(&self) -> Vec<(String, String)> {
             vec![]
         }
-        fn volume(&self, _: u32) -> Option<iyakki_devctl::Volume> {
+        fn volume(&self, _: u32) -> Option<iyakki_core_api::device_types::devctl::Volume> {
             None
         }
-        fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_devctl::Volume, String> {
+        fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
             Err("no".into())
         }
-        fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_devctl::Volume, String> {
+        fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
             Err("no".into())
         }
         fn dhcp(&self, _: &str) -> Result<(), String> {
@@ -6582,7 +6665,7 @@ mod tests {
         put("class/net/eno1/carrier", "1\n");
         put("class/net/eno1/device/x", "");
         let ctl = Arc::new(FakeCtl(Mutex::new(vec![])));
-        (DeviceEnv { roots: iyakki_devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") }, ctl: ctl.clone() }, ctl)
+        (DeviceEnv { roots: iyakki_core_api::device_types::devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") }, ctl: ctl.clone() }, ctl)
     }
 
     #[test]
@@ -6838,7 +6921,7 @@ mod tests {
             Some(SpeechEngine::Host { engine, voice: Some(v), .. }) => assert_eq!((engine.as_str(), v.as_str()), ("espeak-ng", "en-us")),
             other => panic!("{other:?}"),
         }
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("voice.test") && log.contains("settings.voice.tts") && log.contains("settings.voice.speed"), "{log}");
     }
 
@@ -6911,7 +6994,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(matches!(a.vo_engine(&cx), Some(SpeechEngine::Host { ref engine, .. }) if engine == "espeak-ng"));
-        assert!(std::fs::read_to_string(cx.audit.path()).unwrap().contains("voice.recheck"));
+        assert!(std::fs::read_to_string(cx.audit.path_buf()).unwrap().contains("voice.recheck"));
     }
 
     #[test]
@@ -6941,7 +7024,7 @@ mod tests {
         let addr = url.trim_start_matches("http://").split('/').next().unwrap().to_string();
         let closed = (0..200).any(|_| { std::thread::sleep(std::time::Duration::from_millis(20)); std::net::TcpStream::connect(&addr).is_err() });
         assert!(closed, "the helper's port is closed");
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("voice.helper"), "{log}");
         // without the voice permission it is refused
         let mut gcx = user("sv-host5g");
@@ -7148,7 +7231,7 @@ mod tests {
         put("class/backlight/bl0/brightness", "50\n");
         put("class/graphics/fb0/virtual_size", "1280,720\n");
         let ctl = Arc::new(FakeCtl(Mutex::new(vec![])));
-        let env = DeviceEnv { roots: iyakki_devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") }, ctl };
+        let env = DeviceEnv { roots: iyakki_core_api::device_types::devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") }, ctl };
         let mut a = SettingsApp::new(&cx).with_hardware(env);
         goto(&mut a, &cx, Tab::Display);
         let g = draw(&mut a, &cx, 1280, 720);
@@ -7323,9 +7406,9 @@ mod tests {
         script("wpa_supplicant", "exit 0");
         script("udhcpc", "exit 0");
         let env = WifiEnv {
-            wifi: Arc::new(iyakki_devctl::wifi::Wifi { run_dir: d.join("run"), path: Some(bin) }),
-            known: Arc::new(iyakki_devctl::wifi::KnownStore::new(&d.join("wifi.json"))),
-            roots: iyakki_devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") },
+            wifi: Arc::new(iyakki_core_api::device_types::devctl::wifi::Wifi { run_dir: d.join("run"), path: Some(bin) }),
+            known: Arc::new(iyakki_core_api::device_types::devctl::wifi::KnownStore::new(&d.join("wifi.json"))),
+            roots: iyakki_core_api::device_types::devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") },
         };
         (env, d)
     }
@@ -7365,7 +7448,7 @@ mod tests {
         assert!(std::fs::read_to_string(d.join("run/wpa_supplicant-wlan0.conf")).unwrap().contains("ssid=\"Seen\""));
         assert!(!std::fs::read_to_string(d.join("run/wpa_supplicant-wlan0.conf")).unwrap().contains("password1"));
         assert!(cx.audit.recent(10).iter().any(|l| l.contains("settings.wifi.join") && l.contains("Seen")));
-        assert!(!std::fs::read_to_string(cx.audit.path()).unwrap().contains("password1"), "the passphrase is never logged");
+        assert!(!std::fs::read_to_string(cx.audit.path_buf()).unwrap().contains("password1"), "the passphrase is never logged");
         // an open network is joined without a question; the saved one is marked and can be forgotten
         key(&mut a, &cx, Key::Char('w'));
         settle(&mut a, &cx);
@@ -7444,7 +7527,7 @@ mod tests {
         assert_eq!((k[0].ssid.as_str(), k[0].hidden), ("Secret Net", true));
         assert!(std::fs::read_to_string(d.join("run/wpa_supplicant-wlan0.conf")).unwrap().contains("scan_ssid=1"));
         // no adapter: said plainly
-        let mut b = SettingsApp::new(&cx).with_wifi(WifiEnv { roots: iyakki_devctl::Roots { sys: d.join("nothing"), proc_: d.join("nothing") }, ..env.clone() });
+        let mut b = SettingsApp::new(&cx).with_wifi(WifiEnv { roots: iyakki_core_api::device_types::devctl::Roots { sys: d.join("nothing"), proc_: d.join("nothing") }, ..env.clone() });
         goto(&mut b, &cx, Tab::Network);
         key(&mut b, &cx, Key::Char('w'));
         assert!(status(&b).contains("no WiFi adapter"), "{}", status(&b));
@@ -7453,7 +7536,7 @@ mod tests {
         std::fs::create_dir_all(bcm.join("sys/bus/pci/devices/0000:03:00.0")).unwrap();
         std::fs::write(bcm.join("sys/bus/pci/devices/0000:03:00.0/vendor"), "0x14e4\n").unwrap();
         std::fs::write(bcm.join("sys/bus/pci/devices/0000:03:00.0/device"), "0x43a0\n").unwrap();
-        let mut c = SettingsApp::new(&cx).with_wifi(WifiEnv { roots: iyakki_devctl::Roots { sys: bcm.join("sys"), proc_: bcm.join("proc") }, ..env.clone() });
+        let mut c = SettingsApp::new(&cx).with_wifi(WifiEnv { roots: iyakki_core_api::device_types::devctl::Roots { sys: bcm.join("sys"), proc_: bcm.join("proc") }, ..env.clone() });
         goto(&mut c, &cx, Tab::Network);
         key(&mut c, &cx, Key::Char('w'));
         assert!(status(&c).contains("Broadcom BCM43xx") && status(&c).contains("USB Wi-Fi adapter"), "{}", status(&c));
@@ -7517,6 +7600,9 @@ mod gemini_tests;
 #[path = "settings_announce_tests.rs"]
 mod announce_tests;
 #[cfg(test)]
+#[path = "settings_link_tests.rs"]
+mod link_tests;
+#[cfg(test)]
 #[cfg(test)]
 #[path = "settings_lemonade_tests.rs"]
 mod lemonade_tests;
@@ -7557,8 +7643,14 @@ mod cloudroles_tests;
 #[path = "settings_battery_tests.rs"]
 mod battery_tests;
 #[cfg(test)]
+#[path = "settings_radio_tests.rs"]
+mod radio_tests;
+#[cfg(test)]
 #[path = "settings_geminivoice_tests.rs"]
 mod geminivoice_tests;
+#[cfg(test)]
+#[path = "settings_alexa_tests.rs"]
+mod alexa_tests;
 #[cfg(test)]
 #[path = "settings_assistant_tests.rs"]
 mod assistant_tests;

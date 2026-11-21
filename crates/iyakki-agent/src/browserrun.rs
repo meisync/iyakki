@@ -23,6 +23,9 @@ pub enum Step {
     Goto(String),
     Click { role: String, name: String },
     Fill { label: String, value: String },
+    /// A field filled with a secret that is not in the spec: the value is read from the environment variable `var` when the step runs
+    /// (only names that start with `IYAKKI_TEST_`, so a spec cannot read any other variable). The value is never written to a report.
+    FillEnv { label: String, var: String },
     Check { label: String, checked: bool },
     Select { label: String, option: String },
     Press { key: String, label: Option<String> },
@@ -66,6 +69,13 @@ fn str_of(v: &Value, what: &str) -> Result<String, String> {
     v.as_str().map(str::to_string).ok_or_else(|| format!("{what} must be text"))
 }
 
+/// The only environment variables a spec may read a secret from.
+pub const SECRET_PREFIX: &str = "IYAKKI_TEST_";
+
+fn secret_var_ok(v: &str) -> bool {
+    v.len() > SECRET_PREFIX.len() && v.len() <= 80 && v.starts_with(SECRET_PREFIX) && v.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
 fn field(v: &Value, k: &str, what: &str) -> Result<String, String> {
     v.get(k).and_then(Value::as_str).map(str::to_string).ok_or_else(|| format!("{what} needs \"{k}\""))
 }
@@ -87,6 +97,16 @@ pub fn parse_step(v: &Value) -> Result<Step, String> {
         "click" => {
             let (role, name) = role_name(arg, "click")?;
             Step::Click { role, name }
+        }
+        "fill" if arg.get("value_env").is_some() => {
+            let var = field(arg, "value_env", "fill")?;
+            if arg.get("value").is_some() {
+                return Err("fill takes \"value\" or \"value_env\", not both".into());
+            }
+            if !secret_var_ok(&var) {
+                return Err(format!("value_env must be a name like {SECRET_PREFIX}GMAIL_PASSWORD (capital letters, digits and underscores, starting with {SECRET_PREFIX}), not {var}"));
+            }
+            Step::FillEnv { label: field(arg, "label", "fill")?, var }
         }
         "fill" => Step::Fill { label: field(arg, "label", "fill")?, value: field(arg, "value", "fill")? },
         "check" => Step::Check { label: field(arg, "label", "check")?, checked: arg.get("checked").and_then(Value::as_bool).unwrap_or(true) },
@@ -224,6 +244,7 @@ fn describe_step(s: &Step) -> String {
         Step::Goto(u) => format!("goto {u}"),
         Step::Click { role, name } => format!("click {role} \"{name}\"").replace("click  ", "click "),
         Step::Fill { label, value } => format!("fill \"{label}\" = \"{}\"", if value.chars().count() > 40 { format!("{}…", value.chars().take(40).collect::<String>()) } else { value.clone() }),
+        Step::FillEnv { label, var } => format!("fill \"{label}\" = <from {var}>"),
         Step::Check { label, checked } => format!("{} \"{label}\"", if *checked { "check" } else { "uncheck" }),
         Step::Select { label, option } => format!("select \"{option}\" in \"{label}\""),
         Step::Press { key, label } => format!("press {key}{}", label.as_ref().map_or(String::new(), |l| format!(" in \"{l}\""))),
@@ -360,6 +381,11 @@ impl Runner<'_, '_> {
             Step::Click { role, name } => {
                 let id = self.locate(role, name, None, &[])?;
                 self.retry(|| self.a.click(&id)).map(|_| ())
+            }
+            Step::FillEnv { label, var } => {
+                let value = std::env::var(var).map_err(|_| format!("the environment variable {var} is not set: this run was given no secret for the field"))?;
+                let id = self.locate("", "", Some(label), &["textbox", "combobox", "select", "slider"])?;
+                self.retry(|| self.a.type_text(&id, &value, true, false)).map(|_| ())
             }
             Step::Fill { label, value } => {
                 let id = self.locate("", "", Some(label), &["textbox", "combobox", "select", "slider"])?;
@@ -531,6 +557,21 @@ mod tests {
         assert!(parse_steps(&json!([])).is_err());
         assert!(parse_step(&json!({"expect": {}})).is_err());
         assert!(parse_step(&json!({"click": {}})).is_err());
+    }
+
+    #[test]
+    fn a_secret_field_names_an_environment_variable_never_the_value_and_only_test_variables_may_be_read() {
+        let st = parse_step(&json!({"fill": {"label": "Password", "value_env": "IYAKKI_TEST_GMAIL_PASSWORD"}})).unwrap();
+        assert!(matches!(&st, Step::FillEnv { label, var } if label == "Password" && var == "IYAKKI_TEST_GMAIL_PASSWORD"));
+        // the description a report carries names the variable and never a value
+        assert_eq!(describe_step(&st), "fill \"Password\" = <from IYAKKI_TEST_GMAIL_PASSWORD>");
+        for bad in ["HOME", "PATH", "AWS_SECRET_ACCESS_KEY", "IYAKKI_TEST_", "iyakki_test_x", "IYAKKI_TEST_A-B", "IYAKKI_TEST_A B"] {
+            assert!(parse_step(&json!({"fill": {"label": "P", "value_env": bad}})).unwrap_err().contains("value_env must be"), "{bad}");
+        }
+        assert!(parse_step(&json!({"fill": {"label": "P", "value": "x", "value_env": "IYAKKI_TEST_X"}})).unwrap_err().contains("not both"));
+        assert!(parse_step(&json!({"fill": {"value_env": "IYAKKI_TEST_X"}})).is_err(), "a label is needed");
+        // a plain value still works as before
+        assert!(matches!(parse_step(&json!({"fill": {"label": "E", "value": "a@b.c"}})).unwrap(), Step::Fill { .. }));
     }
 
     #[test]

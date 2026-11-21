@@ -9,10 +9,9 @@ use iyakki_core_api::assistant as api;
 use iyakki_core_api::{AuditSink, Core};
 use iyakki_ui_sdk::assistant::{AssistError, AssistResult, AssistantPort, ChatEvent, Choice, ContextItem, ContextKind, HistoryLine, SessionConfig, Speaker};
 
-use crate::accounts::AuditLog;
 
 /// The machine's audit log as the core's audit sink.
-pub struct AuditLogSink(pub Arc<AuditLog>);
+pub struct AuditLogSink(pub Arc<dyn iyakki_agent_api::AuditApi>);
 
 impl AuditSink for AuditLogSink {
     fn record(&self, user: &str, event: &str, detail: &str) {

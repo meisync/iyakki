@@ -287,8 +287,8 @@ fn the_schedule_form_saves_checks_and_shows_the_schedule_and_u_turns_it_off() {
     let dir = cx.data_dir().to_path_buf();
     assert!(!iyakki_shared::backup_schedule::Schedule::load(&dir, "amy").enabled);
     let form = |days: &str, hour: &str, folder: &str, keep: &str, pf: &str| {
-        let mut f = Form::new("x").text("d", "", "").text("h", "", "").path("f", "", "", crate::filepicker::PathKind::Folder, &[]).text("k", "", "").path("p", "", "", crate::filepicker::PathKind::File, &[]);
-        for (i, v) in [days, hour, folder, keep, pf].into_iter().enumerate() {
+        let mut f = Form::new("x").text("d", "", "").text("h", "", "").path("f", "", "", crate::filepicker::PathKind::Folder, &[]).text("k", "", "").path("p", "", "", crate::filepicker::PathKind::File, &[]).text("s", "", "").path("c", "", "", crate::filepicker::PathKind::File, &[]).text("n", "", "");
+        for (i, v) in [days, hour, folder, keep, pf, "", "", "0"].into_iter().enumerate() {
             f.set_value(i, v);
         }
         f
@@ -306,8 +306,153 @@ fn the_schedule_form_saves_checks_and_shows_the_schedule_and_u_turns_it_off() {
     assert!(s.enabled && (s.every_days, s.hour, s.keep) == (2, 5, 4) && s.dest == stick_s);
     let t = alltext(&draw(&mut a, &cx, 1280, 720));
     assert!(t.contains("Every 2 day(s) from 05:00"), "the page shows it: {t}");
+    // a share instead of the folder needs no folder, only an address that parses; a chain length of one is refused
+    let mut sh = form("2", "5", "", "4", "");
+    sh.set_value(5, "smb://nas/backups");
+    assert!(a.backup_submit(&cx, &BackupForm::Schedule, &mut sh).is_ok());
+    let s = iyakki_shared::backup_schedule::Schedule::load(&dir, "amy");
+    assert!(s.share == "smb://nas/backups" && s.full_every == 0, "{s:?}");
+    let mut one = form("2", "5", &stick_s, "4", "");
+    one.set_value(7, "1");
+    assert!(a.backup_submit(&cx, &BackupForm::Schedule, &mut one).is_err());
+    let mut ch = form("2", "5", &stick_s, "4", "");
+    ch.set_value(7, "7");
+    assert!(a.backup_submit(&cx, &BackupForm::Schedule, &mut ch).unwrap().contains("after 7 files"));
     key(&mut a, &cx, Key::Char('u'));
     assert!(!iyakki_shared::backup_schedule::Schedule::load(&dir, "amy").enabled && status(&a).contains("is off"));
-    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
     assert!(audit.contains("backup.schedule"), "{audit}");
+}
+
+#[test]
+fn a_share_a_chain_link_and_the_machines_own_data_are_backed_up_through_the_page() {
+    use iyakki_shared::backup_share::FakeMounter;
+    let (cx, a, l, stick) = fake("bk-more", "root");
+    let fm = std::sync::Arc::new(FakeMounter::default());
+    let mut a = a.with_backup_mounter(fm.clone());
+    goto(&mut a, &cx, Tab::Backup);
+    // the buttons are there
+    let names: Vec<&str> = a.backup_buttons().iter().map(|b| b.0).collect();
+    assert!(names.contains(&"To a network share…") && names.contains(&"Add a link…") && names.contains(&"Machine data…"), "{names:?}");
+    // a share: the address is read strictly, the passwords must match, the share is let go again
+    let share = |a: &mut SettingsApp, addr: &str, creds: &str, p1: &str, p2: &str| {
+        let mut f = Form::new("x").text("a", "", "").path("c", "", "", crate::filepicker::PathKind::File, &[]).secret("p", "").secret("r", "");
+        f.set_value(0, addr);
+        f.set_value(1, creds);
+        f.set_value(2, p1);
+        f.set_value(3, p2);
+        let r = a.backup_submit(&cx, &BackupForm::Share, &mut f);
+        wait(a, &cx);
+        r
+    };
+    assert!(share(&mut a, "http://nas/x", "", "", "").is_err());
+    assert!(share(&mut a, "nfs://nas/export", "", "longenough1", "different22").unwrap_err().contains("differ"));
+    assert!(fm.calls.lock().unwrap().is_empty(), "nothing is mounted for a refused form");
+    let creds = stick.join("creds.txt");
+    put(&creds, "amy\nsecret-pw\n");
+    share(&mut a, "smb://nas/backups/me", &creds.to_string_lossy(), "", "").unwrap();
+    assert!(status(&a).contains("Wrote iyakki-backup-root-") && status(&a).contains("not encrypted") && !status(&a).contains("secret-pw"), "{}", status(&a));
+    let calls = fm.calls.lock().unwrap().clone();
+    assert!(calls.len() == 2 && calls[0].starts_with("mount ") && calls[1].starts_with("umount"), "{calls:?}");
+    assert!(!calls[0].contains("secret-pw"));
+    // the machine's own data: an administrator, a passphrase, nothing else
+    let sys = |a: &mut SettingsApp, dest: &std::path::Path, p1: &str, p2: &str| {
+        let mut f = Form::new("x").path("f", "", "", crate::filepicker::PathKind::Folder, &[]).secret("p", "").secret("r", "");
+        f.set_value(0, &dest.to_string_lossy());
+        f.set_value(1, p1);
+        f.set_value(2, p2);
+        let r = a.backup_submit(&cx, &BackupForm::System, &mut f);
+        wait(a, &cx);
+        r
+    };
+    put(&l.data.join("settings.json"), "{}");
+    assert!(sys(&mut a, &stick, "", "").unwrap_err().contains("at least 8"));
+    sys(&mut a, &stick, "longenough1", "longenough1").unwrap();
+    assert!(status(&a).contains("encrypted"), "{}", status(&a));
+    // a chain: a full file, then a link naming it
+    let full = stick.join("full");
+    std::fs::create_dir_all(&full).unwrap();
+    make(&mut a, &cx, &full, "", "").unwrap();
+    let first = newest(&full);
+    put(&l.home.join("Flows/b/flow.json"), "{\"new\":1}");
+    let link = |a: &mut SettingsApp, chain: &str| {
+        let mut f = Form::new("x").path("f", "", "", crate::filepicker::PathKind::Folder, &[]).text("c", "", "").secret("p", "");
+        f.set_value(0, &full.to_string_lossy());
+        f.set_value(1, chain);
+        let r = a.backup_submit(&cx, &BackupForm::Link, &mut f);
+        wait(a, &cx);
+        r
+    };
+    assert!(link(&mut a, "").is_err());
+    link(&mut a, &first.to_string_lossy()).unwrap();
+    assert!(status(&a).contains("Wrote iyakki-incr-root-") && status(&a).contains("1 changed files"), "{}", status(&a));
+}
+
+#[test]
+fn the_machines_own_data_and_a_chain_are_restored_through_the_page_with_every_check() {
+    let (cx, a, l, stick) = fake("bk-restore", "root");
+    let mut a = a;
+    goto(&mut a, &cx, Tab::Backup);
+    let names: Vec<&str> = a.backup_buttons().iter().map(|b| b.0).collect();
+    assert!(names.contains(&"Restore machine data…") && names.contains(&"Restore a chain…"), "{names:?}");
+    // machine data: made, changed, then put back; the passphrase is typed twice and RESTORE is typed
+    put(&l.data.join("settings.json"), "{\"v\":1}");
+    let mk = |a: &mut SettingsApp| {
+        let mut f = Form::new("x").path("f", "", "", crate::filepicker::PathKind::Folder, &[]).secret("p", "").secret("r", "");
+        f.set_value(0, &stick.to_string_lossy());
+        f.set_value(1, "longenough1");
+        f.set_value(2, "longenough1");
+        a.backup_submit(&cx, &BackupForm::System, &mut f).unwrap();
+        wait(a, &cx);
+    };
+    mk(&mut a);
+    let file = newest(&stick);
+    put(&l.data.join("settings.json"), "{\"v\":2}");
+    let sysr = |a: &mut SettingsApp, p1: &str, p2: &str, word: &str| {
+        let mut f = Form::new("x").path("f", "", "", crate::filepicker::PathKind::File, &[]).secret("p", "").secret("r", "").text("w", "", "");
+        f.set_value(0, &file.to_string_lossy());
+        f.set_value(1, p1);
+        f.set_value(2, p2);
+        f.set_value(3, word);
+        let r = a.backup_submit(&cx, &BackupForm::SystemRestore, &mut f);
+        wait(a, &cx);
+        r
+    };
+    assert!(sysr(&mut a, "longenough1", "other-pass-22", "RESTORE").unwrap_err().contains("differ"));
+    assert!(sysr(&mut a, "longenough1", "longenough1", "yes").unwrap_err().contains("RESTORE"));
+    assert!(sysr(&mut a, "", "", "RESTORE").is_err());
+    assert_eq!(std::fs::read_to_string(l.data.join("settings.json")).unwrap(), "{\"v\":2}", "a refused form changes nothing");
+    sysr(&mut a, "longenough1", "longenough1", "RESTORE").unwrap();
+    assert!(status(&a).contains("Restored"), "{}", status(&a));
+    assert_eq!(std::fs::read_to_string(l.data.join("settings.json")).unwrap(), "{\"v\":1}");
+    // a chain: full file, a link, then the areas back through the page
+    let full = stick.join("chain");
+    std::fs::create_dir_all(&full).unwrap();
+    make(&mut a, &cx, &full, "", "").unwrap();
+    let first = newest(&full);
+    put(&l.home.join("Flows/b/flow.json"), "{\"new\":1}");
+    let mut f = Form::new("x").path("f", "", "", crate::filepicker::PathKind::Folder, &[]).text("c", "", "").secret("p", "");
+    f.set_value(0, &full.to_string_lossy());
+    f.set_value(1, &first.to_string_lossy());
+    a.backup_submit(&cx, &BackupForm::Link, &mut f).unwrap();
+    wait(&mut a, &cx);
+    let second = std::fs::read_dir(&full).unwrap().filter_map(Result::ok).map(|e| e.path()).find(|p| p != &first && p.to_string_lossy().contains("incr")).unwrap();
+    std::fs::remove_file(l.home.join("Flows/b/flow.json")).unwrap();
+    let chain = format!("{};{}", first.display(), second.display());
+    let cr = |a: &mut SettingsApp, chain: &str, areas: &str, word: &str| {
+        let mut f = Form::new("x").text("c", "", "").text("a", "", "").secret("p", "").text("w", "", "");
+        f.set_value(0, chain);
+        f.set_value(1, areas);
+        f.set_value(3, word);
+        let r = a.backup_submit(&cx, &BackupForm::ChainRestore, &mut f);
+        wait(a, &cx);
+        r
+    };
+    assert!(cr(&mut a, "", "flows", "RESTORE").is_err());
+    assert!(cr(&mut a, &chain, "", "RESTORE").is_err());
+    assert!(cr(&mut a, &chain, "nonsense", "RESTORE").unwrap_err().contains("not a backup area"));
+    assert!(cr(&mut a, &chain, "flows", "no").unwrap_err().contains("RESTORE"));
+    assert!(!l.home.join("Flows/b/flow.json").exists(), "a refused form restores nothing");
+    cr(&mut a, &chain, "flows", "RESTORE").unwrap();
+    assert!(l.home.join("Flows/b/flow.json").exists(), "{}", status(&a));
 }

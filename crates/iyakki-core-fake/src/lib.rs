@@ -22,17 +22,35 @@ pub use sound::{FakeCues, FakeSound};
 pub use assistant::{FakeAssistant, FakeTurn};
 pub use media::FakeMedia;
 mod crashlog;
+mod startupdisk;
+mod btaudio;
+mod outputstate;
+mod screenfacts;
 pub use fakecore::{FakeCore, FakeMixer, FakeMonitors, FakeResume};
 mod netscan;
 mod router;
 mod fleet;
 mod hardware;
+mod drivers;
+pub mod diskengine;
+pub use diskengine::FakeDiskEngine;
+mod audioroute;
+mod installer;
+mod disktools;
 mod memory;
 pub use crashlog::FakeCrashLog;
+pub use startupdisk::FakeStartupDisk;
+pub use btaudio::{FakeBtAudio, Paired as BtPaired};
+pub use outputstate::FakeOutputState;
+pub use screenfacts::FakeScreenFacts;
 pub use netscan::FakeNetScan;
 pub use router::FakeRouter;
 pub use fleet::FakeFleet;
 pub use hardware::FakeHardware;
+pub use drivers::FakeDrivers;
+pub use audioroute::FakeAudioRoute;
+pub use installer::FakeInstaller;
+pub use disktools::FakeDiskTools;
 pub use memory::FakeMemory;
 
 use iyakki_core_api::{Audio, PlaybackVolume, SoundCard, BlockDev, Disks, Mount, Net, NetCounters, ApiError, ApiResult, Capabilities, HostApi, Identity, LoadAvg, MemInfo, Sysinfo, Uptime};
@@ -98,19 +116,31 @@ pub struct FakeOs {
     canned: Mutex<Canned>,
     calls: Mutex<Vec<String>>,
     memory: std::sync::Arc<FakeMemory>,
+    installer: std::sync::Arc<FakeInstaller>,
+    drivers: std::sync::Arc<FakeDrivers>,
+    disk_engine: std::sync::Arc<diskengine::FakeDiskEngine>,
+    audio_route: std::sync::Arc<FakeAudioRoute>,
     hardware: std::sync::Arc<FakeHardware>,
     crashlog: std::sync::Arc<FakeCrashLog>,
+    startup_disk: std::sync::Arc<FakeStartupDisk>,
+    bt_audio: std::sync::Arc<FakeBtAudio>,
+    output_state: std::sync::Arc<FakeOutputState>,
+    screen_facts: std::sync::Arc<FakeScreenFacts>,
     netscan: std::sync::Arc<FakeNetScan>,
     router: std::sync::Arc<FakeRouter>,
     fleet: std::sync::Arc<FakeFleet>,
 }
 
 impl FakeOs {
+    /// The drive engine of this fake, to set the scan and read what the page did.
+    pub fn disk_engine_fake(&self) -> std::sync::Arc<diskengine::FakeDiskEngine> {
+        self.disk_engine.clone()
+    }
     pub fn new() -> FakeOs {
         FakeOs::default()
     }
     pub fn with(canned: Canned) -> FakeOs {
-        FakeOs { canned: Mutex::new(canned), calls: Mutex::new(vec![]), memory: Default::default(), hardware: Default::default(), crashlog: Default::default(), netscan: Default::default(), router: Default::default(), fleet: Default::default() }
+        FakeOs { canned: Mutex::new(canned), calls: Mutex::new(vec![]), memory: Default::default(), installer: Default::default(), drivers: Default::default(), disk_engine: Default::default(), audio_route: Default::default(), hardware: Default::default(), crashlog: Default::default(), startup_disk: Default::default(), bt_audio: Default::default(), output_state: Default::default(), screen_facts: Default::default(), netscan: Default::default(), router: Default::default(), fleet: Default::default() }
     }
     /// Change the canned answers while a test runs.
     pub fn set(&self, f: impl FnOnce(&mut Canned)) {
@@ -123,6 +153,18 @@ impl FakeOs {
     /// The memory part of this fake, to set figures and read what the page did.
     pub fn memory_fake(&self) -> std::sync::Arc<FakeMemory> {
         self.memory.clone()
+    }
+    /// The sound-facts part of this fake (a made-up `/proc/asound`, device holders, mixer answers).
+    pub fn audio_route_fake(&self) -> std::sync::Arc<FakeAudioRoute> {
+        self.audio_route.clone()
+    }
+    /// The drivers part of this fake (machine, rows, installed packs, the calls).
+    pub fn drivers_fake(&self) -> std::sync::Arc<FakeDrivers> {
+        self.drivers.clone()
+    }
+    /// The install-to-disk part of this fake (disks, source, the plans it was asked to write).
+    pub fn installer_fake(&self) -> std::sync::Arc<FakeInstaller> {
+        self.installer.clone()
     }
     /// The network-scan part of this fake (subnets, the hosts it finds, the calls).
     pub fn netscan_fake(&self) -> std::sync::Arc<FakeNetScan> {
@@ -137,6 +179,22 @@ impl FakeOs {
         self.fleet.clone()
     }
     /// The kept-logs part of this fake (a note, files with lines, the calls).
+    /// The screens of this fake (connectors, the firmware framebuffer, the reads).
+    pub fn screen_facts_fake(&self) -> std::sync::Arc<FakeScreenFacts> {
+        self.screen_facts.clone()
+    }
+    /// The sound output state of this fake (device, generation, gain).
+    pub fn output_state_fake(&self) -> std::sync::Arc<FakeOutputState> {
+        self.output_state.clone()
+    }
+    /// The Bluetooth audio part of this fake (paired devices, the connection, the stream, the calls).
+    pub fn bt_audio_fake(&self) -> std::sync::Arc<FakeBtAudio> {
+        self.bt_audio.clone()
+    }
+    /// The startup-disk part of this fake (firmware entries, the rules, the calls).
+    pub fn startup_disk_fake(&self) -> std::sync::Arc<FakeStartupDisk> {
+        self.startup_disk.clone()
+    }
     pub fn crashlog_fake(&self) -> std::sync::Arc<FakeCrashLog> {
         self.crashlog.clone()
     }
@@ -178,8 +236,32 @@ impl iyakki_core_api::Os for FakeOs {
     fn memory(&self) -> std::sync::Arc<dyn iyakki_core_api::memory::Memory> {
         self.memory.clone()
     }
+    fn installer(&self) -> std::sync::Arc<dyn iyakki_core_api::installer::Installer> {
+        self.installer.clone()
+    }
+    fn audio_route(&self) -> std::sync::Arc<dyn iyakki_core_api::AudioRoute> {
+        self.audio_route.clone()
+    }
+    fn drivers(&self) -> std::sync::Arc<dyn iyakki_core_api::drivers::Drivers> {
+        self.drivers.clone()
+    }
+    fn disk_engine(&self) -> std::sync::Arc<dyn iyakki_core_api::diskmodel::DiskEngine> {
+        self.disk_engine.clone()
+    }
     fn hardware(&self) -> std::sync::Arc<dyn iyakki_core_api::hardware::Hardware> {
         self.hardware.clone()
+    }
+    fn screen_facts(&self) -> std::sync::Arc<dyn iyakki_core_api::screenfacts::ScreenFacts> {
+        self.screen_facts.clone()
+    }
+    fn output_state(&self) -> std::sync::Arc<dyn iyakki_core_api::soundctl::OutputState> {
+        self.output_state.clone()
+    }
+    fn bt_audio(&self) -> std::sync::Arc<dyn iyakki_core_api::btaudio::BtAudio> {
+        self.bt_audio.clone()
+    }
+    fn startup_disk(&self) -> std::sync::Arc<dyn iyakki_core_api::startupdisk::StartupDisk> {
+        self.startup_disk.clone()
     }
     fn crashlog(&self) -> std::sync::Arc<dyn iyakki_core_api::crashlog::CrashLog> {
         self.crashlog.clone()

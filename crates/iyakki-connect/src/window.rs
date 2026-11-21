@@ -40,7 +40,7 @@ const COOKIE: &str = "iyakki_window";
 const MAX_CONNECTIONS: usize = 32;
 const MAX_SOCKETS: usize = 2;
 /// Files of the instance's page that are passed through (the media half's `media.js` and `audio-worklet.js` too). `/connect/keys.js` is ours.
-const PAGE_PATHS: [&str; 7] = ["/connect", "/connect/page.js", "/connect/page.css", "/connect/engine.js", "/connect/engine.wasm", "/connect/media.js", "/connect/audio-worklet.js"];
+const PAGE_PATHS: [&str; 9] = ["/connect", "/connect/page.js", "/connect/page.css", "/connect/engine.js", "/connect/engine.wasm", "/connect/media.js", "/connect/audio-worklet.js", "/connect/uidisplay.js", "/connect/files.js"];
 const OUR_CSP: &str = "default-src 'none'; frame-ancestors 'none'";
 
 // ------------------------------------------------------------------------------------------------------------------ what was seen

@@ -1,0 +1,22 @@
+scenario: VOICE-WAKE-01
+title: Wake phrase (experimental)
+area: Voice
+rows: F-VOICE-46, F-VOICE-60
+machines: any
+needs: person
+prereq: A working microphone. The wake phrase is EXPERIMENTAL and off by default: switch it on in Settings, Voice only for this check.
+step: Switch on the wake phrase in Settings, Voice. Read what the page says about it.
+expect: The page says in words that the wake phrase is experimental, and a microphone indicator shows while it listens.
+clause: F-VOICE-46.label
+step: Say the wake phrase clearly, about one metre from the microphone.
+expect: The assistant answers with its listening sound within two seconds.
+clause: F-VOICE-46.hear
+step: Talk normally for one minute without the phrase (read a paragraph of any text).
+expect: The assistant does not wake by itself more than once.
+clause: F-VOICE-46.false
+step: Open the Browser tile on a page that asks for the microphone and say the phrase.
+expect: The assistant still hears the phrase, or the page says why it cannot.
+clause: F-VOICE-60.browser
+step: Switch the wake phrase off again.
+expect: The microphone indicator disappears and saying the phrase does nothing.
+clause: F-VOICE-46.off

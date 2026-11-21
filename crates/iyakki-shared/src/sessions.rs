@@ -59,7 +59,7 @@ impl Session {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionMeta {
     pub id: String,
     pub title: String,

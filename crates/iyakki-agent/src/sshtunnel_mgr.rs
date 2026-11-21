@@ -658,17 +658,18 @@ impl Runner for OpenSshRunner {
         let audit = self.audit.clone();
         let name = l.key_name.clone();
         let agent = GitAgent::start(&self.dir.join("run").join(&l.id), vec![AgentKey { id: l.key_name.clone(), pair: l.key.clone() }], vec![], Arc::new(move |_, fp| audit("sshtunnel.sign", &format!("{name} {fp}"))), Arc::new(|_| {}))?;
-        let mut cmd = std::process::Command::new(&ssh);
-        cmd.args(&l.args)
+        use iyakki_core_local::starters_launch::{Launch, Stream};
+        let mut child = Launch::new(&ssh)
+            .args(&l.args)
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()))
             .env("HOME", &home)
             .env("LC_ALL", "C")
             .env("SSH_AUTH_SOCK", agent.ssh_sock())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| format!("could not run {}: {e}", ssh.display()))?;
+            .stdin(Stream::Null)
+            .stdout(Stream::Null)
+            .stderr(Stream::Piped)
+            .spawn().map_err(|e| format!("could not run {}: {e}", ssh.display()))?;
         let err = Arc::new(Mutex::new(String::new()));
         let mut pipe = child.stderr.take();
         let e2 = err.clone();

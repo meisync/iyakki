@@ -76,7 +76,7 @@ impl BarcodeView {
         let caption = fit(c, size, &self.text, TextStyle::Mono, area.w - 2.0 * pad);
         let w = c.measure(size, &caption, TextStyle::Mono);
         c.text(area.x + ((area.w - w) / 2.0).max(0.0), area.y + pad + bar_h + m.gutter(), size, ink, &caption, TextStyle::Mono);
-        c.hit(area, Hit { action: self.base, name: format!("Barcode: {}", self.text), role: Role::Image });
+        c.hit(area, Hit { action: self.base, name: format!("Barcode: {}", self.text), role: Role::Image, ..Default::default() });
         area
     }
 }

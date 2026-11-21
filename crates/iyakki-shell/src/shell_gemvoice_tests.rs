@@ -216,7 +216,7 @@ fn the_start_key_runs_a_whole_manual_turn_and_the_local_voice_reads_the_answer()
     assert!(until(&mut r.sh, |s| !s.gv.open() && !iyakki_shared::geminilive::mic_open()), "it ends after the answer");
     assert_eq!(r.said.lock().unwrap().join(" "), "It is ten o'clock.");
     assert!(!r.mic.0.lock().unwrap().open, "the microphone was closed");
-    assert!(std::fs::read_to_string(r.sh.env.audit.path()).unwrap_or_default().contains("voice.session"), "audited");
+    assert!(std::fs::read_to_string(r.sh.env.audit.path_buf()).unwrap_or_default().contains("voice.session"), "audited");
     assert!(!iyakki_agent::clientmedia::indicator().active());
 }
 
@@ -255,7 +255,7 @@ fn a_tool_that_asks_shows_a_card_and_only_the_press_on_allow_runs_it() {
     // the card is drawn with Allow and Deny, inside the window, at several sizes
     for (w, h) in [(360u32, 740u32), (800, 480), (1280, 720), (2560, 1600)] {
         let mut g = Gfx::new(w, h);
-        gv_impl::render(&r.sh.gv, &mut g, w, h, crate::ui::scale_for(w, h));
+        gv_impl::render(&r.sh.gv, &mut g, w, h, crate::ui::scale_for(w, h), false);
         for id in [gv_impl::ALLOW, gv_impl::DENY] {
             let hit = g.hits.iter().find(|x| x.ev == Event::Tab(id)).unwrap_or_else(|| panic!("{w}x{h}: button {id}"));
             assert!(hit.rect.x >= -0.5 && hit.rect.x + hit.rect.w <= w as f32 + 0.5 && hit.rect.y >= -0.5 && hit.rect.y + hit.rect.h <= h as f32 + 0.5, "{w}x{h}: {:?}", hit.rect);
@@ -264,7 +264,7 @@ fn a_tool_that_asks_shows_a_card_and_only_the_press_on_allow_runs_it() {
     r.sh.handle(&Event::Tab(gv_impl::ALLOW));
     assert!(until(&mut r.sh, |_| !r.said.lock().unwrap().is_empty()), "the answer follows the result");
     assert!(r.tools.0.lock().unwrap().iter().any(|x| x.starts_with("radio_play")), "it ran after the press");
-    assert!(std::fs::read_to_string(r.sh.env.audit.path()).unwrap_or_default().contains("voice.card"));
+    assert!(std::fs::read_to_string(r.sh.env.audit.path_buf()).unwrap_or_default().contains("voice.card"));
 }
 
 #[test]
@@ -296,7 +296,7 @@ fn esc_ends_the_session_and_closes_the_microphone_and_the_key_again_does_too() {
     }
     press_key(&mut r.sh);
     let ok = until(&mut r.sh, |s| !s.gv.open());
-    assert!(ok, "audit: {} state: {:?}", std::fs::read_to_string(r.sh.env.audit.path()).unwrap_or_default(), r.sh.gv.running.as_ref().map(|x| x.state()));
+    assert!(ok, "audit: {} state: {:?}", std::fs::read_to_string(r.sh.env.audit.path_buf()).unwrap_or_default(), r.sh.gv.running.as_ref().map(|x| x.state()));
 }
 
 #[test]
@@ -334,6 +334,21 @@ fn the_microphone_button_is_offered_only_when_the_assistant_is_on_and_starts_a_s
 }
 
 #[test]
+fn the_microphone_button_sits_in_the_top_bar_on_the_home_screen_and_only_while_the_assistant_is_on() {
+    let mut r = rig("gv-bar", true, vec![], vec![]);
+    assert!(!r.sh.bar_order().contains(&BarButton::GemVoice), "off by default: no button");
+    for _ in 0..70 {
+        r.sh.handle(&Event::Tick);
+    }
+    assert!(r.sh.bar_order().contains(&BarButton::GemVoice));
+    let mut g = Gfx::new(1280, 720);
+    r.sh.render(&mut g);
+    let hit = r.sh.hits().iter().find(|x| x.ev == Event::Tab(gv_impl::MIC)).expect("the Mic button");
+    assert!(hit.rect.y < 100.0, "in the top bar, not the bottom right corner");
+    assert_eq!(r.sh.hits().iter().filter(|x| x.ev == Event::Tab(gv_impl::MIC)).count(), 1);
+}
+
+#[test]
 fn the_wake_phrase_hands_off_only_when_everything_is_opted_in_and_chimes() {
     let mut r = rig("gv-wake", true, vec![], vec![]);
     assert!(!r.sh.gv_wake_handoff(), "the hand-off is off by default: the Voice tile gets the wake as before");
@@ -347,5 +362,42 @@ fn the_wake_phrase_hands_off_only_when_everything_is_opted_in_and_chimes() {
     }
     assert!(r.sh.gv_wake_handoff());
     assert!(until(&mut r.sh, |s| s.gv.open()));
-    assert!(std::fs::read_to_string(r.sh.env.audit.path()).unwrap_or_default().contains("opened by the wake phrase"));
+    assert!(std::fs::read_to_string(r.sh.env.audit.path_buf()).unwrap_or_default().contains("opened by the wake phrase"));
+}
+
+fn release_key(sh: &mut Shell) {
+    sh.handle(&Event::Fn(crate::fnkeys::FnKey::VoiceAssist, false));
+}
+
+#[test]
+fn a_start_key_held_down_is_press_to_talk_and_its_release_hands_the_turn_over() {
+    let mut r = rig("gv-hold", true, vec![], reply("It is ten o'clock."));
+    press_key(&mut r.sh);
+    assert!(until(&mut r.sh, |s| s.gv.open() && iyakki_shared::geminilive::mic_open()), "the press starts the session");
+    assert!(until(&mut r.sh, |_| r.wire.sent.lock().unwrap().iter().any(|m| m.contains("\"audio\""))), "the microphone goes in as audio");
+    // kept down long enough, then let go: the same as pressing Done talking
+    for _ in 0..gv_impl::HOLD_TICKS + 1 {
+        r.sh.handle(&Event::Tick);
+    }
+    release_key(&mut r.sh);
+    assert!(until(&mut r.sh, |s| !s.gv.open() && !iyakki_shared::geminilive::mic_open()), "it ends after the answer");
+    assert_eq!(r.said.lock().unwrap().join(" "), "It is ten o'clock.");
+}
+
+#[test]
+fn a_tap_on_the_start_key_leaves_the_session_open_and_a_release_with_no_session_does_nothing() {
+    let mut r = rig("gv-tap", true, vec![], reply("Never said."));
+    release_key(&mut r.sh);
+    assert!(!r.sh.gv.open(), "a release alone starts nothing");
+    press_key(&mut r.sh);
+    release_key(&mut r.sh);
+    assert!(until(&mut r.sh, |s| s.gv.open() && iyakki_shared::geminilive::mic_open()), "a tap starts a session that stays open");
+    for _ in 0..gv_impl::HOLD_TICKS + 1 {
+        r.sh.handle(&Event::Tick);
+    }
+    assert!(r.sh.gv.open(), "nothing ended it");
+    // a second press ends it (and its release does not hand over a turn that is already gone)
+    press_key(&mut r.sh);
+    release_key(&mut r.sh);
+    assert!(until(&mut r.sh, |s| !s.gv.open()), "the second press ends the session");
 }

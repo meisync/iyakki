@@ -1,8 +1,10 @@
-//! The DISKS tile on a made-up machine (`iyakki_disksx::disks_fake`): drawing at every size and in panes, keys, roles, the partition
+//! The DISKS tile on a made-up machine (the core's engine over `iyakki_disksx::disks_fake`; the tile holds only a `dyn DiskEngine`): drawing at every size and in panes, keys, roles, the partition
 //! manager's confirmations, hot-plug. Nothing here sees a real drive.
 
 use std::sync::Arc;
 
+use iyakki_core_api::diskmodel::DiskEngine;
+use iyakki_core_local::diskengine::LocalDiskEngine;
 use iyakki_disksx::disks_fake::{blank_stick, machine, Fake};
 use iyakki_sec::policy::{Policy, Role};
 
@@ -16,6 +18,8 @@ struct Fx {
     app: DisksApp,
     cx: AppCx,
     f: Arc<Fake>,
+    /// The core's drive engine over the made-up machine: the tile only holds it as a `dyn DiskEngine`; the tests keep this handle to set the helper, the programs and the clock.
+    eng: Arc<LocalDiskEngine>,
     g: Gfx,
     area: R,
     s: f32,
@@ -29,11 +33,12 @@ fn fixture(tag: &str, role: Role, w: u32, h: u32, s: f32) -> Fx {
     cx.session.policy = Policy::resolve(role, &Default::default());
     let f = machine();
     blank_stick(&f);
-    let mut app = DisksApp::with_engine(&cx, Arc::new(f.disks()), true);
+    let eng = Arc::new(LocalDiskEngine::over(Arc::new(f.disks())));
+    let mut app = DisksApp::with_engine(&cx, eng.clone(), true);
     app.poll_every = 1;
     // the tests do not wait five seconds; the countdown has its own tests
     app.cancel_window = std::time::Duration::ZERO;
-    Fx { app, cx, f, g: Gfx::new(w, h), area: R::new(0.0, 0.0, w as f32, h as f32), s, tick: 0 }
+    Fx { app, cx, f, eng, g: Gfx::new(w, h), area: R::new(0.0, 0.0, w as f32, h as f32), s, tick: 0 }
 }
 
 fn admin() -> Fx {
@@ -84,7 +89,7 @@ impl Fx {
     }
 
     fn audit(&self) -> String {
-        std::fs::read_to_string(self.cx.audit.path()).unwrap_or_default()
+        std::fs::read_to_string(self.cx.audit.path_buf()).unwrap_or_default()
     }
 }
 
@@ -459,7 +464,7 @@ fn the_system_drive_cannot_even_open_the_manager() {
     f.ev(Event::Tab(T_ADV));
     assert!(!f.app.manager);
     // even a review forced by the engine's own plan call is refused
-    f.app.review(iyakki_disksx::disks_part::PartOp::NewTable(iyakki_shared::disks::Table::Gpt));
+    f.app.review(iyakki_core_api::diskmodel::PartOp::NewTable(iyakki_core_api::diskmodel::Table::Gpt));
     assert!(matches!(f.app.modal, Modal::None) && !f.f.wrote());
     // a mounted drive is refused with the way out
     f.pick("sda");
@@ -508,7 +513,7 @@ fn sizes_are_parsed_in_plain_units() {
 #[test]
 fn nothing_panics_on_a_machine_with_no_drives_or_a_collapsed_area() {
     let mut f = admin();
-    f.app = DisksApp::with_engine(&f.cx, Arc::new(Fake::new().disks()), true);
+    f.app = DisksApp::with_engine(&f.cx, Arc::new(LocalDiskEngine::over(Arc::new(Fake::new().disks()))), true);
     f.draw();
     assert!(f.app.snap.disks.is_empty());
     for k in [Key::Down, Key::Up, Key::Enter, Key::Right, Key::Left, Key::Char('m'), Key::Char('u'), Key::Char('e'), Key::Char('a'), Key::Char('p'), Key::Char('/'), Key::Esc, Key::Char('d')] {
@@ -601,7 +606,7 @@ fn with_helper(f: &mut Fx) -> Arc<iyakki_disksx::disks_helper::FakeCrypt> {
     let c = FakeCrypt::new(f.f.clone());
     c.add("sdb1", "open sesame", iyakki_disksx::disks_fake::sb_ext4("secrets"));
     c.add("nvme1n1p2", "123456-234567-345678-456789-567890-678901-789012-890123", iyakki_disksx::disks_fake::sb_ext4("win"));
-    f.app.crypt = c.clone();
+    f.eng.set_crypt(c.clone());
     c
 }
 
@@ -680,7 +685,7 @@ fn the_password_box_is_masked_unlocks_read_only_then_writing_and_lock_are_separa
 fn a_wrong_password_is_a_plain_message_and_the_next_try_has_to_wait() {
     let mut f = admin();
     let c = with_helper(&mut f);
-    f.app.engine.hold_clock(1000);
+    f.eng.hold_clock(1000);
     choose_sdb1(&mut f);
     f.chr('k');
     f.type_text("not it");
@@ -791,12 +796,10 @@ fn the_unlock_box_draws_inside_the_window_at_every_size() {
 
 /// The blank stick with a GPT and one 40 MiB ext4 partition "data", the programs made up.
 fn stick_with_data() -> Fx {
-    use iyakki_shared::disks::Table;
-    use iyakki_shared::disks_part::{Confirm};
-    use iyakki_disksx::disks_part::{FormatFs, PartOp};
+    use iyakki_core_api::diskmodel::{Confirm, FormatFs, PartOp, Table};
     let mut f = admin();
     let sys = iyakki_disksx::disks_helper::FakeSys::with_programs(&["e2fsck", "resize2fs", "mkfs.exfat", "mkntfs", "ntfsresize"]);
-    f.app.engine.set_tools(Arc::new(iyakki_disksx::disks_fmt::ProcTools::new(sys, "/none")));
+    f.eng.set_tools(Arc::new(iyakki_disksx::disks_fmt::ProcTools::new(sys, "/none")));
     let (a, c) = (f.app.who.clone(), Confirm { typed: "sdc".into(), second: true });
     f.app.engine.apply_partition(&a, "sdc", &PartOp::NewTable(Table::Gpt), &c, &|_, _| {}).unwrap();
     f.app.engine.apply_partition(&a, "sdc", &PartOp::Add { size_bytes: Some(40 << 20), fs: Some(FormatFs::Ext4), label: "data".into() }, &c, &|_, _| {}).unwrap();
@@ -888,7 +891,7 @@ fn escape_cancels_the_countdown_and_the_end_of_it_starts_the_change() {
 
 #[test]
 fn what_the_assistant_asked_for_opens_the_review_but_the_person_does_the_confirming() {
-    use iyakki_disksx::disks_part::FormatFs;
+    use iyakki_core_api::diskmodel::FormatFs;
     let mut f = stick_with_data();
     let user = f.cx.session.user.clone();
     let writes = f.f.calls().len();
@@ -905,4 +908,143 @@ fn what_the_assistant_asked_for_opens_the_review_but_the_person_does_the_confirm
     assert_eq!(f.f.calls().len(), writes, "only the dry run so far");
     f.ev(Event::Tab(T_APPLY));
     assert_eq!(f.f.calls().len(), writes, "and pressing Apply without the name still does nothing");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// the tile on the core's FAKE engine (F-ARCH-06): nothing but the trait is between the tile and the drives
+// ---------------------------------------------------------------------------------------------------------------------
+
+mod on_the_fake_engine {
+    use super::*;
+    use iyakki_core_api::diskmodel::{Disk, Fs, Part, Snapshot, Table, Transport};
+    use iyakki_core_fake::diskengine::FakeDiskEngine;
+
+    fn part(name: &str, number: u32, fs: Fs, label: &str) -> Part {
+        Part { name: name.into(), path: format!("/dev/{name}"), number, start_bytes: 1 << 20, size_bytes: 1 << 30, fs, label: label.into(), uuid: String::new(), mountpoints: vec![], space: None, mounted_ro: false, swap_in_use: false, system: false, type_name: String::new(), crypt: None, unlocked: false }
+    }
+
+    fn stick(parts: Vec<Part>) -> Disk {
+        Disk { name: "sdb".into(), path: "/dev/sdb".into(), vendor: "Acme".into(), model: "Stick".into(), serial: "SN001234".into(), size_bytes: 4 << 30, sector: 512, removable: true, transport: Transport::Usb, read_only: false, table: Table::Gpt, table_notes: vec![], parts, system: false, system_why: String::new(), holders: vec![] }
+    }
+
+    fn on_fake(snap: Snapshot, role: Role) -> (Fx, Arc<FakeDiskEngine>) {
+        let mut f = fixture("disks-fake", role, 1280, 720, 1.0);
+        let eng = Arc::new(FakeDiskEngine::with(snap));
+        f.app = DisksApp::with_engine(&f.cx, eng.clone(), true);
+        f.app.poll_every = 1;
+        f.app.cancel_window = std::time::Duration::ZERO;
+        f.draw();
+        (f, eng)
+    }
+
+    fn one_stick() -> Snapshot {
+        Snapshot { disks: vec![stick(vec![part("sdb1", 1, Fs::Ext4, "DATA")])], support: vec![] }
+    }
+
+    #[test]
+    fn what_the_assistant_asked_for_is_taken_from_the_engine_once_and_opens_the_review_and_an_unknown_partition_is_said() {
+        use iyakki_core_api::diskmodel::{FormatFs, FormatRequest};
+        let mut f = fixture("disks-fake-ask", Role::Admin, 1280, 720, 1.0);
+        let eng = Arc::new(FakeDiskEngine::with(one_stick()));
+        let user = f.cx.session.user.clone();
+        eng.ask_format(&user, FormatRequest::Format { part: "sdb1".into(), fs: FormatFs::Exfat, label: "BK".into() });
+        f.app = DisksApp::with_engine(&f.cx, eng.clone(), true);
+        f.app.poll_every = 1;
+        f.draw();
+        for _ in 0..40 {
+            f.ev(Event::Tick);
+            if matches!(f.app.modal, Modal::Review(_)) {
+                break;
+            }
+        }
+        assert!(matches!(f.app.modal, Modal::Review(_)), "{}", f.msg());
+        assert!(eng.calls().iter().any(|c| c == &format!("take_format_request({user})")));
+        assert!(!eng.calls().iter().any(|c| c.starts_with("apply_partition")), "the person still confirms: nothing is written by a request");
+        // taken once: the engine has nothing more to give
+        assert_eq!(iyakki_core_api::diskmodel::DiskEngine::take_format_request(&*eng, f.cx.data_dir(), &user), None);
+        // a partition that is not there is said, not changed
+        let snap = iyakki_core_api::diskmodel::DiskEngine::scan(&*eng);
+        assert!(iyakki_core_api::diskmodel::request_op(&snap, &FormatRequest::Resize { part: "sdz9".into(), bytes: 1 << 30 }).unwrap_err().contains("no such partition"));
+    }
+
+    #[test]
+    fn the_tile_lists_mounts_and_ejects_only_through_the_engine_handle() {
+        let (mut f, eng) = on_fake(one_stick(), Role::Admin);
+        assert_eq!(f.app.snap.disks.len(), 1);
+        f.pick("sdb");
+        f.key(Key::Right);
+        f.chr('m');
+        assert!(eng.calls().iter().any(|c| c == "mount(sdb1)"), "{:?}", eng.calls());
+        assert!(f.app.snap.disk("sdb").unwrap().parts[0].mounted(), "the new picture comes back from the engine's scan");
+        f.chr('u');
+        assert!(eng.calls().iter().any(|c| c == "unmount(sdb1)"));
+        f.pick("sdb");
+        f.chr('e');
+        assert!(eng.calls().iter().any(|c| c == "eject(sdb)"));
+        assert!(f.app.snap.disks.is_empty());
+    }
+
+    #[test]
+    fn a_delete_needs_the_typed_name_the_engine_checks_it_again_and_changes_nothing_when_it_is_wrong() {
+        let (mut f, eng) = on_fake(one_stick(), Role::Admin);
+        f.pick("sdb");
+        f.chr('a');
+        f.chr('d');
+        assert!(matches!(f.app.modal, Modal::Review(_)), "the dry run comes from the engine's plan");
+        assert!(eng.calls().iter().any(|c| c == "plan_partition(sdb,delete)"), "{:?}", eng.calls());
+        f.type_text("nope");
+        f.ev(Event::Tab(T_APPLY));
+        assert!(!eng.calls().iter().any(|c| c.starts_with("apply_partition")), "a wrong name never reaches the engine");
+        assert_eq!(eng.scan().disks[0].parts.len(), 1);
+        for _ in 0..4 {
+            f.key(Key::Backspace);
+        }
+        f.type_text("sdb");
+        f.ev(Event::Tab(T_APPLY));
+        assert!(eng.calls().iter().any(|c| c == "apply_partition(sdb,delete)"), "{:?}", eng.calls());
+        assert!(eng.scan().disks[0].parts.is_empty(), "{}", f.msg());
+    }
+
+    #[test]
+    fn a_user_never_gets_the_manager_the_engines_refusal_is_the_one_shown() {
+        let (mut f, eng) = on_fake(one_stick(), Role::User);
+        f.pick("sdb");
+        f.chr('a');
+        f.chr('d');
+        assert!(matches!(f.app.modal, Modal::None) && !f.app.manager);
+        assert!(f.msg().contains("administrator"), "{}", f.msg());
+        assert!(!eng.calls().iter().any(|c| c.starts_with("apply_partition")));
+    }
+
+    #[test]
+    fn unlocking_goes_through_the_engine_the_key_is_not_kept_and_lock_closes_it() {
+        let mut s = one_stick();
+        let mut p = part("sdb2", 2, Fs::Luks, "");
+        p.crypt = Some(iyakki_diskcrypt::CryptInfo { kind: iyakki_diskcrypt::CryptKind::Luks2, uuid: String::new(), label: String::new(), detail: String::new(), problem: None });
+        s.disks[0].parts.push(p);
+        let (mut f, eng) = on_fake(s, Role::Admin);
+        eng.set_key("sdb2", "open sesame");
+        f.pick("sdb");
+        f.key(Key::Right);
+        f.key(Key::Down);
+        f.chr('k');
+        assert!(modal_is_unlock(&f));
+        f.type_text("hunter2");
+        f.key(Key::Enter);
+        assert!(f.msg().contains("does not open"), "{}", f.msg());
+        assert!(!f.audit().contains("hunter2") && !f.msg().contains("hunter2"));
+        f.chr('k');
+        f.type_text("open sesame");
+        f.key(Key::Enter);
+        assert!(f.msg().contains("Opened at") && f.msg().contains("read-only"), "{}", f.msg());
+        assert!(f.app.part().unwrap().unlocked);
+        f.ev(Event::Tab(T_ALLOW_WRITE));
+        assert!(f.msg().contains("Open for writing"), "{}", f.msg());
+        f.ev(Event::Tab(T_LOCK));
+        assert!(!f.app.part().unwrap().unlocked);
+        let calls = eng.calls();
+        for want in ["unlock(sdb2)", "allow_writing(sdb2)", "lock(sdb2)"] {
+            assert!(calls.iter().any(|c| c == want), "{want} in {calls:?}");
+        }
+    }
 }

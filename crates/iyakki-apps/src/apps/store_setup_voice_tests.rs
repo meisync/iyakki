@@ -41,7 +41,7 @@ fn rig(tag: &str, role: Role, m: Machine, present: &[Item], other_cluster: bool)
 }
 
 fn audit(cx: &AppCx) -> String {
-    std::fs::read_to_string(cx.audit.path()).unwrap_or_default().replace("\\\"", "\"")
+    std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default().replace("\\\"", "\"")
 }
 
 #[test]

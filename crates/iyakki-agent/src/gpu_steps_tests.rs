@@ -149,7 +149,7 @@ impl GpuEnv for Fake {
         if line.contains("get nodes") {
             self.node_looks += 1;
             let n = if self.node_looks > self.node_after { self.node_gpus } else { 0 };
-            return out(0, &format!("{{\"items\":[{{\"status\":{{\"allocatable\":{{\"nvidia.com/gpu\":\"{n}\",\"iyakki.dev/gpu\":\"{n}\"}}}}}}]}}"));
+            return out(0, &format!("{{\"items\":[{{\"status\":{{\"allocatable\":{{\"nvidia.com/gpu\":\"{n}\",\"iyakki.dev/gpu\":\"{n}\",\"amd.com/gpu\":\"{n}\"}}}}}}]}}"));
         }
         out(0, "")
     }
@@ -541,7 +541,10 @@ fn the_test_job_tries_each_server_and_keeps_the_result() {
 #[test]
 fn the_gpu_entries_are_in_local_models_after_k3s_and_the_nvidia_one_hides_without_an_nvidia_gpu() {
     use crate::quickinstall::{items_of, order, Group};
-    assert_eq!(items_of(Group::LocalModels), [Item::Lemonade, Item::Ollama, Item::MacHost, Item::GpuVulkan, Item::GpuNvidia]);
+    assert_eq!(items_of(Group::LocalModels), [Item::Lemonade, Item::Ollama, Item::MacHost, Item::GpuVulkan, Item::GpuNvidia, Item::GpuRocm]);
+    assert_eq!(Item::GpuRocm.title(), "AMD GPU compute (ROCm)");
+    assert_eq!(order(Item::GpuRocm, &|_| false), [Item::K3s, Item::GpuRocm]);
+    assert_eq!(Item::parse("gpu-rocm"), Some(Item::GpuRocm));
     assert_eq!(Item::GpuVulkan.title(), "GPU for local models (Vulkan)");
     assert_eq!(Item::GpuNvidia.title(), "NVIDIA GPU driver (CUDA)");
     assert_eq!(order(Item::GpuVulkan, &|_| false), [Item::K3s, Item::GpuVulkan]);
@@ -553,9 +556,10 @@ fn the_gpu_entries_are_in_local_models_after_k3s_and_the_nvidia_one_hides_withou
     assert!(Item::GpuNvidia.licence().contains("proprietary") && Item::GpuNvidia.licence().contains("MIT / GPL-2.0"));
     let amd = crate::gpu::Gpu { pci: "0000:65:00.0".into(), vendor_id: 0x1002, device_id: 0x15bf, vendor: crate::gpu::Vendor::Amd, name: "x".into(), driver: None, card: None, render: None, boot_vga: false, vram: None };
     let nvd = crate::gpu::Gpu { vendor_id: 0x10de, vendor: crate::gpu::Vendor::Nvidia, ..amd.clone() };
-    assert_eq!(crate::quickinstall::hidden_items(&[amd.clone()]), [Item::GpuNvidia]);
-    assert_eq!(crate::quickinstall::hidden_items(&[]), [Item::GpuNvidia]);
-    assert!(crate::quickinstall::hidden_items(&[amd, nvd]).is_empty());
+    // an AMD card with no driver is not one ROCm may be tried on, so the entry stays hidden for it
+    assert_eq!(crate::quickinstall::hidden_items(&[amd.clone()]), [Item::GpuNvidia, Item::GpuRocm]);
+    assert_eq!(crate::quickinstall::hidden_items(&[]), [Item::GpuNvidia, Item::GpuRocm]);
+    assert_eq!(crate::quickinstall::hidden_items(&[amd, nvd]), [Item::GpuRocm]);
 }
 
 #[test]
@@ -683,4 +687,74 @@ fn the_nvidia_driver_is_not_loaded_on_a_computer_without_an_nvidia_card() {
     assert!(r.is_empty(), "nothing to restore without the card: {r:?}");
     assert!(calls.lock().unwrap().is_empty(), "no modprobe, no mknod: {:?}", calls.lock().unwrap());
     let _ = std::fs::remove_dir_all(&f.root);
+}
+
+// ---- stage 2 (AMD compute)
+
+const D1: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn rocm_pins() -> iyakki_shared::gpu_rocm::Pins {
+    iyakki_shared::gpu_rocm::Pins { plugin: format!("amd/k8s-device-plugin@sha256:{D1}"), smoke: format!("rocm/rocm-terminal@sha256:{D1}"), ollama: String::new() }
+}
+
+fn rocminfo_log() -> String {
+    "ROCk module is loaded\nAgent 1\n  Name:                    AMD Ryzen 7\n  Marketing Name:          AMD Ryzen 7 7840U\nAgent 2\n  Name:                    gfx1103\n  Marketing Name:          AMD Radeon 780M Graphics\n".into()
+}
+
+#[test]
+fn rocm_stops_before_changing_anything_while_the_images_are_not_pinned() {
+    let mut f = Fake::new("s2-unpinned");
+    f.amd();
+    std::fs::create_dir_all(f.root.join("dev")).unwrap();
+    std::fs::write(f.root.join("dev/kfd"), b"").unwrap();
+    // a build whose pins are empty fails closed (the shipped build now carries the owner-directed pins of 2026-11-19)
+    let none = iyakki_shared::gpu_rocm::Pins { plugin: String::new(), smoke: String::new(), ollama: String::new() };
+    let e = run_rocm_with(&mut f, &none, W, P).unwrap_err();
+    assert!(e.contains("must be pinned by digest") && e.contains("Nothing was changed"), "{e}");
+    assert!(f.kubectl.is_empty() && f.applied.is_empty() && f.marks.is_empty(), "nothing touched the cluster");
+}
+
+#[test]
+fn rocm_runs_every_step_labels_the_node_and_ends_with_a_pod_that_sees_the_card() {
+    let mut f = Fake::new("s2-ok");
+    f.amd();
+    std::fs::create_dir_all(f.root.join("dev")).unwrap();
+    std::fs::write(f.root.join("dev/kfd"), b"").unwrap();
+    f.lemonade = true;
+    f.pod_log = rocminfo_log();
+    f.node_after = 1;
+    run_rocm_with(&mut f, &rocm_pins(), W, P).unwrap();
+    for step in ["[0/7]", "[1/7]", "[2/7]", "[3/7]", "[4/7]", "[5/7]", "[6/7]", "[7/7] done"] {
+        assert!(f.said(step), "no `{step}` in {:?}", f.lines);
+    }
+    assert!(f.kubectl.iter().any(|k| k == "label nodes --all iyakki.dev/amd-compute=true --overwrite"));
+    assert_eq!(f.applied[0].0, "amd-device-plugin");
+    assert!(f.applied[0].1.contains(&format!("amd/k8s-device-plugin@sha256:{D1}")));
+    assert_eq!(f.applied[1].0, "gpu-smoke-rocm");
+    assert!(f.applied[1].1.contains("amd.com/gpu: 1"));
+    let patch = f.kubectl.iter().find(|k| k.contains("patch deployment lemonade")).expect("Lemonade is patched");
+    assert!(patch.contains("amd.com/gpu") && patch.contains("rocm"), "{patch}");
+    assert_eq!(f.marks.len(), 1);
+    assert_eq!(f.marks[0].0, Item::GpuRocm);
+    assert!(f.marks[0].1.contains("gfx1103"), "{:?}", f.marks);
+    assert!(f.said("no ROCm build of it is pinned") || f.said("Ollama is not installed"));
+}
+
+#[test]
+fn rocm_refuses_a_card_that_stays_on_vulkan_and_a_pod_that_sees_only_the_cpu() {
+    let mut f = Fake::new("s2-polaris");
+    f.pci("0000:65:00.0", "0x1002", "0x67df", Some("amdgpu"), Some("renderD128"));
+    std::fs::create_dir_all(f.root.join("dev")).unwrap();
+    std::fs::write(f.root.join("dev/kfd"), b"").unwrap();
+    let e = run_rocm_with(&mut f, &rocm_pins(), W, P).unwrap_err();
+    assert!(e.contains("no AMD card here can run ROCm") && f.said("Polaris"), "{e} {:?}", f.lines);
+    assert!(f.applied.is_empty());
+    let mut g = Fake::new("s2-cpuonly");
+    g.amd();
+    std::fs::create_dir_all(g.root.join("dev")).unwrap();
+    std::fs::write(g.root.join("dev/kfd"), b"").unwrap();
+    g.pod_log = "ROCk module is loaded\nAgent 1\n  Name:                    AMD Ryzen 7\n".into();
+    let e = run_rocm_with(&mut g, &rocm_pins(), W, P).unwrap_err();
+    assert!(e.contains("no GPU target"), "{e}");
+    assert!(g.marks.is_empty());
 }

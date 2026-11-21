@@ -660,6 +660,10 @@ pub fn tls_dialer_via(roots: rustls::RootCertStore, connect_timeout: Duration, p
         while st.conn.is_handshaking() {
             st.conn.complete_io(&mut st.sock).map_err(|e| e.to_string())?;
         }
+        // the chain the site sent is remembered for the lock panel of an open tab (F-BROW-98)
+        if let Some(c) = st.conn.peer_certificates() {
+            crate::certseen::record(host, port, &c.iter().map(|d| d.as_ref().to_vec()).collect::<Vec<_>>());
+        }
         if st.conn.alpn_protocol() == Some(b"h2".as_slice()) {
             Ok(Dialed::H2(Box::new(st)))
         } else {

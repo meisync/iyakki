@@ -77,7 +77,7 @@ fn themes_come_from_the_persons_folder_then_the_shared_one_and_a_bad_file_is_lis
     let b = available(&d, "bob");
     assert_eq!(b.iter().find(|(k, _)| k == "midnight-blue").unwrap().1.as_ref().unwrap().name, "Shared midnight");
     // a person name that tries to leave the folder looks only in the shared one
-    assert_eq!(folders(&d, "../x").len(), 1, "a name that starts with a dot gets no folder of its own");
+    assert_eq!(folders(&d, "../x").len(), 2, "a name that starts with a dot gets no folder of its own (shared and bundle-shared only)");
     assert!(folders(&d, "..").iter().all(|p| !p.to_string_lossy().contains("..")));
 }
 
@@ -122,4 +122,19 @@ fn the_same_theme_is_kept_once_and_the_cap_is_a_plain_refusal() {
     let a = leak(&parse(MIDNIGHT).unwrap()).unwrap();
     let b = leak(&parse(MIDNIGHT).unwrap()).unwrap();
     assert!(std::ptr::eq(a, b));
+}
+
+#[test]
+fn a_theme_an_installed_bundle_brought_is_offered_like_any_other_and_a_bad_one_says_why() {
+    let d = dir("bundle");
+    let own = d.join(BUNDLE_DIR).join("ann");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::write(d.join(BUNDLE_DIR).join("bundle-dusk.theme"), "name = Dusk\nbase = dark\nbg_top = #101830\n").unwrap();
+    std::fs::write(own.join("bundle-bad.theme"), "name = Bad\ntext = #101010\n").unwrap();
+    let a = available(&d, "ann");
+    assert_eq!(a.iter().find(|(k, _)| k == "bundle-dusk").unwrap().1.as_ref().unwrap().name, "Dusk");
+    assert!(a.iter().find(|(k, _)| k == "bundle-bad").unwrap().1.as_ref().unwrap_err().contains("`text` on"));
+    let b = available(&d, "bob");
+    assert!(b.iter().any(|(k, _)| k == "bundle-dusk") && !b.iter().any(|(k, _)| k == "bundle-bad"), "a person's own bundle theme is theirs");
+    let _ = std::fs::remove_dir_all(&d);
 }

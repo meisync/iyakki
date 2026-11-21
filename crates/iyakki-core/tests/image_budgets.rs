@@ -138,3 +138,28 @@ fn alpha_check_runs_the_budgets_gate_only_when_asked() {
     assert!(t.contains("not asked for (--budgets)"), "without the flag the row says it was skipped");
 }
 
+
+#[test]
+fn the_boot_measure_reads_the_ram_in_use_at_the_sign_in_screen_from_the_serial_log() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tmp("ram");
+    std::fs::create_dir_all(d.join("images")).unwrap();
+    write_sized(&d.join("images"), "bzImage", 10);
+    write_sized(&d.join("images"), "rootfs.cpio.zst", 10);
+    // a stand-in for qemu: prints what the real serial console prints, with the memory line right after the first picture
+    let fake = d.join("fake-qemu.sh");
+    std::fs::write(&fake, "#!/bin/sh\necho '[    0.000000] Linux version 6.12'\necho '[    1.0] Run /init as init process'\necho '[    2.0] supervisor up'\necho '[    4.0] shell: first picture on screen (1280x800, first frame took 5 ms, 20 ms after the display was opened)'\necho '[    4.0] shell: memory in use at the sign-in screen: 412 MiB of 1950 MiB'\nsleep 30\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let json = d.join("res.json");
+    let o = Command::new("python3").arg("-I").arg(root().join("dist/buildroot/boot-time.py")).arg(&d).arg("1").env("QEMU", &fake).env("BOOT_TIME_JSON", &json).output().unwrap();
+    let text = String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success() && text.contains("RAM in use at the sign-in screen 412 MiB"), "{text}");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    assert_eq!(v["memory"]["idle_ram_mib"], 412, "{v}");
+    assert!(v["timings"]["login_wall_s"].is_number());
+    // the checker takes the figure: no ceiling is written yet, so it is reported as a figure without a budget and never fails
+    let (code, out) = run("full", &d.join("images"), Some(&json), false);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("idle_ram_mib") && out.contains("412"), "{out}");
+    let _ = std::fs::remove_dir_all(&d);
+}

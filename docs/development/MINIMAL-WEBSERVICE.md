@@ -287,7 +287,7 @@ certificate kept with a private key, own certificate used); a client signs in, c
 readiness 503 without a reason in the body; graceful shutdown; token store hashed, 0600, restart, expiry, revoke; strict route matching.
 
 **Not built** (still the plan above): `flows-runner` write side, `data-api` and `tile-host` profiles, `/metrics`, the WebSocket
-(2026-11-14: a first slice of `tile-host` is built: `--profile tile-host` lists and runs the built-in WASM tiles and nothing else; the web-bundle tile runtime in the row above is still not built.)
+(2026-11-14: a first slice of `tile-host` is built: `--profile tile-host` lists and runs the built-in WASM tiles and nothing else; the web-bundle tile runtime in the row above was written in alpha.7: `POST /api/v1/tile-bundles`, `GET /tiles/{id}/b/{file}`, `/tiles/bridge.js` and the WebSocket `GET /tiles/{id}/bridge` (`webbundle.rs`, `tilebridge.rs`); not yet run in a real browser.)
 stream, developer-mode pairing and `api:*` scopes, MCP bridge, the SSRF refusal suite for the service's web tools (the tools use the
 existing egress policy; the hostile-host tests of section 4 were not written for this route), structured JSON logs, a `headless`
 feature, container manifests, a Helm chart, per-request token budgets beyond the role's `AgentBudget`.
@@ -326,3 +326,7 @@ beyond the usual per-account ones.
 * First profile after `agent-api` and `cloud`: `flows-runner` (sign-in and the person's flows: list, read, start, follow runs). Not yet: import, validate, stop, schedules, answering steps, `data-api`, `tile-host`.
 
 * Round 6: `flows-runner` has import, validate, stop and the schedules routes; `data-api` exists (sign-in and the three read-only data tools). `build-cloud.sh docker --headless` is the container recipe for the headless program (checked by `headless-check.sh`, not built).
+
+* Alpha.7 (finG9a): a web-bundle tile is opened through its WRAPPER page `GET /tiles/{id}/w` (`bundlewrap.rs`): the wrapper holds the sign-in, the token (memory only) and the WebSocket bridge and shows the bundle in `<iframe sandbox="allow-scripts">` with no same-origin rights; the bundle's `/tiles/bridge.js` talks to the wrapper by `postMessage` only, and every bundle file carries `sandbox allow-scripts` and `connect-src 'none'`. The tile host has chat tools `tile_bundle_list`, `tile_bundle_install` and `tile_bundle_remove` for administrators (`bundletools.rs`; install and remove ask every time).
+* Alpha.7 (finG9a): the cloud profile takes webhooks (`/hooks/<id>/<token>`, F-FLOW-15): the sender is read from the gateway's `X-Forwarded-For`; the person makes and manages hooks with `GET/POST /api/v1/hooks`, `GET /api/v1/hooks/reveal` and `POST /api/v1/hooks/{id}/regenerate`, `enable`, `disable`, `public` (D-FLOW15-CLOUD in ALPHA-7-DECISIONS.md).
+* Alpha.7 (finG9a): the headless image boots by itself: as process 1 the headless program mounts the pseudo file systems, brings the machine up and serves the profile named by `serve --profile`, `IYAKKI_PROFILE`, the kernel line `iyakki.profile=NAME` or the `profile` of `/etc/iyakki/service.json` (`headlessboot.rs`, F-WEBSVC-15).

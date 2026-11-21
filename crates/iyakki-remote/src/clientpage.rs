@@ -15,7 +15,7 @@ const PAGE_CSS: &str = include_str!("clientpage/page.css");
 pub const CSP: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// The paths of the page, for tests and the router.
-pub const PATHS: [&str; 8] = ["/connect", "/connect/page.js", "/connect/page.css", "/connect/engine.js", "/connect/keys.js", "/connect/engine.wasm", "/connect/media.js", "/connect/audio-worklet.js"];
+pub const PATHS: [&str; 10] = ["/connect", "/connect/page.js", "/connect/page.css", "/connect/engine.js", "/connect/keys.js", "/connect/engine.wasm", "/connect/media.js", "/connect/audio-worklet.js", "/connect/uidisplay.js", "/connect/files.js"];
 
 /// The page may use this device's camera and microphone and the clipboard only for itself, and only when the person presses a button (the
 /// browser asks too); nothing else.
@@ -34,6 +34,8 @@ pub fn serve(path: &str) -> Option<Response> {
         "/connect/page.css" => Response::new(200, "text/css; charset=utf-8", PAGE_CSS),
         "/connect/engine.js" => Response::new(200, js, iyakki_client_engine::GLUE_JS),
         "/connect/keys.js" => Response::new(200, js, iyakki_client_engine::KEYS_JS),
+        "/connect/uidisplay.js" => Response::new(200, js, iyakki_client_engine::UIDISPLAY_JS),
+        "/connect/files.js" => Response::new(200, js, iyakki_client_engine::FILES_JS),
         "/connect/media.js" => Response::new(200, js, iyakki_client_engine::MEDIA_JS),
         "/connect/audio-worklet.js" => Response::new(200, js, iyakki_client_engine::WORKLET_JS),
         "/connect/engine.wasm" if !iyakki_client_engine::WASM.is_empty() => Response::new(200, "application/wasm", iyakki_client_engine::WASM),

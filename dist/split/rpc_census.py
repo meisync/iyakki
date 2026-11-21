@@ -15,9 +15,11 @@ def strip(s):
     s = re.sub(r'//[^\n]*', '', s)
     return re.sub(r'/\*.*?\*/', '', s, flags=re.S)
 
+EXTRA_FILES = []  # traits of other crates a generator wants parsed too (gen_unserved.py); the census itself never sets it
+
 def parse():
     res = []
-    for f in sorted(glob.glob(ROOT + '/crates/iyakki-agent-api/src/*.rs')):
+    for f in sorted(glob.glob(ROOT + '/crates/iyakki-agent-api/src/*.rs')) + list(EXTRA_FILES):
         t = strip(open(f).read())
         for m in re.finditer(r'^pub trait (\w+)[^{;]*\{', t, flags=re.M):
             name = m.group(1); i = m.end(); d = 1; j = i
@@ -39,10 +41,15 @@ def parse():
                 cur += c
             for it in items:
                 body_ = it.rstrip().endswith('@BODY'); it = it.replace('@BODY', '')
-                mm = re.search(r'\bfn\s+(\w+)\s*(<[^>]*>)?\s*\((.*)\)\s*(->\s*(.*))?$', it.strip(), flags=re.S)
+                mm = re.search(r'\bfn\s+(\w+)\s*(<[^>]*>)?\s*\(', it.strip(), flags=re.S)
                 if not mm: continue
-                fn, gen, args, _, ret = mm.groups()
-                res.append(dict(file=os.path.basename(f), trait=name, fn=fn, gen=gen or '', args=' '.join(args.split()), ret=' '.join((ret or '').split()), body=body_))
+                t_ = it.strip(); k_ = mm.end(); dd_ = 1
+                while dd_ and k_ < len(t_):
+                    dd_ += (t_[k_] == '(') - (t_[k_] == ')'); k_ += 1
+                fn, gen = mm.group(1), mm.group(2)
+                args = t_[mm.end():k_ - 1]; rest_ = t_[k_:].strip()
+                ret = rest_[2:].strip() if rest_.startswith('->') else None
+                res.append(dict(file=os.path.basename(f), path=f, trait=name, fn=fn, gen=gen or '', args=' '.join(args.split()), ret=' '.join((ret or '').split()), body=body_))
     return res
 
 # classes, in the order the design document explains them

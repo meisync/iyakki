@@ -16,7 +16,6 @@
 //! routes carry text), a check that a host name does not resolve to a private address (literal addresses and cluster names are refused).
 
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::cloudroles::Action;
@@ -417,8 +416,8 @@ pub fn git_clone(url: &str, dest: &Path, allow: &str, branch: Option<&str>, dept
             return Err("that is not a branch name".into());
         }
     }
-    let mut cmd = Command::new("git");
-    cmd.env_clear()
+    let mut cmd = iyakki_core_local::starters_launch::Launch::new("git")
+        .env_clear()
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .env("HOME", "/nonexistent")
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -428,13 +427,19 @@ pub fn git_clone(url: &str, dest: &Path, allow: &str, branch: Option<&str>, dept
         .env("LC_ALL", "C")
         .args(["-c", "core.symlinks=false", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "clone", "--no-tags", "--quiet", "--no-recurse-submodules"]);
     if depth > 0 {
-        cmd.args(["--depth", &depth.min(100_000).to_string()]);
+        cmd = cmd.args(["--depth", &depth.min(100_000).to_string()]);
     }
     if let Some(b) = branch {
-        cmd.args(["--branch", b]);
+        cmd = cmd.args(["--branch", b]);
     }
-    cmd.arg("--").arg(url).arg(dest).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("git cannot be started: {e}"))?;
+    let mut child = cmd
+        .arg("--")
+        .arg(url)
+        .arg(dest)
+        .stdin(iyakki_core_local::starters_launch::Stream::Null)
+        .stdout(iyakki_core_local::starters_launch::Stream::Null)
+        .stderr(iyakki_core_local::starters_launch::Stream::Piped)
+        .spawn().map_err(|e| format!("git cannot be started: {e}"))?;
     let end = Instant::now() + timeout;
     // a status taken by the PID 1 reaper is not a failure: the clone counts as done when the repository folder is there
     let state = loop {
@@ -493,6 +498,7 @@ pub fn list_clones(base: &Path) -> Vec<Checkout> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
     use std::path::PathBuf;
 
     fn dir(tag: &str) -> PathBuf {

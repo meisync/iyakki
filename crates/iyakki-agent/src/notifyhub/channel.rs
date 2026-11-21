@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 pub enum Kind {
     Webhook,
     Email,
+    /// Browser Web Push (F-INBOX-09): one push per person who saved a browser; the person's own push settings still decide.
+    Push,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,7 +58,8 @@ pub fn from_item(it: &Item) -> Result<Channel, String> {
     let kind = match s(v, "type") {
         "webhook" => Kind::Webhook,
         "email" => Kind::Email,
-        _ => return Err("type must be webhook or email".into()),
+        "push" => Kind::Push,
+        _ => return Err("type must be webhook, email or push".into()),
     };
     let mut addresses = BTreeMap::new();
     for e in v.get("addresses").and_then(|x| x.as_array()).into_iter().flatten().filter_map(|x| x.as_str()) {

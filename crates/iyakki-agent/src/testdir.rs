@@ -18,11 +18,8 @@ pub fn base() -> PathBuf {
 }
 
 fn alive(pid: u32) -> bool {
-    if Path::new("/proc/self").exists() {
-        return Path::new(&format!("/proc/{pid}")).exists();
-    }
     // no /proc (macOS): cannot tell, so a folder of another process is never swept (it may belong to a test run still going)
-    true
+    iyakki_core_local::procfacts::is_alive(pid).unwrap_or(true)
 }
 
 /// Removes `<prefix>-<pid>-...` folders in `dir` whose process is gone.
@@ -167,41 +164,20 @@ pub fn free_port() -> u16 {
 /// Tests only look at it after a failure; nothing depends on its answer.
 #[allow(dead_code)]
 pub fn describe_port(port: u16) -> String {
-    let hex = format!(":{port:04X}");
-    let mut found: Vec<(String, String, String)> = Vec::new(); // (table, state, inode)
-    for table in ["tcp", "tcp6", "udp", "udp6"] {
-        let Ok(text) = std::fs::read_to_string(format!("/proc/net/{table}")) else { continue };
-        for line in text.lines().skip(1) {
-            let f: Vec<&str> = line.split_whitespace().collect();
-            if f.len() > 9 && f[1].ends_with(&hex) {
-                found.push((table.to_string(), f[3].to_string(), f[9].to_string()));
-            }
-        }
-    }
-    if found.is_empty() {
+    let uses = iyakki_core_local::procfacts::socket_uses(port);
+    if uses.is_empty() {
         return format!("port {port}: no socket holds it now (it was released after the failure)");
     }
-    let mut out = Vec::new();
-    for (table, state, inode) in found {
-        let mut owner = String::from("owner not visible");
-        if let Ok(rd) = std::fs::read_dir("/proc") {
-            'procs: for e in rd.flatten() {
-                let name = e.file_name().to_string_lossy().to_string();
-                if !name.chars().all(|c| c.is_ascii_digit()) {
-                    continue;
-                }
-                let Ok(fds) = std::fs::read_dir(e.path().join("fd")) else { continue };
-                for fd in fds.flatten() {
-                    if std::fs::read_link(fd.path()).is_ok_and(|l| l.to_string_lossy() == format!("socket:[{inode}]")) {
-                        let comm = std::fs::read_to_string(e.path().join("comm")).unwrap_or_default();
-                        owner = format!("process {name} ({}), this test process is {}", comm.trim(), std::process::id());
-                        break 'procs;
-                    }
-                }
-            }
-        }
-        out.push(format!("{table} state {state}: {owner}"));
-    }
+    let out: Vec<String> = uses
+        .into_iter()
+        .map(|u| {
+            let owner = match u.owner {
+                Some((pid, comm)) => format!("process {pid} ({comm}), this test process is {}", std::process::id()),
+                None => String::from("owner not visible"),
+            };
+            format!("{} state {}: {owner}", u.table, u.state)
+        })
+        .collect();
     format!("port {port}: {}", out.join("; "))
 }
 

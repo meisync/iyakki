@@ -1,0 +1,1 @@
+# Scenarios counted as BLOCKED, never PASS, until fixed. One scenario name per line. The list may only shrink.

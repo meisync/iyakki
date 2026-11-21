@@ -342,6 +342,17 @@ mod over_tls {
     }
 
     #[test]
+    fn a_site_that_only_speaks_http11_still_has_its_certificate_recorded_for_the_lock_panel() {
+        // the dialer finishes the handshake before it learns the site is not an h2 site, so the HTTP/1.1 sites are covered too
+        let (port, roots) = serve_tls(&[b"http/1.1"]);
+        let pool = H2Pool::new(tls_dialer(roots.clone(), Duration::from_secs(10)));
+        assert!(crate::certseen::latest("localhost", port).is_none());
+        assert!(matches!(pool.fetch("localhost", port, &get("/hello"), T), Pooled::Http1));
+        let chain = crate::certseen::latest("localhost", port).expect("recorded although the site chose HTTP/1.1");
+        assert!(crate::certview::view("localhost", &chain, 1_900_000_000, roots).unwrap().names_match);
+    }
+
+    #[test]
     fn a_certificate_that_is_not_trusted_is_not_used_for_h2() {
         let (port, _roots) = serve_tls(&[b"h2"]);
         let pool = H2Pool::new(tls_dialer(rustls::RootCertStore::empty(), Duration::from_secs(10)));
@@ -531,6 +542,19 @@ mod coalescing {
         let before = dials.load(Ordering::SeqCst);
         assert!(matches!(pool.fetch("alias.test", port, &get("/hello"), T), Pooled::Http1));
         assert!(dials.load(Ordering::SeqCst) > before, "it dials for itself and is not shared again");
+    }
+
+    #[test]
+    fn the_chain_a_handshake_was_given_is_remembered_for_the_lock_panel() {
+        let (port, roots, _) = serve_names(&["localhost"]);
+        let pool = H2Pool::new(tls_dialer(roots.clone(), Duration::from_secs(10)));
+        assert!(crate::certseen::latest("localhost", port).is_none(), "nothing before the first handshake on this port");
+        ok(pool.fetch("localhost", port, &get("/hello"), T));
+        let chain = crate::certseen::latest("localhost", port).expect("the handshake was recorded");
+        assert!(!chain.is_empty() && chain[0].len() > 100, "the leaf certificate");
+        // and it reads as a certificate for that name, trusted by the roots the client used
+        let v = crate::certview::view("localhost", &chain, 1_900_000_000, roots).unwrap();
+        assert!(v.names_match, "{}", v.text());
     }
 
     #[test]

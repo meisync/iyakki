@@ -486,3 +486,27 @@ fn a_phone_finds_configures_starts_streams_loses_a_packet_suspends_and_closes_an
     assert_eq!(say(&mut sink, &mut path, SIG_CLOSE, seid), MsgType::Accept);
     assert_eq!((*log.closed.lock().unwrap(), path.playing()), (2, false));
 }
+
+#[test]
+fn an_extra_record_is_found_and_read_like_the_built_in_ones_until_it_is_taken_out_and_the_audio_handles_cannot_be_taken() {
+    let rec = crate::nap_server::nap_extra_record();
+    assert_eq!(rec.handle, crate::bnep_nap::SDP_NAP_HANDLE);
+    // a private handle and UUID so that no other test's search sees it
+    let mine = ExtraRecord { handle: 0x0001_00f0, uuids: vec![crate::bnep::UUID_NAP, 0x1fff], attrs: rec.attrs.clone() };
+    assert!(sdp_register_extra(ExtraRecord { handle: SDP_RECORD_HANDLE, ..mine.clone() }).is_err(), "the audio record's handle is not for sale");
+    sdp_register_extra(mine.clone()).unwrap();
+    let mut p = pattern(0x1fff);
+    p.extend_from_slice(&[0, 10, 0]);
+    let r = sdp_respond(&sdp_req(0x02, 3, &p), "IYAKKI");
+    assert_eq!((&r[5..9], &r[9..13]), (&[0u8, 1, 0, 1][..], &mine.handle.to_be_bytes()[..]));
+    let mut a = mine.handle.to_be_bytes().to_vec();
+    a.extend_from_slice(&[0x02, 0x00]);
+    a.extend_from_slice(&all_attrs());
+    a.push(0);
+    let r = sdp_respond(&sdp_req(0x04, 4, &a), "IYAKKI");
+    assert_eq!(r[0], 0x05, "{r:?}");
+    assert!(r.windows(2).any(|w| w == [0x11, 0x16]), "the NAP class is in the attribute list");
+    sdp_unregister_extra(mine.handle);
+    let r = sdp_respond(&sdp_req(0x02, 5, &p), "IYAKKI");
+    assert_eq!(&r[5..9], &[0, 0, 0, 0]);
+}

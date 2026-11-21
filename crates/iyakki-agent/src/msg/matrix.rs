@@ -74,7 +74,12 @@ struct St {
     health: Health,
     rate: RateInfo,
     user_id: String,
+    /// Encrypted events whose key had not arrived: tried again after every sync (newest kept, at most [`MAX_PENDING_ENCRYPTED`]).
+    pending_encrypted: Vec<(String, Value)>,
 }
+
+/// Most undecryptable events kept to try again when their key arrives.
+const MAX_PENDING_ENCRYPTED: usize = 100;
 
 pub struct MatrixChannel {
     label: String,
@@ -207,7 +212,7 @@ impl MatrixChannel {
             sleeper: Arc::new(real_sleep),
             max_attachment: DEFAULT_MAX_ATTACHMENT,
             addon: e2ee::installed(),
-            st: Mutex::new(St { since: None, health: Health::unknown(), rate: RateInfo::default(), user_id: String::new() }),
+            st: Mutex::new(St { since: None, health: Health::unknown(), rate: RateInfo::default(), user_id: String::new(), pending_encrypted: Vec::new() }),
         }
     }
 
@@ -315,12 +320,47 @@ impl MatrixChannel {
         r.json.get("event_id").and_then(Value::as_str).map(String::from).ok_or_else(|| ChannelError::Rejected("the server accepted the message but gave no event id".into()))
     }
 
+    /// Carry out the requests an add-on asks for, one after the other, and give each answer back to it (it may ask for the next step:
+    /// device lookup, one-time key claim, key delivery). Only the configured homeserver is ever called; a few steps at most.
+    fn drive(&self, w: &Wire, a: &Arc<dyn E2eeAddon>, first: Vec<e2ee::AddonRequest>) -> Result<(), ChannelError> {
+        let mut queue: std::collections::VecDeque<e2ee::AddonRequest> = first.into();
+        let mut steps = 0;
+        while let Some(rq) = queue.pop_front() {
+            steps += 1;
+            if steps > 8 {
+                return Err(ChannelError::Refused("the encryption add-on asked for too many steps to share its key, so nothing was sent".into()));
+            }
+            let method = match rq.method.to_ascii_uppercase().as_str() {
+                "GET" => "GET",
+                "PUT" => "PUT",
+                _ => "POST",
+            };
+            let r = w.json(method, &format!("/_matrix/client/{}", rq.path.trim_start_matches('/')), Some(&rq.body))?;
+            self.count_waits(&r);
+            let more = a.on_response(&rq, r.status, &r.json).map_err(|e| ChannelError::Refused(format!("the encryption add-on could not share its key, so nothing was sent: {}", clean_text(&e, 160))))?;
+            queue.extend(more);
+        }
+        Ok(())
+    }
+
+    /// Make sure the room's key is with the devices of the room's members before a message goes out (only for an add-on that asks).
+    fn share_keys(&self, w: &Wire, a: &Arc<dyn E2eeAddon>, room: &str) -> Result<(), ChannelError> {
+        if !a.shares_keys() {
+            return Ok(());
+        }
+        let r = check_ok(w.json("GET", &format!("/_matrix/client/v3/rooms/{}/joined_members", pct(room)), None)?, self.t())?;
+        let members: Vec<String> = r.json.get("joined").and_then(Value::as_object).map(|m| m.keys().cloned().collect()).unwrap_or_default();
+        let first = a.prepare_send(room, &members).map_err(|e| ChannelError::Refused(format!("the encryption add-on could not prepare the room key, so nothing was sent: {}", clean_text(&e, 160))))?;
+        self.drive(w, a, first)
+    }
+
     /// Send one event; in an encrypted room only through the installed add-on.
     fn send_event(&self, w: &Wire, room: &str, content: Value, txn: &str, encrypted: bool) -> Result<String, ChannelError> {
         if !encrypted {
             return self.put_event(w, room, "m.room.message", &content, txn);
         }
         let Some(a) = &self.addon else { return Err(ChannelError::Refused(e2ee::REFUSAL.into())) };
+        self.share_keys(w, a, room)?;
         let (ty, enc) = a.encrypt(room, "m.room.message", &content).map_err(|e| ChannelError::Refused(format!("the encryption add-on could not encrypt it, so nothing was sent: {}", clean_text(&e, 160))))?;
         self.put_event(w, room, &ty, &enc, txn)
     }
@@ -346,13 +386,16 @@ impl MatrixChannel {
         Ok(if mime == "image/jpeg" { strip_jpeg_metadata(&bytes) } else { bytes })
     }
 
-    fn parse_events(&self, v: &Value, own: &str, out: &mut Vec<InMessage>) {
-        let Some(rooms) = v.pointer("/rooms/join").and_then(Value::as_object) else { return };
+    /// Turn the events of a sync into messages. An encrypted event that cannot be opened is returned (room, event) so the caller can keep it
+    /// and ask for its key; with `show_unreadable` it is also in `out` as a line that says it is unreadable (only when first seen).
+    fn parse_events(&self, v: &Value, own: &str, out: &mut Vec<InMessage>, show_unreadable: bool) -> Vec<(String, Value)> {
+        let mut unreadable_events = Vec::new();
+        let Some(rooms) = v.pointer("/rooms/join").and_then(Value::as_object) else { return unreadable_events };
         for (room, data) in rooms {
             let Some(events) = data.pointer("/timeline/events").and_then(Value::as_array) else { continue };
             for e in events {
                 if out.len() >= MAX_EVENTS_PER_SYNC {
-                    return;
+                    return unreadable_events;
                 }
                 let ty = e.get("type").and_then(Value::as_str).unwrap_or("");
                 let from = clean_text(e.get("sender").and_then(Value::as_str).unwrap_or(""), 120);
@@ -370,12 +413,18 @@ impl MatrixChannel {
                     "m.room.message" => out.push(base(Self::message_text(e.get("content").unwrap_or(&Value::Null)), false)),
                     "m.room.encrypted" => match self.addon.as_ref().and_then(|a| a.decrypt(room, e).ok()) {
                         Some(clear) => out.push(base(Self::message_text(&clear), false)),
-                        None => out.push(base(String::new(), true)),
+                        None => {
+                            unreadable_events.push((room.clone(), e.clone()));
+                            if show_unreadable {
+                                out.push(base(String::new(), true));
+                            }
+                        }
                     },
                     _ => {}
                 }
             }
         }
+        unreadable_events
     }
 
     fn message_text(content: &Value) -> String {
@@ -470,18 +519,35 @@ impl Channel for MatrixChannel {
         })?;
         let next = v.get("next_batch").and_then(Value::as_str).filter(|s| !s.is_empty() && s.len() < 512).map(String::from);
         let mut out = Vec::new();
+        // the add-on goes FIRST: a room key that arrives in this very sync (a to-device event) opens the messages of the same sync, and the
+        // keys it asks the homeserver for (upload, claim, verification replies) are sent now
+        if let Some(a) = &self.addon {
+            if let Ok(reqs) = a.on_sync(&v) {
+                let _ = self.with_wire(|w| self.drive(w, a, reqs.into_iter().take(10).collect()));
+            }
+        }
         // the very first sync only finds our place: old messages are not replayed
         if since.is_some() {
-            self.parse_events(&v, &own, &mut out);
-        }
-        if let Some(a) = &self.addon {
-            // the add-on may need the homeserver (keys): it asks, we do the call here, against the same host
-            if let Ok(reqs) = a.on_sync(&v) {
-                for rq in reqs.into_iter().take(10) {
-                    let method = if rq.method.eq_ignore_ascii_case("GET") { "GET" } else { "POST" };
-                    let _ = self.with_wire(|w| w.json(method, &format!("/_matrix/client/{}", rq.path.trim_start_matches('/')), Some(&rq.body)));
+            // events that waited for a key are tried again first (they are not shown as unreadable a second time)
+            let waiting = std::mem::take(&mut self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pending_encrypted);
+            let mut still: Vec<(String, Value)> = Vec::new();
+            for (room, e) in waiting {
+                let retry = json!({"rooms": {"join": {room.clone(): {"timeline": {"events": [e.clone()]}}}}});
+                still.extend(self.parse_events(&retry, &own, &mut out, false));
+            }
+            // new events: an unreadable one is shown as such, kept for later, and its key is asked for from the person's other devices
+            let fresh = self.parse_events(&v, &own, &mut out, true);
+            if let Some(a) = &self.addon {
+                let asks: Vec<e2ee::AddonRequest> = fresh.iter().flat_map(|(room, e)| a.key_requests(room, e)).take(10).collect();
+                if !asks.is_empty() {
+                    let _ = self.with_wire(|w| self.drive(w, a, asks));
                 }
             }
+            still.extend(fresh);
+            if still.len() > MAX_PENDING_ENCRYPTED {
+                still.drain(..still.len() - MAX_PENDING_ENCRYPTED);
+            }
+            self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pending_encrypted = still;
         }
         if let Some(n) = next {
             self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).since = Some(n);

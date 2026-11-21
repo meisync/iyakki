@@ -8,6 +8,13 @@ fn pos(needle: &str) -> usize {
     MAIN.find(needle).unwrap_or_else(|| panic!("main.rs has no `{needle}`"))
 }
 
+/// `main.rs` without the body of `serve_image`: the headless service image is process 1 on its own and does its own boot there (F-WEBSVC-15).
+fn without_serve_image() -> String {
+    let Some(start) = MAIN.find("\nfn serve_image(") else { return MAIN.to_string() };
+    let end = MAIN[start + 1..].find("\nfn ").map_or(MAIN.len(), |e| start + 1 + e);
+    format!("{}{}", &MAIN[..start], &MAIN[end..])
+}
+
 #[test]
 fn the_boot_steps_stay_in_the_pid1_block_and_the_per_process_steps_follow_in_a_block_a_live_restart_enters() {
     let boot_block = pos("            if pid1 {\n                // /proc must exist before the command line can be read");
@@ -17,7 +24,7 @@ fn the_boot_steps_stay_in_the_pid1_block_and_the_per_process_steps_follow_in_a_b
     for step in ["mount_pseudo_filesystems()", "early_boot_critical()", "late_boot(plan)", "run_install_console()"] {
         let at = pos(step);
         assert!(at > boot_block && at < process_block, "`{step}` belongs to the boot part (inside `if pid1`)");
-        assert_eq!(MAIN.matches(step).count(), MAIN[boot_block..process_block].matches(step).count(), "`{step}` is not called anywhere else");
+        assert_eq!(without_serve_image().matches(step).count(), MAIN[boot_block..process_block].matches(step).count(), "`{step}` is not called anywhere else (the headless image's own boot, `serve_image`, is the one other place: it is process 1 of a machine that has no shell)");
     }
     // the per-process steps come after the marker, so a restarted program does them
     let tail = &MAIN[process_block..];

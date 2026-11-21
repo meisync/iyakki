@@ -40,7 +40,7 @@ impl SettingsApp {
     }
 
     pub(super) fn appaccess_buttons(&self) -> Vec<Btn> {
-        vec![("Take it away", ERR, 'r'), ("Clear the log", TEXT, 'c')]
+        vec![("Take it away", ERR, 'r'), ("Time limit…", TEXT, 'e'), ("Clear the log", TEXT, 'c')]
     }
 
     pub(super) fn handle_appaccess(&mut self, k: &Key, cx: &AppCx) {
@@ -49,6 +49,7 @@ impl SettingsApp {
             Key::Up => self.move_sel(-1, len),
             Key::Down => self.move_sel(1, len),
             Key::Char('r') | Key::Delete => self.appaccess_revoke(self.sel(), cx),
+            Key::Char('e') => self.appaccess_limit_form(self.sel(), cx),
             Key::Char('c') => self.appaccess_clear(cx),
             _ => {}
         }
@@ -84,6 +85,41 @@ impl SettingsApp {
             }
             Ok(false) => self.ok(format!("{} was already taken away from {}.", r.capability, r.app)),
             Err(e) => self.fail(e),
+        }
+    }
+
+    /// Opens the form that gives the chosen grant an end (F-SDK-217).
+    fn appaccess_limit_form(&mut self, row: usize, cx: &AppCx) {
+        if !self.admin(cx) {
+            return;
+        }
+        let Some(r) = Self::appaccess_rows(cx).get(row).cloned() else { return self.fail("Nothing is chosen.") };
+        if r.revoked {
+            return self.fail(format!("{} was taken away from {}: there is nothing to limit.", r.capability, r.app));
+        }
+        let f = Form::new(&format!("Time limit for {} on {}", r.capability, r.app)).text("Hours it may still use it (1 to 8784; empty: no limit)", "", "for example 24");
+        self.open_form(FormKind::AppAccessLimit(r.installation, r.capability), f);
+    }
+
+    /// The form was submitted: the limit is written and the app is told by the core's own look at the next tick (`app.permissions`, cause `expiry`).
+    pub(super) fn appaccess_limit_submit(&mut self, cx: &AppCx, installation: &str, capability: &str, form: &Form) -> Result<String, String> {
+        if !self.admin(cx) {
+            return Err("Only an administrator may change what apps may use.".into());
+        }
+        let text = form.value(0);
+        let hours = match text.trim() {
+            "" => None,
+            t => Some(t.parse::<u32>().ok().filter(|h| (1..=8784).contains(h)).ok_or("Hours: a whole number from 1 to 8784, or empty for no limit.")?),
+        };
+        match cx.agent.helpers_b6().access_limit(cx.data_dir(), installation, capability, hours)? {
+            true => {
+                cx.audit.record(&cx.session.user, "access.limit", &format!("{installation} {capability} {}", hours.map_or("no limit".to_string(), |h| format!("{h} h"))));
+                Ok(match hours {
+                    Some(h) => format!("{capability} may be used for {h} more hour(s). It applies at the app's next try."),
+                    None => format!("{capability} has no time limit now."),
+                })
+            }
+            false => Err(format!("{capability} is not held now, so no limit was set.")),
         }
     }
 

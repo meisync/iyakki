@@ -79,7 +79,7 @@ impl std::fmt::Display for RevError {
 }
 
 /// The list in force.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Revocations {
     list: Option<RevList>,
 }

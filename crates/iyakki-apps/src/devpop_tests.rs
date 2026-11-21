@@ -2,7 +2,7 @@
 //! computer with no `/sys` at all (the desktop window on macOS).
 
 use super::*;
-use iyakki_devctl::{Control, Roots};
+use iyakki_core_api::device_types::devctl::{Control, Roots};
 use std::path::{Path, PathBuf};
 
 fn put(root: &Path, rel: &str, content: &str) {
@@ -29,17 +29,17 @@ impl Control for Fake {
     fn ipv4(&self) -> Vec<(String, String)> {
         vec![("eth0".into(), "192.168.1.5".into()), ("wlan0".into(), "192.168.1.6".into())]
     }
-    fn volume(&self, _: u32) -> Option<iyakki_devctl::Volume> {
-        Some(iyakki_devctl::Volume { control: "Master".into(), percent: 70, muted: *self.muted.lock().unwrap() })
+    fn volume(&self, _: u32) -> Option<iyakki_core_api::device_types::devctl::Volume> {
+        Some(iyakki_core_api::device_types::devctl::Volume { control: "Master".into(), percent: 70, muted: *self.muted.lock().unwrap() })
     }
-    fn change_volume(&self, _: u32, d: Option<i32>) -> Result<iyakki_devctl::Volume, String> {
+    fn change_volume(&self, _: u32, d: Option<i32>) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
         if d.is_none() {
             let mut m = self.muted.lock().unwrap();
             *m = !*m;
         }
         Ok(self.volume(0).unwrap())
     }
-    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_devctl::Volume, String> {
+    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
         Err("no".into())
     }
     fn dhcp(&self, _: &str) -> Result<(), String> {
@@ -52,15 +52,16 @@ pub(crate) fn probe_at(root: &Path) -> Probe {
     Probe {
         core: super::scanning_core(),
         dev: DeviceEnv { roots: roots.clone(), ctl: Arc::new(Fake { muted: Default::default() }) },
-        hw: iyakki_hwinfo::Roots { sys: roots.sys.clone(), proc: roots.proc_.clone() },
+        hw: iyakki_core_api::device_types::hwinfo::Roots { sys: roots.sys.clone(), proc: roots.proc_.clone() },
         data_dir: root.to_path_buf(),
         bt_dir: root.join("bluetooth"),
         drivers: None,
         hostname: "kitchen".into(),
         volatile: false,
         screen: (1280, 720),
-        wifi: Arc::new(|i| (i == "wlan0").then(|| iyakki_devctl::WifiLink { ssid: "HomeNet".into(), signal_dbm: Some(-48) })),
+        wifi: Arc::new(|i| (i == "wlan0").then(|| iyakki_core_api::device_types::devctl::WifiLink { ssid: "HomeNet".into(), signal_dbm: Some(-48) })),
         can_scan: true,
+        hardware: None,
     }
 }
 
@@ -174,7 +175,7 @@ fn a_mac_mini_gets_the_reason_from_the_driver_list() {
         put(&dr, rel, c);
     }
     let mut p = probe_at(&r);
-    p.drivers = Some(std::sync::Arc::new(iyakki_agent::store::drivers::Drivers::for_data(&dr.join("data")).with_roots(iyakki_drivers::Roots { sys: dr.join("sys"), proc: dr.join("proc") })));
+    p.drivers = Some(std::sync::Arc::new(iyakki_agent::store::drivers::Drivers::for_data(&dr.join("data")).with_roots(iyakki_core_api::device_types::driver_packs::Roots { sys: dr.join("sys"), proc: dr.join("proc") })));
     let s = gather(&p);
     assert!(!s.driver_help.is_empty(), "the Mac mini's Wi-Fi and Bluetooth packs are not installed");
     let wifi = item(&s, "Wi-Fi");
@@ -193,7 +194,7 @@ fn a_t2_mac_without_apples_firmware_is_told_which_files_it_needs_and_leads_to_th
         put(&dr, rel, c);
     }
     let mut p = probe_at(&r);
-    p.drivers = Some(std::sync::Arc::new(iyakki_agent::store::drivers::Drivers::for_data(&dr.join("data")).with_roots(iyakki_drivers::Roots { sys: dr.join("sys"), proc: dr.join("proc") })));
+    p.drivers = Some(std::sync::Arc::new(iyakki_agent::store::drivers::Drivers::for_data(&dr.join("data")).with_roots(iyakki_core_api::device_types::driver_packs::Roots { sys: dr.join("sys"), proc: dr.join("proc") })));
     let s = gather(&p);
     let bt = item(&s, "Bluetooth");
     assert!(bt.detail.contains("needs firmware: brcm/BCM.hcd"), "{bt:?}");
@@ -209,7 +210,7 @@ fn a_t2_mac_without_apples_firmware_is_told_which_files_it_needs_and_leads_to_th
         put(&dr2, rel, c);
     }
     let mut p2 = probe_at(&r2);
-    p2.drivers = Some(std::sync::Arc::new(iyakki_agent::store::drivers::Drivers::for_data(&dr2.join("data")).with_roots(iyakki_drivers::Roots { sys: dr2.join("sys"), proc: dr2.join("proc") })));
+    p2.drivers = Some(std::sync::Arc::new(iyakki_agent::store::drivers::Drivers::for_data(&dr2.join("data")).with_roots(iyakki_core_api::device_types::driver_packs::Roots { sys: dr2.join("sys"), proc: dr2.join("proc") })));
     assert_eq!(item(&gather(&p2), "Wi-Fi").jump, Jump::Drivers);
 }
 
@@ -218,7 +219,7 @@ fn a_computer_with_no_sys_still_answers_and_says_what_it_cannot_see() {
     let r = tmp("mac");
     let mut p = probe_at(&r);
     p.dev.roots = Roots { sys: r.join("nope/sys"), proc_: r.join("nope/proc") };
-    p.hw = iyakki_hwinfo::Roots { sys: p.dev.roots.sys.clone(), proc: p.dev.roots.proc_.clone() };
+    p.hw = iyakki_core_api::device_types::hwinfo::Roots { sys: p.dev.roots.sys.clone(), proc: p.dev.roots.proc_.clone() };
     let s = gather(&p);
     for t in ["Bluetooth", "Sound", "Keyboard and pointer"] {
         assert!(item(&s, t).detail.contains("not available on this OS"), "{t}: {:?}", item(&s, t));
@@ -393,14 +394,14 @@ fn the_sound_row_shows_the_hdmi_monitor_in_use_or_why_there_is_no_output() {
 #[test]
 fn the_sound_row_shows_and_mutes_iyakkis_software_volume_when_it_carries_the_card_that_plays() {
     let prefs = iyakki_shared::audioout::SoundSettings { volume_pct: 30, ..Default::default() };
-    let soft = iyakki_devctl::Volume { control: "IYAKKI".into(), percent: 30, muted: false };
+    let soft = iyakki_core_api::device_types::devctl::Volume { control: "IYAKKI".into(), percent: 30, muted: false };
     // the T2 Mac's speaker (card 1) through IYAKKI's softvol: Mute switches IYAKKI's mute, which keeps the 30 %
     assert_eq!(sound_volume_view(1, Some(&soft), Some(1), &prefs), ("volume 30%".to_string(), Some(Act::ToggleSoundMute)));
     let muted = iyakki_shared::audioout::SoundSettings { muted: true, ..prefs.clone() };
     assert_eq!(sound_volume_view(1, None, Some(1), &muted).0, "muted (30%)");
     assert_eq!(Act::ToggleSoundMute.label(), "Mute");
     // a card with its own mixer, or none at all, as before
-    let hw = iyakki_devctl::Volume { control: "Master".into(), percent: 62, muted: true };
+    let hw = iyakki_core_api::device_types::devctl::Volume { control: "Master".into(), percent: 62, muted: true };
     assert_eq!(sound_volume_view(0, Some(&hw), Some(1), &prefs), ("muted (62%)".to_string(), Some(Act::ToggleMute(0))));
     assert_eq!(sound_volume_view(0, None, None, &prefs), ("volume unknown".to_string(), None));
     // the popover cannot change Settings itself: the shell carries this one out
@@ -420,20 +421,20 @@ impl Control for MiniBt {
     fn ipv4(&self) -> Vec<(String, String)> {
         vec![]
     }
-    fn volume(&self, _: u32) -> Option<iyakki_devctl::Volume> {
+    fn volume(&self, _: u32) -> Option<iyakki_core_api::device_types::devctl::Volume> {
         None
     }
-    fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_devctl::Volume, String> {
+    fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
         Err("no".into())
     }
-    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_devctl::Volume, String> {
+    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
         Err("no".into())
     }
     fn dhcp(&self, _: &str) -> Result<(), String> {
         Ok(())
     }
-    fn bt_controllers(&self) -> Result<Vec<iyakki_devctl::btview::Controller>, String> {
-        Ok(vec![iyakki_devctl::btview::Controller { index: 0, configured: true, address: "00:00:00:00:00:00".into(), version: Some(6), manufacturer: 15, supported: 0, current: 0, name: String::new() }])
+    fn bt_controllers(&self) -> Result<Vec<iyakki_core_api::device_types::devctl::btview::Controller>, String> {
+        Ok(vec![iyakki_core_api::device_types::devctl::btview::Controller { index: 0, configured: true, address: "00:00:00:00:00:00".into(), version: Some(6), manufacturer: 15, supported: 0, current: 0, name: String::new() }])
     }
     fn bt_held(&self) -> bool {
         self.held
@@ -469,7 +470,7 @@ fn the_popover_shows_the_rom_state_controller_with_its_reason_and_offers_load_an
     assert!(bt.detail.contains("no valid address") && bt.detail.contains("powered off") && bt.detail.contains("pairing and audio are not available yet"), "{}", bt.detail);
     // a Mac controller without its patch file is not an ordinary device row: it says it needs firmware and leads to Store -> Setup
     assert_eq!(bt.level, Level::Missing);
-    assert!(bt.detail.starts_with(iyakki_devctl::btview::NEEDS_FIRMWARE), "{}", bt.detail);
+    assert!(bt.detail.starts_with(iyakki_core_api::device_types::devctl::btview::NEEDS_FIRMWARE), "{}", bt.detail);
     assert_eq!(bt.jump, Jump::Setup("mac-firmware"));
     assert_eq!(bt.acts, vec![Act::BluetoothLoad], "no bluetoothctl scan offered when the kernel answers; the load button while held");
     assert_eq!(run_act(&p, &Act::BluetoothLoad).unwrap(), "Bluetooth: 2 driver file(s) given back");
@@ -522,20 +523,20 @@ impl Control for OneBt {
     fn ipv4(&self) -> Vec<(String, String)> {
         vec![]
     }
-    fn volume(&self, _: u32) -> Option<iyakki_devctl::Volume> {
+    fn volume(&self, _: u32) -> Option<iyakki_core_api::device_types::devctl::Volume> {
         None
     }
-    fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_devctl::Volume, String> {
+    fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
         Err("no".into())
     }
-    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_devctl::Volume, String> {
+    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
         Err("no".into())
     }
     fn dhcp(&self, _: &str) -> Result<(), String> {
         Ok(())
     }
-    fn bt_controllers(&self) -> Result<Vec<iyakki_devctl::btview::Controller>, String> {
-        Ok(vec![iyakki_devctl::btview::Controller { index: 0, configured: true, address: self.address.into(), version: Some(6), manufacturer: self.manufacturer, supported: 0, current: 1, name: String::new() }])
+    fn bt_controllers(&self) -> Result<Vec<iyakki_core_api::device_types::devctl::btview::Controller>, String> {
+        Ok(vec![iyakki_core_api::device_types::devctl::btview::Controller { index: 0, configured: true, address: self.address.into(), version: Some(6), manufacturer: self.manufacturer, supported: 0, current: 1, name: String::new() }])
     }
     fn bt_firmware_file(&self) -> bool {
         self.file

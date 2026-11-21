@@ -112,7 +112,7 @@ fn join_codes_are_nine_digits_compare_by_hash_and_ignore_the_dashes() {
 
 #[test]
 fn a_heartbeat_keeps_only_figures_and_plain_model_names() {
-    let h = Heartbeat { disk_free_mb: 5, disk_total_mb: 10, cpu_load_pct: 99999, cpus: 4, mem_used_pct: 400, mem_total_mb: 8000, tasks_running: 2, models: vec!["openai/gpt-x".into(), "/home/person/secret model".into(), "gpt-x".into(), "".into()] }.sanitised();
+    let h = Heartbeat { disk_free_mb: 5, disk_total_mb: 10, cpu_load_pct: 99999, cpus: 4, mem_used_pct: 400, mem_total_mb: 8000, tasks_running: 2, models: vec!["openai/gpt-x".into(), "/home/person/secret model".into(), "gpt-x".into(), "".into()], battery_pct: None }.sanitised();
     assert_eq!((h.cpu_load_pct, h.mem_used_pct), (1000, 100));
     assert_eq!(h.models, vec!["gpt-x".to_string(), "secretmodel".to_string()], "the folder part is cut off and odd characters dropped, duplicates removed");
     assert!(h.line().contains("2 task(s)"));

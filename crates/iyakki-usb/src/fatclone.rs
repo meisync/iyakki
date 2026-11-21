@@ -281,6 +281,37 @@ impl Editor for WithoutInstallMarker<'_> {
     }
 }
 
+/// Another editor's decisions, and a menu entry added at the end of `/boot/grub/grub.cfg` (the entry that hands over to the other
+/// system whose boot code a shared legacy-BIOS install replaced, `biosgpt::entry_for_replaced_boot_code`). A menu that already holds the
+/// same text is not given it twice.
+pub struct AppendMenu<'a>(pub &'a mut dyn Editor, pub String);
+
+impl Editor for AppendMenu<'_> {
+    fn decide(&mut self, path: &str) -> Edit {
+        match self.0.decide(path) {
+            Edit::Keep if path.eq_ignore_ascii_case("/boot/grub/grub.cfg") => Edit::Rewrite,
+            other => other,
+        }
+    }
+    fn rewrite(&mut self, path: &str, data: Vec<u8>) -> Vec<u8> {
+        let mut data = self.0.rewrite(path, data);
+        if path.eq_ignore_ascii_case("/boot/grub/grub.cfg") {
+            let has = String::from_utf8_lossy(&data).contains(self.1.trim());
+            if !has {
+                if !data.ends_with(b"\n") {
+                    data.push(b'\n');
+                }
+                data.extend_from_slice(b"\n");
+                data.extend_from_slice(self.1.as_bytes());
+                if !self.1.ends_with('\n') {
+                    data.push(b'\n');
+                }
+            }
+        }
+        data
+    }
+}
+
 impl Editor for Unchanged {
     fn decide(&mut self, _: &str) -> Edit {
         Edit::Keep
@@ -548,6 +579,18 @@ pub fn clone_to_with<R: Read + Seek>(src: &mut Fat32<R>, sector: u32, total_byte
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::AppendMenu;
+
+    #[test]
+    fn a_menu_entry_is_added_once_to_the_end_of_grub_cfg_and_nothing_else_changes() {
+        let mut ed = AppendMenu(&mut Unchanged, "menuentry \"Windows\" {\n    chainloader +1\n}\n".into());
+        assert!(matches!(ed.decide("/boot/grub/grub.cfg"), Edit::Rewrite) && matches!(ed.decide("/boot/bzImage"), Edit::Keep));
+        let out = String::from_utf8(ed.rewrite("/boot/grub/grub.cfg", b"set default=0\nmenuentry \"IYAKKI\" {\n}".to_vec())).unwrap();
+        assert!(out.starts_with("set default=0\nmenuentry \"IYAKKI\" {\n}\n\nmenuentry \"Windows\"") && out.ends_with("}\n"), "{out}");
+        assert_eq!(String::from_utf8(ed.rewrite("/boot/grub/grub.cfg", out.clone().into_bytes())).unwrap(), out, "a second pass adds nothing");
+        assert_eq!(ed.rewrite("/boot/bzImage", b"x".to_vec()), b"x");
+    }
+
     use super::*;
     use std::io::Cursor;
 
@@ -566,7 +609,7 @@ pub(crate) mod tests {
         assert!(matches!(WithoutInstallMarker(&mut lean).decide("/EFI/iyakki-boot/install-media"), Edit::Skip), "also over the lean cloner");
     }
 
-    /// A small FAT32 volume built by hand: `bps`-byte sectors, `spc` sectors per cluster, 8.3 names only, files in the
+    /// A small FAT32 volume built by hand: `bps`-byte sectors, `spc` sectors per cluster, 8.3 names or (for lower case and long names) long-name entries, files in the
     /// root, in `BOOT` and in `BOOT/GRUB`, plus a made-up long-name entry (copied verbatim by the cloner).
     pub(crate) fn mini_fat(bps: u32, spc: u32, total_bytes: u64, files: &[(&str, Vec<u8>)]) -> Vec<u8> {
         let (bps, spc) = (bps as u64, spc as u64);
@@ -622,6 +665,7 @@ pub(crate) mod tests {
         let boot = alloc(&mut fat, 4 * 32);
         let grub = alloc(&mut fat, 4 * 32);
         let (mut re, mut be, mut ge) = (vec![], vec![], vec![]);
+        let mut aliases: Vec<[u8; 11]> = Vec::new();
         re.extend(entry(b"IYAKKI-BOOT", 0x08, 0, 0));
         // a long-name entry for the BOOT folder (the real image has them for "bzImage" and others)
         let mut lfn = vec![0u8; 32];
@@ -647,28 +691,42 @@ pub(crate) mod tests {
                 Some((d, n)) => (d, n),
                 None => ("", *path),
             };
-            // a name with lower-case letters (at most 13 characters) is stored as one long-name entry plus a made-up short name
+            // a name with lower-case letters or longer than an 8.3 name is stored as long-name entries (any length, last part first)
+            // in front of a made-up short alias `BASE~N.EXT` (N counts up per alias so no two files share one)
             let mut e = Vec::new();
-            let short = if name.chars().any(|c| c.is_ascii_lowercase()) {
+            let short = if name.chars().any(|c| c.is_ascii_lowercase()) || name.len() > 12 || name.split_once('.').is_some_and(|(b, x)| b.len() > 8 || x.len() > 3) {
                 let (b, x) = name.rsplit_once('.').unwrap_or((name, ""));
                 let b6: String = b.chars().filter(|c| c.is_ascii_alphanumeric()).take(6).collect::<String>().to_uppercase();
-                let mut n = [b' '; 11];
-                let sb = format!("{b6}~1");
-                n[..sb.len()].copy_from_slice(sb.as_bytes());
-                n[8..8 + x.len().min(3)].copy_from_slice(&x.to_uppercase().as_bytes()[..x.len().min(3)]);
-                let mut l = vec![0xFFu8; 32];
-                l[0] = 0x41;
-                l[11] = 0x0F;
-                l[12] = 0;
-                l[13] = n.iter().fold(0u8, |sum, c| (sum >> 1).wrapping_add((sum & 1) << 7).wrapping_add(*c));
-                l[26] = 0;
-                l[27] = 0;
-                let units: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-                for (k, o) in [1usize, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30].into_iter().enumerate() {
-                    let u = units.get(k).copied().unwrap_or(0xFFFF);
-                    l[o..o + 2].copy_from_slice(&u.to_le_bytes());
+                let x3: String = x.chars().filter(|c| c.is_ascii_alphanumeric()).take(3).collect::<String>().to_uppercase();
+                let mut k = 1;
+                let n = loop {
+                    let mut n = [b' '; 11];
+                    let sb = format!("{b6}~{k}");
+                    n[..sb.len()].copy_from_slice(sb.as_bytes());
+                    n[8..8 + x3.len()].copy_from_slice(x3.as_bytes());
+                    if !aliases.contains(&n) {
+                        aliases.push(n);
+                        break n;
+                    }
+                    k += 1;
+                };
+                let sum = n.iter().fold(0u8, |sum, c| (sum >> 1).wrapping_add((sum & 1) << 7).wrapping_add(*c));
+                let mut units: Vec<u16> = name.encode_utf16().collect();
+                if units.len() % 13 != 0 {
+                    units.push(0);
                 }
-                e.extend(l);
+                units.resize(units.len().div_ceil(13) * 13, 0xFFFF);
+                let parts = units.len() / 13;
+                for ord in (1..=parts).rev() {
+                    let mut l = vec![0u8; 32];
+                    l[0] = ord as u8 | if ord == parts { 0x40 } else { 0 };
+                    l[11] = 0x0F;
+                    l[13] = sum;
+                    for (k, o) in [1usize, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30].into_iter().enumerate() {
+                        l[o..o + 2].copy_from_slice(&units[(ord - 1) * 13 + k].to_le_bytes());
+                    }
+                    e.extend(l);
+                }
                 n
             } else {
                 sfn(name)

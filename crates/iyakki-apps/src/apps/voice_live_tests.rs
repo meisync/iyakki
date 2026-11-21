@@ -92,7 +92,7 @@ fn live_voice_tile_asks_first_then_reads_pasted_text_with_kokoro() {
         assert!(iyakki_shared::voice::peak(&p.samples) > 1500);
         secs.push(p.samples.len() as f32 / (p.rate as f32 * p.channels as f32));
     }
-    let log = std::fs::read_to_string(b.cx.audit.path()).unwrap();
+    let log = std::fs::read_to_string(b.cx.audit.path_buf()).unwrap();
     assert!(log.contains("voice.read") && log.contains("voice.remote_ok") && !log.contains("Hello there"), "the audit names the voice, never the text: {log}");
     assert!(!log.contains(&std::fs::read_to_string(live_env().1).unwrap().trim().to_string()), "no key in the audit");
     live_note("F-VOICE-17", "voice-tile-read-aloud", &format!("consent card shown first, No sent nothing, Yes kept; 3 sentences read in {} ms; sounds {:?} s each; audit has voice.read and voice.remote_ok", t0.elapsed().as_millis(), secs));

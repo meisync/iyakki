@@ -24,7 +24,7 @@ pub struct AgentCore {
     /// The media player an app embeds (the shell gives it the audit log through `with_media`).
     media: Option<Arc<crate::embedmedia::AgentMedia>>,
     embedded: Arc<crate::embedbrowser::Embedded>,
-    terminals: crate::terminalfacet::Terminals,
+    terminals: Arc<crate::terminalfacet::Terminals>,
     file_book: iyakki_core_api::ChangeBook,
 }
 
@@ -63,7 +63,7 @@ impl AgentCore {
         // the sources look on a clock of the core's own, so what happens while an app is closed waits for it
         let events = Arc::new(crate::appevent_sources::SourcedEvents::new(services.app_events.clone(), crate::appevent_sources::real_inputs(&services)));
         crate::appevent_sources::SourcedEvents::spawn_ticker(&events);
-        AgentCore { app_actions: crate::appactions_real::AgentActions::new(services.clone()), app_events: events, cameras: None, media: None, embedded: crate::embedbrowser::for_dir(services.dir()), assistant: None, ui_state: iyakki_core_local::uistate::LocalUiState::new(services.dir()), settings, vault: crate::contract_local::CoreVault::new(services.clone()), terminals: crate::terminalfacet::Terminals::new(services.clone()), file_book: Default::default(), services }
+        AgentCore { app_actions: crate::appactions_real::AgentActions::new(services.clone()), app_events: events, cameras: None, media: None, embedded: crate::embedbrowser::for_dir(services.dir()), assistant: None, ui_state: iyakki_core_local::uistate::LocalUiState::new(services.dir()), settings, vault: crate::contract_local::CoreVault::new(services.clone()), terminals: Arc::new(crate::terminalfacet::Terminals::new(services.clone())), file_book: Default::default(), services }
     }
 
     /// The core's app events as one shared handle (the web service gives them to WASM tiles, F-SDK-202).
@@ -83,6 +83,11 @@ impl AgentCore {
             Some(a) => a.clone(),
             None => Arc::new(iyakki_core_api::NoAssistant),
         }
+    }
+
+    /// The terminal facet as a shared handle (the web service's tile host serves a tile's `terminal` calls through it).
+    pub fn shared_terminal(&self) -> Arc<dyn iyakki_core_api::Terminal> {
+        self.terminals.clone()
     }
 
     /// The bytes of a file in the person's home (a picture a tile asks for): the file browser's own rules, names inside the home, no links.
@@ -164,6 +169,12 @@ impl iyakki_core_api::SoundControl for AgentCore {
     }
     fn card_starting(&self, proc_root: &std::path::Path, sys: &std::path::Path) -> Option<u32> {
         crate::audioout::card_starting(proc_root, sys)
+    }
+    fn outputs_via(&self, route: &dyn iyakki_core_api::AudioRoute) -> Vec<iyakki_core_api::soundtypes::Output> {
+        crate::audioout::outputs_via(route)
+    }
+    fn card_starting_via(&self, route: &dyn iyakki_core_api::AudioRoute) -> Option<u32> {
+        crate::audioout::card_starting_via(route)
     }
     fn volume_note(&self) -> Option<String> {
         crate::audioout::global().volume_note()
@@ -257,12 +268,12 @@ impl AppStatuses for AgentCore {
         if updates > 0 {
             v.push((PApp::Store.id().into(), AppStatus { kind: StatusKind::Setup, line: plural(updates, "update", "updates"), count: updates, needs: Some(("Updates".into(), format!("{updates} waiting in STORE"))) }));
         }
-        if !iyakki_storage::loss::snapshot().state.healthy() {
+        if !iyakki_core_local::keptlog::drive_healthy() {
             v.push((PApp::Disks.id().into(), AppStatus { kind: StatusKind::Attention, line: "drive problem".into(), count: 0, needs: Some(("Boot drive".into(), "a drive problem was found: open SYSTEM".into())) }));
         }
         match sv.radio.state() {
-            crate::radio::RadioState::Playing { station, .. } => v.push((PApp::Radio.id().into(), AppStatus { kind: StatusKind::Running, line: format!("Playing {station}"), count: 0, needs: None })),
-            crate::radio::RadioState::Connecting(station) => v.push((PApp::Radio.id().into(), AppStatus { kind: StatusKind::Running, line: format!("Connecting to {station}"), count: 0, needs: None })),
+            crate::radio::RadioState::Playing { station, .. } => v.push((PApp::Radio.id().into(), AppStatus { kind: StatusKind::Running, line: format!("Playing {station}{}", sv.radio.notice().map_or(String::new(), |n| format!(" ({n})"))), count: 0, needs: None })),
+            crate::radio::RadioState::Connecting(station) => v.push((PApp::Radio.id().into(), AppStatus { kind: StatusKind::Running, line: format!("Connecting to {station}{}", sv.radio.notice().map_or(String::new(), |n| format!(" ({n})"))), count: 0, needs: None })),
             _ => {}
         }
         if let Some(label) = crate::media::shared().now_playing() {
@@ -312,7 +323,7 @@ const CHOSEN_FILE: &str = "ddcci-chosen";
 
 impl AgentCore {
     fn screens(&self) -> Vec<crate::ddcci_bus::Screen> {
-        crate::ddcci_bus::list_real(std::path::Path::new("/sys"), std::path::Path::new("/dev"))
+        crate::ddcci_bus::list_real(std::path::Path::new(iyakki_core_local::kernelfacts::SYS), std::path::Path::new(iyakki_core_local::kernelfacts::DEV))
     }
     fn chosen_id(&self) -> Option<String> {
         std::fs::read_to_string(self.services.dir().join(CHOSEN_FILE)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
@@ -341,8 +352,8 @@ impl Monitors for AgentCore {
     }
     fn set_brightness(&self, percent: u8) -> Result<u8, String> {
         let id = self.chosen_id().ok_or("no screen is chosen; choose one first")?;
-        let buses = iyakki_core_local::i2c::ddc_buses(std::path::Path::new("/sys"));
-        crate::ddcci_bus::set(&buses, &mut |n| crate::ddcci_bus::open_real(std::path::Path::new("/dev"), n), &crate::ddcci::Chosen(Some(id.clone())), &id, percent).map(|b| b.percent()).map_err(|e| e.to_string())
+        let buses = iyakki_core_local::i2c::ddc_buses(std::path::Path::new(iyakki_core_local::kernelfacts::SYS));
+        crate::ddcci_bus::set(&buses, &mut |n| crate::ddcci_bus::open_real(std::path::Path::new(iyakki_core_local::kernelfacts::DEV), n), &crate::ddcci::Chosen(Some(id.clone())), &id, percent).map(|b| b.percent()).map_err(|e| e.to_string())
     }
 }
 
@@ -428,6 +439,9 @@ impl iyakki_core_api::Files for AgentCore {
     }
     fn read_text(&self, user: &str, path: &str, max: usize) -> Result<String, String> {
         iyakki_core_local::homebrowse::read_text(&crate::scope::home_root_for_writes(user, self.services.dir()), path, max)
+    }
+    fn read_bytes(&self, user: &str, path: &str, max: usize) -> Result<Vec<u8>, String> {
+        iyakki_core_local::homebrowse::read_bytes(&crate::scope::home_root_for_writes(user, self.services.dir()), path, max.min(iyakki_core_api::files::MAX_UPLOAD))
     }
     fn book(&self) -> Option<&iyakki_core_api::ChangeBook> {
         Some(&self.file_book)
@@ -542,6 +556,22 @@ impl SessionResume for AgentCore {
             return Vec::new();
         }
         iyakki_core_local::resume::Resume::new(self.services.dir()).apps(crate::clock::now_unix() as u64)
+    }
+    fn remember_items(&self, items: &[(String, String)]) {
+        if !self.allowed() {
+            return;
+        }
+        let r = iyakki_core_local::resume::Resume::new(self.services.dir());
+        let now = crate::clock::now_unix() as u64;
+        if let Some(who) = r.who(now) {
+            let _ = r.remember_items(&who, items, now);
+        }
+    }
+    fn items(&self) -> Vec<(String, String)> {
+        if !self.allowed() {
+            return Vec::new();
+        }
+        iyakki_core_local::resume::Resume::new(self.services.dir()).items(crate::clock::now_unix() as u64)
     }
 }
 
@@ -669,7 +699,7 @@ impl Core for AgentCore {
         self
     }
     fn terminal(&self) -> &dyn iyakki_core_api::Terminal {
-        &self.terminals
+        &*self.terminals
     }
     fn file_scope(&self) -> &dyn iyakki_core_api::FileScope {
         &LocalFileScope
@@ -737,6 +767,13 @@ impl Core for AgentCore {
     fn mixer(&self) -> &dyn Mixer {
         self
     }
+    fn audio_route(&self) -> Arc<dyn iyakki_core_api::AudioRoute> {
+        Arc::new(iyakki_core_local::audioroute::LocalAudioRoute::system())
+    }
+    fn audio_route_at(&self, proc_root: &std::path::Path, sys_root: &std::path::Path) -> Arc<dyn iyakki_core_api::AudioRoute> {
+        // a made-up tree keeps no mixer: the real one is only run on this computer
+        if proc_root == std::path::Path::new(iyakki_core_local::kernelfacts::PROC) { self.audio_route() } else { Arc::new(iyakki_core_local::audioroute::LocalAudioRoute::at(proc_root, sys_root)) }
+    }
     fn sound(&self) -> &dyn iyakki_core_api::SoundControl {
         self
     }
@@ -790,7 +827,7 @@ mod tests {
         let (core, _svc, d) = core_in("host");
         assert_eq!(core.host().cmdline(), crate::sysinfo::cmdline(crate::sysinfo::proc_root()));
         assert_eq!(core.host().product_name(), crate::sysinfo::product_name(crate::sysinfo::sys_root()));
-        assert_eq!(core.host().proc_root(), std::path::PathBuf::from("/proc"));
+        assert_eq!(core.host().proc_root(), std::path::PathBuf::from(iyakki_core_local::kernelfacts::PROC));
         assert_eq!(core.host().mem_total_kb(), crate::sysinfo::mem_total_kb(&crate::sysinfo::SysRoots::real()));
         assert!(core.host().shared_memory_dir().is_dir());
         let _ = std::fs::remove_dir_all(d);

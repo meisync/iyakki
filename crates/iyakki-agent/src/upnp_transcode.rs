@@ -8,7 +8,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 
 /// One thing a file can be turned into.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,11 +80,8 @@ pub struct Ffmpeg {
 impl Ffmpeg {
     /// Look at the program: it must run, and its encoder list is read. `None` when it does not.
     pub fn probe(exe: &Path) -> Option<Ffmpeg> {
-        let out = Command::new(exe).args(["-hide_banner", "-encoders"]).env_clear().stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        Some(Ffmpeg { exe: exe.to_path_buf(), encoders: encoder_names(&String::from_utf8_lossy(&out.stdout)) })
+        let text = iyakki_core_local::starters::ffmpeg_encoder_list(exe)?;
+        Some(Ffmpeg { exe: exe.to_path_buf(), encoders: encoder_names(&text) })
     }
 }
 
@@ -133,7 +130,7 @@ impl Transcoder for Ffmpeg {
         if !self.can(t) {
             return Err("this ffmpeg cannot make that".into());
         }
-        let mut child = Command::new(&self.exe).args(ffmpeg_args(t, input)).env_clear().stdin(Stdio::null()).stderr(Stdio::null()).stdout(Stdio::piped()).spawn().map_err(|e| format!("ffmpeg did not start: {e}"))?;
+        let mut child = iyakki_core_local::starters::ffmpeg_stream_spawn(&self.exe, &ffmpeg_args(t, input)).map_err(|e| format!("ffmpeg did not start: {e}"))?;
         let out = child.stdout.take().ok_or("ffmpeg gave no output")?;
         Ok(Box::new(Running { child, out }))
     }

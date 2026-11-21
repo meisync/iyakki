@@ -52,7 +52,7 @@ impl Exposure {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OptKind {
     Text,
     /// `10Gi`, `500Mi`.
@@ -63,7 +63,7 @@ pub enum OptKind {
     Port,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OptionDef {
     pub key: String,
     pub label: String,
@@ -110,13 +110,14 @@ impl Options {
 }
 
 /// One container image a service runs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImageRef {
     /// `docker.io/gitea/gitea:1.24.5-rootless`.
     pub image: String,
     /// `sha256:...` when known; the reference then is `image@digest` (the tag stays for people).
     pub digest: Option<String>,
     /// CPU architectures the image is published for (`amd64`, `arm64`).
+    #[serde(deserialize_with = "crate::serde_static::words")]
     pub archs: Vec<&'static str>,
 }
 
@@ -144,14 +145,14 @@ impl ImageRef {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SecretKind {
     Password,
     Token,
 }
 
 /// One generated value: the key in the Kubernetes Secret, the vault entry name and what the person sees it called.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SecretEntry {
     pub key: String,
     /// The vault entry (`svc.<instance>.<name>`), stored in the person's vault as `uvault:<name>`.
@@ -162,7 +163,7 @@ pub struct SecretEntry {
     pub reveal: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SecretSpec {
     pub name: String,
     pub entries: Vec<SecretEntry>,
@@ -200,14 +201,14 @@ pub struct BackupPlan {
 
 
 /// A cluster the person may pick, with the reason it cannot be used (None: usable).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ListedProfile {
     pub id: String,
     pub profile: ClusterProfile,
     pub refusal: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MirrorPlan {
     pub engine: String,
     /// `(source image, pushed to, pulled by the pods as)` per image.
@@ -215,7 +216,7 @@ pub struct MirrorPlan {
     pub platform: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Plan {
     pub service: String,
     pub title: String,
@@ -272,7 +273,7 @@ impl std::fmt::Debug for Applied {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SvcState {
     Running,
     Starting,
@@ -299,7 +300,7 @@ impl SvcState {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Status {
     pub state: SvcState,
     pub ready: u32,
@@ -317,7 +318,7 @@ impl Status {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct UpgradePlan {
     pub inst: Installed,
     pub from: String,
@@ -330,33 +331,33 @@ pub struct UpgradePlan {
     pub blockers: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BackupResult {
     /// The file inside the pod (on the PVC).
     pub remote: String,
     pub local: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 pub struct RemovePlan {
     pub inst: Installed,
     pub delete_data: bool,
 }
 
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct WsInfo {
     pub name: String,
     pub root: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Transport {
     Https,
     Ssh,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConnectOpts {
     /// Empty: from the workspace name.
     pub repo: String,
@@ -372,7 +373,7 @@ impl Default for ConnectOpts {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConnectPlan {
     pub inst: Installed,
     pub ws: WsInfo,
@@ -388,7 +389,7 @@ pub struct ConnectPlan {
     pub warnings: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Connected {
     pub owner: String,
     pub repo_url: String,
@@ -397,7 +398,7 @@ pub struct Connected {
     pub origin_set: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PushPlan {
     pub inst: Installed,
     pub ws: WsInfo,
@@ -410,7 +411,7 @@ pub struct PushPlan {
 
 /// A pull request from the workspace's current branch into `base`, opened through the service's API. Nothing is pushed here: the branch
 /// must already be on the service (its own approval, [`push`]), so the request is for what the service holds.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PrPlan {
     pub inst: Installed,
     pub ws: WsInfo,
@@ -570,7 +571,7 @@ impl std::fmt::Display for ElfError {
 }
 
 /// A program a service builds its image from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct LocalBinary {
     /// The file name, e.g. `iyakki-store-server`.
     pub file: &'static str,
@@ -582,6 +583,23 @@ pub struct LocalBinary {
     pub legacy: &'static [&'static str],
     /// What to read.
     pub docs: &'static str,
+}
+
+/// Read from the wire: the words are interned (one `&'static str` per distinct word, once for the life of the process).
+impl<'de> serde::Deserialize<'de> for LocalBinary {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            file: String,
+            package: String,
+            sub: String,
+            legacy: Vec<String>,
+            docs: String,
+        }
+        let w = Wire::deserialize(d)?;
+        let i = crate::serde_static::intern;
+        Ok(LocalBinary { file: i(&w.file), package: i(&w.package), sub: i(&w.sub), legacy: crate::serde_static::word_list(&w.legacy), docs: i(&w.docs) })
+    }
 }
 
 /// Where to look; built from the machine ([`Places::real`]) or by a test.

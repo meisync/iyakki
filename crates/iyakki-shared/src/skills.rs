@@ -4,7 +4,7 @@
 
 pub const MAX_BODY_BYTES: usize = 16 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Scope {
     Shared,
     User(String),
@@ -25,7 +25,7 @@ impl Scope {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Skill {
     pub scope: Scope,
     pub name: String,
@@ -34,16 +34,37 @@ pub struct Skill {
     pub body: String,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "SkillErrorWire")]
 pub enum SkillError {
     #[error("{0}")]
     Invalid(String),
     #[error("you may not change {0} skills")]
-    Forbidden(&'static str),
+    Forbidden(#[serde(skip_deserializing)] &'static str),
     #[error("no such skill")]
     NotFound,
     #[error("storage error: {0}")]
     Storage(String),
+}
+
+/// What a [`SkillError`] looks like on the wire (the `&'static str` of `Forbidden` arrives as text).
+#[derive(serde::Deserialize)]
+enum SkillErrorWire {
+    Invalid(String),
+    Forbidden(String),
+    NotFound,
+    Storage(String),
+}
+
+impl From<SkillErrorWire> for SkillError {
+    fn from(w: SkillErrorWire) -> SkillError {
+        match w {
+            SkillErrorWire::Invalid(s) => SkillError::Invalid(s),
+            SkillErrorWire::Forbidden(s) => SkillError::Forbidden(crate::serde_static::intern(&s)),
+            SkillErrorWire::NotFound => SkillError::NotFound,
+            SkillErrorWire::Storage(s) => SkillError::Storage(s),
+        }
+    }
 }
 
 pub fn valid_skill_name(n: &str) -> bool {

@@ -219,7 +219,7 @@ fn the_add_on_check_names_the_source_and_fails_when_a_library_or_licence_file_is
 
 #[test]
 fn a_firmware_pack_is_read_back_from_the_data_volume_before_it_counts_as_installed() {
-    use iyakki_drivers::{apply, b64, pack, run::Recorder};
+    use iyakki_core_local::driver_packs::{apply, b64, pack, run::Recorder};
     let t = Tmp::new("fw");
     std::fs::create_dir_all(t.0.join("proc/sys/kernel")).unwrap();
     std::fs::write(t.0.join("proc/sys/kernel/osrelease"), "6.12.1\n").unwrap();

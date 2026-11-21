@@ -27,11 +27,23 @@
 #define XS_MAX_STR 4096u
 #define XS_MAX_PER_REQUEST 16
 
-enum { XS_HOOK_REQUEST_HEADERS = 1, XS_HOOK_RESPONSE_HEADERS, XS_HOOK_REQUEST_BLOCK, XS_HOOK_CONTENT_SCRIPT, XS_HOOK_PAGE_ACTION };
+#define XS_MAX_BODY (32u * 1024u)
+#define XS_MAX_SCRIPTS 16u
+#define XS_MAX_UA 400u
+
+enum { XS_HOOK_REQUEST_HEADERS = 1, XS_HOOK_RESPONSE_HEADERS, XS_HOOK_REQUEST_BLOCK, XS_HOOK_CONTENT_SCRIPT, XS_HOOK_PAGE_ACTION, XS_HOOK_USER_AGENT };
 
 typedef struct { uint8_t scheme, suffix; char *host; uint32_t port, nseg; char **segs; } XPat;
 typedef struct { char *header, *value; int replace; uint32_t nd, np; XPat *d, *p; } XRule;
 typedef struct { XRule *rules; uint32_t n; } XHeaders;
+/* The sites of a user script or style as the engine's own match patterns (`scheme://host/path`, host `*.example.com`), a NULL-terminated list
+ * for webkit_user_script_new. A plug-in's `*.example.com` means the domain and its subdomains (browserplugins.rs), which is what the engine's
+ * `*.` pattern matches. */
+typedef struct { char **allow; uint32_t nallow; } XSites;
+/* One user script or style sheet (hook kind 4). The helper puts it into the page; the web process never does. */
+typedef struct { int style, at_end; XSites sites; char *body; } XScript;
+/* What the helper (not the web process) acts on: scripts, styles and the User-Agent (hook kinds 4 and 6). */
+typedef struct { XScript *s; uint32_t n; int has_ua; char *ua; } XContent;
 
 /* ---- reading ----------------------------------------------------------------------------------------------------------- */
 
@@ -52,6 +64,17 @@ static inline uint8_t xs_u8(XRd *r) {
 static inline char *xs_str(XRd *r) {
     uint32_t n = xs_u32(r);
     if (r->bad || n > XS_MAX_STR || r->o + n > r->n) { r->bad = 1; return calloc(1, 1); }
+    char *s = malloc(n + 1);
+    if (!s) abort();
+    memcpy(s, r->p + r->o, n);
+    s[n] = 0;
+    r->o += n;
+    return s;
+}
+/* like xs_str with a longer limit (the body of a script) */
+static inline char *xs_str_max(XRd *r, uint32_t max) {
+    uint32_t n = xs_u32(r);
+    if (r->bad || n > max || r->o + n > r->n) { r->bad = 1; return calloc(1, 1); }
     char *s = malloc(n + 1);
     if (!s) abort();
     memcpy(s, r->p + r->o, n);
@@ -143,6 +166,111 @@ static inline void xs_note(char *rep, size_t cap, const char *fmt, ...) {
     va_end(ap);
 }
 
+
+static inline void xs_free_sites(XSites *t) {
+    for (uint32_t i = 0; i < t->nallow; i++) free(t->allow[i]);
+    free(t->allow);
+    memset(t, 0, sizeof *t);
+}
+
+static inline void xs_content_free(XContent *c) {
+    for (uint32_t i = 0; i < c->n; i++) { xs_free_sites(&c->s[i].sites); free(c->s[i].body); }
+    free(c->s);
+    free(c->ua);
+    memset(c, 0, sizeof *c);
+}
+
+static inline void xs_site_add(char ***list, uint32_t *n, char *text) {
+    char **grown = realloc(*list, (*n + 2) * sizeof(char *));
+    if (!grown) abort();
+    *list = grown;
+    grown[(*n)++] = text;
+    grown[*n] = NULL;
+}
+
+static inline char *xs_fmt(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static inline char *xs_fmt(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int len = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    char *out = malloc((size_t)len + 1);
+    if (!out) abort();
+    va_start(ap, fmt);
+    vsnprintf(out, (size_t)len + 1, fmt, ap);
+    va_end(ap);
+    return out;
+}
+
+/* Patterns to the engine's match patterns. A pattern with a port is left out (the engine's patterns have no port, so it could only match
+ * more than it says); returns how many patterns were used. Never produces a catch-all: an empty host is left out too. */
+static inline uint32_t xs_sites_from(const XPat *ps, uint32_t n, XSites *out) {
+    uint32_t used = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const XPat *p = &ps[i];
+        if (p->port || !p->host[0] || strchr(p->host, '*') || strchr(p->host, '/')) continue;
+        char path[512] = "/";
+        for (uint32_t j = 0; j < p->nseg; j++) {
+            if (strlen(path) + strlen(p->segs[j]) + 3 >= sizeof path || strchr(p->segs[j], '*')) { path[0] = 0; break; }
+            strcat(path, p->segs[j]);
+            strcat(path, "/");
+        }
+        if (!path[0]) continue;
+        used++;
+        for (int https = 0; https < 2; https++) {
+            if ((p->scheme == 1 && https) || (p->scheme == 2 && !https)) continue;
+            xs_site_add(&out->allow, &out->nallow, xs_fmt("%s://%s%s/%s*", https ? "https" : "http", p->suffix ? "*." : "", p->host, path + 1));
+        }
+    }
+    return used;
+}
+
+/* the payload of a content.script hook; appends to c. 0 when whole, -1 when broken. An entry without a usable site is dropped and named. */
+static inline int xs_read_content_scripts(const uint8_t *b, size_t len, XContent *c, char *rep, size_t cap, const char *id) {
+    XRd r = { b, len, 0, 0 };
+    uint32_t n = xs_count(&r, XS_MAX_SCRIPTS);
+    XScript *got = calloc(n ? n : 1, sizeof(XScript));
+    if (!got) abort();
+    uint32_t have = 0, dropped = 0;
+    for (uint32_t i = 0; i < n && !r.bad; i++) {
+        XScript x = {0};
+        x.style = xs_u8(&r) != 0;
+        x.at_end = xs_u8(&r) != 0;
+        uint32_t nd = 0;
+        XPat *d = xs_read_pats(&r, &nd);
+        x.body = xs_str_max(&r, XS_MAX_BODY);
+        uint32_t used = r.bad ? 0 : xs_sites_from(d, nd, &x.sites);
+        xs_free_pats(d, nd);
+        if (r.bad || used == 0 || !x.body[0]) { xs_free_sites(&x.sites); free(x.body); if (!r.bad) dropped++; continue; }
+        got[have++] = x;
+    }
+    if (r.bad) {
+        for (uint32_t i = 0; i < have; i++) { xs_free_sites(&got[i].sites); free(got[i].body); }
+        free(got);
+        return -1;
+    }
+    if (dropped) xs_note(rep, cap, "%s: %u script or style without a usable site (a port or no site), ignored", id, dropped);
+    XScript *all = realloc(c->s, (c->n + have + 1) * sizeof(XScript));
+    if (!all) abort();
+    memcpy(all + c->n, got, have * sizeof(XScript));
+    c->s = all;
+    c->n += have;
+    free(got);
+    return 0;
+}
+
+/* the payload of a user.agent hook: one line of printable ASCII, at most 400 characters; empty means the engine's own */
+static inline int xs_read_user_agent(const uint8_t *b, size_t len, XContent *c) {
+    XRd r = { b, len, 0, 0 };
+    char *ua = xs_str(&r);
+    if (r.bad || strlen(ua) > XS_MAX_UA) { free(ua); return -1; }
+    for (const char *p = ua; *p; p++) if ((unsigned char)*p < 0x20 || (unsigned char)*p > 0x7e) { free(ua); return -1; }
+    free(c->ua);
+    c->ua = ua;
+    c->has_ua = 1;
+    return 0;
+}
+
 static inline const char *xs_hook_name(uint32_t k) {
     switch (k) {
     case XS_HOOK_REQUEST_HEADERS: return "request.headers";
@@ -150,6 +278,7 @@ static inline const char *xs_hook_name(uint32_t k) {
     case XS_HOOK_REQUEST_BLOCK: return "request.block";
     case XS_HOOK_CONTENT_SCRIPT: return "content.script";
     case XS_HOOK_PAGE_ACTION: return "page.action";
+    case XS_HOOK_USER_AGENT: return "user.agent";
     default: return NULL;
     }
 }
@@ -160,14 +289,21 @@ static inline const char *xs_hook_cap(uint32_t k) {
     case XS_HOOK_REQUEST_BLOCK: return "web.request.block";
     case XS_HOOK_CONTENT_SCRIPT: return "web.content.script";
     case XS_HOOK_PAGE_ACTION: return "web.page.action";
+    case XS_HOOK_USER_AGENT: return "web.user.agent";
     default: return "";
     }
 }
 
-/* Parse a whole snapshot into the header rules it carries. Returns 0 (rules in *h, which was emptied first; report says what was
- * ignored) or -1 (refused: *h is empty, report says why). */
-static inline int xs_parse(const uint8_t *b, size_t len, XHeaders *h, char *rep, size_t cap) {
+/* Parse a whole snapshot. The header rules go to *h (the web process acts on them) and the scripts, styles and User-Agent to *c (the helper
+ * acts on them); either may be NULL when the caller does not act on that part. Both are emptied first. Returns 0 (report says what was ignored)
+ * or -1 (refused: both are empty, report says why). */
+static inline int xs_parse_all(const uint8_t *b, size_t len, XHeaders *h, XContent *c, char *rep, size_t cap) {
+    XHeaders sink_h = {0};
+    XContent sink_c = {0};
+    if (!h) h = &sink_h;
+    if (!c) c = &sink_c;
     xs_free(h);
+    xs_content_free(c);
     if (cap) rep[0] = 0;
     if (len > XS_MAX_SNAPSHOT) { xs_note(rep, cap, "snapshot too long"); return -1; }
     XRd r = { b, len, 0, 0 };
@@ -190,19 +326,30 @@ static inline int xs_parse(const uint8_t *b, size_t len, XHeaders *h, char *rep,
             r.o += plen;
             const char *name = xs_hook_name(kind);
             if (!name) { xs_note(rep, cap, "%s: hook kind %u is unknown, ignored", id, kind); continue; }
-            if (kind != XS_HOOK_REQUEST_HEADERS) { xs_note(rep, cap, "%s: hook %s is not implemented in this build, ignored", id, name); continue; }
+            if (kind != XS_HOOK_REQUEST_HEADERS && kind != XS_HOOK_CONTENT_SCRIPT && kind != XS_HOOK_USER_AGENT) { xs_note(rep, cap, "%s: hook %s is not implemented in this build, ignored", id, name); continue; }
             int has = 0;
-            for (uint32_t c = 0; c < got_c; c++) if (!strcmp(caps[c], xs_hook_cap(kind))) has = 1;
+            for (uint32_t k = 0; k < got_c; k++) if (!strcmp(caps[k], xs_hook_cap(kind))) has = 1;
             if (!has) { xs_note(rep, cap, "%s: hook %s without the capability %s, ignored", id, name, xs_hook_cap(kind)); continue; }
-            if (xs_read_header_rules(payload, plen, h) < 0) xs_note(rep, cap, "%s: hook %s is broken, ignored", id, name);
+            int rc = 0;
+            if (kind == XS_HOOK_REQUEST_HEADERS) rc = xs_read_header_rules(payload, plen, h);
+            else if (kind == XS_HOOK_CONTENT_SCRIPT) rc = xs_read_content_scripts(payload, plen, c, rep, cap, id);
+            else rc = xs_read_user_agent(payload, plen, c);
+            if (rc < 0) xs_note(rep, cap, "%s: hook %s is broken, ignored", id, name);
         }
-        for (uint32_t c = 0; c < got_c; c++) free(caps[c]);
+        for (uint32_t k = 0; k < got_c; k++) free(caps[k]);
         free(caps);
         free(id);
         free(ver);
     }
-    if (r.bad) { xs_free(h); xs_note(rep, cap, "snapshot is cut short or has a part that is too long"); return -1; }
+    if (r.bad) { xs_free(h); xs_content_free(c); xs_note(rep, cap, "snapshot is cut short or has a part that is too long"); return -1; }
+    xs_content_free(&sink_c);
+    if (h == &sink_h) xs_free(&sink_h);
     return 0;
+}
+
+/* The web process only needs the header rules. */
+static inline int xs_parse(const uint8_t *b, size_t len, XHeaders *h, char *rep, size_t cap) {
+    return xs_parse_all(b, len, h, NULL, rep, cap);
 }
 
 /* ---- matching (twin of ext.rs `headers_for`) ------------------------------------------------------------------------------ */

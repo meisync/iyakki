@@ -2,14 +2,14 @@
 //! a Quick install item that is downloaded from the vendors at the person's click and never shipped in an image.
 //!
 //! This file is the PIN TABLE and the rules around it. Every file the install may fetch is named here with its exact address and its
-//! SHA-256, and nothing else is ever fetched. THE ADDRESSES AND HASHES ARE NOT FILLED IN: the plan lists only the first sixteen hex
-//! characters of each hash and cut-off addresses, and a hash is never guessed. Until the owner fills the table (one step, below), the
-//! item FAILS CLOSED: [`ready`] says what is missing and the install stops before the first byte is downloaded.
-//!
-//! OWNER STEP to fill the table: for each row of [`PINS`], download the vendor's file (python-build-standalone release, the wheels on
-//! files.pythonhosted.org), compute `sha256sum` of the file, check it against the hash the vendor publishes (PyPI's JSON page, the
-//! release's SHA256SUMS), and write the full address and the 64 hex characters into the row. `ready()` then turns true; the table test
-//! (`a_filled_table_passes_and_every_problem_is_named`) shows what a good row looks like.
+//! SHA-256, and nothing else is ever fetched. THE TABLE IS FILLED (owner directive 2026-11-19, x86_64 glibc only; an aarch64 row set is
+//! still to be made). Provenance, read over HTTPS on 2026-11-19: the Python row from the python-build-standalone release 20261021, whose
+//! `SHA256SUMS` file and GitHub's release API list the same SHA-256 for the file; each wheel row from PyPI's JSON API
+//! (`https://pypi.org/pypi/<name>/<version>/json`, the file's `digests.sha256` and `url`; the first 16 hex characters also equal the values
+//! the plan recorded on 2026-10-25 from files that were downloaded and hashed). A row is changed only by repeating those reads.
+//! [`ready`] says what is missing if a row is ever emptied again, and the install then stops before the first byte is downloaded.
+//! Note: the self-test after the unpack still needs the Linux sandbox runner (`datasci_install::no_runner`), so the item is not marked
+//! installed yet.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -29,9 +29,9 @@ pub struct Pin {
     pub name: &'static str,
     pub version: &'static str,
     pub kind: Kind,
-    /// The complete https address (empty until the owner fills the table).
+    /// The complete https address (empty means "not pinned": the install fails closed).
     pub url: &'static str,
-    /// The 64 lowercase hex characters of the SHA-256 of the file (empty until the owner fills the table).
+    /// The 64 lowercase hex characters of the SHA-256 of the file (empty means "not pinned": the install fails closed).
     pub sha256: &'static str,
     /// About how big the file is, megabytes: the size shown before the click and the cap while downloading (with slack).
     pub mb: u32,
@@ -41,17 +41,17 @@ pub struct Pin {
 /// The only hosts a download (and a redirect) may touch. `pypi.org` is not needed: the addresses are pinned.
 pub const HOSTS: [&str; 4] = ["files.pythonhosted.org", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"];
 
-/// The state of the table as shipped: names, versions, sizes and licences from the plan; addresses and hashes still to be filled.
+/// The table as shipped: x86_64 glibc (manylinux) files, versions, sizes and licences from the plan, addresses and hashes from the vendors (2026-11-19).
 pub const PINS: [Pin; 9] = [
-    Pin { name: "cpython (python-build-standalone install_only)", version: "3.12.15+20261021", kind: Kind::Python, url: "", sha256: "", mb: 64, licence: "PSF-2.0" },
-    Pin { name: "numpy", version: "2.5.4", kind: Kind::Wheel, url: "", sha256: "", mb: 17, licence: "BSD-3-Clause and others" },
-    Pin { name: "scipy", version: "1.18.1", kind: Kind::Wheel, url: "", sha256: "", mb: 36, licence: "BSD-3-Clause" },
-    Pin { name: "scikit-learn", version: "1.9.1", kind: Kind::Wheel, url: "", sha256: "", mb: 10, licence: "BSD-3-Clause" },
-    Pin { name: "joblib", version: "1.6.0", kind: Kind::Wheel, url: "", sha256: "", mb: 1, licence: "BSD-3-Clause" },
-    Pin { name: "threadpoolctl", version: "3.7.0", kind: Kind::Wheel, url: "", sha256: "", mb: 1, licence: "BSD-3-Clause" },
-    Pin { name: "narwhals", version: "2.27.1", kind: Kind::Wheel, url: "", sha256: "", mb: 1, licence: "MIT" },
-    Pin { name: "cloudpickle", version: "3.1.2", kind: Kind::Wheel, url: "", sha256: "", mb: 1, licence: "BSD-3-Clause" },
-    Pin { name: "opencv-python-headless", version: "4.14.0.94", kind: Kind::Wheel, url: "", sha256: "", mb: 62, licence: "Apache-2.0 with LGPL-2.1 (FFmpeg) and Intel (IPP) parts" },
+    Pin { name: "cpython (python-build-standalone install_only)", version: "3.12.15+20261021", kind: Kind::Python, url: "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.12.15%2B20261021-x86_64-unknown-linux-gnu-install_only.tar.gz", sha256: "5ff9f0602ce964a529ed1e8555d3abab6341926d724402ba9a15e9e877191124", mb: 64, licence: "PSF-2.0" },
+    Pin { name: "numpy", version: "2.5.4", kind: Kind::Wheel, url: "https://files.pythonhosted.org/packages/43/a3/c799c62e19c337e6d3770b08e475887fb30ce8477d3c09efca6b2f0228a6/numpy-2.5.4-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", sha256: "fbde6962867ee75b48b0ee29b2b9372ec5d617799dbaf38e82dc0596f2f7738a", mb: 17, licence: "BSD-3-Clause and others" },
+    Pin { name: "scipy", version: "1.18.1", kind: Kind::Wheel, url: "https://files.pythonhosted.org/packages/df/64/ff35eb9e54894cf471ff4716abd3c81eb0a0626869217ce3e6ba4ccf17d7/scipy-1.18.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", sha256: "f55fa87b6c612ecd6b058f167c53231b1d14e412efe361d3d6e38b3631c73218", mb: 36, licence: "BSD-3-Clause" },
+    Pin { name: "scikit-learn", version: "1.9.1", kind: Kind::Wheel, url: "https://files.pythonhosted.org/packages/8e/57/a50162f3d29feb979ab6347c6debda506dfb525bcff3c50dd17606651c7e/scikit_learn-1.9.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", sha256: "e5d7b18a5b9dca241a74695f3275fa4c895a9dadc72b3d8df5fa9d1083c9b83e", mb: 10, licence: "BSD-3-Clause" },
+    Pin { name: "joblib", version: "1.6.0", kind: Kind::Wheel, url: "https://files.pythonhosted.org/packages/18/53/84099323c2ec4be98d935f63c033ac4151ee83836ca1050ede3b3aadf155/joblib-1.6.0-py3-none-any.whl", sha256: "3dbbf9f6e4b592a2357b854608e980fe6390d131d7a82f011a377ef2ebef7aba", mb: 1, licence: "BSD-3-Clause" },
+    Pin { name: "threadpoolctl", version: "3.7.0", kind: Kind::Wheel, url: "https://files.pythonhosted.org/packages/43/3f/f88a53f60a472b46f4023f56d204dd7de33d34c5d2acbfa0d70a674e639e/threadpoolctl-3.7.0-py3-none-any.whl", sha256: "cd8b60b5641b45c67bbf73c64c843235fc2d8a480c87389f52f5dbee893b86be", mb: 1, licence: "BSD-3-Clause" },
+    Pin { name: "narwhals", version: "2.27.1", kind: Kind::Wheel, url: "https://files.pythonhosted.org/packages/d1/89/5d4c86da1130d9059681e5b6cd7645df5c10279a6a079c5c37dcb2cc6f3f/narwhals-2.27.1-py3-none-any.whl", sha256: "d057df13f5852b8e157596e82eb5e955fad267425df5e420e0ee9863da483b31", mb: 1, licence: "MIT" },
+    Pin { name: "cloudpickle", version: "3.1.2", kind: Kind::Wheel, url: "https://files.pythonhosted.org/packages/88/39/799be3f2f0f38cc727ee3b4f1445fe6d5e4133064ec2e4115069418a5bb6/cloudpickle-3.1.2-py3-none-any.whl", sha256: "9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a", mb: 1, licence: "BSD-3-Clause" },
+    Pin { name: "opencv-python-headless", version: "4.14.0.94", kind: Kind::Wheel, url: "https://files.pythonhosted.org/packages/ae/ce/7f538891722a4f06921419d55bac6f41729258d54442861edb2de0dbdf5e/opencv_python_headless-4.14.0.94-cp37-abi3-manylinux_2_28_x86_64.whl", sha256: "211e581f5a4670acbbe08fff36a35e9946039d2eea28b80394632d036d1be527", mb: 62, licence: "Apache-2.0 with LGPL-2.1 (FFmpeg) and Intel (IPP) parts" },
 ];
 
 /// Shown at the click, with the "I have read it" confirmation.
@@ -166,11 +166,20 @@ mod tests {
     const PY: Pin = Pin { name: "cpython", version: "3.12.15+20261021", kind: Kind::Python, url: "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.12.15+20261021-x86_64-unknown-linux-gnu-install_only.tar.gz", sha256: "5ff9f0602ce964a55ff9f0602ce964a55ff9f0602ce964a55ff9f0602ce964a5", mb: 64, licence: "PSF-2.0" };
 
     #[test]
-    fn the_shipped_table_is_not_filled_in_so_the_item_fails_closed_before_any_download() {
-        let e = ready().unwrap_err();
+    fn the_shipped_table_is_filled_from_the_vendors_files_and_a_table_without_addresses_fails_closed() {
+        assert!(ready().is_ok(), "{:?}", table_problems(&PINS));
+        // every row: https on an allowed host, a name that matches, a 64-hex hash, no hash used twice
+        let hashes: std::collections::BTreeSet<&str> = PINS.iter().map(|p| p.sha256).collect();
+        assert_eq!(hashes.len(), PINS.len());
+        // a table made of the same rows with the addresses and hashes taken out stops before any download
+        let mut empty = PINS;
+        for p in empty.iter_mut() {
+            p.url = "";
+            p.sha256 = "";
+        }
+        let e = check(&empty).unwrap_err();
         assert!(e.contains("Nothing was downloaded") && e.contains("no address is pinned yet"), "{e}");
-        // every row is named, with the plan's versions
-        assert_eq!(table_problems(&PINS).iter().filter(|p| p.contains("no SHA-256")).count(), PINS.len());
+        assert_eq!(table_problems(&empty).iter().filter(|p| p.contains("no SHA-256")).count(), PINS.len());
         assert_eq!(total_mb(), 64 + 17 + 36 + 10 + 1 + 1 + 1 + 1 + 62);
     }
 

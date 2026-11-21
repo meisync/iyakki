@@ -84,9 +84,52 @@ pub fn sdp_record(name: &str) -> Vec<(u16, Vec<u8>)> {
 /// The UUIDs the sink record contains (a search pattern matches a record when all its UUIDs are in the record).
 const RECORD_UUIDS: [u16; 5] = [0x110b, 0x110d, 0x0100, 0x0019, 0x1002];
 
+/// A record other services put into the same service-discovery server (the sharing service of F-HOTSPOT-15 registers its NAP record
+/// here while it is on: one server answers on the one channel).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtraRecord {
+    pub handle: u32,
+    /// The UUIDs the record contains (a search pattern matches when all its UUIDs are in the record).
+    pub uuids: Vec<u16>,
+    /// The attributes in id order.
+    pub attrs: Vec<(u16, Vec<u8>)>,
+}
+
+/// Most extra records the server holds, and none may use a handle of the built-in ones.
+const MAX_EXTRA_RECORDS: usize = 4;
+
+static EXTRA: std::sync::Mutex<Vec<ExtraRecord>> = std::sync::Mutex::new(Vec::new());
+
+fn extra() -> std::sync::MutexGuard<'static, Vec<ExtraRecord>> {
+    EXTRA.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Add (or replace, by handle) an extra record. Refused for the built-in handles and when the server holds too many.
+pub fn sdp_register_extra(rec: ExtraRecord) -> Result<(), String> {
+    if rec.handle == SDP_RECORD_HANDLE || rec.handle == SDP_AVRCP_HANDLE {
+        return Err("that record handle belongs to the audio records".into());
+    }
+    let mut g = extra();
+    if let Some(at) = g.iter().position(|r| r.handle == rec.handle) {
+        g[at] = rec;
+    } else if g.len() >= MAX_EXTRA_RECORDS {
+        return Err("the service-discovery server holds too many extra records".into());
+    } else {
+        g.push(rec);
+    }
+    Ok(())
+}
+
+/// Take an extra record out again.
+pub fn sdp_unregister_extra(handle: u32) {
+    extra().retain(|r| r.handle != handle);
+}
+
 /// The records this server holds: (handle, UUIDs in it).
-fn record_table() -> [(u32, &'static [u16]); 2] {
-    [(SDP_RECORD_HANDLE, &RECORD_UUIDS), (SDP_AVRCP_HANDLE, &crate::avrcp::SDP_UUIDS)]
+fn record_table() -> Vec<(u32, Vec<u16>)> {
+    let mut v = vec![(SDP_RECORD_HANDLE, RECORD_UUIDS.to_vec()), (SDP_AVRCP_HANDLE, crate::avrcp::SDP_UUIDS.to_vec())];
+    v.extend(extra().iter().map(|r| (r.handle, r.uuids.clone())));
+    v
 }
 
 /// The attributes of the record with this handle.
@@ -94,7 +137,7 @@ fn record_attrs(handle: u32, name: &str) -> Option<Vec<(u16, Vec<u8>)>> {
     match handle {
         SDP_RECORD_HANDLE => Some(sdp_record(name)),
         SDP_AVRCP_HANDLE => Some(crate::avrcp::sdp_record(SDP_AVRCP_HANDLE, name)),
-        _ => None,
+        _ => extra().iter().find(|r| r.handle == handle).map(|r| r.attrs.clone()),
     }
 }
 
@@ -121,7 +164,7 @@ fn pattern_matches(e: &Elem) -> Option<Vec<u32>> {
         return None;
     }
     let table = record_table();
-    let mut all = [true; 2];
+    let mut all = vec![true; table.len()];
     for u in list {
         match u.uuid16() {
             Some(u) => {
@@ -130,7 +173,7 @@ fn pattern_matches(e: &Elem) -> Option<Vec<u32>> {
                 }
             }
             // a UUID that is not on the Bluetooth base cannot be in these records
-            None if matches!(u, Elem::Uuid(_)) => all = [false; 2],
+            None if matches!(u, Elem::Uuid(_)) => all = vec![false; table.len()],
             None => return None,
         }
     }
@@ -570,6 +613,9 @@ pub struct AudioPath {
     label: String,
     out: Option<(u32, usize, Box<dyn Output>)>,
     decoder: StreamDecoder,
+    /// The stream is AAC: its settings and the way to make a decoder for it (set by [`AudioPath::set_aac`]).
+    aac_cfg: Option<(crate::a2dp_aac::AacConfig, std::sync::Arc<dyn crate::a2dp_aac::AacBackend>)>,
+    aac: Option<crate::a2dp_aac::AacStream>,
     playing: bool,
     pub error: Option<String>,
     queue: VecDeque<Block>,
@@ -577,7 +623,23 @@ pub struct AudioPath {
 
 impl AudioPath {
     pub fn new(factory: Box<dyn OutputFactory>, label: &str) -> AudioPath {
-        AudioPath { factory, label: label.to_string(), out: None, decoder: StreamDecoder::new(), playing: false, error: None, queue: VecDeque::new() }
+        AudioPath { factory, label: label.to_string(), out: None, decoder: StreamDecoder::new(), aac_cfg: None, aac: None, playing: false, error: None, queue: VecDeque::new() }
+    }
+
+    /// The phone chose AAC: from the next `start` the media is decoded by a coder of this backend (the add-on).
+    pub fn set_aac(&mut self, cfg: crate::a2dp_aac::AacConfig, backend: std::sync::Arc<dyn crate::a2dp_aac::AacBackend>) {
+        self.aac_cfg = Some((cfg, backend));
+    }
+
+    /// The phone chose SBC (or the stream ended): back to the in-house decoder.
+    pub fn set_sbc(&mut self) {
+        self.aac_cfg = None;
+        self.aac = None;
+    }
+
+    /// The AAC settings of the stream, when it is an AAC one.
+    pub fn aac_config(&self) -> Option<crate::a2dp_aac::AacConfig> {
+        self.aac_cfg.as_ref().map(|c| c.0)
     }
 
     pub fn label(&self) -> &str {
@@ -589,7 +651,7 @@ impl AudioPath {
     }
 
     pub fn stats(&self) -> &StreamStats {
-        &self.decoder.stats
+        self.aac.as_ref().map_or(&self.decoder.stats, |a| &a.stats)
     }
 
     pub fn params(&self) -> Option<Params> {
@@ -601,12 +663,23 @@ impl AudioPath {
         self.playing = true;
         self.error = None;
         self.decoder = StreamDecoder::new();
+        self.aac = None;
+        if let Some((cfg, backend)) = &self.aac_cfg {
+            match backend.decoder(cfg) {
+                Ok(d) => self.aac = Some(crate::a2dp_aac::AacStream::new(*cfg, d)),
+                Err(e) => {
+                    self.error = Some(e);
+                    self.playing = false;
+                }
+            }
+        }
     }
 
     /// Suspended, closed or the link went away: the output ends at once so the speaker is free for other sounds.
     pub fn stop(&mut self) {
         self.playing = false;
         self.out = None;
+        self.aac = None;
         self.queue.clear();
     }
 
@@ -615,9 +688,40 @@ impl AudioPath {
         if !self.playing {
             return;
         }
-        for b in self.decoder.on_media(pkt) {
-            self.queue.push_back(b);
+        if let Some(a) = self.aac.as_mut() {
+            self.queue.extend(a.on_media(pkt));
+        } else if self.aac_cfg.is_some() {
+            return;
+        } else {
+            self.queue.extend(self.decoder.on_media(pkt));
         }
+        self.play_queue();
+    }
+
+    /// Sound the AAC decoder has ready (the decoder runs in its own process, so its sound comes a little after the packet): call after a
+    /// packet and on a timer. A decoder that stops ends the sound with its plain reason in `error`.
+    pub fn poll(&mut self) {
+        if !self.playing {
+            return;
+        }
+        if let Some(a) = self.aac.as_mut() {
+            match a.poll() {
+                Ok(Some(b)) => self.queue.push_back(b),
+                Ok(None) => {}
+                Err(e) => {
+                    self.error = Some(e);
+                    self.playing = false;
+                    self.out = None;
+                    self.aac = None;
+                    self.queue.clear();
+                    return;
+                }
+            }
+            self.play_queue();
+        }
+    }
+
+    fn play_queue(&mut self) {
         while let Some(b) = self.queue.pop_front() {
             if b.pcm.is_empty() {
                 continue;
@@ -685,6 +789,8 @@ pub struct AudioView {
     /// a phone may pair with this computer now
     pub pairing_open: bool,
     pub device: Option<AudioDeviceView>,
+    /// What the person should know about AAC (empty when nothing is to be said): "needs the add-on" or "available".
+    pub aac_note: String,
 }
 
 impl AudioView {
@@ -704,11 +810,12 @@ impl AudioView {
         if !self.ready {
             return format!("not available: {}", self.why_not);
         }
-        if self.pairing_open {
-            "waiting for a phone: it is discoverable now, choose this computer in the phone's Bluetooth list".into()
+        let base = if self.pairing_open {
+            "waiting for a phone: it is discoverable now, choose this computer in the phone's Bluetooth list"
         } else {
-            "ready: a paired phone can play through this computer; to pair a new one, let a phone pair".into()
-        }
+            "ready: a paired phone can play through this computer; to pair a new one, let a phone pair"
+        };
+        if self.aac_note.is_empty() { base.into() } else { format!("{base}. {}", self.aac_note) }
     }
 }
 

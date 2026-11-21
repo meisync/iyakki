@@ -186,7 +186,7 @@ impl Fx {
         self.app.wall()
     }
     fn audit_text(&self) -> String {
-        std::fs::read_to_string(self.cx.audit.path()).unwrap_or_default().replace("\\\"", "\"")
+        std::fs::read_to_string(self.cx.audit.path_buf()).unwrap_or_default().replace("\\\"", "\"")
     }
     fn clipboard(&self) -> String {
         crate::ui::clipboard::latest().unwrap_or_default()

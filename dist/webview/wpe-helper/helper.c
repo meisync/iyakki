@@ -48,6 +48,8 @@
 
 #define IYAKKI_MIC_WITH_ALSA 1
 #include "extsnap.h"
+#include "mediapolicy.h"
+#include "cachelimit.h"
 #include "micscan.h"
 #include "proto.h"
 
@@ -78,6 +80,15 @@ typedef struct {
     WebKitWebContext *ctx;
     /* the last extension snapshot (header values inside: never logged, never written to a file) */
     uint8_t *ext; size_t ext_len;
+    /* plug-ins (F-BROW-90): the scripts and styles put into the content manager from the last snapshot, and the engine's own User-Agent */
+    GPtrArray *plug_scripts, *plug_styles;
+    char *default_ua, *plug_ua;
+    /* the media policy (F-BROX-18, F-BROX-20): the script that carries it, and GST_PLUGIN_FEATURE_RANK as the helper started */
+    WebKitUserScript *cap_script;
+    char *rank_base;
+    int rank_base_set;
+    uint32_t cache_limit_mb;   /* 0x1a disk cache limit (F-BROX-17), 0 = none */
+    gint64 cache_checked_us;
     WebKitNetworkSession *session;
     WebKitUserContentManager *ucm;
     int filter_wait;                 /* a content filter is being loaded: the first page waits for it */
@@ -158,6 +169,7 @@ static void send_str_msg(uint8_t type, const char *s) {
     buf_free(&b);
 }
 
+static void enforce_cache_limit(int force);
 static void logf_(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
 static void logf_(const char *fmt, ...) {
     char line[512];
@@ -598,7 +610,7 @@ static void on_load_changed(WebKitWebView *v, WebKitLoadEvent e, gpointer ud) {
             return;
         }
     }
-    if (e == WEBKIT_LOAD_FINISHED) send_bb(F_LOADING, 0, 100);
+    if (e == WEBKIT_LOAD_FINISHED) { send_bb(F_LOADING, 0, 100); enforce_cache_limit(0); }
     else if (e == WEBKIT_LOAD_STARTED) { media_need_sent[0] = 0; dev_sent = 0; send_bb(F_LOADING, 1, 0); }
     send_history();
 }
@@ -766,10 +778,68 @@ static void stop_capture(uint8_t kinds) {
     if (kinds & MK_SCREEN) webkit_web_view_set_display_capture_state(G.view, WEBKIT_MEDIA_CAPTURE_STATE_NONE);
 }
 
-static char *screen_path;   /* the file the shell writes its screen into while a screen share is on (read by the screen feeder, when there is one) */
+/* The screen portal (F-BROW-71): with IYAKKI_WEBVIEW_SCREEN=1 the helper starts iyakki-screenportal (screenportal.c) before the engine, reads the
+ * private session bus address it prints and puts it in DBUS_SESSION_BUS_ADDRESS, which the engine's processes inherit, so WebKit's
+ * getDisplayMedia finds the ScreenCast portal there. The portal answers a screen only while the shell has handed over a feed file; the helper
+ * passes the shell's ScreenSource path on to it (`feed PATH`, and `feed` when the share ends). A portal that is not installed or does not come up
+ * within six seconds leaves the engine as it was (the screen request is then refused without a question, as before). */
+static int portal_in = -1;
+static void portal_start(void) {
+    const char *on = getenv("IYAKKI_WEBVIEW_SCREEN");
+    if (!on || strcmp(on, "1") || portal_in >= 0) return;
+    const char *exe = getenv("IYAKKI_SCREENPORTAL");
+    if (!exe || !*exe) exe = "/usr/libexec/iyakki/iyakki-screenportal";
+    if (access(exe, X_OK) != 0) { logf_("screen share: %s is not installed; no screen source", exe); return; }
+    char *argv[] = { (char *)exe, NULL };
+    GPid pid = 0;
+    gint out_fd = -1;
+    GError *err = NULL;
+    if (!g_spawn_async_with_pipes(NULL, argv, NULL, G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_CLOEXEC_PIPES, NULL, NULL, &pid, &portal_in, &out_fd, NULL, &err)) {
+        logf_("screen share: the portal did not start: %s", err ? err->message : "?");
+        g_clear_error(&err);
+        portal_in = -1;
+        return;
+    }
+    char buf[1024];
+    size_t have = 0;
+    int ready = 0;
+    gint64 until = g_get_monotonic_time() + 6 * G_USEC_PER_SEC;
+    while (!ready && have < sizeof buf - 1) {
+        gint64 left = (until - g_get_monotonic_time()) / 1000;
+        struct pollfd p = { .fd = out_fd, .events = POLLIN };
+        if (left <= 0 || poll(&p, 1, (int)left) <= 0) break;
+        ssize_t n = read(out_fd, buf + have, sizeof buf - 1 - have);
+        if (n <= 0) break;
+        have += (size_t)n;
+        buf[have] = 0;
+        ready = strstr(buf, "\nready\n") != NULL;
+    }
+    close(out_fd);
+    char *bus = strstr(buf, "bus ");
+    if (!ready || !bus) {
+        logf_("screen share: the portal did not come up in six seconds");
+        close(portal_in);
+        portal_in = -1;
+        kill(pid, SIGTERM);
+        return;
+    }
+    bus += 4;
+    bus[strcspn(bus, "\n")] = 0;
+    setenv("DBUS_SESSION_BUS_ADDRESS", bus, 1);
+    logf_("screen share: the portal is up");
+}
+static void portal_feed(const char *path) {
+    if (portal_in < 0) return;
+    char *line = g_strdup_printf("feed%s%s\n", path ? " " : "", path ? path : "");
+    if (write(portal_in, line, strlen(line)) < 0) logf_("screen share: the portal is gone");
+    g_free(line);
+}
+
+static char *screen_path;   /* the file the shell writes its screen into while a screen share is on (read by the portal's feeder) */
 static void screen_source(const char *path) {
     g_free(screen_path);
     screen_path = (path && *path) ? g_strdup(path) : NULL;
+    portal_feed(screen_path);
     logf_("screen source: %s", screen_path ? screen_path : "(none)");
 }
 
@@ -1009,6 +1079,9 @@ static void on_site_message(WebKitUserContentManager *m, JSCValue *val, gpointer
             snprintf(site_keys_sent[site_keys_n++], sizeof site_keys_sent[0], "%s", k);
             send_str_msg(F_KEY_SYSTEM, k);
         }
+    } else if (t && !strncmp(t, "access ", 7) && strlen(t) < 60000 + 16 && t[7] == '[') {
+        /* "access <json>": the page's headings, links, controls, pictures and landmarks on screen (F-A11Y-06); the shell parses, limits and scrubs it */
+        send_str_msg(F_PAGE_ACCESS, t + 7);
     } else if (t && !strncmp(t, "meta ", 5) && strlen(t) < 100000 + 4096) {
         /* "meta <manifest url>\x1f<manifest text>\x1f<icon url>": the three parts are passed on as they are (the shell reads, limits and scrubs them) */
         char **parts = g_strsplit(t + 5, "\x1f", 3);
@@ -1056,6 +1129,28 @@ static void clear_cache(void) {
     WebKitWebsiteDataManager *m = webkit_network_session_get_website_data_manager(G.session);
     if (!m) return;
     webkit_website_data_manager_clear(m, (WebKitWebsiteDataTypes)(WEBKIT_WEBSITE_DATA_DISK_CACHE | WEBKIT_WEBSITE_DATA_MEMORY_CACHE), 0, NULL, NULL, NULL);
+}
+
+/* Optional 0x1a CacheLimit {u32 disk_mb}: the most the engine's disk cache may hold (0 = no limit; the reader's Speed and memory choice sets it).
+ * WebKit has no call for the size of its disk cache, so the helper adds up the cache folder (cachelimit.h) when the limit arrives and after a
+ * page has loaded (at most once in 30 seconds) and empties the disk cache when the folder is above the limit. Memory stays WebKit's own
+ * (the cache model of IYAKKI_WEBVIEW_CACHE_MODEL). */
+static void enforce_cache_limit(int force) {
+    if (!G.session || !G.cache_limit_mb) return;
+    gint64 now = g_get_monotonic_time();
+    if (!force && G.cache_checked_us && now - G.cache_checked_us < 30 * G_USEC_PER_SEC) return;
+    G.cache_checked_us = now;
+    WebKitWebsiteDataManager *m = webkit_network_session_get_website_data_manager(G.session);
+    const char *dir = m ? webkit_website_data_manager_get_base_cache_directory(m) : NULL;
+    if (!cl_over(dir, G.cache_limit_mb)) return;
+    logf_("disk cache is above %u MB: emptied", G.cache_limit_mb);
+    webkit_website_data_manager_clear(m, WEBKIT_WEBSITE_DATA_DISK_CACHE, 0, NULL, NULL, NULL);
+}
+static void set_cache_limit(Rd *r) {
+    uint32_t mb = cl_limit_mb(rd_u32(r));
+    if (r->bad) return;
+    G.cache_limit_mb = mb;
+    enforce_cache_limit(1);
 }
 
 /* Protocol 1.1 Script: evaluate JavaScript in the top-level page, answer ScriptResult{id, ok, json}. The value is turned into JSON text
@@ -1219,6 +1314,55 @@ static GVariant *ext_variant(void) {
     if (!G.ext || !G.ext_len) return g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, "", 0, 1);
     return g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, G.ext, G.ext_len, 1);
 }
+/* ---- browser plug-ins (F-BROW-90): user scripts, user styles and the User-Agent ------------------------------------------------
+ * The same snapshot the web process reads carries two more hooks for this process: content.script (scripts and styles, each with the sites it
+ * may run on) and user.agent (one line). extsnap.h parses them; this puts them into the content manager (webkit_user_content_manager_add_script
+ * and add_style_sheet with the sites as the allow list, top frame only, so a frame of another site is never touched) and onto the live
+ * settings (webkit_settings_set_user_agent). The previous snapshot's scripts and styles are removed first, so a plug-in switched off is gone
+ * from the next page. They apply to the next page that loads; the shell sends the snapshot before every page. Not run in this tree: the calls
+ * are the documented ones of WPE 2.50 and compile against its headers. */
+static void apply_plugins(void) {
+    if (!G.ucm || !G.view) return;
+    if (!G.plug_scripts) G.plug_scripts = g_ptr_array_new();
+    if (!G.plug_styles) G.plug_styles = g_ptr_array_new();
+    for (guint i = 0; i < G.plug_scripts->len; i++) {
+        webkit_user_content_manager_remove_script(G.ucm, g_ptr_array_index(G.plug_scripts, i));
+        webkit_user_script_unref(g_ptr_array_index(G.plug_scripts, i));
+    }
+    for (guint i = 0; i < G.plug_styles->len; i++) {
+        webkit_user_content_manager_remove_style_sheet(G.ucm, g_ptr_array_index(G.plug_styles, i));
+        webkit_user_style_sheet_unref(g_ptr_array_index(G.plug_styles, i));
+    }
+    g_ptr_array_set_size(G.plug_scripts, 0);
+    g_ptr_array_set_size(G.plug_styles, 0);
+    XContent c = {0};
+    char rep[1024];
+    int rc = G.ext && G.ext_len ? xs_parse_all(G.ext, G.ext_len, NULL, &c, rep, sizeof rep) : 0;
+    if (rc < 0) { logf_("plug-ins: snapshot refused: %s", rep); xs_content_free(&c); return; }
+    for (uint32_t i = 0; i < c.n; i++) {
+        XScript *x = &c.s[i];
+        if (x->style) {
+            WebKitUserStyleSheet *st = webkit_user_style_sheet_new(x->body, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_STYLE_LEVEL_USER, (const char *const *)x->sites.allow, NULL);
+            webkit_user_content_manager_add_style_sheet(G.ucm, st);
+            g_ptr_array_add(G.plug_styles, st);
+        } else {
+            WebKitUserScript *us = webkit_user_script_new(x->body, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, x->at_end ? WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_END : WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, (const char *const *)x->sites.allow, NULL);
+            webkit_user_content_manager_add_script(G.ucm, us);
+            g_ptr_array_add(G.plug_scripts, us);
+        }
+    }
+    /* the User-Agent: one line, set on the live view's settings (it reaches every request of the next page); empty or absent restores the engine's own */
+    WebKitSettings *st = webkit_web_view_get_settings(G.view);
+    const char *want = c.has_ua && c.ua[0] ? c.ua : NULL;
+    if (st && g_strcmp0(want, G.plug_ua) != 0) {
+        webkit_settings_set_user_agent(st, want ? want : G.default_ua);
+        g_free(G.plug_ua);
+        G.plug_ua = g_strdup(want);
+    }
+    logf_("plug-ins: %u scripts and styles, user agent %s%s%s", c.n, want ? "replaced" : "the engine's own", rep[0] ? "; " : "", rc == 0 ? rep : "");
+    xs_content_free(&c);
+}
+
 static void set_extensions(const uint8_t *p, size_t n) {
     if (n > XS_MAX_SNAPSHOT) { logf_("extensions: snapshot of %zu bytes is too long, ignored", n); return; }
     free(G.ext);
@@ -1227,6 +1371,7 @@ static void set_extensions(const uint8_t *p, size_t n) {
     if (n) memcpy(G.ext, p, n);
     G.ext_len = n;
     if (G.ctx) webkit_web_context_send_message_to_all_extensions(G.ctx, webkit_user_message_new("iyakki-extensions", ext_variant()));
+    apply_plugins();
 }
 static void on_initialize_web_extensions(WebKitWebContext *c, gpointer d) {
     const char *dir = getenv("IYAKKI_WEBEXT_DIR");
@@ -1243,6 +1388,39 @@ static gboolean on_context_message(WebKitWebContext *c, WebKitUserMessage *m, gp
     GVariant *v = webkit_user_message_get_parameters(m);
     if (v && g_variant_is_of_type(v, G_VARIANT_TYPE_STRING)) logf_("extensions: %s", g_variant_get_string(v, NULL)); /* names and counts only */
     return TRUE;
+}
+
+/* ---- the media policy (0x18, F-BROX-18 and F-BROX-20) ---------------------------------------------------------------------------
+ * `u32 max_height` (0 = no ceiling) and `u8 codecs` (absent = on). The ceiling and the decoder switch reach the page as one object read by
+ * media-cap.js, whose wrappers answer "not supported" to a size above the ceiling and, with the decoders off, to H.264, H.265, AAC and
+ * AC-3; a site then picks another picture or codec itself. The decoders are also given rank 0 for web processes started after this message
+ * (the engine's own player never picks them), so a page that asks nothing first still gets no add-on decoder. With no ceiling and the
+ * decoders on, the script is removed and the page is left as it was. The live page is told at once; the script covers the next pages. */
+static const char MEDIA_CAP_JS[] =
+#include "media-cap.h"
+;
+static void media_policy(Rd *r) {
+    uint32_t h = mp_height(rd_u32(r));
+    int codecs = r->o < r->n ? rd_u8(r) != 0 : 1;
+    if (r->bad || !G.view || !G.ucm) return;
+    char pre[128];
+    mp_prefix(pre, sizeof pre, h, codecs);
+    if (G.cap_script) {
+        webkit_user_content_manager_remove_script(G.ucm, G.cap_script);
+        webkit_user_script_unref(G.cap_script);
+        G.cap_script = NULL;
+    }
+    if (h > 0 || !codecs) {
+        char *src = g_strconcat(pre, MEDIA_CAP_JS, NULL);
+        G.cap_script = webkit_user_script_new(src, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
+        webkit_user_content_manager_add_script(G.ucm, G.cap_script);
+        g_free(src);
+    }
+    webkit_web_view_evaluate_javascript(G.view, pre, -1, NULL, NULL, NULL, NULL, NULL);   /* the page that is open (a no-op if no wrapper is installed) */
+    if (!G.rank_base_set) { const char *old = getenv("GST_PLUGIN_FEATURE_RANK"); G.rank_base = old ? g_strdup(old) : NULL; G.rank_base_set = 1; }
+    char rank[2048];
+    if (mp_rank(rank, sizeof rank, G.rank_base, codecs) == 0) setenv("GST_PLUGIN_FEATURE_RANK", rank, 1);
+    logf_("media policy: video ceiling %u, add-on decoders %s", h, codecs ? "on" : "off");
 }
 
 static void handle(uint8_t ty, const uint8_t *p, size_t n) {
@@ -1302,6 +1480,8 @@ static void handle(uint8_t ty, const uint8_t *p, size_t n) {
     case T_PERMISSION_ANSWER: { uint32_t id = rd_u32(&r); uint8_t allow = rd_u8(&r); if (!r.bad) permission_answer(id, allow); break; }
     case T_EXTENSIONS: set_extensions(p, n); break;
     case T_CLEAR_CACHE: clear_cache(); break;
+    case T_MEDIA_POLICY: media_policy(&r); break;
+    case T_CACHE_LIMIT: set_cache_limit(&r); break;
     case T_SITE_SCOPE: set_scope(&r); break;
     case T_QUIT: quit_loop(); break;
     default: break;   /* unknown: skipped */
@@ -1410,6 +1590,7 @@ static void setup_engine(void) {
             g_free(rank);
         } else logf_("VA-API video decoding was asked for but %s: software decoding stays", node ? "the VA plug-in is not installed" : "there is no render node");
     }
+    portal_start();   /* the screen portal, before the engine's processes exist (they inherit its bus address) */
     if (!getenv("IYAKKI_WEBVIEW_ALSA_DEVICES")) {
         const char *old = getenv("GST_PLUGIN_FEATURE_RANK");
         char *rk = g_strdup_printf("%s%salsadeviceprovider:0", old ? old : "", old && *old ? "," : "");
@@ -1548,6 +1729,7 @@ static void setup_engine(void) {
             fclose(uf);
         }
     }
+    G.default_ua = g_strdup(webkit_settings_get_user_agent(st));   /* what a plug-in's empty User-Agent goes back to */
     WebKitUserContentManager *ucm = webkit_user_content_manager_new();
     G.ucm = ucm;
     webkit_user_content_manager_register_script_message_handler(ucm, "iyakkiClip", NULL);

@@ -822,6 +822,22 @@ impl TileHost {
         self.sdk()?.v2().call(op, a, &self.caps).map_err(|e| e.encode())
     }
 
+    /// What waits for the person's answer (a first-use card of the SDK bridge, oldest first): a WebAssembly tile's screen draws these.
+    pub fn take_requests(&self) -> Vec<Request> {
+        self.out.lock().map(|o| o.requests.clone()).unwrap_or_default()
+    }
+
+    /// The person answered request `id`; the SDK records a yes (the tile asks again) or a no, and the request is gone. False when there was none.
+    pub fn answer_request(&self, id: u32, allow: bool) -> bool {
+        let ok = self.sdk.as_ref().is_some_and(|s| s.answer(id, allow));
+        if let Ok(mut o) = self.out.lock() {
+            let had = o.requests.iter().any(|r| r.id == id);
+            o.requests.retain(|r| r.id != id);
+            return ok || had;
+        }
+        ok
+    }
+
     fn pending(&self, kind: &str, args: Value) -> Result<Value, String> {
         let mut o = self.out.lock().map_err(|_| "busy".to_string())?;
         if o.requests.len() >= MAX_PENDING {
@@ -1028,7 +1044,18 @@ impl TileRuntime {
             (u.host == own).then(|| bundle.text(u.path.trim_start_matches('/')).map(str::to_string)).flatten()
         };
         let vp = iyakki_web::css::Viewport::default();
-        iyakki_web::style::styled_doc(&tree, &self.origin, &vp, &sheet)
+        // the elements the app mounted a viewer on by id are marked, so the page layout can say where they are (F-SDK-14)
+        iyakki_web::style::styled_doc_marked(&tree, &self.origin, &vp, &sheet, &self.embed_element_ids())
+    }
+
+    /// The `id`s of the page elements the app's mounted viewers name as their target (a plain string target; a box target needs no element).
+    pub fn embed_element_ids(&self) -> Vec<String> {
+        let Some(b) = self.sdk.as_ref().and_then(|s| s.embeds.as_ref()) else { return Vec::new() };
+        let mut ids: Vec<String> = b.snapshot().into_iter().filter_map(|v| v.target.as_str().map(str::to_string)).collect();
+        ids.sort();
+        ids.dedup();
+        ids.truncate(64);
+        ids
     }
 
     /// All the text on the page, as one line per block of text.

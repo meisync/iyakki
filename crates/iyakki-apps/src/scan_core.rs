@@ -321,7 +321,7 @@ pub fn draw_card(g: &mut Gfx, p: R, s: f32, tick: u64, ss: &Session, c: &Card) {
             let d = R::new((area.x + (area.w - dw) / 2.0).round(), (area.y + (area.h - dh) / 2.0).round(), dw, dh);
             let (pw, ph) = (pv.pm.width() as f32, pv.pm.height() as f32);
             let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
-            g.pm.draw_pixmap(0, 0, pv.pm.as_ref(), &paint, Transform::from_row(dw / pw, 0.0, 0.0, dh / ph, d.x, d.y), None);
+            g.pm_mut().draw_pixmap(0, 0, pv.pm.as_ref(), &paint, Transform::from_row(dw / pw, 0.0, 0.0, dh / ph, d.x, d.y), None);
             let side = d.w.min(d.h) * 0.72;
             let (gx, gy) = (d.x + (d.w - side) / 2.0, d.y + (d.h - side) / 2.0);
             let arm = side * 0.2;

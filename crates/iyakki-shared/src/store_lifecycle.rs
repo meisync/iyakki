@@ -1,7 +1,7 @@
 //! What a check of an installed item found out (data only). The check itself stays in `iyakki_agent::store::lifecycle`.
 
 /// What a check found out about one installed thing.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Check {
     UpToDate,
     Update,
@@ -44,7 +44,7 @@ impl Check {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct RemoveOpts {
     /// Delete its data folder and vault entries as well (default: keep).
     pub delete_data: bool,
@@ -63,7 +63,7 @@ use crate::store_installed::Status;
 use crate::store_installed::Type;
 
 /// One installed thing with everything the lifecycle knows about it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Life {
     pub entry: IEntry,
     /// What a person types: `skill:meeting-notes`, `cli:kubectl`.
@@ -117,13 +117,13 @@ impl Life {
 }
 
 /// What the caller knows about the last look at the network.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Ctx {
     /// `(store name, why)` for every store the last refresh could not read.
     pub refresh_errors: Vec<(String, String)>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LifeError {
     /// Needs a yes first: the text says what to confirm.
     NeedsConfirm(String),
@@ -150,7 +150,7 @@ impl From<InstallError> for LifeError {
 }
 
 /// What an update would do, worked out from the real package (downloaded and reviewed) before anything changes.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct UpdatePlan {
     pub key: String,
     pub title: String,
@@ -205,7 +205,7 @@ impl UpdatePlan {
 }
 
 /// What a removal would do.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RemovePlan {
     pub key: String,
     pub title: String,
@@ -252,7 +252,25 @@ impl RemovePlan {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+/// Find one item by `kind:name`, a bare name, or the tile's key. A user's own item wins over a shared one of the same name. (Pure: the agent's
+/// `Store::find_life` and the UI's remote store handle both use it, so the lookup needs no call over the socket.)
+pub fn find_life<'a>(lives: &'a [Life], id: &str) -> Result<&'a Life, String> {
+    let id = id.trim();
+    let hits: Vec<&Life> = lives.iter().filter(|l| l.entry.key == id || l.id == id || l.entry.name == id).collect();
+    match hits.as_slice() {
+        [] => Err(format!("Nothing installed is called \"{id}\". `store list` shows what is.")),
+        [one] => Ok(one),
+        many => {
+            let mine = many.iter().filter(|l| matches!(l.entry.scope, crate::skills::Scope::User(_))).collect::<Vec<_>>();
+            if mine.len() == 1 {
+                return Ok(mine[0]);
+            }
+            Err(format!("\"{id}\" is ambiguous: {}. Use kind:name.", many.iter().map(|l| l.id.clone()).collect::<Vec<_>>().join(", ")))
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Report {
     pub items: Vec<(String, Done)>,
 }
@@ -292,7 +310,7 @@ pub struct Hist {
 }
 
 /// One item's result in an Update all run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Done {
     Updated(String),
     /// Skipped, with the reason (needs confirmation, pinned, source gone, ...).

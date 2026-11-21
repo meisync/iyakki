@@ -64,6 +64,15 @@ pub trait SoundControl: Send + Sync {
     fn card_starting(&self, _proc_root: &Path, _sys: &Path) -> Option<u32> {
         None
     }
+    /// The playback devices as the kernel facts of `route` show them (`Core::audio_route`): the selector's watched picture when the route
+    /// is the running machine's and the selector is installed, else a fresh look. The reads are the route's; the decision is the service's.
+    fn outputs_via(&self, _route: &dyn crate::audioroute::AudioRoute) -> Vec<Output> {
+        Vec::new()
+    }
+    /// A sound card that is still starting, from the kernel facts of `route`: its number.
+    fn card_starting_via(&self, _route: &dyn crate::audioroute::AudioRoute) -> Option<u32> {
+        None
+    }
     /// Why the volume keys do nothing yet (no control moves the sound), if that is so.
     fn volume_note(&self) -> Option<String> {
         None
@@ -79,6 +88,33 @@ pub trait SoundControl: Send + Sync {
     /// `play_cmd` with the ALSA device of `device` put in.
     fn command_with_device(&self, play_cmd: &str, _device: &str) -> Result<String, String> {
         Ok(play_cmd.to_string())
+    }
+}
+
+/// The part of the sound output's state that the players and the tiles read: which device, how loud, and a number that changes when the device
+/// changes. The decisions (choose the output, the learned format, the software volume) stay in the selector that owns them (decision
+/// D-ARCH-06-AUDIOROUTE, option b); this is the read seam the core serves through `Os::output_state`, so a tile or a player is tested on a made-up state.
+pub trait OutputState: Send + Sync {
+    /// The ALSA device players should use now (`None`: leave the play command alone).
+    fn device(&self) -> Option<String>;
+    /// Changes whenever [`device`](Self::device) changes.
+    fn generation(&self) -> u64;
+    /// The volume a player applies to its samples, in percent.
+    fn gain(&self) -> u32;
+}
+
+/// The state of a core with no selector: no device, no change, full volume.
+pub struct NoOutputState;
+
+impl OutputState for NoOutputState {
+    fn device(&self) -> Option<String> {
+        None
+    }
+    fn generation(&self) -> u64 {
+        0
+    }
+    fn gain(&self) -> u32 {
+        100
     }
 }
 

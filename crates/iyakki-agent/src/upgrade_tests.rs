@@ -551,8 +551,45 @@ fn check_earlier_release(which: &str) {
             assert_eq!(bytes(&e.path()), stamp, "{which}: a second inbox run writes nothing");
         }
     }
+    // flows, one folder of flows per person: every flow and every published version is still there, a second look writes nothing
+    let home = d.join("home");
+    if home.is_dir() {
+        for e in fs::read_dir(&home).unwrap().flatten() {
+            let root = e.path().join("Flows");
+            if !root.is_dir() {
+                continue;
+            }
+            let st = iyakki_flow::store::FlowStore::new(&root, std::sync::Arc::new(|| 1_700_000_500_000));
+            let ids = st.ids();
+            let on_disk = fs::read_dir(&root).unwrap().flatten().filter(|x| x.path().is_dir()).count();
+            assert_eq!(ids.len(), on_disk, "{which}: a flow folder of {} is not listed", e.path().display());
+            for id in &ids {
+                let versions_on_disk = fs::read_dir(root.join(id).join("versions")).map_or(0, |r| r.flatten().count());
+                let m = st.meta_of(id);
+                assert!(m.versions.len() >= versions_on_disk, "{which}: a version of flow {id} was lost");
+                assert!(st.get_draft(id).is_some(), "{which}: the draft of flow {id} does not open");
+            }
+            let snapshot = |r: &Path| { let mut w = walk(r); w.sort(); w.iter().map(|p| (p.clone(), bytes(p))).collect::<Vec<_>>() };
+            let stamp = snapshot(&root);
+            let st2 = iyakki_flow::store::FlowStore::new(&root, std::sync::Arc::new(|| 1_700_000_501_000));
+            for id in st2.ids() {
+                let _ = st2.meta_of(&id);
+            }
+            assert_eq!(snapshot(&root), stamp, "{which}: a second look at the flows writes nothing");
+        }
+    }
+    // vaults: every file opens sealed, names a slot, and opening never writes it
+    let vdir = d.join("vault");
+    if vdir.is_dir() {
+        for p in walk(&vdir).into_iter().filter(|p| p.extension().is_some_and(|x| x == "afv")) {
+            let b = bytes(&p);
+            let v = crate::vault::LocalVault::open(&p).unwrap_or_else(|er| panic!("{which}: {} does not open: {er:?}", p.display()));
+            assert!(!v.is_unlocked() && !v.slot_ids().is_empty(), "{which}: {} opens sealed and names a way in", p.display());
+            assert_eq!(bytes(&p), b, "{which}: opening {} wrote it", p.display());
+        }
+    }
     // nothing else was written by loading these three
-    for (p, b) in others.iter().filter(|(p, _)| !p.starts_with(&inbox_dir)) {
+    for (p, b) in others.iter().filter(|(p, _)| !p.starts_with(&inbox_dir) && !p.starts_with(&home)) {
         assert_eq!(&bytes(p), b, "{which}: {} was written by loading settings and sources", p.display());
     }
 }

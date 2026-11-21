@@ -4,25 +4,93 @@
 //! of `iyakki-agent` and `iyakki-shell` here).
 
 mod hardware;
+pub mod appevent_facts;
+pub mod backlight;
 pub mod appevents;
 pub mod bootdisk;
+pub mod bootvolume;
 pub mod homebrowse;
 pub mod homefiles;
 pub mod i2c;
+pub mod debugfacts;
+pub mod doctorsys;
+pub mod kernelfacts;
+pub mod macfwsys;
+pub mod machinefacts;
 pub mod resume;
 pub mod cloudseed;
 pub mod gadget;
+pub mod linksys;
 pub mod bootconfirm;
 pub mod net;
+pub mod netfacts;
+pub mod nl80211_os;
+pub mod btshare;
+pub mod devscan;
+pub mod bootmenu;
+pub mod fanctl;
+pub mod kmodpack;
+pub mod keptlog;
+pub mod memconf;
+pub mod sbwrite;
+pub mod wifijoin;
+pub mod nvidia;
+pub mod procfacts;
+pub mod startupdisk;
+pub mod braille_link;
+pub mod btaudio;
+pub mod outputstate;
+pub mod screenfacts;
+pub mod starters;
+pub mod starters_launch;
+// The disk engine (moved from iyakki-disksx, F-ARCH-07): listing, plans, mount, partition, format, encrypted volumes. iyakki-disksx
+// re-exports these names for the UI crates, which may not name this crate.
+pub use iyakki_diskcrypt as disks_crypt;
+// The device and hardware crates, reached through this crate so the agent names none of them (F-ARCH-07).
+pub use iyakki_hwinfo as hwinfo;
+pub use iyakki_zram as zram;
+pub use iyakki_netscan as netscan;
+pub use iyakki_usb as usb;
+pub use iyakki_devctl as devctl;
+pub use iyakki_drivers as driver_packs;
+pub use iyakki_storage as storage;
+pub mod diskengine;
+pub mod disks;
+pub mod disks_fake;
+pub mod disks_fmt;
+pub mod disks_dm;
+pub mod disks_helper;
+pub mod disks_part;
+pub mod disks_sys;
+pub mod disks_unlock;
+pub mod disksformattools;
+pub mod oscompat;
+pub mod touchfix;
+pub mod touchprobe;
+pub mod touchrecover;
 pub mod uistate;
+pub mod usbawake;
+pub mod usbports;
 
 /// The control of this machine (links, addresses, volume, DHCP).
 pub fn system_control() -> std::sync::Arc<dyn iyakki_core_api::hardware::Control> {
     std::sync::Arc::new(iyakki_devctl::System)
 }
+mod drivers;
+pub mod audioroute;
+mod installer;
+pub mod disktools;
 mod memory;
 pub mod sysinfo;
-pub use hardware::LocalHardware;
+pub use drivers::LocalDrivers;
+pub use startupdisk::LocalStartupDisk;
+pub use btaudio::LocalBtAudio;
+pub use screenfacts::LocalScreenFacts;
+pub use audioroute::LocalAudioRoute;
+pub use installer::LocalInstaller;
+pub use disktools::LocalDiskTools;
+pub use kmodpack::LocalDepmod;
+pub use hardware::{set_device_broker, LocalHardware};
 pub use memory::LocalMemory;
 
 use std::path::{Path, PathBuf};
@@ -117,6 +185,44 @@ impl Os for LocalOs {
     }
     fn hardware(&self) -> std::sync::Arc<dyn iyakki_core_api::hardware::Hardware> {
         self.hardware.clone()
+    }
+    fn installer(&self) -> std::sync::Arc<dyn iyakki_core_api::installer::Installer> {
+        // a made-up machine (`under`) keeps `proc` under its root: look there, never at the real disks
+        match (self.proc == Path::new("/proc"), self.proc.parent()) {
+            (false, Some(root)) => std::sync::Arc::new(LocalInstaller::under(root)),
+            _ => std::sync::Arc::new(LocalInstaller::system()),
+        }
+    }
+    fn audio_route(&self) -> std::sync::Arc<dyn iyakki_core_api::AudioRoute> {
+        // a made-up machine keeps no mixer: the real one is only run on this computer
+        if self.proc == Path::new("/proc") { std::sync::Arc::new(LocalAudioRoute::system()) } else { std::sync::Arc::new(LocalAudioRoute::at(&self.proc, &self.sys)) }
+    }
+    fn drivers(&self) -> std::sync::Arc<dyn iyakki_core_api::drivers::Drivers> {
+        // a made-up machine (`at`) keeps `proc` under its root: look there, never at this computer
+        match (self.proc == Path::new("/proc"), self.proc.parent()) {
+            (false, Some(root)) => std::sync::Arc::new(LocalDrivers::under(root)),
+            _ => std::sync::Arc::new(LocalDrivers::system(Path::new("/var/lib/iyakki"))),
+        }
+    }
+    fn disk_engine(&self) -> std::sync::Arc<dyn iyakki_core_api::diskmodel::DiskEngine> {
+        // a made-up machine keeps no drives: the real engine is only run on this computer
+        if self.proc == Path::new("/proc") { std::sync::Arc::new(diskengine::LocalDiskEngine::system()) } else { std::sync::Arc::new(iyakki_core_api::diskmodel::NoDiskEngine) }
+    }
+    fn screen_facts(&self) -> std::sync::Arc<dyn iyakki_core_api::screenfacts::ScreenFacts> {
+        // a made-up machine keeps its sysfs under its root
+        if self.sys == Path::new("/sys") { std::sync::Arc::new(LocalScreenFacts::system()) } else { std::sync::Arc::new(LocalScreenFacts::at(&self.sys.join("class/drm"), &self.sys.join("class/graphics"))) }
+    }
+    fn output_state(&self) -> std::sync::Arc<dyn iyakki_core_api::soundctl::OutputState> {
+        // a made-up machine plays nowhere
+        if self.proc == Path::new("/proc") { outputstate::current() } else { std::sync::Arc::new(iyakki_core_api::soundctl::NoOutputState) }
+    }
+    fn bt_audio(&self) -> std::sync::Arc<dyn iyakki_core_api::btaudio::BtAudio> {
+        // a made-up machine has no Bluetooth: the real one is only reached on this computer
+        if self.proc == Path::new("/proc") { std::sync::Arc::new(LocalBtAudio::real()) } else { std::sync::Arc::new(iyakki_core_api::btaudio::NoBtAudio) }
+    }
+    fn startup_disk(&self) -> std::sync::Arc<dyn iyakki_core_api::startupdisk::StartupDisk> {
+        // a made-up machine has no firmware: the real one is only reached on this computer
+        if self.proc == Path::new("/proc") { std::sync::Arc::new(LocalStartupDisk::system(None)) } else { std::sync::Arc::new(iyakki_core_api::startupdisk::NoStartupDisk) }
     }
     fn crashlog(&self) -> std::sync::Arc<dyn iyakki_core_api::crashlog::CrashLog> {
         std::sync::Arc::new(LocalCrashLog)
@@ -412,6 +518,9 @@ mod space_tests {
     }
 }
 
+pub use router_models::publish_models;
+mod router_models;
+
 /// The router on the device: the guard has asked and logged; there is nothing more for the machine to do.
 pub struct LocalRouter;
 
@@ -429,6 +538,9 @@ impl iyakki_core_api::router::Router for LocalRouter {
         Ok(())
     }
     fn record(&self, _: &str, _: &str) {}
+    fn models(&self) -> Vec<iyakki_core_api::router::RouteModel> {
+        router_models::published_models()
+    }
 }
 
 /// The fleet on the device: the guard has asked and logged; there is nothing more for the machine to do.
@@ -451,4 +563,27 @@ impl iyakki_core_api::fleet::Fleet for LocalFleet {
         Ok(())
     }
     fn record(&self, _: &str, _: &str) {}
+}
+
+#[cfg(test)]
+mod disks_fmt_tests;
+#[cfg(test)]
+mod disks_tests;
+#[cfg(test)]
+mod disks_unlock_tests;
+
+#[cfg(test)]
+mod routing_decision_tests {
+    use iyakki_core_api::router::{RouteCost, RouteModel, RouteNeed, RouteZone, Router};
+
+    #[test]
+    fn the_device_router_answers_the_routing_decision_from_the_published_registry_and_publishing_replaces_it() {
+        let m = |id: &str, zone| RouteModel { id: id.into(), role: "both".into(), tools: true, vision: false, audio: false, context: 8192, cost: RouteCost::Free, zone, enabled: true, answer_ms: None };
+        crate::publish_models(vec![m("a/x", RouteZone::Internet), m("b/y", RouteZone::Computer)]);
+        let r = super::LocalRouter;
+        assert_eq!(r.models().len(), 2);
+        assert_eq!(r.route(&RouteNeed::default()).chosen.as_deref(), Some("b/y"));
+        crate::publish_models(vec![]);
+        assert!(r.route(&RouteNeed::default()).chosen.is_none());
+    }
 }

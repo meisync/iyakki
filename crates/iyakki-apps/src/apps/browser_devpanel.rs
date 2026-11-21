@@ -19,7 +19,7 @@
 use iyakki_clock as clock;
 use iyakki_clock::{Zone};
 use iyakki_shared::devtools::{DevEvent, Level, Snapshot, Tagged};
-use iyakki_shared::devtools::DevTools;
+use iyakki_agent_api::DevToolsApi as DevTools;
 
 use super::browser_devtools::NetLine;
 use super::browser_inspect::{Inspector, Kind as InKind};
@@ -253,7 +253,7 @@ fn human(n: u64) -> String {
 
 impl Panel {
     /// Opens the panel: collecting starts for this person (memory only) and the panel takes the keyboard.
-    pub fn open(&mut self, dt: &DevTools, user: &str) {
+    pub fn open(&mut self, dt: &dyn DevTools, user: &str) {
         self.open = true;
         self.focus = true;
         self.editing = false;
@@ -263,7 +263,7 @@ impl Panel {
     }
 
     /// Closes the panel: collecting stops (unless the chat agent's switch is on) and what it collected is forgotten, here too.
-    pub fn close(&mut self, dt: &DevTools, user: &str) {
+    pub fn close(&mut self, dt: &dyn DevTools, user: &str) {
         if self.open {
             dt.set_panel(user, false);
         }
@@ -280,7 +280,7 @@ impl Panel {
     }
 
     /// Copies the shared buffers again when they changed since the last call. True when the panel has to be drawn again.
-    pub fn refresh(&mut self, dt: &DevTools, user: &str, reader_len: usize) -> bool {
+    pub fn refresh(&mut self, dt: &dyn DevTools, user: &str, reader_len: usize) -> bool {
         if !self.open {
             return false;
         }

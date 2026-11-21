@@ -1,0 +1,14 @@
+[package]
+name = "iyakki-audiolink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The device side of My IYAKKI's sound stream in cloud mode: frames, the pinned TLS link, the consent gate, the microphone loop. Shared by the agent and the connector program (F-VOICE-38, F-VOICE-61)."
+
+# Small on purpose: the connector program runs on a person's own computer and must not pull in the agent. std, the TLS library the rest of the
+# system uses, and the link crate's base64.
+[dependencies]
+iyakki-link.workspace = true
+serde_json = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }

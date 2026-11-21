@@ -128,12 +128,12 @@ fn a_look_file_carries_the_skin_parts_and_a_bad_one_is_refused_by_line() {
         l.surface.glyph = 24;
     });
     let text = l.to_text();
-    for k in ["[shape]", "shape = round", "edge = heavy", "[spacing]", "spacing = airy", "[effects]", "elevation = high", "glass = on", "blur = 18", "glyph_size = 24"] {
+    for k in ["[shape]", "shape = round", "edge = heavy", "[spacing]", "spacing = airy", "[effects]", "elevation = high", "glass = on", "blur = 18", "glyph_size = 24", "parallel_draw = off"] {
         assert!(text.contains(k), "missing {k}");
     }
     assert_eq!(Look::from_text(&text).unwrap(), l);
     // a file from before skins has none of these and reads as the plain skin
-    let old = Look::default().to_text().replace("[shape]\nshape = soft\nedge = regular\n\n[spacing]\nspacing = normal\n\n[effects]\nelevation = flat\nglass = off\nblur = 12\nglyph_size = 20\n", "");
+    let old = Look::default().to_text().replace("[shape]\nshape = soft\nedge = regular\n\n[spacing]\nspacing = normal\n\n[effects]\nelevation = flat\nglass = off\nblur = 12\nglyph_size = 20\nparallel_draw = off\n", "");
     assert!(!old.contains("[shape]"));
     assert_eq!(Look::from_text(&old).unwrap().surface, Look::default().surface);
     let bad = text.replace("shape = round", "shape = hexagon").replace("blur = 18", "blur = 99");

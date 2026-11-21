@@ -266,11 +266,11 @@ impl Rig {
         Rig {
             picture,
             vision,
-            frames: cx.services.b5().lab_frames(),
+            frames: cx.services.b5().lab_frames_for(&cx.session.user),
             camera: Arc::new(move || {
                 let cam = svc.camera().backend().ok_or("The camera service is not ready yet. Try again in a moment.")?;
                 // the red "camera in use" sign shows while this guard lives
-                let _busy = svc.camera().begin(&user, "taking a picture in LAB");
+                let _busy = iyakki_agent_api::CameraBusy::begin(svc.camera(), &user, "taking a picture in LAB");
                 cam.photo_bytes()
             }),
             has_camera: Arc::new(move || allowed && svc3.camera().backend().is_some_and(|b| !b.cameras().is_empty())),

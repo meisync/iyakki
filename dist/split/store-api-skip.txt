@@ -1,0 +1,5 @@
+# a guard that borrows the store cannot be a trait method or cross the socket: busy_set and busy_clear carry it
+CameraHubApi::begin
+ExtStatusApi::models_for
+# an account added without an acting person: reaching the command line of the machine is the only authority for it; never over the socket
+AccountsApi::add_local

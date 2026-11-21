@@ -130,3 +130,25 @@ pub fn entry_for_replaced_boot_code(old: &BootCode, windows_uuid: Option<&str>) 
         BootCode::Other => Err("another boot loader's code is being replaced and IYAKKI does not know how to hand over to it; keep its boot code (do not replace it)".into()),
     }
 }
+
+/// The file-system UUID GRUB's `search --fs-uuid` prints for an NTFS volume: the 64-bit volume serial of its boot sector (offset 0x48,
+/// little endian) as 16 lower-case hex digits. `None` when the sector is not an NTFS boot sector.
+pub fn ntfs_uuid(boot_sector: &[u8]) -> Option<String> {
+    if boot_sector.len() < 512 || &boot_sector[3..11] != b"NTFS    " || boot_sector[510] != 0x55 || boot_sector[511] != 0xAA {
+        return None;
+    }
+    let mut serial = [0u8; 8];
+    serial.copy_from_slice(&boot_sector[0x48..0x50]);
+    Some(format!("{:016x}", u64::from_le_bytes(serial)))
+}
+
+/// The menu text to add to the boot menu of a shared legacy-BIOS install: the entry that starts the system whose boot code is replaced.
+/// `first_sectors` gives the first 512 bytes of every NTFS partition (the first one that is an NTFS boot sector is the Windows volume).
+/// `Ok(None)` when no boot code is replaced; an error says why a replacement would leave the other system unreachable.
+pub fn menu_for_install(replace: bool, old: &BootCode, first_sectors: &[Vec<u8>]) -> Result<Option<String>, String> {
+    if !replace {
+        return Ok(None);
+    }
+    let uuid = first_sectors.iter().find_map(|s| ntfs_uuid(s));
+    entry_for_replaced_boot_code(old, uuid.as_deref())
+}

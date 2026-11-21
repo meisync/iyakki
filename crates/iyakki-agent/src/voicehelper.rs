@@ -380,15 +380,12 @@ pub fn browser_command(os: crate::hostengines::Os, url: &str) -> Vec<String> {
 /// Open the default browser on `url`. `opener` replaces the usual command (tests, and people whose desktop has another
 /// one); the url is its last argument. Returns an error that names what to do when there is none.
 pub fn open_browser(url: &str, opener: Option<&[String]>, path: &str) -> Result<(), String> {
-    use std::os::unix::process::CommandExt;
     let argv: Vec<String> = match opener {
         Some(o) if !o.is_empty() => o.iter().cloned().chain([url.to_string()]).collect(),
         _ => browser_command(crate::hostengines::Os::current(), url),
     };
     let prog = crate::story::which(&argv[0], path).ok_or_else(|| format!("no program to open a browser was found ({}); open this address in your browser yourself: {url}", argv[0]))?;
-    let mut c = std::process::Command::new(prog);
-    c.args(&argv[1..]).process_group(0).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    let mut child = c.spawn().map_err(|e| format!("could not open the browser: {e}; open this address yourself: {url}"))?;
+    let mut child = iyakki_core_local::starters::open_detached(std::path::Path::new(&prog), &argv[1..]).map_err(|e| format!("could not open the browser: {e}; open this address yourself: {url}"))?;
     std::thread::spawn(move || {
         let _ = child.wait();
     });

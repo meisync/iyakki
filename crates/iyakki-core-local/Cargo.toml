@@ -19,6 +19,14 @@ iyakki-zram.workspace = true
 iyakki-drivers.workspace = true
 iyakki-storage.workspace = true
 iyakki-netscan.workspace = true
+iyakki-usb = { path = "../iyakki-usb" }
+iyakki-hotspot = { path = "../iyakki-hotspot" }
+iyakki-sec.workspace = true
+iyakki-shared.workspace = true
+iyakki-volcrypt.workspace = true
+iyakki-diskcrypt.workspace = true
+serde = { version = "1", features = ["derive"] }
+
 
 [features]
 # the made-up machine of the sysinfo tests, for the tests of crates that read through it

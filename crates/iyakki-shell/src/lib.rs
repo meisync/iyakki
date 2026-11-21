@@ -44,6 +44,7 @@ pub mod backend;
 pub mod pointer_sprites;
 pub mod speechprobe;
 pub mod fb;
+pub mod screen;
 pub mod panel;
 pub mod saver;
 pub mod clockbar;

@@ -577,11 +577,13 @@ pub struct Request {
     pub bios: bool,
     pub bios_replace: bool,
     pub bios_save: String,
+    /// 4096-byte-sector disks only: the file with the 4096-byte-sector boot code (from the iyakki-boot build); see `bios4kn`.
+    pub bios_4k_code: String,
 }
 
 impl Default for Request {
     fn default() -> Request {
-        Request { mode: Mode::WholeDisk, gap_start: None, boot_part: None, data_part: None, keep_esp: false, boot_mib: None, data_mib: None, table: TableChoice::Auto, confirm_running_disk: false, delete_parts: vec![], zram: "auto".into(), swapfile: "off".into(), hostname: None, bios: false, bios_replace: false, bios_save: String::new() }
+        Request { mode: Mode::WholeDisk, gap_start: None, boot_part: None, data_part: None, keep_esp: false, boot_mib: None, data_mib: None, table: TableChoice::Auto, confirm_running_disk: false, delete_parts: vec![], zram: "auto".into(), swapfile: "off".into(), hostname: None, bios: false, bios_replace: false, bios_save: String::new(), bios_4k_code: String::new() }
     }
 }
 
@@ -609,6 +611,7 @@ impl Request {
             ("bios", Json::Bool(self.bios)),
             ("bios_replace", Json::Bool(self.bios_replace)),
             ("bios_save", Json::str(&self.bios_save)),
+            ("bios_4k_code", Json::str(&self.bios_4k_code)),
         ])
     }
 
@@ -638,6 +641,7 @@ impl Request {
         r.bios = b("bios");
         r.bios_replace = b("bios_replace");
         r.bios_save = s("bios_save").unwrap_or("").into();
+        r.bios_4k_code = s("bios_4k_code").unwrap_or("").into();
         r.choices().validate()?;
         Ok(r)
     }
@@ -1392,6 +1396,9 @@ fn bios_option(d: &DiskModel, req: &Request, src: &SourceSpec, plan: &mut Plan, 
             facts = &planned_facts;
         }
     }
+    if d.sector == 4096 {
+        return bios_option_4k(d, req, facts, src, plan);
+    }
     let c = bs::evaluate(facts, src.core_bytes, req.bios_replace);
     let Some(m) = c.method.filter(|_| c.refusals.is_empty()) else {
         return Err(format!("legacy BIOS boot cannot be set up on this disk: {}", c.refusals.join("; ")));
@@ -1399,6 +1406,39 @@ fn bios_option(d: &DiskModel, req: &Request, src: &SourceSpec, plan: &mut Plan, 
     warnings.retain(|w| !w.starts_with("the BIOS (legacy) boot of this shared disk"));
     warnings.extend(c.warnings);
     plan.bios = Some(m);
+    Ok(())
+}
+
+/// `--bios` on a disk with 4096-byte sectors (F-INST-29): only with the 4096-byte-sector boot code (`--bios-4k-boot-code`), only on GPT with a
+/// BIOS boot partition that is there already and empty, and never replacing another system's boot code. Anything else is a plain refusal.
+fn bios_option_4k(d: &DiskModel, req: &Request, facts: &crate::biosshared::Facts, src: &SourceSpec, plan: &mut Plan) -> Result<(), String> {
+    use crate::biosshared as bs;
+    let refuse = |why: &str| Err(format!("legacy BIOS boot cannot be set up on this disk of 4096-byte sectors: {why}. It starts through UEFI."));
+    if req.bios_4k_code.is_empty() {
+        return refuse("it needs the 4096-byte-sector boot code (--bios-4k-boot-code FILE, made by the iyakki-boot build), which was not given");
+    }
+    let code = crate::bios4kn::load_code(&req.bios_4k_code)?;
+    if let Err(e) = crate::bios4kn::check_boot_code(&code) {
+        return refuse(&e);
+    }
+    if facts.kind != iyakki_storage::gpt::Kind::Gpt {
+        return refuse("only a GPT disk is supported");
+    }
+    let Some((first512, sectors512)) = facts.bios_boot else { return refuse("the disk has no BIOS boot partition and this option does not make one on 4096-byte sectors") };
+    if facts.bios_boot_content.iter().any(|b| *b != 0) {
+        return refuse("the BIOS boot partition is not empty; another boot loader keeps something there");
+    }
+    if !matches!(bs::BootCode::classify(&facts.sector0), bs::BootCode::Empty | bs::BootCode::Grub) && !req.bios_replace {
+        return refuse("sector 0 holds another system's boot code (--bios-replace-boot-code allows replacing it)");
+    }
+    let need = (src.core_bytes.max(1024)).div_ceil(4096) + 1;
+    // the facts of a 4096-byte-sector disk count in disk sectors of 4096 bytes already
+    let (first, sectors) = (first512, sectors512);
+    if sectors < need {
+        return refuse(&format!("the BIOS boot partition has {sectors} sectors of 4096 bytes and GRUB needs about {need}"));
+    }
+    let _ = d;
+    plan.bios = Some(bs::Method::BiosBootPartition { start_lba: first, sectors });
     Ok(())
 }
 

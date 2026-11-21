@@ -44,7 +44,7 @@ fn stop_all(sh: &Shell, user: &str) {
 }
 
 fn audit(sh: &Shell) -> String {
-    std::fs::read_to_string(sh.env.audit.path()).unwrap_or_default()
+    std::fs::read_to_string(sh.env.audit.path_buf()).unwrap_or_default()
 }
 
 #[test]

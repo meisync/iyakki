@@ -122,13 +122,16 @@ pub fn entries(env: &Env) -> Vec<Entry> {
             "keep": {"type": "integer", "description": "Keep this many files of this account in the folder, 1 to 50."},
             "areas": {"type": "array", "items": {"type": "string"}, "description": "Area ids from backup_status (all when left out)."},
             "passphrase_file": {"type": "string", "description": "A file in the person's home whose first line is the passphrase (8 or more characters); the person makes it, the chat never sees it. Empty: no encryption."},
+            "share": {"type": "string", "description": "smb://host/share[/folder] or nfs://host/export to write to instead of a folder (mounted only for the run); an empty string goes back to the folder."},
+            "credentials_file": {"type": "string", "description": "SMB only: a file in the person's home, user name on the first line and password on the second. The chat never sees it."},
+            "full_every": {"type": "integer", "description": "0: every run is a full file. 2 to 50: a full file, then small incremental links, a new full file when the chain holds this many files."},
             "unencrypted": {"type": "boolean", "description": "Say true only if the person agreed that the scheduled files are NOT encrypted."}}});
         v.push(Entry::change(
             TAB,
             "backup_schedule",
             "Set, change or turn off the scheduled backup of the person's own data (it runs while they are signed in). The person approves a card.",
             schema,
-            |a| format!("{} the scheduled backup{}{}", if a.get("enabled").and_then(Value::as_bool) == Some(false) { "Turn off" } else { "Set" }, a.get("folder").and_then(Value::as_str).map(|f| format!(" into {f}")).unwrap_or_default(), if a.get("passphrase_file").and_then(Value::as_str).is_some_and(|p| !p.is_empty()) { ", encrypted with the passphrase in the file you named" } else { ", NOT encrypted unless a passphrase file is set" }),
+            |a| format!("{} the scheduled backup{}{}", if a.get("enabled").and_then(Value::as_bool) == Some(false) { "Turn off" } else { "Set" }, a.get("share").and_then(Value::as_str).filter(|x| !x.is_empty()).or(a.get("folder").and_then(Value::as_str)).map(|f| format!(" into {f}")).unwrap_or_default(), if a.get("passphrase_file").and_then(Value::as_str).is_some_and(|p| !p.is_empty()) { ", encrypted with the passphrase in the file you named" } else { ", NOT encrypted unless a passphrase file is set" }),
             move |a| {
                 let l = layout(&e);
                 let mut s = Schedule::load(&e.dir, &e.user);
@@ -153,14 +156,26 @@ pub fn entries(env: &Env) -> Vec<Entry> {
                 if let Some(x) = areas_arg(a)? {
                     s.areas = x.into_iter().collect();
                 }
+                if let Some(sh) = a.get("share").and_then(Value::as_str) {
+                    s.share = sh.trim().to_string();
+                    if !s.share.is_empty() {
+                        iyakki_shared::backup_share::ShareSpec::parse(&s.share)?;
+                    }
+                }
+                if let Some(f) = a.get("credentials_file").and_then(Value::as_str) {
+                    s.credentials_file = if f.trim().is_empty() { String::new() } else { inside_home(&l, f, false)?.display().to_string() };
+                }
+                if let Some(n) = num("full_every", 0, 50)? {
+                    s.full_every = n as u32;
+                }
                 if let Some(p) = a.get("passphrase_file").and_then(Value::as_str) {
                     s.passphrase_file = if p.trim().is_empty() { String::new() } else { inside_home(&l, p, false)?.display().to_string() };
                 }
                 if let Some(b) = a.get("enabled").and_then(Value::as_bool) {
                     s.enabled = b;
                 }
-                if !["enabled", "every_days", "hour", "keep", "folder", "areas", "passphrase_file"].iter().any(|k| a.get(*k).is_some()) {
-                    return Err("say what to set: enabled, every_days, hour, folder, keep, areas or passphrase_file".into());
+                if !["enabled", "every_days", "hour", "keep", "folder", "areas", "passphrase_file", "share", "credentials_file", "full_every"].iter().any(|k| a.get(*k).is_some()) {
+                    return Err("say what to set: enabled, every_days, hour, folder, keep, areas, passphrase_file, share, credentials_file or full_every".into());
                 }
                 if s.enabled {
                     if s.passphrase_file.is_empty() && a.get("unencrypted").and_then(Value::as_bool) != Some(true) {

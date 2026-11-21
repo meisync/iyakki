@@ -28,7 +28,7 @@ pub struct ImageParams {
 }
 
 /// What one picture request sent and got back, for the picture log. Nothing secret is in it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ImageTrace {
     pub provider: String,
     pub model: String,
@@ -226,7 +226,7 @@ pub fn note_vision_models(names: &[String]) {
 }
 
 /// The answer of a provider connection test: how long it took and the models it lists.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TestReport {
     pub latency_ms: u64,
     pub models: Vec<String>,

@@ -47,6 +47,10 @@ impl Api for Rig {
         self.log.lock().unwrap().push(format!("delete {id}"));
         self.shares.delete(id)
     }
+    fn publish(&self, port: u16, host: &str) -> Result<String, String> {
+        self.log.lock().unwrap().push(format!("publish {host} -> {port}"));
+        Ok("The domain listener is on.".into())
+    }
     fn vault_password(&self, entry: &str) -> Result<String, String> {
         self.vault.iter().find(|(n, _)| n == entry).map(|(_, v)| v.clone()).ok_or_else(|| format!("no vault entry {entry}"))
     }
@@ -182,4 +186,42 @@ fn share_folder_makes_and_starts_in_one_card_and_offers_only_a_link_or_this_comp
     assert!(said.contains("started"), "{said}");
     let log = r.log.lock().unwrap().clone();
     assert!(log.len() == 2 && log[0].starts_with("create docs") && log[1].starts_with("start "), "{log:?}");
+}
+
+#[test]
+fn a_share_is_published_under_a_name_in_one_card_and_a_share_for_this_computer_only_is_refused() {
+    let (t, r, home, _) = rig("publish", true);
+    let f = home.join("docs");
+    t.call("share_create", &json!({"name": "My Docs", "folder": f, "access": "link"})).unwrap();
+    t.call("share_create", &json!({"name": "Mine", "folder": f, "access": "local"})).unwrap();
+    // the card names the route and says the share still decides who gets in
+    let card = t.preview("share_publish", &json!({"share": "My Docs"})).unwrap();
+    assert!(card.contains("my-docs.local") && card.contains("secret link still decides"), "{card}");
+    assert!(card.contains("domain_route_remove"), "{card}");
+    // a share for this computer only would be handed to the network: refused, nothing added
+    let no = t.refusal("share_publish", &json!({"share": "Mine"})).unwrap();
+    assert!(no.contains("this computer only"), "{no}");
+    assert!(t.call("share_publish", &json!({"share": "Mine"})).is_err());
+    assert!(t.call("share_publish", &json!({"share": "nobody"})).is_err());
+    assert!(!r.log.lock().unwrap().iter().any(|l| l.starts_with("publish")));
+    let port = r.shares.list().into_iter().find(|i| i.cfg.name == "My Docs").unwrap().cfg.port;
+    let said = t.call("share_publish", &json!({"share": "My Docs"})).unwrap();
+    assert!(said.contains("published as my-docs.local"), "{said}");
+    assert!(r.log.lock().unwrap().iter().any(|l| *l == format!("publish my-docs.local -> {port}")));
+    t.call("share_publish", &json!({"share": "My Docs", "host": "Files.Home.local"})).unwrap();
+    assert!(r.log.lock().unwrap().iter().any(|l| l.starts_with("publish files.home.local")));
+}
+
+#[test]
+fn publishing_a_share_goes_through_the_domain_checker_and_only_an_administrator_has_the_manager() {
+    let rig = crate::domains::domains_tests_support::rig("share-publish");
+    let m = &*rig.mgr;
+    assert!(publish_route(m, 9000, "bad host").is_err(), "the route checker refuses a bad name");
+    assert!(m.routes().is_empty());
+    let said = publish_route(m, 9000, "Docs.local").unwrap();
+    assert!(said.contains("OFF") || said.contains("on"), "{said}");
+    let r = m.routes();
+    assert_eq!(r.len(), 1);
+    assert_eq!((r[0].host.as_str(), r[0].target.clone()), ("docs.local", crate::cloudroute::Target::Local { port: 9000 }));
+    assert!(publish_route(m, 9001, "docs.local").unwrap_err().contains("already"), "a name is not taken twice");
 }

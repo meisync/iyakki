@@ -3,7 +3,7 @@
 
 use serde_json::Value;
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use iyakki_core_local::starters_launch::{Launch, Stream};
 use std::time::{Duration, Instant};
 
 /// What the cluster says about a run's Job and pod, boiled down.
@@ -53,15 +53,14 @@ impl Kubectl {
     }
 
     pub(crate) fn run(&self, args: &[&str], stdin: Option<&[u8]>, cap: usize) -> Result<Vec<u8>, String> {
-        let mut c = Command::new(&self.program);
+        let mut c = Launch::new(&self.program);
         if let Some(k) = &self.kubeconfig {
-            c.arg("--kubeconfig").arg(k);
+            c = c.arg("--kubeconfig").arg(k);
         }
-        c.args(args).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped()).env_clear();
-        if let Ok(p) = std::env::var("PATH") {
-            c.env("PATH", p);
-        }
+        let c = c.args(args).stdin(if stdin.is_some() { Stream::Piped } else { Stream::Null }).stdout(Stream::Piped).stderr(Stream::Piped).env_clear().pass_env(["PATH"]);
         let mut child = c.spawn().map_err(|e| format!("cannot start {}: {e}", self.program))?;
+        // what the cluster is asked for a person (an editor script, a test run) is hers in "My processes" while it runs (KI-131)
+        let _claim = crate::procowner::current_user().map(|u| crate::procowner::claim(child.id(), &u, "kubectl"));
         if let (Some(data), Some(mut si)) = (stdin, child.stdin.take()) {
             si.write_all(data).map_err(|e| e.to_string())?;
         }

@@ -22,13 +22,19 @@
 //!
 //! Also drawn: `feComponentTransfer` (identity, table, discrete, linear, gamma), `feMorphology`, `feConvolveMatrix` and `feTurbulence`.
 //!
-//! Not supported (silently left out): `image` and the lighting primitives,
-//! pattern `href` inheritance, marker and nested-`svg` overflow clipping, markers set through CSS rules, CSS combinators and
+//! Also drawn (`svg_extra.rs`): `image` and `feImage` from `data:` addresses (PNG, JPEG, GIF, WebP), `feTile`, the sub-region (`x`, `y`,
+//! `width`, `height`) of a filter primitive, and `feDiffuseLighting` / `feSpecularLighting` with distant, point and spot lights.
+//!
+//! Not supported (silently left out): `image` from a file or web address and an SVG inside an SVG `image`, `kernelUnitLength` (a real renderer
+//! ignores it too), CSS combinators and
 //! pseudo-classes. Hostile input cannot panic or run away: sizes,
 //! element counts, nesting, `use` expansion and total rasterising work are all capped.
 
 use crate::image::Bitmap;
 use std::collections::HashMap;
+
+#[path = "svg_extra.rs"]
+mod extra;
 
 const MAX_SIDE: f64 = 4096.0;
 const MAX_PIXELS: f64 = 16_000_000.0;
@@ -1519,6 +1525,8 @@ struct Renderer<'a> {
     deadline: std::time::Instant,
     /// Patterns and markers drawn inside each other.
     nest: usize,
+    /// Pictures (`image`, `feImage`) taken from `data:` addresses so far.
+    pictures: usize,
 }
 
 #[derive(Default, Clone)]
@@ -1618,7 +1626,7 @@ impl<'a> Renderer<'a> {
                 css.push('\n');
             }
         }
-        Renderer { xml, ids, rules: parse_css(&css), vw, vh, visits: 0, work: 0, layer_px: 0, text: None, glyph_runs: 0, deadline: std::time::Instant::now() + TIME_BUDGET, nest: 0 }
+        Renderer { xml, ids, rules: parse_css(&css), vw, vh, visits: 0, work: 0, layer_px: 0, text: None, glyph_runs: 0, deadline: std::time::Instant::now() + TIME_BUDGET, nest: 0, pictures: 0 }
     }
 
     fn cascade(&self, parent: &Style, n: usize) -> Style {
@@ -1789,7 +1797,7 @@ impl<'a> Renderer<'a> {
         }
         let xml = self.xml;
         let node = &xml.nodes[n];
-        if !matches!(node.tag.as_str(), "g" | "a" | "svg" | "switch" | "use" | "text" | "path" | "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon") {
+        if !matches!(node.tag.as_str(), "g" | "a" | "svg" | "switch" | "use" | "text" | "image" | "path" | "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon") {
             return;
         }
         let st = self.cascade(parent, n);
@@ -1839,12 +1847,20 @@ impl<'a> Renderer<'a> {
 
     /// The element a property such as `clip-path="url(#id)"` points to, when it is a `tag` element.
     fn reference(&self, node: &Node, prop: &str, tag: &str) -> Option<usize> {
-        let v = node.attr(prop).map(str::to_string).or_else(|| {
-            node.attr("style").and_then(|s| s.split(';').filter_map(|d| d.split_once(':')).find(|(k, _)| k.trim().eq_ignore_ascii_case(prop)).map(|(_, v)| v.trim().to_string()))
-        })?;
+        // the style attribute, then the style sheet's rules (the one that comes last), then the presentation attribute
+        let v = node.attr("style").and_then(|s| s.split(';').filter_map(|d| d.split_once(':')).find(|(k, _)| k.trim().eq_ignore_ascii_case(prop)).map(|(_, v)| v.trim().to_string())).or_else(|| self.rule_value(node, prop)).or_else(|| node.attr(prop).map(str::to_string))?;
         let rest = &v[v.find("url(")? + 4..];
         let id = rest[..rest.find(')')?].trim().trim_matches(['\'', '"']).strip_prefix('#')?.to_string();
         self.ids.get(&id).copied().filter(|&t| self.xml.nodes[t].tag == tag)
+    }
+
+    /// What the style sheet's rules say for one property of an element (the last matching rule wins), if anything.
+    fn rule_value(&self, node: &Node, prop: &str) -> Option<String> {
+        if self.rules.is_empty() {
+            return None;
+        }
+        let classes: Vec<&str> = node.attr("class").map(|c| c.split_whitespace().collect()).unwrap_or_default();
+        self.rules.iter().rev().filter(|r| !(r.tag.as_ref().is_some_and(|t| *t != node.tag) || r.id.as_deref().is_some_and(|i| Some(i) != node.attr("id")) || !r.classes.iter().all(|c| classes.contains(&c.as_str())))).find_map(|r| r.decls.iter().rev().find(|(k, _)| k.eq_ignore_ascii_case(prop)).map(|(_, v)| v.trim().to_string()))
     }
 
     fn has_primitives(&self, f: usize) -> bool {
@@ -1857,7 +1873,7 @@ impl<'a> Renderer<'a> {
         let k = m.scale_factor();
         // the primitives work in linearRGB unless the filter says `color-interpolation-filters="sRGB"` (the property's default, SVG 1.1 and
         // Filter Effects): the picture goes in as linear light, flood colours are made linear, and the result goes back to sRGB at the end.
-        // (A different value on one primitive is not honoured: the value of the filter element holds for all of them.)
+        // (A primitive that says otherwise works in its own space, see `prim_space`.)
         let linear = !filter_is_srgb(xml, f);
         // the filter region: nothing is drawn outside it, a flood fills only it, and the picture is cut to it first
         let region = self.filter_region(f, layer, m);
@@ -1867,6 +1883,14 @@ impl<'a> Renderer<'a> {
             convert_space(&mut src, true);
         }
         let mut named: HashMap<String, Canvas> = HashMap::new();
+        // where each result has content (its primitive sub-region): feTile repeats it, and it is the default sub-region of what reads it
+        let mut named_sub: HashMap<String, extra::Rect> = HashMap::new();
+        let mut cur_sub = region;
+        let bbox_units = xml.nodes[f].attr("primitiveUnits").is_some_and(|u| u.trim() == "objectBoundingBox");
+        // with `primitiveUnits="objectBoundingBox"` the numbers of a primitive are fractions of the element's box (what it painted)
+        let bbox_px = if bbox_units { alpha_bbox(layer) } else { None };
+        let (ux, uy) = bbox_px.map_or((1.0, 1.0), |b| ((b.2 - b.0) as f64 / k, (b.3 - b.1) as f64 / k));
+        let filter_linear = linear;
         let mut cur = src.clone();
         let mut steps = 0;
         for &p in &xml.nodes[f].kids {
@@ -1879,6 +1903,19 @@ impl<'a> Renderer<'a> {
                 break;
             }
             self.work += (src.w * src.h) as u64 * 6;
+            // `color-interpolation-filters` on this primitive: it works in its own space, and what it makes goes back to the filter's
+            let linear = prim_space(node).map_or(filter_linear, |srgb| !srgb);
+            let saved = if linear != filter_linear {
+                let saved = (src.clone(), cur.clone(), named.clone());
+                convert_space(&mut src, linear);
+                convert_space(&mut cur, linear);
+                for c in named.values_mut() {
+                    convert_space(c, linear);
+                }
+                Some(saved)
+            } else {
+                None
+            };
             let input = |name: Option<&str>, cur: &Canvas, named: &HashMap<String, Canvas>| -> Canvas {
                 match name.map(str::trim) {
                     Some("SourceGraphic") => src.clone(),
@@ -1901,17 +1938,51 @@ impl<'a> Renderer<'a> {
                 }
                 c
             };
+            let in_sub = |name: Option<&str>, cur_sub: extra::Rect, named_sub: &HashMap<String, extra::Rect>| -> extra::Rect {
+                match name.map(str::trim) {
+                    Some("SourceGraphic") | Some("SourceAlpha") => region,
+                    Some(n) if named_sub.contains_key(n) => named_sub[n],
+                    _ => cur_sub,
+                }
+            };
+            let default_sub = match node.tag.as_str() {
+                "feFlood" | "feImage" | "feTurbulence" | "feTile" => region,
+                "feComposite" | "feBlend" => extra::union(in_sub(node.attr("in"), cur_sub, &named_sub), in_sub(node.attr("in2"), cur_sub, &named_sub)),
+                "feMerge" => node.kids.iter().filter(|&&mn| xml.nodes[mn].tag == "feMergeNode").take(16).fold((0, 0, 0, 0), |acc, &mn| extra::union(acc, in_sub(xml.nodes[mn].attr("in"), cur_sub, &named_sub))),
+                _ => in_sub(node.attr("in"), cur_sub, &named_sub),
+            };
+            let default_sub = if default_sub.0 >= default_sub.2 && matches!(node.tag.as_str(), "feMerge") { region } else { default_sub };
+            let sub = extra::intersect(extra::subregion(node, default_sub, m, src.w, src.h, bbox_units, bbox_px), region);
             let out = match node.tag.as_str() {
+                "feTile" => extra::tile(&a, in_sub(node.attr("in"), cur_sub, &named_sub)),
+                "feImage" => {
+                    // the picture is sRGB; the primitives work in linear light when the filter says so
+                    let mut c = self.fe_image(node, a.w, a.h, sub, m);
+                    if linear {
+                        convert_space(&mut c, true);
+                    }
+                    c
+                }
+                "feDiffuseLighting" | "feSpecularLighting" => {
+                    let mut col = node.attr("lighting-color").and_then(parse_color).unwrap_or([1.0, 1.0, 1.0, 1.0]);
+                    if linear {
+                        for ch in col.iter_mut().take(3) {
+                            *ch = srgb_to_linear(*ch);
+                        }
+                    }
+                    let kids: Vec<&Node> = node.kids.iter().map(|&kid| &xml.nodes[kid]).collect();
+                    extra::lighting(&a, node, &kids, m, k, col, node.tag == "feSpecularLighting")
+                }
                 "feGaussianBlur" => {
                     let v = node.attr("stdDeviation").map(numbers).unwrap_or_default();
-                    let sd = if v.len() > 1 { (v[0] + v[1]) / 2.0 } else { v.first().copied().unwrap_or(0.0) };
+                    let sd = if v.len() > 1 { (v[0] + v[1]) / 2.0 } else { v.first().copied().unwrap_or(0.0) } * if bbox_units { (ux + uy) / 2.0 } else { 1.0 };
                     let mut c = a;
                     if sd.is_finite() && sd * k > 0.05 {
                         blur_canvas(&mut c, (sd * k).min(60.0));
                     }
                     c
                 }
-                "feOffset" => offset_canvas(&a, (num("dx", 0.0) * k).round() as i64, (num("dy", 0.0) * k).round() as i64),
+                "feOffset" => offset_canvas(&a, (num("dx", 0.0) * ux * k).round() as i64, (num("dy", 0.0) * uy * k).round() as i64),
                 "feFlood" => flood_canvas(a.w, a.h, flood(node)),
                 "feColorMatrix" => {
                     let vals = node.attr("values").map(numbers).unwrap_or_default();
@@ -1995,9 +2066,9 @@ impl<'a> Renderer<'a> {
                 }
                 "feDropShadow" => {
                     let v = node.attr("stdDeviation").map(numbers).unwrap_or_default();
-                    let sd = if v.len() > 1 { (v[0] + v[1]) / 2.0 } else { v.first().copied().unwrap_or(2.0) };
+                    let sd = if v.len() > 1 { (v[0] + v[1]) / 2.0 } else { v.first().copied().unwrap_or(2.0) } * if bbox_units { (ux + uy) / 2.0 } else { 1.0 };
                     let fl = flood(node);
-                    let mut sh = offset_canvas(&alpha_only(&a), (num("dx", 2.0) * k).round() as i64, (num("dy", 2.0) * k).round() as i64);
+                    let mut sh = offset_canvas(&alpha_only(&a), (num("dx", 2.0) * ux * k).round() as i64, (num("dy", 2.0) * uy * k).round() as i64);
                     if sd.is_finite() && sd * k > 0.05 {
                         blur_canvas(&mut sh, (sd * k).min(60.0));
                     }
@@ -2011,7 +2082,7 @@ impl<'a> Renderer<'a> {
                 }
                 "feMorphology" => {
                     let v = node.attr("radius").map(numbers).unwrap_or_default();
-                    let (rx, ry) = (v.first().copied().unwrap_or(0.0), v.get(1).copied().or(v.first().copied()).unwrap_or(0.0));
+                    let (rx, ry) = (v.first().copied().unwrap_or(0.0) * ux, v.get(1).copied().or(v.first().copied()).unwrap_or(0.0) * uy);
                     let erode = node.attr("operator").map(str::trim) != Some("dilate");
                     if rx < 0.0 || ry < 0.0 || !rx.is_finite() || !ry.is_finite() {
                         Canvas::new(a.w, a.h)
@@ -2028,13 +2099,20 @@ impl<'a> Renderer<'a> {
                 }
                 _ => a,
             };
+            let mut out = out;
+            if let Some((s, _, n)) = saved {
+                // the primitive's own space is left; `cur` becomes what it made, just below
+                convert_space(&mut out, filter_linear);
+                (src, named) = (s, n);
+            }
+            clip_to_region(&mut out, sub);
             if let Some(name) = node.attr("result") {
                 if named.len() < 24 {
                     named.insert(name.trim().to_string(), out.clone());
+                    named_sub.insert(name.trim().to_string(), sub);
                 }
             }
-            let mut out = out;
-            clip_to_region(&mut out, region);
+            cur_sub = sub;
             cur = out;
         }
         if linear {
@@ -2090,12 +2168,21 @@ impl<'a> Renderer<'a> {
             return None;
         }
         let xml = self.xml;
-        let pn = &xml.nodes[pi];
+        // a pattern with an `href` to another pattern takes from it what it does not say itself: its attributes, and its content if it has none
+        let mut chain = vec![pi];
+        while chain.len() < 8 {
+            let Some(&next) = xml.nodes[*chain.last().unwrap_or(&pi)].attr("href").and_then(|h| h.strip_prefix('#')).and_then(|h| self.ids.get(h)) else { break };
+            if xml.nodes[next].tag != "pattern" || chain.contains(&next) {
+                break;
+            }
+            chain.push(next);
+        }
+        let pattr = |name: &str| chain.iter().find_map(|&i| xml.nodes[i].attr(name));
         let (bw, bh) = (bbox.2 - bbox.0, bbox.3 - bbox.1);
-        let bbox_units = pn.attr("patternUnits").map_or(true, |u| u.trim() != "userSpaceOnUse");
-        let content_bbox = pn.attr("patternContentUnits").is_some_and(|u| u.trim() == "objectBoundingBox");
+        let bbox_units = pattr("patternUnits").map_or(true, |u| u.trim() != "userSpaceOnUse");
+        let content_bbox = pattr("patternContentUnits").is_some_and(|u| u.trim() == "objectBoundingBox");
         let coord = |name: &str, refv: f64, bb_off: f64, bb_size: f64| -> f64 {
-            let raw = pn.attr(name).map(str::trim).unwrap_or("0");
+            let raw = pattr(name).map(str::trim).unwrap_or("0");
             if bbox_units {
                 let v = if raw.ends_with('%') { take_number(raw).map_or(0.0, |(v, _)| v / 100.0) } else { take_number(raw).map_or(0.0, |(v, _)| v) };
                 bb_off + v * bb_size
@@ -2110,7 +2197,7 @@ impl<'a> Renderer<'a> {
         if !(tw.is_finite() && th.is_finite()) || tw <= 1e-6 || th <= 1e-6 {
             return None;
         }
-        let ptf = pn.attr("patternTransform").map(parse_transform).unwrap_or(M::ID);
+        let ptf = pattr("patternTransform").map(parse_transform).unwrap_or(M::ID);
         let to_dev = m.mul(&ptf).mul(&M([1.0, 0.0, 0.0, 1.0, tx, ty]));
         let inv = to_dev.invert()?;
         let sc = to_dev.scale_factor();
@@ -2121,15 +2208,16 @@ impl<'a> Renderer<'a> {
         self.layer_px += (pw * ph) as u64;
         let mut tile = Canvas::new(pw, ph);
         let mut content = M([pw as f64 / tw, 0.0, 0.0, ph as f64 / th, 0.0, 0.0]);
-        if let Some(vb) = view_box(pn) {
-            content = content.mul(&fit_view_box(&vb, tw, th, pn.attr("preserveAspectRatio").unwrap_or("")));
+        if let Some(vb) = chain.iter().find_map(|&i| view_box(&xml.nodes[i])) {
+            content = content.mul(&fit_view_box(&vb, tw, th, pattr("preserveAspectRatio").unwrap_or("")));
         } else if content_bbox {
             content = content.mul(&M([bw, 0.0, 0.0, bh, 0.0, 0.0]));
         }
         let pst = self.cascade(&Style::root(), pi);
         let _ = st;
         self.nest += 1;
-        for &k in &xml.nodes[pi].kids {
+        let content_from = chain.iter().copied().find(|&i| !xml.nodes[i].kids.is_empty()).unwrap_or(pi);
+        for &k in &xml.nodes[content_from].kids {
             self.render_node(&mut tile, k, &pst, &content, 2);
         }
         self.nest -= 1;
@@ -2187,10 +2275,20 @@ impl<'a> Renderer<'a> {
             return;
         }
         let mst = self.cascade(&Style::root(), mk);
+        // a marker shows only what is inside its own box (markerWidth by markerHeight, in the units of its viewBox) unless overflow is visible
+        let ref_vp = match view_box(mn) {
+            Some(vb) => fit_view_box(&vb, mw, mh, mn.attr("preserveAspectRatio").unwrap_or("")).apply((refx, refy)),
+            None => (refx, refy),
+        };
+        let rect = [-ref_vp.0, -ref_vp.1, mw, mh];
+        let ov = st_overflow(mn);
+        let clip_m = m.mul(&M([1.0, 0.0, 0.0, 1.0, v.p.0, v.p.1])).mul(&M([cs, sn, -sn, cs, 0.0, 0.0])).mul(&M([units, 0.0, 0.0, units, 0.0, 0.0]));
         self.nest += 1;
-        for &k in &xml.nodes[mk].kids {
-            self.render_node(cv, k, &mst, &mt, 2);
-        }
+        self.clipped_to_viewport(cv, &clip_m, rect, ov.as_deref(), |me, c| {
+            for &k in &xml.nodes[mk].kids {
+                me.render_node(c, k, &mst, &mt, 2);
+            }
+        });
         self.nest -= 1;
     }
 
@@ -2216,6 +2314,34 @@ impl<'a> Renderer<'a> {
         c
     }
 
+    /// Draw into a layer that is cut to a viewport rectangle (user space of `m`: x, y, width, height), as a nested `svg`, a `symbol` and a
+    /// `marker` are unless their `overflow` says visible or auto. `draw` gets the layer; what it drew inside the rectangle is composited.
+    fn clipped_to_viewport(&mut self, cv: &mut Canvas, m: &M, rect: [f64; 4], overflow: Option<&str>, draw: impl FnOnce(&mut Self, &mut Canvas)) {
+        let visible = overflow.is_some_and(|o| matches!(o.trim(), "visible" | "auto"));
+        let area = (cv.w * cv.h) as u64;
+        if visible || !rect.iter().all(|v| v.is_finite()) || rect[2] <= 0.0 || rect[3] <= 0.0 || self.layer_px + area * 2 > MAX_LAYER_PIXELS {
+            if !(rect.iter().all(|v| v.is_finite()) && rect[2] > 0.0 && rect[3] > 0.0) && !visible {
+                return; // an empty viewport shows nothing
+            }
+            draw(self, cv);
+            return;
+        }
+        self.layer_px += area * 2;
+        let mut layer = Canvas::new(cv.w, cv.h);
+        draw(self, &mut layer);
+        let poly = vec![m.apply((rect[0], rect[1])), m.apply((rect[0] + rect[2], rect[1])), m.apply((rect[0] + rect[2], rect[1] + rect[3])), m.apply((rect[0], rect[1] + rect[3]))];
+        let mut k = Canvas::new(cv.w, cv.h);
+        if let Some(mask) = fill_mask(&[orient(poly)], false, cv.w, cv.h, &mut self.work) {
+            for my in 0..mask.h {
+                for mx in 0..mask.w {
+                    k.px[((mask.y0 + my) * cv.w + mask.x0 + mx) * 4 + 3] = mask.data[my * mask.w + mx];
+                }
+            }
+        }
+        multiply_alpha(&mut layer, &k);
+        cv.composite_layer(&layer, 1.0);
+    }
+
     fn render_kids(&mut self, cv: &mut Canvas, n: usize, st: &Style, m: &M, depth: usize) {
         let kids = self.xml.nodes[n].kids.clone();
         for k in kids {
@@ -2229,19 +2355,29 @@ impl<'a> Renderer<'a> {
         match node.tag.as_str() {
             "g" | "a" | "switch" => self.render_kids(cv, n, st, m, depth),
             "text" => self.draw_text(cv, n, st, m),
+            "image" => self.draw_image(cv, node, st, m),
             "svg" => {
                 let mut m2 = *m;
+                let mut viewport = None;
                 if depth > 0 {
                     let x = node.attr("x").and_then(|v| length(v, self.vw)).unwrap_or(0.0);
                     let y = node.attr("y").and_then(|v| length(v, self.vh)).unwrap_or(0.0);
+                    let w = node.attr("width").and_then(|v| length(v, self.vw)).filter(|v| *v > 0.0).unwrap_or(self.vw - x);
+                    let h = node.attr("height").and_then(|v| length(v, self.vh)).filter(|v| *v > 0.0).unwrap_or(self.vh - y);
+                    viewport = Some([x, y, w, h]);
                     m2 = m.mul(&M([1.0, 0.0, 0.0, 1.0, x, y]));
                     if let Some(vb) = view_box(node) {
-                        let w = node.attr("width").and_then(|v| length(v, self.vw)).filter(|v| *v > 0.0).unwrap_or(self.vw - x);
-                        let h = node.attr("height").and_then(|v| length(v, self.vh)).filter(|v| *v > 0.0).unwrap_or(self.vh - y);
                         m2 = m2.mul(&fit_view_box(&vb, w, h, node.attr("preserveAspectRatio").unwrap_or("")));
                     }
                 }
-                self.render_kids(cv, n, st, &m2, depth);
+                match viewport {
+                    // a nested svg shows only what is inside its own box
+                    Some(r) => {
+                        let ov = st_overflow(node);
+                        self.clipped_to_viewport(cv, m, r, ov.as_deref(), |me, c| me.render_kids(c, n, st, &m2, depth));
+                    }
+                    None => self.render_kids(cv, n, st, &m2, depth),
+                }
             }
             "use" => {
                 let Some(&t) = node.attr("href").and_then(|h| h.strip_prefix('#')).and_then(|h| self.ids.get(h)) else { return };
@@ -2251,16 +2387,19 @@ impl<'a> Renderer<'a> {
                 if matches!(xml.nodes[t].tag.as_str(), "symbol" | "svg") {
                     let sst = self.cascade(st, t);
                     // the symbol (or svg) is a viewport of its own: the size comes from the `use`, else from the svg itself, else the whole picture;
-                    // its viewBox is fitted into it (without a clip to the viewport: what a symbol draws outside it is still drawn)
+                    // its viewBox is fitted into it (cut to the viewport unless overflow is visible)
                     let tn = &xml.nodes[t];
                     let size = |name: &str, refv: f64| -> f64 {
                         node.attr(name).or_else(|| tn.attr(name).filter(|_| tn.tag == "svg")).and_then(|v| length(v, refv)).filter(|v| *v > 0.0).unwrap_or(refv)
                     };
+                    let (vw_, vh_) = (size("width", self.vw), size("height", self.vh));
                     let m3 = match view_box(tn) {
-                        Some(vb) => m2.mul(&fit_view_box(&vb, size("width", self.vw), size("height", self.vh), tn.attr("preserveAspectRatio").unwrap_or(""))),
+                        Some(vb) => m2.mul(&fit_view_box(&vb, vw_, vh_, tn.attr("preserveAspectRatio").unwrap_or(""))),
                         None => m2,
                     };
-                    self.render_kids(cv, t, &sst, &m3, depth);
+                    // what a symbol draws outside its viewport is cut off unless its overflow says otherwise
+                    let ov = st_overflow(tn);
+                    self.clipped_to_viewport(cv, &m2, [0.0, 0.0, vw_, vh_], ov.as_deref(), |me, c| me.render_kids(c, t, &sst, &m3, depth));
                 } else {
                     self.render_node(cv, t, st, &m2, depth + 1);
                 }
@@ -2461,9 +2600,23 @@ impl<'a> Renderer<'a> {
     }
 }
 
-const FILTER_PRIMS: [&str; 12] = ["feGaussianBlur", "feOffset", "feFlood", "feColorMatrix", "feComposite", "feBlend", "feMerge", "feDropShadow", "feComponentTransfer", "feMorphology", "feConvolveMatrix", "feTurbulence"];
+const FILTER_PRIMS: [&str; 16] = ["feGaussianBlur", "feOffset", "feFlood", "feColorMatrix", "feComposite", "feBlend", "feMerge", "feDropShadow", "feComponentTransfer", "feMorphology", "feConvolveMatrix", "feTurbulence", "feImage", "feTile", "feDiffuseLighting", "feSpecularLighting"];
 
 /// The matrix that fits a `viewBox` into a `w` x `h` viewport at its origin, by the `preserveAspectRatio` rules.
+/// The `overflow` of an element: the attribute, or a declaration in its `style` attribute.
+fn st_overflow(n: &Node) -> Option<String> {
+    if let Some(st) = n.attr("style") {
+        for d in st.split(';') {
+            if let Some((k, v)) = d.split_once(':') {
+                if k.trim() == "overflow" {
+                    return Some(v.trim().to_string());
+                }
+            }
+        }
+    }
+    n.attr("overflow").map(str::to_string)
+}
+
 fn fit_view_box(vb: &[f64], w: f64, h: f64, aspect: &str) -> M {
     let (ax, ay, slice) = parse_aspect(aspect);
     if ax < 0.0 {
@@ -2596,6 +2749,34 @@ fn srgb_to_linear(v: f32) -> f32 {
 fn linear_to_srgb(v: f32) -> f32 {
     let v = v.clamp(0.0, 1.0);
     if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
+}
+
+/// The extent of what a layer painted (left, top, right, bottom in pixels), if it painted anything.
+fn alpha_bbox(c: &Canvas) -> Option<(usize, usize, usize, usize)> {
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
+    for (i, p) in c.px.chunks_exact(4).enumerate() {
+        if p[3] > 0 {
+            let (x, y) = (i % c.w, i / c.w);
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x + 1);
+            y1 = y1.max(y + 1);
+        }
+    }
+    (x0 != usize::MAX).then_some((x0, y0, x1, y1))
+}
+
+/// `color-interpolation-filters` written on one primitive: `Some(true)` for sRGB, `Some(false)` for linearRGB, `None` when it says nothing (or `auto`).
+fn prim_space(n: &Node) -> Option<bool> {
+    let from_style = n.attr("style").and_then(|s| s.split(';').filter_map(|d| d.split_once(':')).find(|(k, _)| k.trim() == "color-interpolation-filters").map(|(_, v)| v.trim().to_string()));
+    let v = from_style.or_else(|| n.attr("color-interpolation-filters").map(|v| v.trim().to_string()))?;
+    if v.eq_ignore_ascii_case("sRGB") {
+        Some(true)
+    } else if v.eq_ignore_ascii_case("linearRGB") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Does the filter element ask for sRGB? (`color-interpolation-filters` as an attribute or in `style`; anything else is linearRGB, the default.)
@@ -3653,6 +3834,25 @@ mod more_svg_tests {
     }
 
     #[test]
+    fn a_nested_svg_a_symbol_and_a_marker_are_cut_to_their_box_unless_overflow_is_visible() {
+        let red = [255, 0, 0, 255];
+        // nested svg: box 20..60; the big rect inside it is cut at 60
+        let b = draw("<svg x='20' y='20' width='40' height='40'><rect x='-50' y='-50' width='300' height='300' fill='#f00'/></svg>");
+        assert_eq!((px(&b, 40, 40), px(&b, 70, 40), px(&b, 10, 40)), (red, [0, 0, 0, 0], [0, 0, 0, 0]));
+        let b = draw("<svg x='20' y='20' width='40' height='40' overflow='visible'><rect x='-50' y='-50' width='300' height='300' fill='#f00'/></svg>");
+        assert_eq!((px(&b, 70, 40), px(&b, 10, 40)), (red, red));
+        // symbol used at 10,10 with a 30 by 30 viewport
+        let b = draw("<defs><symbol id='s' viewBox='0 0 10 10'><rect x='-20' y='-20' width='60' height='60' fill='#f00'/></symbol></defs><use href='#s' x='10' y='10' width='30' height='30'/>");
+        assert_eq!((px(&b, 20, 20), px(&b, 60, 20), px(&b, 5, 20)), (red, [0, 0, 0, 0], [0, 0, 0, 0]));
+        // marker: a 10 by 10 box centred on the vertex
+        let mk = |ov: &str| draw(&format!("<defs><marker id='m' markerWidth='10' markerHeight='10' refX='5' refY='5' markerUnits='userSpaceOnUse' {ov}><rect x='-30' y='-30' width='80' height='80' fill='#f00'/></marker></defs><line x1='50' y1='50' x2='80' y2='50' stroke='none' marker-start='url(#m)'/>"));
+        let b = mk("");
+        assert_eq!((px(&b, 52, 52), px(&b, 70, 50), px(&b, 30, 50)), (red, [0, 0, 0, 0], [0, 0, 0, 0]));
+        let b = mk("overflow='visible'");
+        assert_eq!((px(&b, 70, 50), px(&b, 30, 50)), (red, red));
+    }
+
+    #[test]
     fn a_pattern_repeats_its_tile_in_user_space_and_in_bounding_box_units() {
         let user = draw("<defs><pattern id='p' width='20' height='20' patternUnits='userSpaceOnUse'><rect width='10' height='20' fill='#ff0000'/></pattern></defs><rect width='100' height='100' fill='url(#p)'/>");
         assert_eq!(px(&user, 5, 50), [255, 0, 0, 255]);
@@ -3815,5 +4015,73 @@ mod more_filter_tests {
             assert!(((g[0] * g[0] + g[1] * g[1]).sqrt() - 1.0).abs() < 1e-9, "unit gradient vectors");
         }
         assert_eq!(turb_noise2(&t, 0, 0.0, 0.0), 0.0, "the noise is zero at lattice points");
+    }
+}
+
+#[cfg(test)]
+mod units_and_sheets_tests {
+    use super::*;
+
+    fn draw(inner: &str) -> Bitmap {
+        render(format!("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>{inner}</svg>").as_bytes(), Some((100, 100))).unwrap()
+    }
+    fn px(b: &Bitmap, x: u32, y: u32) -> [u8; 4] {
+        let o = ((y * b.width + x) * 4) as usize;
+        [b.rgba[o], b.rgba[o + 1], b.rgba[o + 2], b.rgba[o + 3]]
+    }
+
+    #[test]
+    fn a_marker_named_in_a_style_sheet_is_drawn_like_one_named_on_the_shape() {
+        let defs = "<defs><marker id='m' markerWidth='10' markerHeight='10' refX='5' refY='5' markerUnits='userSpaceOnUse'><rect width='10' height='10' fill='#f00'/></marker></defs>";
+        let sheet = draw(&format!("<style>.l {{ marker-start: url(#m) }}</style>{defs}<line class='l' x1='50' y1='50' x2='80' y2='50' stroke='none'/>"));
+        assert_eq!(px(&sheet, 52, 52), [255, 0, 0, 255]);
+        let short = draw(&format!("<style>line {{ marker: url(#m) }}</style>{defs}<line x1='50' y1='50' x2='80' y2='50' stroke='none'/>"));
+        assert_eq!(px(&short, 52, 52), [255, 0, 0, 255], "the shorthand in a rule");
+        assert_eq!(px(&short, 78, 52), [255, 0, 0, 255], "and on the end");
+        // the style attribute still wins over the sheet, and a sheet rule over the presentation attribute
+        let inline = draw(&format!("<style>.l {{ marker-start: url(#m) }}</style>{defs}<line class='l' style='marker-start: none' x1='50' y1='50' x2='80' y2='50' stroke='none'/>"));
+        assert_eq!(px(&inline, 52, 52)[3], 0);
+    }
+
+    #[test]
+    fn a_pattern_takes_what_it_lacks_from_the_pattern_its_href_names() {
+        let b = draw("<defs><pattern id='p' width='20' height='20' patternUnits='userSpaceOnUse'><rect width='10' height='20' fill='#ff0000'/></pattern><pattern id='q' href='#p'/></defs><rect width='100' height='100' fill='url(#q)'/>");
+        assert_eq!(px(&b, 5, 50), [255, 0, 0, 255]);
+        assert_eq!(px(&b, 15, 50)[3], 0);
+        assert_eq!(px(&b, 25, 50), [255, 0, 0, 255]);
+        // its own attributes win: a tile twice as wide
+        let w = draw("<defs><pattern id='p' width='20' height='20' patternUnits='userSpaceOnUse'><rect width='10' height='20' fill='#ff0000'/></pattern><pattern id='q' href='#p' width='40'/></defs><rect width='100' height='100' fill='url(#q)'/>");
+        assert_eq!((px(&w, 25, 50)[3], px(&w, 45, 50)), (0, [255, 0, 0, 255]));
+        // a loop of references and a reference to something else are harmless
+        let l = draw("<defs><pattern id='a' href='#b' width='10' height='10' patternUnits='userSpaceOnUse'/><pattern id='b' href='#a'/></defs><rect width='100' height='100' fill='url(#a)'/><rect id='r' width='1' height='1'/><defs><pattern id='c' href='#r' width='10' height='10' patternUnits='userSpaceOnUse'/></defs><rect width='5' height='5' fill='url(#c)'/>");
+        assert_eq!(px(&l, 50, 50)[3], 0);
+    }
+
+    #[test]
+    fn primitive_units_in_the_bounding_box_scale_offsets_and_sub_regions() {
+        let f = |prim: &str, units: &str| draw(&format!("<defs><filter id='f' x='-100%' y='-100%' width='300%' height='300%' color-interpolation-filters='sRGB' {units}>{prim}</filter></defs><rect x='10' y='40' width='20' height='20' fill='#ff0000' filter='url(#f)'/>"));
+        // 0.5 of a 20 wide box is 10: the square moves from 10..30 to 20..40
+        let b = f("<feOffset dx='0.5' dy='0'/>", "primitiveUnits='objectBoundingBox'");
+        assert_eq!((px(&b, 15, 50)[3], px(&b, 35, 50)), (0, [255, 0, 0, 255]));
+        // the same numbers in user units move it half a pixel
+        let u = f("<feOffset dx='0.5' dy='0'/>", "");
+        assert_eq!(px(&u, 12, 50), [255, 0, 0, 255]);
+        // a flood sub-region as fractions of the box: the right half of it only
+        let s = f("<feFlood flood-color='#00ff00' x='0.5' width='0.5' y='0' height='1'/>", "primitiveUnits='objectBoundingBox'");
+        assert_eq!((px(&s, 15, 50)[3], px(&s, 25, 50)), (0, [0, 255, 0, 255]));
+    }
+
+    #[test]
+    fn one_primitive_can_work_in_another_colour_space_than_its_filter() {
+        let half = |filter_attr: &str, prim_attr: &str| {
+            let b = draw(&format!("<defs><filter id='f' x='0' y='0' width='1' height='1' {filter_attr}><feComponentTransfer {prim_attr}><feFuncR type='linear' slope='0.5'/><feFuncG type='linear' slope='0.5'/><feFuncB type='linear' slope='0.5'/></feComponentTransfer></filter></defs><rect x='10' y='10' width='80' height='80' fill='rgb(128,128,128)' filter='url(#f)'/>"));
+            px(&b, 50, 50)[0] as i32
+        };
+        // half of 128 in sRGB is 64; half in linear light is about 95
+        assert!((half("color-interpolation-filters='sRGB'", "") - 64).abs() <= 2);
+        assert!((half("", "") - 95).abs() <= 3);
+        assert!((half("", "color-interpolation-filters='sRGB'") - 64).abs() <= 2, "the primitive says sRGB inside a linear filter");
+        assert!((half("color-interpolation-filters='sRGB'", "color-interpolation-filters='linearRGB'") - 95).abs() <= 3, "and the other way round");
+        assert!((half("", "style='color-interpolation-filters: sRGB'") - 64).abs() <= 2, "in a style attribute too");
     }
 }

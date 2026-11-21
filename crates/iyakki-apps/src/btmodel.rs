@@ -10,12 +10,12 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub use iyakki_devctl::a2dp::{AudioState, AudioView};
-pub use iyakki_devctl::bt_pan::{TetherState, TetherView};
-pub use iyakki_devctl::bthid::{DeviceView, LinkState, PairState};
-pub use iyakki_devctl::btmgmt::{Found, Kind};
-pub use iyakki_devctl::{Control, Roots};
-use iyakki_devctl::{bthid, btmgmt, btstate, btview};
+pub use iyakki_core_api::device_types::devctl::a2dp::{AudioState, AudioView};
+pub use iyakki_core_api::device_types::devctl::bt_pan::{TetherState, TetherView};
+pub use iyakki_core_api::device_types::devctl::bthid::{DeviceView, LinkState, PairState};
+pub use iyakki_core_api::device_types::devctl::btmgmt::{Found, Kind};
+pub use iyakki_core_api::device_types::devctl::{Control, Roots};
+use iyakki_core_api::device_types::devctl::{bthid, btmgmt, btstate, btview};
 
 /// A scan stops by itself after this many seconds.
 pub const SCAN_SECS: u64 = 15;
@@ -290,6 +290,8 @@ pub enum ScanView {
 
 pub struct BtModel {
     ctl: Arc<dyn Control>,
+    /// Bluetooth audio through the core (`cx.os.bt_audio()`); without one the control of the environment answers (tests, the first frame).
+    bt_audio: Option<Arc<dyn iyakki_core_api::btaudio::BtAudio>>,
     roots: Roots,
     pub view: BtView,
     pub devices: Vec<DeviceView>,
@@ -331,6 +333,7 @@ impl BtModel {
         let view = Self::view_of(state);
         BtModel {
             ctl,
+            bt_audio: None,
             roots,
             view,
             devices: Vec::new(),
@@ -357,7 +360,7 @@ impl BtModel {
 
     fn view_of(state: btstate::BtState) -> BtView {
         let switch = classify(&state);
-        let chip = iyakki_drivers::macboard::uart_chip(&state.product);
+        let chip = iyakki_core_api::device_types::driver_packs::macboard::uart_chip(&state.product);
         let (headline, detail, address, powered) = match state.controller() {
             Some(c) => (Some(btview::headline(c, chip, state.fw_file)), Some(btview::detail(c)), Some(c.address.clone()), c.powered()),
             None => (None, None, None, false),
@@ -408,7 +411,7 @@ impl BtModel {
                 self.say(line);
             }
         }
-        let live = Live { devices: self.ctl.bt_devices(), pair: self.ctl.bt_pair_state(), tether: self.ctl.bt_tether_view(), audio: self.ctl.bt_audio_view() };
+        let live = Live { devices: self.ctl.bt_devices(), pair: self.ctl.bt_pair_state(), tether: self.ctl.bt_tether_view(), audio: self.audio_now() };
         self.tether_ip = if live.tether.state == TetherState::Connected { btstate::tether_address(&*self.ctl) } else { None };
         self.observe(&live);
         self.devices = live.devices.clone();
@@ -529,7 +532,7 @@ impl BtModel {
                 TetherState::Connected => {
                     let ip = btstate::tether_address(&*self.ctl);
                     let shown = ip.clone().unwrap_or_else(|| "no address yet".into());
-                    self.say(format!("bluetooth tether {a} attempt {n} connected {} {shown}", iyakki_devctl::BT_PAN_IFACE));
+                    self.say(format!("bluetooth tether {a} attempt {n} connected {} {shown}", iyakki_core_api::device_types::devctl::BT_PAN_IFACE));
                     self.set_last(&a, match ip {
                         Some(ip) => format!("Tether connected {ip}"),
                         None => "Tether connected".into(),
@@ -822,10 +825,10 @@ impl BtModel {
         match &text {
             Some(t) => match &self.pair {
                 PairState::TypePasskey(_) => {
-                    iyakki_devctl::bthid::check_typed_passkey(t)?;
+                    iyakki_core_api::device_types::devctl::bthid::check_typed_passkey(t)?;
                 }
                 PairState::TypePin(..) => {
-                    iyakki_devctl::bthid::check_typed_pin(t)?;
+                    iyakki_core_api::device_types::devctl::bthid::check_typed_pin(t)?;
                 }
                 _ => return Err("Nothing is waiting for a passkey or PIN.".into()),
             },
@@ -882,6 +885,39 @@ impl BtModel {
         Ok("Connecting to the phone's internet ... Bluetooth tethering must be on in the phone.".into())
     }
 
+    /// Bluetooth audio goes through this handle (the core's, guarded).
+    pub fn set_bt_audio(&mut self, h: Arc<dyn iyakki_core_api::btaudio::BtAudio>) {
+        self.bt_audio = Some(h);
+    }
+
+    fn audio_now(&self) -> AudioView {
+        match &self.bt_audio {
+            Some(h) => h.receive_view(),
+            None => self.ctl.bt_audio_view(),
+        }
+    }
+
+    fn audio_connect(&self, address: &str) -> Result<(), String> {
+        match &self.bt_audio {
+            Some(h) => h.apply(&iyakki_core_api::btaudio::BtAudioAction::ConnectAt { address: address.to_string() }).map(|_| ()),
+            None => self.ctl.bt_audio_connect(address),
+        }
+    }
+
+    fn audio_disconnect(&self) -> Result<(), String> {
+        match &self.bt_audio {
+            Some(h) => h.apply(&iyakki_core_api::btaudio::BtAudioAction::Disconnect).map(|_| ()),
+            None => self.ctl.bt_audio_disconnect(),
+        }
+    }
+
+    fn audio_pairing(&self, on: bool) -> Result<(), String> {
+        match &self.bt_audio {
+            Some(h) => h.apply(&iyakki_core_api::btaudio::BtAudioAction::Pairing { on }).map(|_| ()),
+            None => self.ctl.bt_audio_pairing(on),
+        }
+    }
+
     /// Connect the phone for audio, or stop its audio.
     pub fn audio_toggle(&mut self, address: &str) -> Result<String, String> {
         let k = format!("audio:{}", key(address));
@@ -889,11 +925,11 @@ impl BtModel {
             return Ok("Still waiting for the phone. Start playing on it.".into());
         }
         if self.audio.device.as_ref().is_some_and(|d| d.address.eq_ignore_ascii_case(address)) {
-            self.ctl.bt_audio_disconnect()?;
+            self.audio_disconnect()?;
             self.say(format!("bluetooth audio {address} disconnect"));
             return Ok("Disconnecting the audio.".into());
         }
-        self.ctl.bt_audio_connect(address)?;
+        self.audio_connect(address)?;
         self.say(format!("bluetooth audio {address} connect"));
         self.start(k);
         self.set_last(address, "Audio connecting ... start playing on the phone".into());
@@ -903,12 +939,12 @@ impl BtModel {
     /// The audio card: lets a phone pair for two minutes, closes that, or disconnects the phone that is connected.
     pub fn audio_pairing_toggle(&mut self) -> Result<String, String> {
         if let Some(d) = self.audio.device.clone() {
-            self.ctl.bt_audio_disconnect()?;
+            self.audio_disconnect()?;
             self.say(format!("bluetooth audio {} disconnect", d.address));
             return Ok("Disconnecting the phone's audio.".into());
         }
         let on = !self.audio.pairing_open;
-        self.ctl.bt_audio_pairing(on)?;
+        self.audio_pairing(on)?;
         self.say(format!("bluetooth audio pairing {}", if on { "open" } else { "closed" }));
         Ok(if on { "This computer is visible to phones for two minutes. On the phone, open Bluetooth and choose this computer.".into() } else { "Pairing for phones is closed.".into() })
     }

@@ -240,6 +240,73 @@ def page_suite(rep, chrome, root):
         host.stop()
 
 
+def app_suite(rep, chrome, root):
+    """The Apps button of the real client page against a fake machine that agrees to the display-list mode: the menu, an app opened in the window
+    form and in the phone form (drawn by the engine module from the display list text), a click on its button becomes input lines, Close ends it."""
+    import fakehost
+    eng = os.path.join(root, "crates/iyakki-client-engine")
+    meta = json.load(open(os.path.join(eng, "tests/golden/frame.json")))
+    frame = open(os.path.join(eng, "tests/golden/frame.bin"), "rb").read()
+    host = fakehost.FakeHost(root, frame, caps=("picture", "input", "events", "calls", "display.list"))
+    page = chrome.new_page(1000, 700, 1)
+    try:
+        page.goto(host.base + "/connect#tok-1")
+        page.wait_for("!document.getElementById('enrol').hidden", 10, "the enrol form")
+        page.click("#enrol button[type=submit]")
+        page.wait_for("!document.getElementById('signin').hidden", 10, "sign-in form")
+        page.click("#user")
+        page.type_text("ann")
+        page.click("#pass")
+        page.type_text("right-pw")
+        page.click("#signin button[type=submit]")
+        _wait_stage(page)
+        page.wait_for("!document.getElementById('apps').hidden", 10, "the Apps button")
+        rep.check("the Apps button is shown because the machine agreed to the display-list mode", True)
+        page.screenshot(rep.shot("client-app-01-picture.png"))
+        page.click("#apps")
+        page.wait_for("!document.getElementById('apps-menu').hidden", 5, "the Apps menu")
+        names = page.evaluate("Array.from(document.querySelectorAll('#apps-list button')).map(function(b){return b.textContent})")
+        rep.check("the Apps menu lists the apps this page can show", names == ["SAMPLE", "Markdown viewer"], names)
+        page.screenshot(rep.shot("client-app-02-menu.png"))
+        page.evaluate("document.querySelector('#apps-list button').click()")
+        page.wait_for("!document.getElementById('app').hidden", 10, "the app pane")
+        page.evaluate("new Promise(function(r){setTimeout(r,500)})")
+        rep.check("the machine was asked to open the app once", host.wait_for("app_open")[0]["app"] == "sample")
+        form = page.evaluate("document.getElementById('stage').dataset.appform")
+        rep.check("a wide window shows the window form", form == "window", form)
+        rep.check("the machine's picture is hidden while the app is shown", page.evaluate("document.getElementById('screen').hidden"))
+        a11y = page.evaluate("Array.from(document.querySelectorAll('#app-aria *')).map(function(e){return (e.getAttribute('role')||e.tagName)+':'+(e.getAttribute('aria-label')||e.textContent)})")
+        rep.check("the app's accessibility tree has its button by name", any("Press" in a for a in a11y), a11y)
+        page.screenshot(rep.shot("client-app-03-window-form.png"))
+        box = page.evaluate("(function(){var r=document.getElementById('app').getBoundingClientRect();return [r.x,r.y,r.width,r.height];})()")
+        k = box[2] / 400.0
+        n0 = len(host.sent("app_input"))
+        page.click_at(box[0] + (16 + 60) * k, box[1] + (100 + 20) * k)
+        page.wait_for("true", 1)
+        host.wait_for("app_input", n0 + 1)
+        lines = host.sent("app_input")[-1].get("lines", "")
+        rep.check("a click on the button becomes input lines for the machine", len(lines) > 0, lines)
+        page.evaluate("new Promise(function(r){setTimeout(r,500)})")
+        page.screenshot(rep.shot("client-app-04-after-press.png"))
+        page.set_viewport(390, 844, 3, True)
+        page.evaluate("new Promise(function(r){setTimeout(r,500)})")
+        form = page.evaluate("document.getElementById('stage').dataset.appform")
+        rep.check("a narrow window turns into the phone form", form == "phone", form)
+        page.screenshot(rep.shot("client-app-05-phone-form.png"))
+        page.set_viewport(1000, 700, 1)
+        page.evaluate("new Promise(function(r){setTimeout(r,300)})")
+        page.click("#app-close")
+        page.wait_for("document.getElementById('app').hidden && !document.getElementById('screen').hidden", 5, "back to the picture")
+        host.wait_for("app_close")
+        rep.check("Close tells the machine and shows the machine's screen again", True)
+        page.screenshot(rep.shot("client-app-06-closed.png"))
+        errs = page.errors()
+        rep.check("no console error in the app run", errs == [], errs)
+    finally:
+        page.close()
+        host.stop()
+
+
 def media_suite(rep, chrome, root):
     """The media half of the client page against a fake machine that offers sound, clipboard and a camera list: the Devices panel, a real
     AudioContext and AudioWorklet playing a 440 Hz tone (headless: nothing is audible, the page's own counters say what arrived), the

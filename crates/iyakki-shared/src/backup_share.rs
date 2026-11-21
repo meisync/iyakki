@@ -97,6 +97,27 @@ pub trait Mounter {
     fn unmount(&self, mountpoint: &Path) -> Result<(), String>;
 }
 
+/// The real mounter (F-BACKUP-04): the machine's own `mount` and `umount` with a fixed argument list and no shell.
+pub struct RealMounter;
+
+fn run_tool(prog: &str, args: &[String]) -> Result<(), String> {
+    let out = std::process::Command::new(prog).args(args).output().map_err(|e| format!("cannot run {prog}: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().chars().take(300).collect())
+    }
+}
+
+impl Mounter for RealMounter {
+    fn mount(&self, args: &[String]) -> Result<(), String> {
+        run_tool("/bin/mount", args)
+    }
+    fn unmount(&self, mountpoint: &Path) -> Result<(), String> {
+        run_tool("/bin/umount", &[mountpoint.display().to_string()])
+    }
+}
+
 /// Credentials of an SMB share, from the vault entry (two lines).
 pub fn parse_credentials(entry: &str) -> Result<(String, String), String> {
     let mut l = entry.lines();

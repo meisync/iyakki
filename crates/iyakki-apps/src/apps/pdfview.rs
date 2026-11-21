@@ -21,7 +21,7 @@ struct ShellPdfFiles {
     downloads: Option<PathBuf>,
     policy: iyakki_sec::policy::Policy,
     user: String,
-    audit: Arc<crate::accounts::AuditLog>,
+    audit: Arc<dyn iyakki_agent_api::AuditApi>,
 }
 
 impl PdfFiles for ShellPdfFiles {
@@ -343,7 +343,7 @@ mod tests {
         assert_eq!(std::fs::read(dl.join("shell-form.pdf")).unwrap(), out, "the original is untouched");
         let d = iyakki_pdf::Document::open(std::fs::read(dl.join("shell-form (filled).pdf")).unwrap()).unwrap();
         assert_eq!(d.editable_fields()[0].value, "Grace");
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
         assert!(log.contains("pdf.form.save") && log.contains("shell-form (filled).pdf"), "{log}");
         let _ = std::fs::remove_file(dl.join("shell-form.pdf"));
         let _ = std::fs::remove_file(dl.join("shell-form (filled).pdf"));

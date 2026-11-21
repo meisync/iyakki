@@ -58,7 +58,7 @@ fn center(r: R) -> (i32, i32) {
 }
 
 fn audit_text(sh: &Shell) -> String {
-    std::fs::read_to_string(sh.env.audit.path()).unwrap_or_default()
+    std::fs::read_to_string(sh.env.audit.path_buf()).unwrap_or_default()
 }
 
 #[test]

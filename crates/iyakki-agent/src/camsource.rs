@@ -9,10 +9,52 @@ use iyakki_tile_api::cameras as api;
 use crate::cameras::Hub;
 use crate::cameras::Who;
 
+/// Where a camera's sound goes (F-CAM-20): a place on the speaker for mono 16-bit sound at a rate.
+pub trait SoundRoute: Send + Sync {
+    /// Whether a place for the sound exists now, in words when it does not (asked before a chat-started sound begins).
+    fn ready(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn open(&self, rate: u32, label: &str) -> Result<crate::mixer::SourceWriter, String>;
+}
+
+/// The real route: IYAKKI's own mixer, as media (a call or an alarm still wins and ducks it). Refused in words while the mixer is off.
+pub struct MixerRoute;
+
+impl SoundRoute for MixerRoute {
+    fn ready(&self) -> Result<(), String> {
+        crate::audiosink::mixer_if_on().map(|_| ()).ok_or_else(|| "Camera sound plays through IYAKKI's mixer; switch it on in Settings, Sound.".to_string())
+    }
+    fn open(&self, rate: u32, label: &str) -> Result<crate::mixer::SourceWriter, String> {
+        let m = crate::audiosink::mixer_if_on().ok_or("Camera sound plays through IYAKKI's mixer; switch it on in Settings, Sound.")?;
+        m.open_source_with(crate::mixer::SourceKind::Media, rate, 1, label, false).map_err(|e| e.to_string())
+    }
+}
+
+/// The sound being played now: which camera, at which rate, and the speaker's handle (dropping it lets the speaker go).
+struct Playing {
+    id: String,
+    rate: u32,
+    out: crate::mixer::SourceWriter,
+}
+
 /// The hub and the person it answers for.
 pub struct HubSource {
     pub hub: Arc<Hub>,
     pub who: Who,
+    route: Arc<dyn SoundRoute>,
+    playing: std::sync::Mutex<Option<Playing>>,
+}
+
+impl HubSource {
+    pub fn new(hub: Arc<Hub>, who: Who) -> HubSource {
+        HubSource::with_route(hub, who, Arc::new(MixerRoute))
+    }
+
+    /// The same with another place for the sound (tests use a mixer that writes to a recording sink).
+    pub fn with_route(hub: Arc<Hub>, who: Who, route: Arc<dyn SoundRoute>) -> HubSource {
+        HubSource { hub, who, route, playing: std::sync::Mutex::new(None) }
+    }
 }
 
 fn motion_mode_to_api(m: iyakki_camdetect::settings::WatchMode) -> api::MotionMode {
@@ -37,6 +79,60 @@ fn status_to_api(s: crate::cameras::Status) -> api::Status {
 }
 
 impl api::CameraSource for HubSource {
+    fn trust_waiting(&self, id: &str) -> Option<String> {
+        // only a camera the person may watch is asked about (the list is the person's own)
+        if !self.hub.cameras(&self.who).iter().any(|c| c.id == id) {
+            return None;
+        }
+        crate::camtls::TrustStore::load(&self.hub.data_dir()).pending.get(id).cloned()
+    }
+    fn trust_approve(&self, id: &str, shown: &str) -> Result<String, String> {
+        if !self.hub.cameras(&self.who).iter().any(|c| c.id == id) {
+            return Err("no such camera".into());
+        }
+        let fp = crate::camtls::TrustStore::change(&self.hub.data_dir(), |st| {
+            if st.pending.get(id).map(String::as_str) != Some(shown) {
+                return Err("The camera showed a different certificate than the one on your screen; look at the new one.".to_string());
+            }
+            st.approve(id)
+        })?;
+        self.hub.audit(&self.who.user, "camera.trust", &format!("{id} approve"));
+        Ok(format!("The certificate of this camera is trusted ({}).", fp))
+    }
+    fn listen(&self, id: &str, on: bool) -> api::Listen {
+        let mut play = self.playing.lock().unwrap_or_else(|e| e.into_inner());
+        if !on {
+            *play = None;
+            return api::Listen::Off;
+        }
+        if play.as_ref().is_some_and(|p| p.id != id) {
+            *play = None; // another camera: the old one's sound stops
+        }
+        match self.hub.listen(&self.who, id) {
+            Err(e) => {
+                *play = None;
+                api::Listen::Unavailable(e)
+            }
+            Ok(None) => {
+                if play.is_some() { api::Listen::Playing } else { api::Listen::Waiting }
+            }
+            Ok(Some(sound)) => {
+                if play.as_ref().is_some_and(|p| p.rate != sound.rate) {
+                    *play = None;
+                }
+                if play.is_none() {
+                    match self.route.open(sound.rate, "camera sound") {
+                        Ok(out) => *play = Some(Playing { id: id.to_string(), rate: sound.rate, out }),
+                        Err(e) => return api::Listen::Unavailable(e),
+                    }
+                }
+                if let Some(p) = play.as_ref() {
+                    p.out.write_i16(&sound.pcm);
+                }
+                api::Listen::Playing
+            }
+        }
+    }
     fn cameras(&self) -> Vec<api::CamInfo> {
         self.hub
             .cameras(&self.who)

@@ -1,0 +1,10 @@
+[package]
+name = "iyakki-devtools-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The thirteen small tools of the DEV TOOLS tile as plain functions (JSON, JSON query, Base64, JWT, URL, hash, UUID and time, regex, diff, converters, QR code text and pictures). No screen, no I/O: the tile in iyakki-apps draws them."
+
+[dependencies]
+iyakki-qr = { path = "../iyakki-qr" }
+iyakki-clock = { path = "../iyakki-clock" }

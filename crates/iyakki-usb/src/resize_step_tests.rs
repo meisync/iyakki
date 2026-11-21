@@ -74,3 +74,88 @@ fn the_plan_comes_first_the_second_step_needs_the_name_and_the_box_and_a_failed_
     assert_eq!(std::fs::read(&img).unwrap(), before);
     let _ = std::fs::remove_file(&img);
 }
+
+#[test]
+fn the_boot_time_pages_walk_the_shrink_step_with_the_second_deliberate_step_and_read_the_drives_again() {
+    use crate::wizard::{Page, ShrinkFocus, WKey, Wizard};
+    use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+    let (_, img) = flow("pages");
+    let model = disk();
+    let spec = SourceSpec { path: PathBuf::from("/x.img"), boot_bytes: 40 * MB, payload_bytes: 10 * MB, core_bytes: 0, secure_boot: false };
+    let mut w = Wizard::new(vec![model.clone()], spec, true);
+    w.handle(WKey::Enter);
+    assert_eq!(w.page, Page::Mode);
+    // no opener: the page says where the command is instead of failing silently
+    w.handle(WKey::Char('s'));
+    assert_eq!(w.page, Page::Mode);
+    assert!(w.error.as_deref().unwrap().contains("--shrink"), "{:?}", w.error);
+    let (img2, model2) = (img.clone(), model.clone());
+    w.shrink_opener = Some(Arc::new(move |_d: &DiskModel| {
+        let located = Located { path: img2.clone(), model: model2.clone(), node: Some(PathBuf::from("/dev/sdz1")), proc_mounts: String::new() };
+        Ok(ShrinkFlow::new(located, Box::new(Failing)))
+    }));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let r2 = reads.clone();
+    let m3 = model.clone();
+    w.rereader = Some(Arc::new(move || {
+        r2.fetch_add(1, Ordering::SeqCst);
+        vec![m3.clone()]
+    }));
+    w.handle(WKey::Char('s'));
+    assert_eq!(w.page, Page::Shrink);
+    let text = w.render(100);
+    assert!(text.contains("sdz1") && text.contains("cannot:") && text.contains("Back up first"), "{text}");
+    // a size is needed, and a partition that cannot be shrunk says why
+    w.handle(WKey::Enter);
+    assert!(w.error.as_deref().unwrap().contains("new size"), "{:?}", w.error);
+    w.handle(WKey::Down);
+    for c in "50".chars() {
+        w.handle(WKey::Char(c));
+    }
+    w.handle(WKey::Enter);
+    assert!(w.error.as_deref().unwrap().contains("xfs"), "{:?}", w.error);
+    w.handle(WKey::Up);
+    w.handle(WKey::Enter);
+    assert!(w.error.is_none(), "{:?}", w.error);
+    assert!(w.render(100).contains("Shrink sdz1") && w.render(100).contains("Type the drive's name again"));
+    // the box and the name are both needed; nothing runs without them
+    let before = std::fs::read(&img).unwrap();
+    w.handle(WKey::Tab);
+    w.handle(WKey::Tab);
+    assert_eq!(w.shrink.as_ref().unwrap().focus, ShrinkFocus::Run);
+    w.handle(WKey::Enter);
+    assert!(w.error.as_deref().unwrap().contains("tick the box"), "{:?}", w.error);
+    w.handle(WKey::Tab);
+    for c in "sda".chars() {
+        w.handle(WKey::Char(c));
+    }
+    w.handle(WKey::Tab);
+    w.handle(WKey::Char(' '));
+    w.handle(WKey::Tab);
+    w.handle(WKey::Enter);
+    assert!(w.error.as_deref().unwrap().contains("exactly as shown"), "{:?}", w.error);
+    assert_eq!(std::fs::read(&img).unwrap(), before);
+    // Esc goes back to the list without changing anything; the right name runs the tool, which fails here and says so
+    w.handle(WKey::Esc);
+    assert_eq!(w.page, Page::Shrink);
+    assert!(w.render(100).contains("New size"));
+    w.handle(WKey::Enter);
+    assert_eq!(w.shrink.as_ref().unwrap().focus, ShrinkFocus::Name);
+    for c in "sdz".chars() {
+        w.handle(WKey::Char(c));
+    }
+    w.handle(WKey::Tab);
+    w.handle(WKey::Char(' '));
+    w.handle(WKey::Tab);
+    w.handle(WKey::Enter);
+    assert!(w.error.as_deref().unwrap().contains("disk full"), "{:?}", w.error);
+    assert!(w.render(100).contains("The shrink stopped"));
+    assert_eq!(std::fs::read(&img).unwrap(), before, "a failed tool changes nothing");
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    // leaving after a run reads the drives again and returns to the Mode page
+    w.handle(WKey::Enter);
+    assert_eq!(w.page, Page::Mode);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert!(w.shrink.is_none());
+    let _ = std::fs::remove_file(&img);
+}

@@ -35,6 +35,20 @@ pub trait ServiceBackend: Send + Sync {
     /// The tile asked for a call its manifest does not allow (it was refused with `DENIED`, `call` was not reached). The device
     /// ignores it; the SDK emulator records it so the developer sees the missing permission.
     fn denied(&self, _domain: &str, _method: &str, _json: &str) {}
+    /// What waits for the person's answer, oldest first: `(id, kind, arguments as JSON)`. The device draws the card for it; a backend with
+    /// nothing to ask has none (F-SDK-14).
+    fn requests(&self) -> Vec<(u32, String, String)> {
+        Vec::new()
+    }
+    /// The person answered request `id`. False when there was no such request. The tile asks again after a yes.
+    fn answer(&self, _id: u32, _allow: bool) -> bool {
+        false
+    }
+    /// The app a tile asked the dock to open (`dock.open`), taken once: the screen hands it to the shell. A backend that does not
+    /// serve the dock has none.
+    fn take_dock_open(&self) -> Option<String> {
+        None
+    }
 }
 
 struct NoServices;
@@ -126,6 +140,8 @@ pub struct TileRunner {
     budgets: Budgets,
     manifest: TileManifest,
     host_calls: Arc<AtomicU32>,
+    /// The services the tile calls (kept to read what waits for the person and to hand the answer back).
+    services: Arc<dyn ServiceBackend>,
     size: (i32, i32),
     last: Option<DisplayList>,
     pub last_stats: FrameStats,
@@ -152,6 +168,7 @@ impl TileRunner {
         let fuel = budgets.init_fuel.max(budgets.event_fuel).max(budgets.frame_fuel);
         let host_calls = Arc::new(AtomicU32::new(0));
         let backend: Arc<dyn ServiceBackend> = backend.unwrap_or_else(|| Arc::new(NoServices));
+        let services = backend.clone();
         let rng = Arc::new(AtomicU64::new(rng_seed | 1));
         let max_calls = budgets.max_host_calls;
 
@@ -222,6 +239,7 @@ impl TileRunner {
             budgets,
             manifest,
             host_calls,
+            services,
             size: (320, 200),
             last: None,
             last_stats: FrameStats::default(),
@@ -234,6 +252,21 @@ impl TileRunner {
         }
         r.manifest.abi = tile_abi;
         Ok(r)
+    }
+
+    /// What waits for the person's answer (`(id, kind, arguments as JSON)`, oldest first).
+    pub fn requests(&self) -> Vec<(u32, String, String)> {
+        self.services.requests()
+    }
+
+    /// Hand the person's answer to request `id` to the services; the tile asks again after a yes.
+    pub fn answer(&self, id: u32, allow: bool) -> bool {
+        self.services.answer(id, allow)
+    }
+
+    /// The app the tile asked the dock to open since the last time, once (F-SDK-34).
+    pub fn take_dock_open(&self) -> Option<String> {
+        self.services.take_dock_open()
     }
 
     /// Whether this tile reported ABI 3 and so may be sent app events.

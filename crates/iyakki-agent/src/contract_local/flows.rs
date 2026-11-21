@@ -204,7 +204,7 @@ impl Flows for CoreFlows {
         self.catch_up(&mut inner);
         let mut b = inner.log.read(resume, None, limit);
         if let Some(r) = run {
-            b.events.retain(|e| run_of(&e.body) == r);
+            b.events.retain(|e| run_of(&e.body) == Some(r));
         }
         Ok(b)
     }
@@ -270,8 +270,9 @@ impl CoreFlows {
     }
 }
 
-fn run_of(e: &FlowEvent) -> &RunId {
+fn run_of(e: &FlowEvent) -> Option<&RunId> {
     match e {
-        FlowEvent::Started { run, .. } | FlowEvent::Step { run, .. } | FlowEvent::ApprovalNeeded { run, .. } | FlowEvent::ApprovalAnswered { run, .. } | FlowEvent::Frame { run, .. } | FlowEvent::Finished { run, .. } => run,
+        FlowEvent::Started { run, .. } | FlowEvent::Step { run, .. } | FlowEvent::ApprovalNeeded { run, .. } | FlowEvent::ApprovalAnswered { run, .. } | FlowEvent::Frame { run, .. } | FlowEvent::Finished { run, .. } => Some(run),
+        FlowEvent::Unknown => None,
     }
 }

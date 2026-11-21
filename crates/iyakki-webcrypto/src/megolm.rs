@@ -205,6 +205,16 @@ impl InboundGroup {
     pub fn session_id(&self) -> String {
         b64::std_nopad(&self.signing_public)
     }
+    /// The exported form (version 1: first known index, its ratchet, the signing key; no signature) of the session from the first
+    /// index this device can read, as a room key export file carries it. `from_session_key` reads it back.
+    pub fn export_session_key(&self) -> String {
+        let mut o = Vec::with_capacity(1 + 4 + 128 + 32);
+        o.push(1);
+        o.extend_from_slice(&self.initial.counter.to_be_bytes());
+        o.extend_from_slice(&self.initial.data);
+        o.extend_from_slice(&self.signing_public);
+        b64::std_nopad(&o)
+    }
     pub fn first_known_index(&self) -> u32 {
         self.initial.counter
     }

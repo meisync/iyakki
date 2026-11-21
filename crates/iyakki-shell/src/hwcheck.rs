@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 
-use iyakki_hwinfo::{collect, Roots};
+use iyakki_core_local::hwinfo::{collect, Roots};
 
 use crate::gfx::{rgb, Face, Gfx};
 use crate::ui::{Event, Key, DIM, ERR, MUTED, OK, R, TEXT};

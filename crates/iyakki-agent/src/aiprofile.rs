@@ -577,6 +577,18 @@ pub fn rule(p: &AiProfile, item: Item) -> Vis {
                 Vis::Hidden(small())
             }
         }
+        Item::GpuRocm => {
+            let amd = p.gpus.iter().any(|g| g.vendor == Vendor::Amd);
+            if apple {
+                Vis::Hidden("this is an Apple Silicon Mac: there is no AMD card for ROCm".into())
+            } else if !amd {
+                Vis::Hidden("there is no AMD GPU here".into())
+            } else if p.capable() || p.unknown() {
+                Vis::Show
+            } else {
+                Vis::Hidden(small())
+            }
+        }
         Item::GpuNvidia => {
             // any NVIDIA card counts, not only the first one: on a laptop with AMD graphics and an NVIDIA card the NVIDIA card comes second until its driver tells its memory
             let nvidia_best = p.gpus.iter().any(|g| g.vendor == Vendor::Nvidia);

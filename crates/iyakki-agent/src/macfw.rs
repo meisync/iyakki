@@ -2,7 +2,7 @@
 //! Quick install -> "Mac Wi-Fi and Bluetooth firmware"). One detached job (`iyakki quick-install mac-firmware`), three sources:
 //!
 //! * **Download**: Apple's recovery image for this Mac model (`macrecovery.rs`; the board id is the DMI `board_name` of any Intel Mac,
-//!   `iyakki_drivers::macboard::resolve`, the table there is only a cross-check), read with 7-Zip (`7zz`, installed from the CLI list) for `usr/share/firmware`.
+//!   `iyakki_core_api::drivers::macboard::resolve`, the table there is only a cross-check), read with 7-Zip (`7zz`, installed from the CLI list) for `usr/share/firmware`.
 //! * **Image**: a disk image file the person picked (a `.dmg` or an `.img` of a macOS volume on a stick or in the data folder),
 //!   read the same way. A macOS volume is never mounted: the kernel has no APFS driver (and HFS+ is not what T2 Macs use), and
 //!   no drive is ever written or read as a whole device.
@@ -13,7 +13,7 @@
 //! UART Bluetooth) already has the generic firmware from linux-firmware: the job fetches only the NVRAM, CLM and txcap files named after
 //! the DMI board type, and the `.hcd` for the controller's chip (`appfw` board mode); the T2 hold-back never applies to it.
 //!
-//! The firmware then goes through the Rust twin of that script (`iyakki_drivers::appfw`: the same names, the same rules), into two
+//! The firmware then goes through the Rust twin of that script (`iyakki_core_api::drivers::appfw`: the same names, the same rules), into two
 //! driver packs on the data volume (`mac-wifi-brcmfmac` and `mac-bt-broadcom`, so they are linked into `/lib/firmware` at every
 //! boot) and the drivers are loaded again; the job then looks for the Wi-Fi interface and the Bluetooth address and writes a plain
 //! result (`<data>/mac-firmware/last.json`) the Mac drivers page shows.
@@ -27,7 +27,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use iyakki_drivers::{appfw, apply, known, macboard, pack};
+use iyakki_core_api::drivers::{appfw, apply, known, macboard, pack};
 pub use iyakki_shared::macfw::{NOTICE, NO_BCM4364_FILE, Outcome, Seen, Source};
 
 
@@ -324,7 +324,7 @@ fn read_image(env: &mut dyn Env, lines: &mut Vec<String>, seven: &Path, image: &
                 match h.len() {
                     0 => {}
                     1 => {
-                        let data = iyakki_drivers::ihex::check_hcd(&h[0].1).unwrap_or(0);
+                        let data = iyakki_core_api::drivers::ihex::check_hcd(&h[0].1).unwrap_or(0);
                         found.push(format!("{} was made from {} (macOS keeps this patch as Intel HEX text; {} data bytes, {} bytes as a .hcd, sha256 {})", opts.hcd_name, h[0].0, data, h[0].1.len(), sha256_hex(&h[0].1)));
                         files.push((opts.hcd_name.clone(), h[0].1.clone()));
                     }
@@ -868,11 +868,10 @@ fn run_inner(env: &mut dyn Env, data: &Path, source: &Source, lines: &mut Vec<St
 
 /// Install a pack and load the driver again. A Wi-Fi driver that is loaded already has its vendor module (`brcmfmac_wcc`) holding
 /// it, so that goes first; the pack then removes and loads `brcmfmac`.
-pub fn install_with_unload(fs: &apply::Fs, run: &dyn iyakki_drivers::run::Runner, id: &str, version: &str, source: &str, p: &pack::Pack) -> Result<apply::Report, String> {
+pub fn install_with_unload(fs: &apply::Fs, run: &dyn iyakki_core_local::kmodpack::Runner, id: &str, version: &str, source: &str, p: &pack::Pack) -> Result<apply::Report, String> {
     if id == PACK_WIFI {
-        let loaded = std::fs::read_to_string(fs.proc.join("modules")).unwrap_or_default();
         for m in ["brcmfmac_wcc", "brcmfmac_cyw", "brcmfmac_bca"] {
-            if loaded.lines().any(|l| l.split_whitespace().next() == Some(m)) {
+            if iyakki_core_local::macfwsys::module_loaded(&fs.proc, m) {
                 let _ = run.run("modprobe", &["-r", m]);
             }
         }
@@ -883,7 +882,7 @@ pub fn install_with_unload(fs: &apply::Fs, run: &dyn iyakki_drivers::run::Runner
 /// The Bluetooth drivers of this machine are set aside (a T2 Mac without the firmware, `t2hold.rs`): "Load the Bluetooth driver anyway"
 /// is then offered. `lib_modules` is `/lib/modules`.
 pub fn bluetooth_held(lib_modules: &Path) -> bool {
-    iyakki_drivers::t2hold::bluetooth_held(lib_modules)
+    iyakki_core_api::drivers::t2hold::bluetooth_held(lib_modules)
 }
 
 /// "Load the Bluetooth driver anyway" (Mac drivers page, Devices): give the held Bluetooth drivers back and load them in dependency order,
@@ -891,13 +890,13 @@ pub fn bluetooth_held(lib_modules: &Path) -> bool {
 /// inside the data folder and no program runs. Returns the plain lines.
 pub fn load_bluetooth_anyway(data: &Path) -> Vec<String> {
     let (fs, real) = apply::Fs::for_data(data);
-    let run: Box<dyn iyakki_drivers::run::Runner> = if real { Box::new(iyakki_drivers::run::System) } else { Box::new(iyakki_drivers::run::Dry) };
+    let run = iyakki_core_local::kmodpack::runner(real);
     apply::load_bluetooth_anyway(&fs, run.as_ref())
 }
 
-pub use iyakki_drivers::macboard::uart_chip;
+pub use iyakki_core_api::drivers::macboard::uart_chip;
 
-/// What the program registers with `iyakki_devctl::set_bt_loader`: the real `/lib/modules` and data volume.
+/// What the program registers with `iyakki_core_local::devctl::set_bt_loader`: the real `/lib/modules` and data volume.
 pub fn register_bluetooth_loader() {
     fn held() -> bool {
         bluetooth_held(Path::new("/lib/modules"))
@@ -906,32 +905,16 @@ pub fn register_bluetooth_loader() {
         let lines = load_bluetooth_anyway(Path::new("/var/lib/iyakki"));
         Ok(lines.join(". "))
     }
-    iyakki_devctl::set_bt_loader(held, load);
+    iyakki_core_local::macfwsys::register_bt_loader(held, load);
 }
 
 /// The Wi-Fi interfaces and Bluetooth controller under a `/sys` folder.
 pub fn look_in(sys: &Path) -> Seen {
-    let names = |d: &str| -> Vec<String> {
-        let mut v: Vec<String> = std::fs::read_dir(sys.join(d)).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-        v.sort();
-        v
-    };
-    let wifi = names("class/net").into_iter().filter(|n| sys.join("class/net").join(n).join("wireless").exists() || sys.join("class/net").join(n).join("phy80211").exists()).collect();
-    let hci = names("class/bluetooth").into_iter().find(|n| n.starts_with("hci") && !n.contains(':'));
-    let bt_address = hci.as_ref().and_then(|h| std::fs::read_to_string(sys.join("class/bluetooth").join(h).join("address")).ok()).map(|a| a.trim().to_string()).filter(|a| !a.is_empty() && a != "00:00:00:00:00:00");
-    Seen { wifi, bt_controller: hci.is_some(), bt_address }
+    let w = iyakki_core_local::macfwsys::wireless_in(sys);
+    Seen { wifi: w.wifi, bt_controller: w.bt_controller, bt_address: w.bt_address }
 }
 
-/// The addresses of the Bluetooth controllers the kernel's management interface lists (needs root). Current kernels have no `address`
-/// file under `/sys/class/bluetooth/hci0`, and a controller that did not finish its setup is not in this list, which is the sign
-/// the page reports ("still has no address").
-pub fn mgmt_addresses() -> Vec<String> {
-    use iyakki_devctl::btmgmt::{ControlSocket, Mgmt};
-    let Ok(sock) = ControlSocket::open() else { return Vec::new() };
-    let mut m = Mgmt::new(sock);
-    let idx = m.index_list().unwrap_or_default();
-    idx.into_iter().filter_map(|i| m.info(i).ok()).map(|i| i.address).filter(|a| !a.is_empty() && a != "00:00:00:00:00:00").collect()
-}
+pub use iyakki_core_local::macfwsys::mgmt_addresses;
 
 /// The lines of the kernel log that are about the drivers and the firmware they asked for.
 pub fn interesting(log: &str) -> Vec<String> {
@@ -999,13 +982,13 @@ impl Env for RealEnv {
         let _ = o.flush();
     }
     fn product(&self) -> String {
-        std::fs::read_to_string(self.sys.join("class/dmi/id/product_name")).map(|s| s.trim().to_string()).unwrap_or_default()
+        iyakki_core_local::macfwsys::dmi_text(&self.sys, "product_name")
     }
     fn board_name(&self) -> String {
-        std::fs::read_to_string(self.sys.join("class/dmi/id/board_name")).map(|s| s.trim().to_string()).unwrap_or_default()
+        iyakki_core_local::macfwsys::dmi_text(&self.sys, "board_name")
     }
     fn vendor(&self) -> String {
-        std::fs::read_to_string(self.sys.join("class/dmi/id/sys_vendor")).map(|s| s.trim().to_string()).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "Apple Inc.".into())
+        Some(iyakki_core_local::macfwsys::dmi_text(&self.sys, "sys_vendor")).filter(|s| !s.is_empty()).unwrap_or_else(|| "Apple Inc.".into())
     }
     fn bt_log(&mut self) -> String {
         crate::wsexec::run_argv(&self.data, &["dmesg".to_string()], &[], Duration::from_secs(10), 2 << 20).stdout
@@ -1014,7 +997,7 @@ impl Env for RealEnv {
         crate::k3sdev::space(dir).map(|s| s.0)
     }
     fn data_in_memory(&self) -> bool {
-        in_memory(&iyakki_storage::read_mounts().unwrap_or_default(), &self.data)
+        in_memory(&iyakki_core_local::kernelfacts::mounts_text(), &self.data)
     }
     fn ensure_7zz(&mut self) -> Result<PathBuf, String> {
         if let Some(p) = self.find_7zz() {
@@ -1065,7 +1048,7 @@ impl Env for RealEnv {
     }
     fn install(&mut self, id: &str, version: &str, source: &str, p: &pack::Pack) -> Result<apply::Report, String> {
         let (fs, real) = apply::Fs::for_data(&self.data);
-        let run: Box<dyn iyakki_drivers::run::Runner> = if real { Box::new(iyakki_drivers::run::System) } else { Box::new(iyakki_drivers::run::Dry) };
+        let run = iyakki_core_local::kmodpack::runner(real);
         install_with_unload(&fs, run.as_ref(), id, version, source, p)
     }
     fn look(&mut self) -> Seen {

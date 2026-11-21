@@ -112,3 +112,53 @@ fn after_a_restart_the_open_apps_come_back_too_the_one_held_aside_and_the_front_
     sh3.sign_out();
     assert!(core.resume_fake().apps().is_empty());
 }
+
+#[test]
+fn after_a_restart_the_window_panes_come_back_with_their_apps_and_the_apps_of_the_ticket_are_not_stacked_on_them() {
+    let (mut sh, core) = rig("resume-panes", true, true);
+    login(&mut sh, "alice", "alicepass1");
+    sh.set_mem_for_test(Some(big_mem()));
+    sh.open(PApp::Chat);
+    sh.ws_apply("cols-50-50", Some(1), true).unwrap();
+    sh.ws_focus(1);
+    sh.open(PApp::Edit);
+    // the shell is killed: no sign-out, only the refresh of the ticket has run
+    tick(&mut sh, 31);
+    let mut sh2 = Shell::new(sh.env.share());
+    sh2.set_core_for_test(core.clone());
+    sh2.set_mem_for_test(Some(big_mem()));
+    tick(&mut sh2, 2);
+    assert_eq!(sh2.session.as_ref().map(|s| s.user.as_str()), Some("alice"));
+    assert_eq!(sh2.panes_layout_for_test(), "cols-50-50", "the arrangement is back");
+    assert!(sh2.stash.is_none(), "the ticket's apps are not stacked on the panes");
+    // the arrangement is only written when it changed, and not at all when the ticket is not allowed
+    let (mut off, _) = rig("resume-panes-off", true, false);
+    login(&mut off, "alice", "alicepass1");
+    off.set_mem_for_test(Some(big_mem()));
+    off.open(PApp::Chat);
+    off.ws_apply("cols-50-50", Some(1), true).unwrap();
+    tick(&mut off, 31);
+    assert!(iyakki_shared::views::Views::load(off.env.data_dir(), "alice").views[0].layout.is_none(), "nothing kept before a sign-out when the ticket is off");
+}
+
+fn big_mem() -> crate::memgate::MemFacts {
+    crate::memgate::MemFacts { total: 16 << 30, available: 12 << 30 }
+}
+
+#[test]
+fn what_an_app_held_is_handed_back_to_it_after_a_restart_and_an_unknown_app_or_a_refused_item_changes_nothing() {
+    let (mut sh, core) = rig("resume-items", true, true);
+    login(&mut sh, "alice", "alicepass1");
+    core.resume_fake().clear_for_test();
+    core.resume_fake().remember("alice");
+    core.resume_fake().remember_apps(&["edit".to_string()]);
+    core.resume_fake().remember_items(&[("edit".to_string(), "/etc/outside-the-scope".to_string()), ("nonsense".to_string(), "x".to_string())]);
+    core.resume_fake().set_who_for_test("alice");
+    let mut sh2 = Shell::new(sh.env.share());
+    sh2.set_core_for_test(core.clone());
+    tick(&mut sh2, 2);
+    assert_eq!(sh2.screen_name(), "app:edit", "the app opens, the refused path leaves it empty");
+    // a signed-in editor reports its file for the ticket (none here: nothing open)
+    tick(&mut sh2, 31);
+    assert!(core.resume_fake().items().is_empty());
+}

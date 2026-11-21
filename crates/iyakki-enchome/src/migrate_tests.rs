@@ -61,11 +61,16 @@ fn a_migration_copies_verifies_switches_and_keeps_the_old_home() {
     let h = r.home("amy");
     populate(&h);
     let mut seen = vec![];
+    let mut percents = vec![];
     let rep = run(&r.env, "amy", "amy-pass-1", &mut |s| {
-        seen.push(s);
+        match s {
+            Step::CopyProgress(p) => percents.push(p),
+            other => seen.push(other),
+        }
         true
     })
     .unwrap();
+    assert!(!percents.is_empty() && percents.windows(2).all(|w| w[0] < w[1]) && percents.iter().all(|p| (1..=99).contains(p)), "the copy reports growing percents under 100: {percents:?}");
     assert_eq!(seen, vec![Step::Planned, Step::ContainerMade, Step::StagingMounted, Step::Copied, Step::Verified, Step::StagingUnmounted, Step::PlainRenamed, Step::Switched]);
     assert_eq!(rep.files, 5);
     assert_eq!(rep.plain_copy, r.env.plain_copy_path("amy"));
@@ -249,4 +254,91 @@ fn verify_ignores_the_new_file_systems_own_lost_and_found_but_only_at_the_top_an
     std::fs::remove_dir(a.join("lost+found")).unwrap();
     std::fs::write(b.join("extra"), b"x").unwrap();
     assert!(verify(&a, &b).is_err());
+}
+
+#[test]
+fn cancelling_before_the_switch_deletes_what_was_built_and_never_touches_the_plain_home() {
+    use std::cell::Cell;
+    // cancel at each point before the old home is put aside: during the copy, and right after each step
+    for at in ["start", "container", "copy", "copied", "verified"] {
+        let r = rig(&format!("cancel-{at}"));
+        let h = r.home("amy");
+        populate(&h);
+        let asks = Cell::new(0u32);
+        let stage = Cell::new("start");
+        let cancel = || {
+            asks.set(asks.get() + 1);
+            stage.get() == at && match at {
+                "start" | "container" | "copied" | "verified" => true,
+                "copy" => asks.get() > 3,
+                _ => true,
+            }
+        };
+        let e = run_cancellable(
+            &r.env,
+            "amy",
+            "amy-pass-1",
+            &mut |s| {
+                stage.set(match s {
+                    Step::ContainerMade => "container",
+                    Step::StagingMounted | Step::CopyProgress(_) => "copy",
+                    Step::Copied => "copied",
+                    Step::Verified => "verified",
+                    _ => stage.get(),
+                });
+                true
+            },
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(matches!(e, HomeError::Cancelled), "{at}: {e:?}");
+        // everything built is gone and the plain home is exactly as it was
+        assert!(!r.env.exists("amy") && !r.env.dir().join("amy.building").exists() && !r.env.dir().join("amy.staging").exists(), "{at}");
+        same(&h, &h);
+        assert_eq!(std::fs::read(h.join("Documents/a.txt")).unwrap(), b"alpha", "{at}");
+        assert!(!r.env.plain_copy_path("amy").exists(), "{at}: the old home was never put aside");
+        assert_eq!(r.env.status("amy").state, State::NotSetUp, "{at}");
+    }
+}
+
+#[test]
+fn a_cancel_is_not_asked_once_the_old_home_is_being_put_aside_and_the_move_finishes() {
+    let r = rig("cancel-late");
+    let h = r.home("amy");
+    populate(&h);
+    let late = std::cell::Cell::new(false);
+    let rep = run_cancellable(
+        &r.env,
+        "amy",
+        "amy-pass-1",
+        &mut |s| {
+            if s == Step::StagingUnmounted {
+                late.set(true);
+            }
+            true
+        },
+        &|| false,
+    );
+    assert!(rep.is_ok());
+    // a cancel that turns true only after the switch began is never asked: the move completes
+    let r2 = rig("cancel-late2");
+    let h2 = r2.home("amy");
+    populate(&h2);
+    let flag = std::cell::Cell::new(false);
+    let rep = run_cancellable(
+        &r2.env,
+        "amy",
+        "amy-pass-1",
+        &mut |s| {
+            if s == Step::PlainRenamed {
+                flag.set(true);
+            }
+            true
+        },
+        &|| flag.get(),
+    )
+    .unwrap();
+    assert_eq!(rep.files, 5);
+    assert_eq!(r2.env.status("amy").state, State::Open);
+    assert!(late.get());
 }

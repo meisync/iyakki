@@ -168,3 +168,43 @@ fn a_backend_that_cannot_install_says_so_and_nothing_is_fetched_as_installed() {
     let t = BuildTools::new(Arc::new(crate::assign::tests_support::NoTools), Arc::new(NoInstall(inner)));
     assert!(t.call(INSTALL_TOOL, &json!({"machine_type": "pc-x86_64"})).unwrap_err().contains("cannot install"));
 }
+
+/// A device that says what it is (its image variant with the CPU family) in front of the fake store.
+struct Device(Fake, &'static str, &'static str);
+
+impl Backend for Device {
+    fn config(&self) -> Option<Cfg> { self.0.config() }
+    fn set_config(&self, c: &Cfg) -> Result<(), String> { self.0.set_config(c) }
+    fn list(&self, c: &Cfg) -> Result<List, String> { self.0.list(c) }
+    fn fetch(&self, c: &Cfg, b: &Build, d: &std::path::Path) -> Result<String, String> { self.0.fetch(c, b, d) }
+    fn out_root(&self) -> std::path::PathBuf { self.0.out_root() }
+    fn install(&self, d: &std::path::Path, who: &str) -> Result<String, String> { self.0.install(d, who) }
+    fn machine_type(&self) -> Option<String> { crate::store::buildshare::machine_type_for(self.1, self.2) }
+    fn cpu(&self) -> Option<String> { Some(self.2.to_string()) }
+}
+
+fn device_rig(variant: &'static str, cpu: &'static str) -> BuildTools {
+    let mk = |v: &str, id: &str| Build { variant: v.into(), channel: "dev".into(), build_id: id.into(), version: "0.2.0".into(), pack_variant: "pc".into(), commit: "c0ffee".into(), published: 1, seq: 1, total: 10, files: vec![BFile { path: "update.json".into(), sha256: "a".repeat(64), size: 10 }], needs: vec![] };
+    let list = List { builds: vec![mk("pc-x86_64", "x86"), mk("pc-aarch64", "arm"), mk("mac-aarch64", "apple")], ..Default::default() };
+    let f = Fake { cfg: Mutex::new(Some(Cfg { url: "http://10.0.0.5:30580".into(), key: KEY.into(), token_file: String::new() })), list: Ok(list), fetched: Mutex::new(vec![]), held: None, installed: Mutex::new(vec![]) };
+    BuildTools::new(Arc::new(crate::assign::tests_support::NoTools), Arc::new(Device(f, variant, cpu)))
+}
+
+#[test]
+fn a_tool_without_a_machine_type_takes_this_devices_own_and_a_build_for_another_processor_is_never_installed() {
+    // an ARM 64 PC and an Apple Silicon Mac each get their own build by default
+    let arm = device_rig("pc", "aarch64");
+    assert!(arm.preview(INSTALL_TOOL, &json!({})).unwrap().contains("arm"));
+    assert!(arm.call(INSTALL_TOOL, &json!({})).unwrap().contains("Installed."));
+    let apple = device_rig("mac", "aarch64");
+    assert!(apple.preview(FETCH_TOOL, &json!({})).unwrap().contains("apple"));
+    let x86 = device_rig("pc-x86_64", "x86_64");
+    assert!(x86.preview(INSTALL_TOOL, &json!({})).unwrap().contains("x86"));
+    // naming another family: a download is allowed, an install is refused before anything is fetched
+    assert!(x86.call(FETCH_TOOL, &json!({"machine_type": "pc-aarch64"})).unwrap().contains("Fetched build arm"));
+    let e = x86.call(INSTALL_TOOL, &json!({"machine_type": "pc-aarch64"})).unwrap_err();
+    assert!(e.contains("another kind of processor") && e.contains("aarch64") && !e.contains("Fetched"), "{e}");
+    // a device that cannot say what it is needs the name
+    let (plain, _) = rig(true);
+    assert!(plain.call(INSTALL_TOOL, &json!({})).unwrap_err().contains("say the machine type"));
+}

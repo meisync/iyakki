@@ -268,6 +268,39 @@ impl Store {
                 can_toggle: false,
             });
         }
+        // 7. the extension members of installed bundles (kept data that passed its schema; they go with their bundle)
+        for k in super::bundle::extension_lines(self) {
+            let key = format!("bundle-ext//{}/{}", k.bundle, k.id);
+            if out.iter().any(|e| e.key == key) {
+                continue;
+            }
+            out.push(Entry {
+                key,
+                ty: Type::Extension,
+                kind: "extension".into(),
+                name: k.id.clone(),
+                title: k.value.name.clone(),
+                version: "-".into(),
+                level: Level::Unsigned,
+                trust_label: "a member of an installed bundle".into(),
+                status: Status::On,
+                size: 0,
+                installed_at: 0,
+                scope: Scope::Shared,
+                publisher: String::new(),
+                license: String::new(),
+                source: format!("the bundle {}", k.bundle),
+                summary: k.value.summary.clone(),
+                target: k.value.target.clone(),
+                ext_kind: Some("bundle".into()),
+                open: None,
+                permissions: vec![],
+                files: vec![],
+                categories: vec![],
+                removable: false,
+                can_toggle: false,
+            });
+        }
         let _ = (actor, scope_key(&Scope::Shared), newer("1", "0"));
         out
     }

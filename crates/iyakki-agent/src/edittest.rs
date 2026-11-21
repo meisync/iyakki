@@ -8,7 +8,6 @@
 
 pub use iyakki_shared::edittest::{MAX_SECONDS, TestPlan, TestRun, plan, up_to};
 use std::io::Read;
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -84,17 +83,16 @@ pub fn describe_bytes(b: &[u8]) -> String {
 
 /// Run the plan. `cancel` stops it for real (the process is killed).
 pub fn run(p: &TestPlan, seconds: u64, cancel: &AtomicBool) -> Result<TestRun, String> {
-    let mut cmd = Command::new(&p.program);
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    let mut child = cmd
+    use iyakki_core_local::starters_launch::{Launch, Stream};
+    let mut child = Launch::new(&p.program)
+        .own_group()
         .args(&p.args)
-        .current_dir(&p.cwd)
+        .cwd(&p.cwd)
         .env("NO_COLOR", "1")
         .env("PYTHONDONTWRITEBYTECODE", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdin(Stream::Null)
+        .stdout(Stream::Piped)
+        .stderr(Stream::Piped)
         .spawn()
         .map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { format!("{} is not installed on this computer", p.program) } else { format!("{}: {e}", p.program) })?;
     // a test run started for a person is hers in SYSTEM's "My processes" while it runs (see `procowner`)
@@ -136,7 +134,7 @@ pub fn run(p: &TestPlan, seconds: u64, cancel: &AtomicBool) -> Result<TestRun, S
                 if stopped || timed_out {
                     // the whole group: cargo's test programs and a script's children end with it
                     #[cfg(unix)]
-                    let _ = Command::new("kill").args(["-KILL", &format!("-{}", child.id())]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+                    iyakki_core_local::starters::kill_group(child.id());
                     let _ = child.kill();
                     let _ = child.wait();
                     break None;

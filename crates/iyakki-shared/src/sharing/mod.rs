@@ -13,6 +13,8 @@ use std::net::Ipv4Addr;
 pub const TABLE: &str = "iyakki_share";
 /// The bridge-family table that keeps the ports of a bridged downstream from reaching each other ([`rules::bridge_table_spec`]).
 pub const BRIDGE_TABLE: &str = "iyakki_share_br";
+/// The interface of this computer's own Bluetooth access point (phones connect to it); the name is the Bluetooth code's.
+pub const NAP_IFACE: &str = iyakki_devctl::BT_NAP_IFACE;
 pub const DEFAULT_IDLE_HOURS: u8 = 2;
 pub const MAX_IDLE_HOURS: u8 = 72;
 pub const LEASE_SECS: u32 = 3600;
@@ -30,7 +32,7 @@ pub enum LinkKind {
     Usb,
     Thunderbolt,
     Wifi,
-    /// This computer as a Bluetooth network access point (phones connect to it). Not built yet.
+    /// This computer as a Bluetooth network access point (phones connect to it): the interface `iyaknap0` of [`iyakki_devctl::nap_server`].
     BluetoothNap,
     /// This computer as a client of a paired phone's tethering (the uplink side): the interface `iyakbt0` of [`iyakki_devctl::bt_pan`].
     BluetoothPanu,
@@ -109,11 +111,14 @@ pub struct Request {
     pub by_admin: bool,
     /// Share through a Wi-Fi hotspot of this computer's own (the access point is made next to the Wi-Fi client; `via` is then the hotspot).
     pub wifi: bool,
+    /// Share through this computer's Bluetooth network access point (`iyaknap0`; phones connect to it). The service starts the
+    /// access point first, as it does for the Wi-Fi hotspot; `via` is then the access point's interface (F-HOTSPOT-15).
+    pub nap: bool,
 }
 
 impl Default for Request {
     fn default() -> Request {
-        Request { id: 0, on: false, uplink: None, via: None, idle_hours: DEFAULT_IDLE_HOURS, isolate: true, allow_lan: false, by: String::new(), by_admin: false, wifi: false }
+        Request { id: 0, on: false, uplink: None, via: None, idle_hours: DEFAULT_IDLE_HOURS, isolate: true, allow_lan: false, by: String::new(), by_admin: false, wifi: false, nap: false }
     }
 }
 
@@ -285,14 +290,5 @@ pub fn dir(data: &std::path::Path) -> std::path::PathBuf {
     data.join("share")
 }
 
-/// The kernel's IPv4 forwarding switch: the one place it is read and written (internet sharing and the outbound-only Linux apps network).
-pub fn ip_forward_get() -> Result<String, String> {
-    std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward").map(|s| s.trim().to_string()).map_err(|e| format!("ip_forward: {e}"))
-}
-
-pub fn ip_forward_set(value: &str) -> Result<(), String> {
-    if !matches!(value, "0" | "1") {
-        return Err("not a forwarding value".into());
-    }
-    std::fs::write("/proc/sys/net/ipv4/ip_forward", value).map_err(|e| format!("ip_forward: {e}"))
-}
+/// The kernel's IPv4 forwarding switch lives in the base crate `iyakki-linuxinit` (one owner); kept here at the old path.
+pub use iyakki_linuxinit::{ip_forward_get, ip_forward_set};

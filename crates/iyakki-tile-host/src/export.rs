@@ -122,6 +122,61 @@ pub fn to_json(list: &DisplayList, width: i32, height: i32) -> String {
     o
 }
 
+/// The other way round (F-CLOUD-76): a frame a tenant's web service sent (`to_json`'s document) as a display list, checked by the ABI's
+/// own limits (the list is encoded and decoded again, so a list the codec would refuse is refused here). Returns the list and the
+/// surface size it was drawn for. Unknown operations, a missing field and a colour that is not `#rrggbb[aa]` are errors in words.
+pub fn from_json(v: &serde_json::Value) -> Result<(DisplayList, i32, i32), String> {
+    use iyakki_tile_abi::Role;
+    let num = |o: &serde_json::Value, k: &str| -> Result<i32, String> { o.get(k).and_then(|x| x.as_i64()).and_then(|x| i32::try_from(x).ok()).ok_or_else(|| format!("\"{k}\" is a whole number")) };
+    let rect = |o: &serde_json::Value| -> Result<Rect, String> { Ok(Rect::new(num(o, "x")?, num(o, "y")?, num(o, "w")?.max(0), num(o, "h")?.max(0))) };
+    let colour = |o: &serde_json::Value| -> Result<Color, String> {
+        let t = o.get("color").and_then(|c| c.as_str()).and_then(|c| c.strip_prefix('#')).ok_or("\"color\" is a colour like #rrggbbaa")?;
+        if !(t.len() == 6 || t.len() == 8) || !t.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("\"color\" is a colour like #rrggbbaa".into());
+        }
+        let b = |i: usize| u8::from_str_radix(&t[i..i + 2], 16).unwrap_or(0);
+        Ok(Color(b(0), b(2), b(4), if t.len() == 8 { b(6) } else { 255 }))
+    };
+    let (w, h) = (num(v, "width")?, num(v, "height")?);
+    let ops = v.get("ops").and_then(|o| o.as_array()).ok_or("the frame has no \"ops\"")?;
+    let mut list = DisplayList::new();
+    for o in ops {
+        let name = o.get("op").and_then(|n| n.as_str()).ok_or("an operation has no name")?;
+        let op = match name {
+            "rect" => Op::Rect { r: rect(o)?, color: colour(o)? },
+            "round_rect" => Op::RoundRect { r: rect(o)?, radius: num(o, "radius")?, color: colour(o)? },
+            "outline" => Op::Outline { r: rect(o)?, thickness: num(o, "thickness")?, color: colour(o)? },
+            "line" => Op::Line { x1: num(o, "x1")?, y1: num(o, "y1")?, x2: num(o, "x2")?, y2: num(o, "y2")?, thickness: num(o, "thickness")?, color: colour(o)? },
+            "text" => Op::Text { x: num(o, "x")?, y: num(o, "y")?, face: u8::try_from(num(o, "face")?).map_err(|_| "\"face\" is a small number")?, size: u32::try_from(num(o, "size")?).map_err(|_| "\"size\" is positive")?, color: colour(o)?, text: o.get("text").and_then(|t| t.as_str()).ok_or("text has no \"text\"")?.to_string() },
+            "image" => Op::Image { handle: u32::try_from(num(o, "handle")?).map_err(|_| "\"handle\" is positive")?, r: rect(o)? },
+            "push_clip" => Op::PushClip { r: rect(o)? },
+            "pop_clip" => Op::PopClip,
+            "hit" => Op::Hit { id: u32::try_from(num(o, "id")?).map_err(|_| "\"id\" is positive")?, r: rect(o)? },
+            "access" => {
+                let role = match num(o, "role")? {
+                    1 => Role::Button,
+                    2 => Role::Field,
+                    3 => Role::ListItem,
+                    4 => Role::Toggle,
+                    5 => Role::Tab,
+                    6 => Role::Heading,
+                    7 => Role::Slider,
+                    8 => Role::Link,
+                    9 => Role::Text,
+                    _ => return Err("an access node has an unknown role".into()),
+                };
+                Op::Access { id: u32::try_from(num(o, "id")?).map_err(|_| "\"id\" is positive")?, role, r: rect(o)?, name: o.get("name").and_then(|t| t.as_str()).unwrap_or("").to_string(), value: o.get("value").and_then(|t| t.as_str()).unwrap_or("").to_string(), flags: u8::try_from(num(o, "flags").unwrap_or(0)).map_err(|_| "\"flags\" is a small number")? }
+            }
+            other => return Err(format!("the frame has an operation this version does not know: {other}")),
+        };
+        list.push(op);
+    }
+    // the ABI's own limits decide: what the codec would not carry is not drawn
+    let bytes = list.encode().map_err(|e| format!("the frame is over the tile limits: {e:?}"))?;
+    let list = DisplayList::decode(&bytes).map_err(|e| format!("the frame is over the tile limits: {e:?}"))?;
+    Ok((list, w, h))
+}
+
 fn fill(c: Color) -> String {
     format!("fill=\"#{:02x}{:02x}{:02x}\" fill-opacity=\"{:.3}\"", c.0, c.1, c.2, c.3 as f32 / 255.0)
 }

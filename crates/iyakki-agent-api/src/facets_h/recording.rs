@@ -162,9 +162,9 @@ impl ServicesHandle for RecordingServices {
         self.note("flows_facet");
         self.inner.flows_facet()
     }
-    fn flows_panel(&self, user: &str, policy: &iyakki_sec::policy::Policy) -> Option<Arc<dyn crate::FlowsPanel>> {
-        self.note("flows_panel");
-        self.inner.flows_panel(user, policy)
+    fn flows_jobs(&self, user: &str, policy: &iyakki_sec::policy::Policy) -> Option<Arc<dyn crate::FlowsJobs>> {
+        self.note("flows_jobs");
+        self.inner.flows_jobs(user, policy)
     }
     fn gemini_live(&self) -> Arc<dyn GeminiLive> {
         self.note("gemini_live");
@@ -306,6 +306,46 @@ impl ServicesHandle for RecordingServices {
         self.note("sftp_status_lines");
         self.inner.sftp_status_lines(data)
     }
+    fn scope_check_read(&self, policy: &iyakki_sec::policy::Policy, user: &str, p: &std::path::Path) -> Result<(), String> {
+        self.note("scope_check_read");
+        self.inner.scope_check_read(policy, user, p)
+    }
+    fn scope_check_write(&self, policy: &iyakki_sec::policy::Policy, user: &str, p: &std::path::Path) -> Result<(), String> {
+        self.note("scope_check_write");
+        self.inner.scope_check_write(policy, user, p)
+    }
+    fn scope_home_root(&self, user: &str, data_dir: &std::path::Path) -> std::path::PathBuf {
+        self.note("scope_home_root");
+        self.inner.scope_home_root(user, data_dir)
+    }
+    fn scope_home_root_for_writes(&self, user: &str, data_dir: &std::path::Path) -> std::path::PathBuf {
+        self.note("scope_home_root_for_writes");
+        self.inner.scope_home_root_for_writes(user, data_dir)
+    }
+    fn scope_system_home(&self, user: &str) -> Option<std::path::PathBuf> {
+        self.note("scope_system_home");
+        self.inner.scope_system_home(user)
+    }
+    fn scope_roots(&self, policy: &iyakki_sec::policy::Policy, user: &str, data_dir: &std::path::Path) -> iyakki_core_api::FileRoots {
+        self.note("scope_roots");
+        self.inner.scope_roots(policy, user, data_dir)
+    }
+    fn scope_roots_with_home(&self, policy: &iyakki_sec::policy::Policy, user: &str, data_dir: &std::path::Path, home: std::path::PathBuf) -> iyakki_core_api::FileRoots {
+        self.note("scope_roots_with_home");
+        self.inner.scope_roots_with_home(policy, user, data_dir, home)
+    }
+    fn scope_resolve(&self, cwd: &std::path::Path, input: &str) -> Result<std::path::PathBuf, String> {
+        self.note("scope_resolve");
+        self.inner.scope_resolve(cwd, input)
+    }
+    fn scope_resolve_for_write(&self, cwd: &std::path::Path, input: &str) -> Result<std::path::PathBuf, String> {
+        self.note("scope_resolve_for_write");
+        self.inner.scope_resolve_for_write(cwd, input)
+    }
+    fn scope_ensure_parent(&self, path: &std::path::Path) -> Result<(), String> {
+        self.note("scope_ensure_parent");
+        self.inner.scope_ensure_parent(path)
+    }
     fn show_all_ai(&self) -> bool {
         self.note("show_all_ai");
         self.inner.show_all_ai()
@@ -382,59 +422,83 @@ impl ServicesHandle for RecordingServices {
         self.note("wrap_fleet_tools");
         self.inner.wrap_fleet_tools(inner, os, gate, audit)
     }
-    fn settings(&self) -> &Arc<Mutex<iyakki_shared::settings::SettingsStore>> {
+    fn settings(&self) -> SettingsRef {
         self.note("settings");
         self.inner.settings()
     }
-    fn inbox(&self) -> &iyakki_shared::inbox::Inbox {
+    fn settings_api(&self) -> Arc<dyn SettingsApi> {
+        self.note("settings_api");
+        self.inner.settings_api()
+    }
+    fn inbox(&self) -> Arc<dyn crate::member_stores::InboxApi> {
         self.note("inbox");
         self.inner.inbox()
     }
-    fn calendar(&self) -> &iyakki_shared::calendar::CalendarStore {
+    fn calendar(&self) -> Arc<dyn crate::member_stores::CalendarApi> {
         self.note("calendar");
         self.inner.calendar()
     }
-    fn study(&self) -> &iyakki_shared::study::StudyStore {
+    fn study(&self) -> Arc<dyn crate::member_stores::StudyApi> {
         self.note("study");
         self.inner.study()
+    }
+    fn study_calendar(&self) -> Arc<dyn crate::study_calendar::StudyCalendarApi> {
+        self.note("study_calendar");
+        self.inner.study_calendar()
     }
     fn secrets(&self) -> &iyakki_shared::vault::Secrets {
         self.note("secrets");
         self.inner.secrets()
     }
-    fn kb(&self) -> &Arc<Mutex<iyakki_memx::kb::KnowledgeBase>> {
+    fn secrets_api(&self) -> Arc<dyn crate::member_stores::SecretsApi> {
+        self.note("secrets_api");
+        self.inner.secrets_api()
+    }
+    fn kb(&self) -> Arc<dyn crate::member_stores::KnowledgeBaseApi> {
         self.note("kb");
         self.inner.kb()
     }
-    fn devwatch(&self) -> &Arc<iyakki_shared::devwatch::DeviceWatch> {
+    fn kb_source(&self) -> Arc<dyn iyakki_memx::kb::KbSource> {
+        self.note("kb_source");
+        self.inner.kb_source()
+    }
+    fn devwatch(&self) -> Arc<dyn crate::member_stores::DevWatchApi> {
         self.note("devwatch");
         self.inner.devwatch()
     }
-    fn browser(&self) -> &iyakki_shared::browserconsent::BrowserState {
+    fn browser(&self) -> Arc<dyn crate::member_stores::BrowserStateApi> {
         self.note("browser");
         self.inner.browser()
     }
-    fn screen(&self) -> &iyakki_shared::screencap::ScreenCapture {
+    fn browser_consent(&self) -> Arc<dyn crate::member_stores::ConsentApi> {
+        self.note("browser_consent");
+        self.inner.browser_consent()
+    }
+    fn browser_jobs(&self) -> Arc<dyn crate::member_stores::BrowserJobsApi> {
+        self.note("browser_jobs");
+        self.inner.browser_jobs()
+    }
+    fn screen(&self) -> Arc<dyn crate::member_stores::ScreenCaptureApi> {
         self.note("screen");
         self.inner.screen()
     }
-    fn camera(&self) -> &iyakki_shared::camtools::CameraHub {
+    fn camera(&self) -> Arc<dyn crate::member_stores::CameraHubApi> {
         self.note("camera");
         self.inner.camera()
     }
-    fn devtools(&self) -> &iyakki_shared::devtools::DevTools {
+    fn devtools(&self) -> Arc<dyn crate::member_stores::DevToolsApi> {
         self.note("devtools");
         self.inner.devtools()
     }
-    fn ext_status(&self) -> &Arc<iyakki_shared::extagent::StatusCache> {
+    fn ext_status(&self) -> Arc<dyn crate::member_stores::ExtStatusApi> {
         self.note("ext_status");
         self.inner.ext_status()
     }
-    fn secret_requests(&self) -> &iyakki_shared::secretreq::SecretRequests {
+    fn secret_requests(&self) -> Arc<dyn crate::member_stores::SecretRequestsApi> {
         self.note("secret_requests");
         self.inner.secret_requests()
     }
-    fn usage(&self) -> &iyakki_shared::usagelog::UsageLog {
+    fn usage(&self) -> Arc<dyn crate::member_stores::UsageLogApi> {
         self.note("usage");
         self.inner.usage()
     }
@@ -502,9 +566,21 @@ impl ServicesHandle for RecordingServices {
         self.note("msg_mirror_tick");
         self.inner.msg_mirror_tick(user, audit)
     }
+    fn rag_refresh_tick(&self, user: &str, policy: &iyakki_sec::policy::Policy, audit: iyakki_shared::gitkeys::AuditFn) -> bool {
+        self.note("rag_refresh_tick");
+        self.inner.rag_refresh_tick(user, policy, audit)
+    }
     fn msg_offer_tools(&self, tools: Arc<dyn iyakki_shared::agent::Tools>, user: &str, audit: iyakki_shared::gitkeys::AuditFn) -> Arc<dyn iyakki_shared::agent::Tools> {
         self.note("msg_offer_tools");
         self.inner.msg_offer_tools(tools, user, audit)
+    }
+    fn page_passkeys(&self, user: &str, audit: iyakki_shared::gitkeys::AuditFn) -> Option<Arc<std::sync::Mutex<dyn crate::PagePasskeyHost>>> {
+        self.note("page_passkeys");
+        self.inner.page_passkeys(user, audit)
+    }
+    fn page_push(&self, user: &str, audit: iyakki_shared::gitkeys::AuditFn) -> Option<Arc<std::sync::Mutex<dyn crate::PagePushHost>>> {
+        self.note("page_push");
+        self.inner.page_push(user, audit)
     }
     fn msg_prompt_rules(&self, user: &str) -> String {
         self.note("msg_prompt_rules");

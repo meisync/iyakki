@@ -19,8 +19,11 @@ use std::sync::Arc;
 
 /// The link kind from what the kernel says about the interface.
 pub fn kind_of(name: &str, driver: &str, wireless: bool) -> LinkKind {
-    if name == iyakki_devctl::BT_PAN_IFACE {
+    if name == iyakki_core_local::btshare::PAN_IFACE {
         return LinkKind::BluetoothPanu;
+    }
+    if name == iyakki_core_local::btshare::NAP_IFACE {
+        return LinkKind::BluetoothNap;
     }
     match classify(name, driver, wireless) {
         Kind::Ethernet => LinkKind::Ethernet,
@@ -42,16 +45,16 @@ fn read(p: &str) -> String {
 
 /// Every network interface except `lo`, with its state, addresses, default-route flag and byte counters.
 pub fn list_interfaces() -> Vec<IfaceInfo> {
-    let routes = gateways_from_route(&read("/proc/net/route"));
+    let routes = gateways_from_route(&iyakki_core_local::net::ipv4_routes_text().trim().to_string());
     let addrs = sys::ipv4_addresses();
-    let routed = super::plan::routed_ranges_from(&read("/proc/net/route"));
-    let mut names: Vec<String> = std::fs::read_dir("/sys/class/net").map(|d| d.flatten().filter_map(|e| e.file_name().into_string().ok()).collect()).unwrap_or_default();
+    let routed = super::plan::routed_ranges_from(&iyakki_core_local::net::ipv4_routes_text().trim().to_string());
+    let mut names: Vec<String> = std::fs::read_dir(crate::sysinfo::net_class_root()).map(|d| d.flatten().filter_map(|e| e.file_name().into_string().ok()).collect()).unwrap_or_default();
     names.sort();
     names
         .into_iter()
         .filter(|n| n != "lo" && valid_iface(n))
         .map(|n| {
-            let base = format!("/sys/class/net/{n}");
+            let base = crate::sysinfo::net_class_root().join(&n).to_string_lossy().into_owned();
             let driver = std::fs::read_link(format!("{base}/device/driver")).ok().and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned())).unwrap_or_default();
             let wireless = Path::new(&format!("{base}/wireless")).exists() || Path::new(&format!("{base}/phy80211")).exists();
             let flags = u32::from_str_radix(read(&format!("{base}/flags")).trim_start_matches("0x"), 16).unwrap_or(0);
@@ -78,7 +81,66 @@ pub fn wifi_ap_available() -> bool {
     use iyakki_hotspot::caps::{can_host_ap, ApMode, Want, BAND_2GHZ};
     let Ok(mut sock) = Nl80211Socket::open(std::time::Duration::from_secs(2)) else { return false };
     let Ok(pr) = probe(&mut sock) else { return false };
-    pr.phys.iter().any(|p| can_host_ap(p, &Want { concurrent_sta: true, ..Want::new(BAND_2GHZ, &pr.country) }).is_ok_and(|plan| plan.mode == ApMode::PskOffload))
+    pr.phys.iter().any(|p| can_host_ap(p, &Want { concurrent_sta: true, ..Want::new(BAND_2GHZ, &pr.country) }).is_ok_and(|plan| matches!(plan.mode, ApMode::PskOffload | ApMode::Software)))
+}
+
+/// Can this computer be a Bluetooth network access point: a powered controller (the server is our own code on the L2CAP socket and a
+/// TAP interface, so the kernel needs no BNEP support)? `Err` is the reason in plain words.
+pub fn nap_available() -> Result<(), String> {
+    iyakki_core_local::btshare::controller_ready()
+}
+
+/// How long the computer is visible to phones after a Bluetooth share starts (the window closes by itself).
+pub const NAP_VISIBLE_SECS: u16 = 180;
+
+/// Let phones find and pair with this computer (`on`) or take that away again. Best effort: a controller that refuses is logged, and a
+/// phone that is paired already still connects.
+fn nap_visible(on: bool) {
+    let result = iyakki_core_local::btshare::set_visible(on, NAP_VISIBLE_SECS);
+    if let Err(e) = result {
+        log::warn!("bluetooth sharing: could not change the visibility to phones: {e}");
+    }
+}
+
+/// Switch the Bluetooth sharing service on and wait (`tries` looks, `pause` between them) until its interface exists. When the
+/// service reports why it could not start, that line is the error; when it never shows up the error says so. The service is left
+/// on only when it worked.
+pub fn nap_start(svc: &dyn NapSwitch, isolate: bool, tries: u32, pause: &mut dyn FnMut(u32), present: &dyn Fn() -> bool) -> Result<String, String> {
+    svc.see_each_other(!isolate);
+    svc.set_on(true);
+    for n in 0..tries {
+        if present() {
+            return Ok(iyakki_core_local::btshare::NAP_IFACE.into());
+        }
+        let why = svc.why_not();
+        if !why.is_empty() {
+            svc.set_on(false);
+            return Err(why);
+        }
+        pause(n);
+    }
+    svc.set_on(false);
+    Err("The Bluetooth access point did not come up in time.".into())
+}
+
+/// The Bluetooth sharing service as [`nap_start`] needs it (tests use a fake; the real one is `iyakki_core_local::btshare::Nap`).
+pub trait NapSwitch {
+    fn see_each_other(&self, on: bool);
+    fn set_on(&self, on: bool);
+    /// Why it could not run, in words (empty: no complaint).
+    fn why_not(&self) -> String;
+}
+
+impl NapSwitch for iyakki_core_local::btshare::Nap {
+    fn see_each_other(&self, on: bool) {
+        self.phones_see_each_other(on);
+    }
+    fn set_on(&self, on: bool) {
+        iyakki_core_local::btshare::Nap::set_on(self, on);
+    }
+    fn why_not(&self) -> String {
+        iyakki_core_local::btshare::Nap::why_not(self)
+    }
 }
 
 /// Why [`wifi_ap_available`] is false, in plain words for the Settings page (`None`: it is available). Asks the kernel about every radio.
@@ -226,11 +288,11 @@ struct RealIp;
 
 impl IpRoute for RealIp {
     fn show_default(&self, client: &str) -> Option<String> {
-        let out = std::process::Command::new("ip").args(["-4", "route", "show", "default", "dev", client]).output().ok()?;
-        Some(String::from_utf8_lossy(&out.stdout).to_string())
+        let out = iyakki_core_local::starters::ip_route_show_default(client)?;
+        Some(out)
     }
     fn route(&self, args: &[&str]) -> bool {
-        std::process::Command::new("ip").arg("-4").arg("route").args(args).status().is_ok_and(|s| s.success())
+        iyakki_core_local::starters::ip_route(args)
     }
 }
 
@@ -527,6 +589,21 @@ impl Os for RealOs {
         let up = started?;
         lines.iter().for_each(|l| log::info!("{l}"));
         Ok(up.ifname)
+    }
+    fn nap_available(&mut self) -> Result<(), String> {
+        nap_available()
+    }
+    fn nap_start(&mut self, isolate: bool) -> Result<String, String> {
+        // production wait for the interface to appear (bounded: 40 looks of 100 ms)
+        let pause = |_: u32| std::thread::sleep(std::time::Duration::from_millis(100)); // flaky-ok: production code, not a test
+        let up = nap_start(&iyakki_core_local::btshare::Nap::shared(), isolate, 40, &mut |n| pause(n), &|| iyakki_core_local::netfacts::iface_exists(iyakki_core_local::btshare::NAP_IFACE))?;
+        // a phone that is not paired yet must be able to find this computer: visible for a few minutes only
+        nap_visible(true);
+        Ok(up)
+    }
+    fn nap_stop(&mut self) {
+        iyakki_core_local::btshare::Nap::shared().set_on(false);
+        nap_visible(false);
     }
     fn wifi_ap_stop(&mut self) {
         restore_default_routes();

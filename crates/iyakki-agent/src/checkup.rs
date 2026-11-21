@@ -43,9 +43,9 @@ pub use iyakki_shared::checkup::{start_mic, CamHeard, MicHeard, MicStart, Outcom
 
 /// The real machine. `screens` come from the shell (it drives the displays); everything else is read here.
 pub fn read_inventory(screens: Vec<ScreenOut>) -> Inventory {
-    let proc_root = Path::new("/proc");
-    let sys = Path::new("/sys");
-    let (keyboards, pointers, touchscreens) = count_inputs(&std::fs::read_to_string("/proc/bus/input/devices").unwrap_or_default());
+    let proc_root = Path::new(iyakki_core_local::kernelfacts::PROC);
+    let sys = Path::new(iyakki_core_local::kernelfacts::SYS);
+    let (keyboards, pointers, touchscreens) = count_inputs(&iyakki_core_local::kernelfacts::input_devices());
     let sound_chosen = String::new();
     let (eth, wifi) = read_adapters(sys);
     let (bluetooth, bluetooth_blocked, wifi_blocked) = read_radios(sys);

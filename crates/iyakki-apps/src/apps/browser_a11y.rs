@@ -64,6 +64,9 @@ pub(super) struct Reading {
     due: u64,
 }
 
+/// First of the regions of the page's headings, pictures and landmarks (`Event::Tab`): a press puts the cursor there.
+const SHAPE_TAB: usize = 8400;
+const SHAPE_MAX: usize = 160;
 /// First row of the list's clickable rows (`Event::Tab`).
 const ROW_TAB: usize = 8000;
 const ROWS_MAX: usize = 300;
@@ -88,6 +91,9 @@ pub(super) struct A11y {
     last_status: String,
     ticks: u32,
     summary_for: u64,
+    /// Where the headings, pictures and landmarks of the page lie on the drawn page, found once per drawn page:
+    /// (visit, number of drawn pieces, node and rectangle in page coordinates).
+    shape: Option<(u64, usize, Vec<(usize, R)>)>,
 }
 
 impl A11y {
@@ -107,6 +113,7 @@ impl A11y {
             last_status: String::new(),
             ticks: 0,
             summary_for: u64::MAX,
+            shape: None,
         }
     }
 }
@@ -212,7 +219,7 @@ fn doc_script(doc: &Doc) -> Vec<ReadItem> {
                         out.push(ReadItem { text: cells.join(", "), node: None });
                     }
                 }),
-                Block::Rule => {}
+                Block::Rule | Block::Mark { .. } => {}
             }
         }
     }
@@ -805,8 +812,49 @@ impl BrowserApp {
         }
     }
 
+    /// The headings, pictures and landmarks of the page are nodes of the toolkit's access tree too, with the words the page reader
+    /// says for them ("Heading level 2, Pricing"). They have no control of their own, so each gets a region over the words it
+    /// stands on (a press puts the cursor there). Only while the screen reader is on, and the places are found once per drawn page.
+    /// The regions go to the front of the frame's list so a link or control on top of them still gets its click.
+    fn a11y_shape_nodes(&mut self, g: &mut Gfx, view: R, col_x: f32, top: f32, s: f32) {
+        if !iyakki_uikit::access::prefs().screen_reader {
+            return;
+        }
+        let (Some(tree), Some(l)) = (self.a11y_tree(), self.layout.as_ref()) else { return };
+        let key = (self.a11y.serial, l.prims.len());
+        if self.a11y.shape.as_ref().is_none_or(|c| (c.0, c.1) != key) {
+            let mut found = Vec::new();
+            for (i, n) in tree.nodes.iter().enumerate() {
+                if found.len() >= SHAPE_MAX {
+                    break;
+                }
+                if n.link.is_some() || n.control.is_some() || !matches!(n.role, WRole::Heading | WRole::Image | WRole::Landmark(_)) {
+                    continue;
+                }
+                if let Some(r) = find_anchor(&l.prims, &norm(&n.anchor), occurrence(&tree, i)) {
+                    found.push((i, r));
+                }
+            }
+            self.a11y.shape = Some((key.0, key.1, found));
+        }
+        let Some((_, _, found)) = &self.a11y.shape else { return };
+        let first = g.hits.len();
+        for (k, (i, r)) in found.iter().enumerate() {
+            let r = R::new(col_x + r.x, top + r.y - self.scroll - 12.0 * s, r.w, r.h);
+            if r.y + r.h < view.y || r.y > view.y + view.h {
+                continue;
+            }
+            let words = speak_node(&tree.nodes[*i]);
+            g.hit(r, Event::Tab(SHAPE_TAB + k), &words);
+            iyakki_uikit::access::describe(&words, &Event::Tab(SHAPE_TAB + k), iyakki_uikit::access::Meta::new(iyakki_uikit::access::Role::Spoken, iyakki_uikit::access::State::default()).named(&words));
+        }
+        let mine = g.hits.split_off(first);
+        g.hits.splice(0..0, mine);
+    }
+
     pub(super) fn a11y_draw(&mut self, g: &mut Gfx, view: R, col_x: f32, top: f32, s: f32) {
         self.a11y_register();
+        self.a11y_shape_nodes(g, view, col_x, top, s);
         let (color, factor) = self.a11y_ring();
         if let (Some(tree), Some(n)) = (self.a11y_tree(), self.a11y.cursor) {
             if tree.nodes.get(n).is_some_and(|x| x.link.is_none() && x.control.is_none()) {
@@ -852,6 +900,12 @@ impl BrowserApp {
 
     /// A press on a row of the list.
     pub(super) fn a11y_event(&mut self, n: usize) -> bool {
+        if (SHAPE_TAB..SHAPE_TAB + SHAPE_MAX).contains(&n) {
+            if let Some(node) = self.a11y.shape.as_ref().and_then(|c| c.2.get(n - SHAPE_TAB)).map(|c| c.0) {
+                self.a11y_goto(node, None);
+            }
+            return true;
+        }
         if (ROW_TAB..ROW_TAB + ROWS_MAX).contains(&n) && self.a11y.rotor.is_some() {
             self.a11y_rotor_pick(n - ROW_TAB);
             return true;

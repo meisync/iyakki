@@ -133,7 +133,7 @@ fn keys_are_added_listed_by_fingerprint_and_removed_and_a_private_key_is_refused
     key(&mut a, &cx, Key::Enter);
     assert!(say(&a).contains("Key removed"), "{}", say(&a));
     assert!(sftp.status().keys.iter().all(|(_, k)| k.is_empty()));
-    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
     assert!(audit.contains("\"event\":\"sftp.key_add\"") && audit.contains("\"event\":\"sftp.key_remove\"") && audit.contains("\"detail\":\"root SHA256:") && !audit.contains("PRIVATE") && !audit.contains("ssh-ed25519"), "{audit}");
 }
 
@@ -171,7 +171,7 @@ fn starting_shows_a_card_with_what_becomes_reachable_and_only_y_starts_it_and_st
     assert!(a.modal.is_none() && !sftp.status().running);
     assert!(say(&a).contains("stopped"), "{}", say(&a));
     assert!(fw.0.lock().unwrap().iter().any(|l| l == "close"));
-    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
     assert!(audit.contains("\"event\":\"sftp.enable\"") && audit.contains("\"event\":\"sftp.disable\""), "{audit}");
 }
 

@@ -40,6 +40,58 @@ impl st::Sink for FakeSink {
     }
 }
 
+/// A speaker whose sounds play until the test opens the gate: "the reading is on" can be asserted at once, on any machine,
+/// because nothing ends the reading before the test lets it.
+struct GatedSink {
+    played: Mutex<Vec<Vec<u8>>>,
+    open: Arc<AtomicBool>,
+}
+
+struct GatedPlaying(Arc<AtomicBool>, bool);
+
+impl Playing for GatedPlaying {
+    fn is_playing(&mut self) -> bool {
+        !self.1 && !self.0.load(Ordering::SeqCst)
+    }
+    fn stop(&mut self) {
+        self.1 = true;
+    }
+}
+
+impl st::Sink for GatedSink {
+    fn play(&self, wav: &[u8]) -> Result<Box<dyn Playing>, String> {
+        self.played.lock().unwrap().push(wav.to_vec());
+        Ok(Box::new(GatedPlaying(self.open.clone(), false)))
+    }
+}
+
+/// The network: asks to a machine on the network (`.lan`) wait until the test opens the gate and then fail (the machine is not
+/// really there); everything else goes to the real transport. A reading of a remote voice is therefore on until the test lets it end,
+/// not until a loaded machine has run a failing DNS lookup.
+struct HeldRemote {
+    inner: iyakki_proxy::https::UreqUpstream,
+    open: Arc<AtomicBool>,
+}
+
+impl iyakki_proxy::Upstream for HeldRemote {
+    fn request(&self, method: &str, url: &str, headers: &[(String, String)], body: &[u8]) -> Result<iyakki_proxy::UpstreamResponse, String> {
+        if url.contains(".lan") {
+            iyakki_testkit::wait_until(Duration::from_secs(120), || self.open.load(Ordering::SeqCst));
+            return Err("the machine is not there".into());
+        }
+        self.inner.request(method, url, headers, body)
+    }
+}
+
+/// Opens the gate when the test ends, also when an assertion fails, so no reading thread outlives the test.
+struct OpenOnDrop(Arc<AtomicBool>);
+
+impl Drop for OpenOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 /// What the fake microphone does.
 #[derive(Clone)]
 struct CapCfg {
@@ -144,10 +196,13 @@ fn recs(mics: Vec<Mic>, product: &str) -> Arc<FakeRecs> {
 
 /// An admin with the fake Lemonade added the way Detect adds it (kokoro-v1 and Whisper-Base listed).
 fn bench(tag: &str) -> Bench {
+    bench_over(tag, Arc::new(iyakki_proxy::https::UreqUpstream::with_timeout(Duration::from_secs(60))))
+}
+
+fn bench_over(tag: &str, up: Arc<dyn iyakki_proxy::Upstream>) -> Bench {
     let fake = serve();
     let mut cx = cx_with_admin_store(tag);
     let d = temp_dir(&format!("{tag}-svc"));
-    let up: Arc<dyn iyakki_proxy::Upstream> = Arc::new(iyakki_proxy::https::UreqUpstream::with_timeout(Duration::from_secs(10)));
     cx.services = services_in(&d, up);
     cx.services.on_login("root", "rootpass12", true);
     cx.services.real().use_local_lemonade(&fake.base(), Some("2026.42.1"));
@@ -184,14 +239,19 @@ fn tick(a: &mut VoiceApp, cx: &AppCx) {
     std::thread::sleep(Duration::from_millis(10));
 }
 
+/// Ticks the app until `what` holds, within a wall-clock budget (a count of ticks ends early on a loaded machine, where
+/// the reading thread and the fake server are starved while the ticks are cheap).
 fn wait(a: &mut VoiceApp, cx: &AppCx, what: impl Fn(&VoiceApp) -> bool) {
-    for _ in 0..1500 {
+    let t0 = Instant::now();
+    loop {
         tick(a, cx);
         if what(a) {
             return;
         }
+        if t0.elapsed() >= Duration::from_secs(120) {
+            panic!("gave up waiting: status {:?}, reader {:?}", a.status, a.reader.status());
+        }
     }
-    panic!("gave up waiting: status {:?}, reader {:?}", a.status, a.reader.status());
 }
 
 fn draw(a: &mut VoiceApp, cx: &AppCx, w: u32, h: u32) -> Gfx {
@@ -215,15 +275,20 @@ fn status(a: &VoiceApp) -> String {
 
 #[test]
 fn pasted_text_is_read_with_kokoro_the_request_is_right_and_the_sound_is_played() {
-    let b = bench("voice-read");
-    let mut a = b.app();
+    let mut b = bench("voice-read");
+    let gate = Arc::new(AtomicBool::new(false));
+    let sink = Arc::new(GatedSink { played: Mutex::new(vec![]), open: gate.clone() });
+    b.sink = Arc::new(FakeSink { played: Mutex::new(vec![]), hold: Duration::ZERO });
+    let mut a = VoiceApp::with_rig(&b.cx, Rig { recorders: b.recs.clone(), sink: Some(sink.clone()), output: Arc::new(|| Ok(())) });
     assert_eq!(a.area(), Area::Read);
     assert!(a.voices.iter().any(|v| v.label == "Kokoro · af_heart") && a.voices.len() == 12, "{:?}", a.voices.iter().map(|v| &v.label).collect::<Vec<_>>());
     a.handle(&Event::Paste("Hello there. This is a test of reading aloud.".into()), &b.cx);
     assert_eq!(a.text.text, "Hello there. This is a test of reading aloud.");
     assert!(status(&a).contains("Pasted"), "{}", status(&a));
     click(&mut a, &b.cx, T_PLAY);
-    assert!(a.is_reading());
+    assert!(a.is_reading(), "the first sound is held by the gate, so the reading cannot be over yet");
+    wait(&mut a, &b.cx, |_| sink.played.lock().unwrap().len() == 1);
+    gate.store(true, Ordering::SeqCst);
     wait(&mut a, &b.cx, |a| !a.is_reading() && a.job.is_none());
     assert_eq!(status(&a), "Finished reading.");
     let bodies = b.spoken();
@@ -235,10 +300,10 @@ fn pasted_text_is_read_with_kokoro_the_request_is_right_and_the_sound_is_played(
         assert_eq!(body["response_format"], "wav");
         assert!(body.get("speed").is_none(), "normal speed sends no speed");
     }
-    let played = b.sink.played.lock().unwrap();
+    let played = sink.played.lock().unwrap();
     assert_eq!(played.len(), 2);
     assert!(played.iter().all(|w| &w[..4] == b"RIFF"));
-    let log = std::fs::read_to_string(b.cx.audit.path()).unwrap();
+    let log = std::fs::read_to_string(b.cx.audit.path_buf()).unwrap();
     assert!(log.contains("voice.read") && log.contains("lemonade:lemonade-local:kokoro-v1:af_sky") && !log.contains("Hello there"), "the audit names the voice, never the text: {log}");
 }
 
@@ -332,7 +397,10 @@ fn read_selection_reads_only_the_selected_part_and_lights_it_where_it_is() {
 
 #[test]
 fn a_remote_voice_asks_first_the_answer_is_kept_and_no_asks_sends_nothing() {
-    let b = bench("voice-consent");
+    let gate = Arc::new(AtomicBool::new(false));
+    let _open = OpenOnDrop(gate.clone());
+    let net = Arc::new(HeldRemote { inner: iyakki_proxy::https::UreqUpstream::with_timeout(Duration::from_secs(60)), open: gate });
+    let b = bench_over("voice-consent", net);
     add_remote(&b.cx, "lan-voice", &[("kokoro-v1", "tts")]);
     let mut a = b.app();
     let i = a.voices.iter().position(|v| v.id == "lemonade:lan-voice:kokoro-v1:af_sky").expect("the remote voice is listed");
@@ -354,21 +422,15 @@ fn a_remote_voice_asks_first_the_answer_is_kept_and_no_asks_sends_nothing() {
     click(&mut a, &b.cx, T_PLAY);
     key(&mut a, &b.cx, Key::Char('y'));
     assert_eq!(b.cx.voice_settings().remote_ok, vec!["http://lemon.lan:13305".to_string()]);
-    assert!(a.modal.is_none() && a.is_reading());
+    assert!(a.modal.is_none() && a.is_reading(), "the machine does not answer until the gate opens, so the reading is still on");
     a.stop_reading();
-    let log = std::fs::read_to_string(b.cx.audit.path()).unwrap();
+    let log = std::fs::read_to_string(b.cx.audit.path_buf()).unwrap();
     assert!(log.contains("voice.remote_ok") && log.contains("http://lemon.lan:13305"), "{log}");
     // asked once: the next reading goes straight on
     click(&mut a, &b.cx, T_PLAY);
     assert!(a.modal.is_none(), "no second card");
-    // it goes straight on: reading has started, or has already asked the (absent) machine for the speech: either shows the card was not needed,
-    // and which of the two a poll sees depends on how fast the reading thread ends
-    let t0 = std::time::Instant::now();
-    while !(a.is_reading() || !b.fake.bodies("/api/v1/audio/speech").is_empty()) && t0.elapsed() < std::time::Duration::from_secs(30) {
-        a.handle(&Event::Tick, &b.cx);
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert!(a.modal.is_none() && (a.is_reading() || !b.fake.bodies("/api/v1/audio/speech").is_empty()));
+    // it goes straight on: the reading is on (the machine is held by the gate), no second card
+    assert!(a.is_reading(), "the next reading goes straight on");
     a.stop_reading();
 }
 
@@ -497,7 +559,7 @@ fn only_accounts_with_voice_may_read_or_record() {
     click(&mut a, &b.cx, T_TAB_DICT);
     click(&mut a, &b.cx, T_REC);
     assert!(b.recs.started.lock().unwrap().is_empty() && !a.is_recording());
-    assert!(std::fs::read_to_string(b.cx.audit.path()).unwrap().contains("voice.denied"));
+    assert!(std::fs::read_to_string(b.cx.audit.path_buf()).unwrap().contains("voice.denied"));
 }
 
 // ------------------------------------------------------------------------------------------------ dictating
@@ -810,7 +872,7 @@ fn the_chosen_microphone_is_the_one_recorded() {
 #[test]
 fn the_keyboard_reaches_everything() {
     let mut b = bench("voice-keys");
-    b.sink = Arc::new(FakeSink { played: Mutex::new(vec![]), hold: Duration::from_millis(300) });
+    b.sink = Arc::new(FakeSink { played: Mutex::new(vec![]), hold: Duration::from_secs(60) });
     let mut a = b.app();
     // the text box has the keyboard to begin with: typing goes in it
     for c in "Typed words. Two sentences.".chars() {

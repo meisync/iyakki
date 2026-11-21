@@ -29,10 +29,9 @@ BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_RTP=y
 BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_RTPMANAGER=y
 BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_UDP=y
 
-# ---- NOT enabled yet (real screen share, step 9 of the plan): the engine reads the screen only through the desktop portal and PipeWire.
-# Uncomment when the in-house portal service and the frame feeder exist (docs/development/BROWSER-MEDIA-DEVICES.md, section 5):
-# BR2_PACKAGE_PIPEWIRE=y
-# BR2_PACKAGE_PIPEWIRE_GSTREAMER=y
+# ---- NOT enabled here (real screen share, step 9 of the plan): the engine reads the screen only through the desktop portal and PipeWire.
+# The in-house portal service and the frame feeder are written (screenportal.c); PipeWire comes with the opt-in WEB_SCREEN=1 fragment
+# iyakki_web_screen.fragment until the whole path has been run (docs/development/BROWSER-MEDIA-DEVICES.md, section 5).
 
 # ---- MediaRecorder (audio/webm, audio/ogg): encodebin; the transcode plugin of gst-plugins-bad is switched on in package/iyakki-web-media
 BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_ENCODING=y

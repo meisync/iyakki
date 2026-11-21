@@ -278,6 +278,16 @@ impl Shell {
         if self.look.dock.position == DockPos::Off || !self.dock_fits() {
             return vec![];
         }
+        // the dock of a display other than the primary one is the one that display's person-chosen position draws (`draw_screen_dock`), never
+        // the primary dock inside a launcher pane there
+        if self.panes_drawing_display() > 0 {
+            return vec![];
+        }
+        self.dock_apps_listed()
+    }
+
+    /// The pinned apps this person may use, in order (no check of where or whether a dock is drawn).
+    fn dock_apps_listed(&self) -> Vec<PApp> {
         let Some(sess) = self.session.as_ref() else { return vec![] };
         let saved = self.pinned.clone();
         let ids: Vec<String> = match saved {
@@ -353,6 +363,66 @@ impl Shell {
 
     pub(super) fn app_running(&self, a: PApp) -> bool {
         matches!(&self.screen, Screen::App(_, x) if *x == a) || self.stash.as_ref().is_some_and(|(_, x)| *x == a)
+    }
+
+    /// Where the dock sits on display `k` (F-SDK-30): the primary display (0) keeps the Look's position; any other display has the dock the
+    /// person chose for it through the core (`bottom`, `left`, `right`) and **none** when they chose nothing (decision 2026-11-15).
+    pub(super) fn screen_dock_pos(&self, k: usize) -> DockPos {
+        if k == 0 {
+            return self.look.dock.position;
+        }
+        let Some(sess) = self.session.as_ref() else { return DockPos::Off };
+        match self.core.desktop().screen_dock(&sess.user, k as u32).as_deref() {
+            Some("bottom") => DockPos::Bottom,
+            Some("left") => DockPos::Left,
+            Some("right") => DockPos::Right,
+            _ => DockPos::Off,
+        }
+    }
+
+    /// The dock of display `k` other than the primary one: its apps, the plate and the icons for the size of that display. `None` with no
+    /// dock there, no signed-in person, or a display too small to hold one beside its panes.
+    pub(super) fn screen_dock_layout(&self, k: usize, w: u32, h: u32) -> Option<(Vec<PApp>, R, Vec<R>)> {
+        let pos = self.screen_dock_pos(k);
+        if k == 0 || pos == DockPos::Off || w < 480 || h < 360 {
+            return None;
+        }
+        let apps = self.dock_apps_listed();
+        if apps.is_empty() {
+            return None;
+        }
+        let s = scale_for(w, h);
+        let (plate, items) = launcher::dock_rects(w, h, s, apps.len(), self.look.dock.size, pos);
+        Some((apps, plate, items))
+    }
+
+    /// Draws the dock of a display other than the primary one over its panes: the plate, the icons, a dot under a running app and the regions
+    /// for a click (the same look as the primary dock, without magnify or autohide).
+    pub(super) fn draw_screen_dock(&self, g: &mut Gfx, s: f32, k: usize) {
+        let (w, h) = (g.width(), g.height());
+        let Some((apps, plate, items)) = self.screen_dock_layout(k, w, h) else { return };
+        let il = self.icon_look();
+        g.rrect(plate.x, plate.y + 3.0 * s, plate.w, plate.h, 22.0 * s, [0, 0, 0, 40]);
+        g.rrect(plate.x, plate.y, plate.w, plate.h, 22.0 * s, with_alpha(CARD, appicon::island_alpha()));
+        g.rrect_outline(plate.x, plate.y, plate.w, plate.h, 22.0 * s, 1.2 * s, if crate::theme::is_high_contrast() { BORDER } else { [255, 255, 255, 90] });
+        for (a, r) in apps.iter().zip(items.iter()) {
+            let Some(t) = TILES.iter().find(|t| t.app == *a) else { continue };
+            let sq = R::new(r.x, r.y, r.w, r.w);
+            let body = appicon::body_with(g, sq, t.accent, true, 1.0, s, il);
+            appicon::glyph_with(g, t.icon, body, s, il.effective().style);
+            if self.app_running(*a) && self.look.dock.running {
+                g.circle(r.x + r.w / 2.0, r.y + r.w + 8.0 * s, 2.6 * s, TEXT);
+            }
+            g.hit(*r, Event::MouseDown((r.x + r.w / 2.0) as i32, (r.y + r.h / 2.0) as i32), &format!("dock {}", t.label));
+        }
+    }
+
+    /// A press on an icon of the dock of display `k` (not the primary one): the app it opens.
+    pub(super) fn screen_dock_app_at(&self, k: usize, x: i32, y: i32) -> Option<PApp> {
+        let (w, h) = self.display_size(k)?;
+        let (apps, _, items) = self.screen_dock_layout(k, w, h)?;
+        let s = scale_for(w, h);
+        items.iter().position(|r| R::new(r.x - 6.0 * s, r.y - 6.0 * s, r.w + 12.0 * s, r.h + 12.0 * s).contains(x, y)).and_then(|i| apps.get(i).copied())
     }
 
     /// Draws the dock over the launcher: a plate of the theme's surface with the pinned apps' icons, a dot under the running ones, and the
@@ -488,5 +558,33 @@ impl Shell {
         }
         mark_stale!(self);
         true
+    }
+}
+
+impl Shell {
+    /// Give the menu the Look's entries when the Look has a menu of its own, and put the menu on the right when the Look says so. The
+    /// default list leaves the menu as it always was.
+    pub(super) fn apply_look_menu(&mut self, width: f32) {
+        let default = iyakki_uikit::look::Look::default().menu.entries;
+        self.brand.set_look_menu((self.look.menu.entries != default).then(|| self.look.menu.entries.clone()));
+        if self.look.menu.position == iyakki_uikit::look::MenuPos::Right {
+            self.brand.anchor.0 = width;
+        }
+    }
+
+    /// An entry of the Look's menu that is an action (Home, Apps, Files, Chat, Lock, Sign out, Power).
+    pub(super) fn brand_act(&mut self, p: crate::brandmenu::Page) {
+        use crate::brandmenu::Page;
+        self.brand.close();
+        let user = self.session.as_ref().map(|s| s.user.clone()).unwrap_or_default();
+        match p {
+            Page::Home | Page::Apps => self.go_home(),
+            Page::Files => self.jump_to("files", ""),
+            Page::Chat => self.jump_to("chat", ""),
+            Page::Lock => self.lock_now(&user, "look menu"),
+            Page::SignOut => self.sign_out(),
+            Page::Power => self.fn_power_card(),
+            _ => {}
+        }
     }
 }

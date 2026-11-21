@@ -76,6 +76,21 @@ fn num(ip: IpAddr) -> u128 {
     }
 }
 
+/// True when the whole network `ip/len` lies inside a private or link-local block
+/// (RFC 1918, 169.254/16, fc00::/7, fe80::/10): such a range is not "a big part of the internet" (KI-1016).
+fn in_private_block(ip: IpAddr, len: u8) -> bool {
+    let blocks: &[(u128, u8)] = match ip {
+        IpAddr::V4(_) => &[(0x0A00_0000, 8), (0xAC10_0000, 12), (0xC0A8_0000, 16), (0xA9FE_0000, 16)],
+        IpAddr::V6(_) => &[(0xfc00u128 << 112, 7), (0xfe80u128 << 112, 10)],
+    };
+    let total = bits(ip) as u8;
+    let n = num(ip);
+    blocks.iter().any(|&(base, plen)| {
+        let shift = u32::from(total - plen);
+        len >= plen && (n >> shift) == (base >> shift)
+    })
+}
+
 pub fn parse_range(s: &str) -> Result<(IpAddr, IpAddr, Vec<String>), String> {
     let Some((a, b)) = s.split_once('-') else { return Err("An IP range is written first-last, for example 192.168.1.10-192.168.1.50.".into()) };
     let (a, b) = (parse_ip(a)?, parse_ip(b)?);
@@ -87,7 +102,7 @@ pub fn parse_range(s: &str) -> Result<(IpAddr, IpAddr, Vec<String>), String> {
     }
     let mut w = Vec::new();
     let size = num(b) - num(a) + 1;
-    if (a.is_ipv4() && size > 1 << 24) || (a.is_ipv6() && size > 1u128 << 80) {
+    if ((a.is_ipv4() && size > 1 << 24) || (a.is_ipv6() && size > 1u128 << 80)) && !(in_private_block(a, bits(a) as u8) && in_private_block(b, bits(b) as u8)) {
         w.push("This range is very large: it allows a big part of the internet.".to_string());
     }
     Ok((a, b, w))
@@ -108,7 +123,7 @@ pub fn parse_cidr(s: &str) -> Result<(IpAddr, u8, Vec<String>), String> {
     let mut w = Vec::new();
     if len == 0 {
         w.push("/0 allows everyone on the internet in.".to_string());
-    } else if u32::from(len) <= bits(ip) / 4 {
+    } else if u32::from(len) <= bits(ip) / 4 && !in_private_block(ip, len) {
         w.push(format!("/{len} is a very large network; it allows a big part of the internet."));
     }
     if ip.is_multicast() {

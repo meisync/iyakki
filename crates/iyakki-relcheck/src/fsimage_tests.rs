@@ -206,7 +206,7 @@ fn a_file_on_disk_is_recognised_listed_and_a_zst_is_sent_to_the_unpacker() {
     assert_eq!(list_file(&i).unwrap().1, false);
     assert!(list_file(&i).unwrap().0.iter().any(|e| e.path == "boot/vmlinuz"));
     assert!(list_file(&f).unwrap().0.iter().any(|e| e.path == "EFI/LAST.EFI"));
-    assert!(list_file(&z).unwrap_err().contains("image-gate.sh"));
+    assert!(list_file(&z).unwrap_err().contains("zstd"), "a damaged .zst is an error in words");
     assert!(list_file(&x).unwrap_err().contains("not a cpio"));
     assert!(list_file(&dir.join("missing")).is_err());
     let _ = std::fs::remove_dir_all(&dir);

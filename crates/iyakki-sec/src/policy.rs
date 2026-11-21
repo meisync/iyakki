@@ -68,10 +68,12 @@ pub enum App {
     Sample,
     /// The Markdown viewer: shows a document an app handed over through `markdown.view` (F-SDK-14).
     Markdown,
+    /// The FIREWALL tile (System group): the state of the incoming and outgoing rules at a glance, with a button to the Settings page where they change (F-FW-10).
+    Firewall,
 }
 
 impl App {
-    pub const ALL: [App; 41] = [App::Chat, App::Rag, App::Mcp, App::Cli, App::Users, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras, App::Pdf, App::Sample, App::Markdown];
+    pub const ALL: [App; 42] = [App::Chat, App::Rag, App::Mcp, App::Cli, App::Users, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras, App::Pdf, App::Sample, App::Markdown, App::Firewall];
 
     /// The app with this id (or lower-case name), `None` for an app that does not exist (any more).
     pub fn from_id(name: &str) -> Option<App> {
@@ -121,6 +123,7 @@ impl App {
             App::Pdf => "pdf",
             App::Sample => "sample",
             App::Markdown => "markdown",
+            App::Firewall => "firewall",
         }
     }
 
@@ -391,7 +394,7 @@ impl Role {
                 browser_max_minutes: 20,
             },
             Role::Operator => Policy {
-                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras, App::Pdf, App::Sample, App::Markdown]),
+                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras, App::Pdf, App::Sample, App::Markdown, App::Firewall]),
                 cli: CliLevel::Full,
                 fs_read: strs(&["{home}", "/shared"]),
                 fs_write: strs(&["{home}", "/shared"]),

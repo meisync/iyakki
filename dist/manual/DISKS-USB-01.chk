@@ -1,0 +1,19 @@
+scenario: DISKS-USB-01
+title: Mount and eject a USB stick
+area: Storage
+rows: F-DISKS-02
+machines: any
+needs: person
+prereq: A USB stick with a few files.
+step: Plug the stick in and open DISKS.
+expect: The stick is listed with its name and size.
+clause: listed
+step: Press Open (mount).
+expect: The stick's files appear in Files under media, with the right names.
+clause: mount
+step: Press Eject.
+expect: The page says it is safe to remove, and the stick's light stops blinking.
+clause: eject
+step: Remove the stick and plug it in again.
+expect: It is listed again and opens with the same files.
+clause: again

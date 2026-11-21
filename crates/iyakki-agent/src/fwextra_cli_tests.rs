@@ -1,7 +1,7 @@
 use super::*;
 use crate::archive::tests::tmp;
 use crate::fwextra::{TAG, COMMIT};
-use iyakki_drivers::pack::sha256_hex;
+use iyakki_core_local::driver_packs::pack::sha256_hex;
 
 fn manifest_for(files: &[(&str, &str, &str)]) -> Manifest {
     let mut t = format!("tag {TAG}\ncommit {COMMIT}\nbase https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain\nsnapshot 1 {} https://cdn.kernel.org/x.tar.gz\n", "ab".repeat(32));

@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 iyakki-link.workspace = true
 iyakki-sec.workspace = true
+iyakki-audiolink.workspace = true
 serde_json = "1"
 sha2 = "0.10"
 zeroize = "1"

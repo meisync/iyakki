@@ -46,6 +46,8 @@ pub const ERR_INVALID_ALLOCATION_METHOD: u8 = 0xc9;
 pub const ERR_INVALID_MINIMUM_BITPOOL: u8 = 0xcb;
 pub const ERR_INVALID_MAXIMUM_BITPOOL: u8 = 0xcd;
 pub const ERR_INVALID_BLOCK_LENGTH: u8 = 0xcf;
+pub const ERR_INVALID_OBJECT_TYPE: u8 = 0xd1;
+pub const ERR_INVALID_CHANNELS: u8 = 0xd3;
 
 const CAT_MEDIA_TRANSPORT: u8 = 1;
 const CAT_MEDIA_CODEC: u8 = 7;
@@ -286,6 +288,8 @@ pub enum StreamState {
 pub enum Action {
     /// The phone chose these settings (the sample rate and channels the audio path will get).
     Configured(Params),
+    /// The phone chose the AAC endpoint with these settings (the audio path then decodes through the add-on).
+    ConfiguredAac(crate::a2dp_aac::AacConfig),
     /// The phone is opening the media channel (a second connection on PSM 0x19 is to be expected).
     Opened,
     Started,
@@ -305,6 +309,11 @@ pub struct Sink {
     /// The source's endpoint, from the configuration; delay reports go to it.
     source_seid: u8,
     label: u8,
+    /// A second endpoint for AAC is offered (only when the add-on that decodes it is installed).
+    aac: bool,
+    config_aac: Option<crate::a2dp_aac::AacConfig>,
+    /// The endpoint the stream now set up uses.
+    active: u8,
 }
 
 impl Default for Sink {
@@ -323,7 +332,18 @@ fn accept(m: &Msg, params: Vec<u8>) -> Msg {
 
 impl Sink {
     pub fn new() -> Sink {
-        Sink { state: StreamState::Idle, config: None, delay: false, delay_agreed: false, source_seid: 0, label: 0 }
+        Sink { state: StreamState::Idle, config: None, delay: false, delay_agreed: false, source_seid: 0, label: 0, aac: false, config_aac: None, active: OUR_SEID }
+    }
+
+    /// Offers an AAC endpoint beside the SBC one. The caller does this only while AAC can be decoded (see [`crate::a2dp_aac::aac_ready`]).
+    pub fn with_aac(mut self) -> Sink {
+        self.aac = true;
+        self
+    }
+
+    /// The AAC settings of the stream now set up, if it is an AAC one.
+    pub fn config_aac(&self) -> Option<&crate::a2dp_aac::AacConfig> {
+        self.config_aac.as_ref()
     }
 
     /// Offers delay reporting in the capabilities and accepts it in a configuration.
@@ -334,7 +354,17 @@ impl Sink {
 
     /// The capabilities this endpoint answers with.
     pub fn capabilities(&self) -> Vec<u8> {
-        let mut v = our_capabilities();
+        self.capabilities_of(OUR_SEID)
+    }
+
+    fn capabilities_of(&self, seid: u8) -> Vec<u8> {
+        let mut v = if seid == crate::a2dp_aac::AAC_SEID {
+            let mut v = vec![CAT_MEDIA_TRANSPORT, 0];
+            v.extend_from_slice(&crate::a2dp_aac::sink_codec_element());
+            v
+        } else {
+            our_capabilities()
+        };
         if self.delay {
             v.extend_from_slice(&[CAT_DELAY_REPORTING, 0]);
         }
@@ -359,8 +389,17 @@ impl Sink {
         self.config.as_ref()
     }
 
-    fn seid_ok(b: Option<&u8>) -> bool {
-        b.is_some_and(|b| b >> 2 == OUR_SEID)
+    /// The identifier names one of the endpoints offered.
+    fn seid_offered(&self, b: Option<&u8>) -> bool {
+        b.is_some_and(|b| {
+            let id = b >> 2;
+            id == OUR_SEID || (self.aac && id == crate::a2dp_aac::AAC_SEID)
+        })
+    }
+
+    /// The identifier names an endpoint that can be used now: an offered one, and once a stream is set up the one it uses.
+    fn seid_ok(&self, b: Option<&u8>) -> bool {
+        self.seid_offered(b) && (self.state == StreamState::Idle || b.is_some_and(|b| b >> 2 == self.active))
     }
 
     /// Answers one message. Responses and rejects that come from the phone (we send no commands) are ignored.
@@ -372,28 +411,36 @@ impl Sink {
         let reply = match m.signal {
             SIG_DISCOVER => {
                 // one endpoint: SEID, in use flag, audio, sink
-                let in_use = self.state != StreamState::Idle;
-                accept(m, vec![OUR_SEID << 2 | (in_use as u8) << 1, 0x08])
+                let in_use = |seid: u8| self.state != StreamState::Idle && self.active == seid;
+                let mut eps = vec![OUR_SEID << 2 | (in_use(OUR_SEID) as u8) << 1, 0x08];
+                if self.aac {
+                    eps.extend_from_slice(&[crate::a2dp_aac::AAC_SEID << 2 | (in_use(crate::a2dp_aac::AAC_SEID) as u8) << 1, 0x08]);
+                }
+                accept(m, eps)
             }
             SIG_GET_CAPABILITIES | SIG_GET_ALL_CAPABILITIES => {
-                if !Sink::seid_ok(m.params.first()) || m.params.len() != 1 {
+                if !self.seid_offered(m.params.first()) || m.params.len() != 1 {
                     reject(m, vec![ERR_BAD_ACP_SEID])
                 } else {
-                    accept(m, self.capabilities())
+                    accept(m, self.capabilities_of(m.params[0] >> 2))
                 }
             }
             SIG_SET_CONFIGURATION => self.set_configuration(m, &mut acts),
             SIG_GET_CONFIGURATION => {
-                if !Sink::seid_ok(m.params.first()) {
+                if !self.seid_ok(m.params.first()) {
                     reject(m, vec![ERR_BAD_ACP_SEID])
                 } else if self.state == StreamState::Idle {
                     reject(m, vec![ERR_BAD_STATE])
+                } else if let Some(c) = self.config_aac.filter(|_| self.active == crate::a2dp_aac::AAC_SEID) {
+                    let mut v = vec![CAT_MEDIA_TRANSPORT, 0, CAT_MEDIA_CODEC, 8, 0, crate::a2dp_aac::CODEC_AAC];
+                    v.extend_from_slice(&c.to_config_bytes(true));
+                    accept(m, v)
                 } else {
                     accept(m, self.capabilities())
                 }
             }
             SIG_OPEN => {
-                if !Sink::seid_ok(m.params.first()) {
+                if !self.seid_ok(m.params.first()) {
                     reject(m, vec![ERR_BAD_ACP_SEID])
                 } else if self.state != StreamState::Configured {
                     reject(m, vec![ERR_BAD_STATE])
@@ -406,7 +453,7 @@ impl Sink {
             SIG_START => self.start_or_suspend(m, true, &mut acts),
             SIG_SUSPEND => self.start_or_suspend(m, false, &mut acts),
             SIG_CLOSE => {
-                if !Sink::seid_ok(m.params.first()) {
+                if !self.seid_ok(m.params.first()) {
                     reject(m, vec![ERR_BAD_ACP_SEID])
                 } else if !matches!(self.state, StreamState::Open | StreamState::Streaming) {
                     reject(m, vec![ERR_BAD_STATE])
@@ -431,6 +478,8 @@ impl Sink {
         }
         self.state = StreamState::Idle;
         self.config = None;
+        self.config_aac = None;
+        self.active = OUR_SEID;
         self.delay_agreed = false;
     }
 
@@ -445,13 +494,27 @@ impl Sink {
         if m.params.len() < 2 {
             return reject(m, vec![0, ERR_BAD_PAYLOAD_FORMAT]);
         }
-        if !Sink::seid_ok(m.params.first()) {
+        if !self.seid_offered(m.params.first()) {
             return reject(m, vec![0, ERR_BAD_ACP_SEID]);
         }
         if self.state != StreamState::Idle {
             return reject(m, vec![0, ERR_SEP_IN_USE]);
         }
         let (caps, delay_asked) = if self.delay { strip_delay(&m.params[2..]) } else { (m.params[2..].to_vec(), false) };
+        if self.aac && m.params[0] >> 2 == crate::a2dp_aac::AAC_SEID {
+            return match parse_aac_configuration(&caps) {
+                Ok(c) => {
+                    self.config_aac = Some(c);
+                    self.active = crate::a2dp_aac::AAC_SEID;
+                    self.source_seid = m.params[1] >> 2;
+                    self.delay_agreed = delay_asked;
+                    self.state = StreamState::Configured;
+                    acts.push(Action::ConfiguredAac(c));
+                    accept(m, vec![])
+                }
+                Err((cat, e)) => reject(m, vec![cat, e]),
+            };
+        }
         let (transport, sbc) = match parse_capabilities(&caps) {
             Ok(x) => x,
             Err((cat, e)) => return reject(m, vec![cat, e]),
@@ -474,7 +537,7 @@ impl Sink {
         if m.params.is_empty() {
             return reject(m, vec![0, ERR_BAD_PAYLOAD_FORMAT]);
         }
-        if let Some(bad) = m.params.iter().find(|b| *b >> 2 != OUR_SEID) {
+        if let Some(bad) = m.params.iter().find(|b| *b >> 2 != self.active) {
             return reject(m, vec![*bad, ERR_BAD_ACP_SEID]);
         }
         let ok = if start { self.state == StreamState::Open } else { self.state == StreamState::Streaming };
@@ -489,6 +552,37 @@ impl Sink {
             acts.push(Action::Suspended);
         }
         accept(m, vec![])
+    }
+}
+
+/// The AAC configuration of a list of service capability elements (media transport and one AAC codec element). `Err`: the category
+/// and error to refuse with.
+pub fn parse_aac_configuration(mut d: &[u8]) -> Result<crate::a2dp_aac::AacConfig, (u8, u8)> {
+    let (mut transport, mut cfg) = (false, None);
+    while !d.is_empty() {
+        if d.len() < 2 || d.len() < 2 + d[1] as usize {
+            return Err((0, ERR_BAD_PAYLOAD_FORMAT));
+        }
+        let (cat, len) = (d[0], d[1] as usize);
+        let body = &d[2..2 + len];
+        match cat {
+            CAT_MEDIA_TRANSPORT => transport = true,
+            CAT_MEDIA_CODEC => {
+                if len < 2 {
+                    return Err((cat, ERR_BAD_PAYLOAD_FORMAT));
+                }
+                if body[0] >> 4 != 0 || body[1] != crate::a2dp_aac::CODEC_AAC {
+                    return Err((cat, ERR_INVALID_CODEC_TYPE));
+                }
+                cfg = Some(crate::a2dp_aac::AacConfig::from_config_bytes(&body[2..]).map_err(|e| (cat, e))?);
+            }
+            _ => return Err((cat, ERR_INVALID_CAPABILITIES)),
+        }
+        d = &d[2 + len..];
+    }
+    match (transport, cfg) {
+        (true, Some(c)) => Ok(c),
+        _ => Err((CAT_MEDIA_CODEC, ERR_INVALID_CAPABILITIES)),
     }
 }
 

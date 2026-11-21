@@ -912,10 +912,12 @@ fn panels_that_fail_the_same_way_get_one_banner_and_the_repair_waits_for_the_cli
     assert!(!f.audit.lock().unwrap().iter().any(|l| l.contains("source_repaired")));
     // the click rewrites the address, keeps the rest, audits, and the panels load again
     f.app.handle(&Event::Tab(id::REPAIR), &f.cx);
-    for _ in 0..300 {
+    // (the address is rewritten first and the audit line follows: wait for both, on the wall clock)
+    let repair_wall = std::time::Instant::now();
+    while repair_wall.elapsed() < std::time::Duration::from_secs(30) {
         tick(&mut f, 1);
         draw(&mut f, 1280, 720);
-        if f.env.sources().get("prom").unwrap().value("url").starts_with("cluster://") {
+        if f.env.sources().get("prom").unwrap().value("url").starts_with("cluster://") && f.audit.lock().unwrap().iter().any(|l| l.starts_with("dash.source_repaired")) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(5));

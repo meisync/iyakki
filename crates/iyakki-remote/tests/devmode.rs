@@ -64,7 +64,7 @@ fn fx(tag: &str) -> Fx {
     store.add_local("bob", "bobpass1234", Role::User).unwrap();
     let up: Arc<dyn Upstream> = Arc::new(Offline);
     let env = ShellEnv {
-        store: Arc::new(Mutex::new(store)),
+        store: iyakki_shell::accounts::UsersRef::of_store(&Arc::new(Mutex::new(store))),
         audit: Arc::new(AuditLog::new(&d.join("audit.log"))),
         host: Arc::new(Host),
         cfg: iyakki_agent::config::AiConfig::parse("").unwrap(),
@@ -224,7 +224,7 @@ fn install_upgrade_logs_open_screenshot_and_uninstall_go_through_the_store_and_a
     let painter = std::thread::spawn(move || {
         while !st.load(Ordering::SeqCst) {
             if svc.screen().wanted(SCREEN_USER) {
-                svc.screen().serve(SCREEN_USER, || Some(iyakki_agent::screencap::Frame { w: 4, h: 2, rgba: vec![200; 32] }));
+                svc.screen().serve_frame(SCREEN_USER, Some(iyakki_agent::screencap::Frame { w: 4, h: 2, rgba: vec![200; 32] }));
             }
             std::thread::sleep(Duration::from_millis(10));
         }

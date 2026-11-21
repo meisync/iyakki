@@ -109,7 +109,7 @@ static SET_THIS_START: Mutex<Option<std::collections::HashSet<String>>> = Mutex:
 /// folder on the data volume. Returns one log line per card that was set up.
 pub fn step(proc_root: &Path, markers: &Path, amixer: &dyn Fn(&[String]) -> Result<String, String>) -> Vec<String> {
     let mut lines = Vec::new();
-    let text = std::fs::read_to_string(proc_root.join("asound/cards")).unwrap_or_default();
+    let text = { use iyakki_core_api::audioroute::AudioRoute; iyakki_core_local::LocalAudioRoute::for_proc(proc_root).cards_text() };
     for (n, id) in cards(&text) {
         let marker = markers.join(marker_name(&id));
         // nothing saves the mixer (no alsactl state), so every start begins muted again: the defaults go back once per start of IYAKKI, not once per card ever
@@ -216,7 +216,7 @@ static PLAYED: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(Non
 /// A marker `<id>.out` in `markers` only says whether this is the first time the card is seen (for the log line).
 pub fn playback_step(proc_root: &Path, markers: &Path, amixer: &dyn Fn(&[String]) -> Result<String, String>) -> Vec<String> {
     let mut lines = Vec::new();
-    let text = std::fs::read_to_string(proc_root.join("asound/cards")).unwrap_or_default();
+    let text = { use iyakki_core_api::audioroute::AudioRoute; iyakki_core_local::LocalAudioRoute::for_proc(proc_root).cards_text() };
     for (n, id) in cards(&text) {
         let key = format!("{}:{id}", markers.display());
         if PLAYED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).contains(&key) {
@@ -234,7 +234,7 @@ pub fn playback_step(proc_root: &Path, markers: &Path, amixer: &dyn Fn(&[String]
         // the hardware level is not saved by anything (no alsactl state), so every start begins at the kernel's default, often 0 %: it goes to PLAY_LEVEL
         // each time, and the IYAKKI volume is what the person turns
         // a level the person chose in Settings is kept per card and comes back here
-        let level = iyakki_devctl::saved_level(markers, &id).unwrap_or(PLAY_LEVEL);
+        let level = iyakki_core_local::devctl::saved_level(markers, &id).unwrap_or(PLAY_LEVEL);
         for cmd in playback_commands_at(&controls, Some(level)) {
             let mut args = vec!["-c".to_string(), c.clone()];
             args.extend(cmd);
@@ -255,8 +255,7 @@ pub fn playback_step(proc_root: &Path, markers: &Path, amixer: &dyn Fn(&[String]
 /// The real machine: `/proc`, the data volume's marker folder, the real `amixer`.
 pub fn run() {
     let amixer = |args: &[String]| -> Result<String, String> {
-        let o = std::process::Command::new("amixer").args(args).output().map_err(|e| e.to_string())?;
-        if o.status.success() { Ok(String::from_utf8_lossy(&o.stdout).into_owned()) } else { Err(String::from_utf8_lossy(&o.stderr).trim().to_string()) }
+        iyakki_core_local::starters::amixer_text(args).map_err(|f| f.text)
     };
     for l in step(Path::new("/proc"), Path::new("/var/lib/iyakki/sound-init"), &amixer).into_iter().chain(playback_step(Path::new("/proc"), Path::new("/var/lib/iyakki/sound-init"), &amixer)) {
         log::info!("{l}");
@@ -328,7 +327,7 @@ mod tests {
         std::fs::create_dir_all(d.join("proc/asound")).unwrap();
         std::fs::write(d.join("proc/asound/cards"), " 3 [Chosen          ]: HDA-Intel - HD-Audio\n").unwrap();
         let markers = d.join("m");
-        iyakki_devctl::remember_level(&markers, "Chosen", 60);
+        iyakki_core_local::devctl::remember_level(&markers, "Chosen", 60);
         let calls = RefCell::new(Vec::<String>::new());
         let amixer = |a: &[String]| -> Result<String, String> {
             calls.borrow_mut().push(a.join(" "));
@@ -337,7 +336,7 @@ mod tests {
         let l = playback_step(&d.join("proc"), &markers, &amixer);
         assert!(l[0].contains("set to 60 %"), "{l:?}");
         assert!(calls.borrow().iter().any(|c| c == "-c 3 -q sset Master,0 60% unmute"), "{:?}", calls.borrow());
-        assert_eq!(iyakki_devctl::card_id(&d.join("proc"), 3).as_deref(), Some("Chosen"));
+        assert_eq!(iyakki_core_local::devctl::card_id(&d.join("proc"), 3).as_deref(), Some("Chosen"));
         std::fs::remove_dir_all(&d).ok();
     }
 

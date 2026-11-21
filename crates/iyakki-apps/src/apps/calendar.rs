@@ -17,7 +17,7 @@ pub use iyakki_tile_calendar::Tab;
 
 /// The real calendar store, in the machine's time zone.
 pub struct ShellCalendar<'a> {
-    pub store: &'a agent::CalendarStore,
+    pub store: &'a dyn iyakki_agent_api::CalendarApi,
     pub zone: &'a Zone,
 }
 
@@ -91,7 +91,7 @@ impl api::CalendarSource for ShellCalendar<'_> {
 }
 
 /// The shell's audit log behind the tile's sink.
-pub struct ShellAudit<'a>(pub &'a crate::accounts::AuditLog);
+pub struct ShellAudit<'a>(pub &'a dyn iyakki_agent_api::AuditApi);
 
 impl AuditSink for ShellAudit<'_> {
     fn record(&self, user: &str, action: &str, subject: &str) {
@@ -122,8 +122,9 @@ impl CalendarApp {
 
     fn with_zone<T>(cx: &AppCx, zone: &Zone, f: impl FnOnce(&TileCx) -> T) -> T {
         let usage = ShellUsage::of(cx);
-        let cal = ShellCalendar { store: &cx.calendar(), zone };
-        let audit = ShellAudit(&cx.audit);
+        let store = cx.calendar();
+        let cal = ShellCalendar { store: &*store, zone };
+        let audit = ShellAudit(&*cx.audit);
         f(&TileCx { user: cx.session.user.as_str(), manage_settings: cx.session.policy.manage_settings, usage: &usage, calendar: &cal, audit: &audit, remote: &iyakki_tile_api::remote::NoRemote, cameras: &iyakki_tile_api::cameras::NoCameras, radio: &iyakki_tile_api::radio::NoRadio })
     }
 }
@@ -178,7 +179,8 @@ mod tests {
         let cx = admin_cx("calshell1");
         let mut a = CalendarApp::new(&cx);
         let zone = Zone::system();
-        let src = ShellCalendar { store: &cx.calendar(), zone: &zone };
+        let store = cx.calendar();
+        let src = ShellCalendar { store: &*store, zone: &zone };
         let now = iyakki_clock::now_unix();
         let l = src.local(now);
         assert_eq!((l.year, l.month, l.day, l.hour, l.minute), {
@@ -208,7 +210,7 @@ mod tests {
         assert!(matches!(a.handle(&Event::Key(Key::Char('d')), &cx), Flow::Stay));
         assert!(matches!(a.handle(&Event::Key(Key::Char('y')), &cx), Flow::Stay));
         assert!(cx.calendar().alarms("root").is_empty());
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("alarm.delete"), "{log}");
         assert!(matches!(a.handle(&Event::Key(Key::Esc), &cx), Flow::Back));
     }

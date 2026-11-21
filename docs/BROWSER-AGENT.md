@@ -231,7 +231,7 @@ element:{role,name} | seconds}`, `expect {text | no_text | url | value | visible
 `snapshot_assert text`. Names match as a case-insensitive substring unless exactly one element matches exactly. Every step
 **auto-waits** (polling every 250 ms up to `timeout_ms`) and retries on stale, hidden, disabled or covered targets. The run stops at
 the first failing step, saves a screenshot of the page and prints the page's snapshot lines. A spec (not a model) may fill password
-fields with the values it contains: keep real passwords out of spec files. Payments and destructive clicks fail unless the spec
+fields with the values it contains: keep real passwords out of spec files; `fill {label,value_env}` takes the value from an environment variable instead (only names starting with `IYAKKI_TEST_`, capital letters, digits and underscores, so a spec cannot read any other variable; a step whose variable is unset fails naming it; a report shows `<from NAME>`, never the value; `value` and `value_env` together are refused). Payments and destructive clicks fail unless the spec
 says `allow_payment` / `allow_destructive`. A sample: `dist/samples/browser-test-login-form.json` against
 `dist/samples/browser-test-fixture/` (`python3 -m http.server 8765 --bind 127.0.0.1 --directory dist/samples/browser-test-fixture`).
 Dynamic forms and multi-step wizards work because fields are located by label at the time of the step and every step waits.

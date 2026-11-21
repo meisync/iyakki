@@ -1,0 +1,19 @@
+scenario: POWER-01
+title: Sleep, power card and profiles
+area: Power
+rows: F-PWR-01, F-KBD-05, F-KBD-16
+machines: any
+needs: person
+prereq: Save any open work.
+step: Press the power key briefly.
+expect: A card offers Power off, Restart, Sleep and Cancel.
+clause: F-KBD-05.card
+step: Choose Sleep, wait until the screen is dark, then press a key.
+expect: The computer wakes within ten seconds and asks for the password if the lock is on.
+clause: F-KBD-16.sleep
+step: Open Settings, System, Power and choose a different power profile.
+expect: The page says the profile is active and the computer stays responsive.
+clause: F-PWR-01.profile
+step: Choose Restart from the power card.
+expect: The computer restarts and comes back to the sign-in screen.
+clause: F-KBD-05.restart

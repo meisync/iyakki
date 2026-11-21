@@ -221,9 +221,29 @@ fn a_backup_made_by_hand_is_counted_and_told_once_by_its_file_name() {
 
 #[test]
 fn a_connected_bluetooth_device_is_told_by_its_paired_name_and_never_by_its_address() {
-    let store = iyakki_devctl::bthid::Store::parse(r#"{"devices":[{"address":"AA:BB:CC:00:11:22","addr_type":0,"name":"Desk Keys","kind":"keyboard"},{"address":"AA:BB:CC:00:11:33","addr_type":0,"name":" ","kind":"other"}]}"#);
+    let store = iyakki_core_local::devctl::bthid::Store::parse(r#"{"devices":[{"address":"AA:BB:CC:00:11:22","addr_type":0,"name":"Desk Keys","kind":"keyboard"},{"address":"AA:BB:CC:00:11:33","addr_type":0,"name":" ","kind":"other"}]}"#);
     let got = bluetooth_names(&["AA:BB:CC:00:11:22".to_string(), "AA:BB:CC:00:11:33".to_string(), "11:22:33:44:55:66".to_string()], &store);
     assert_eq!(got, ["Desk Keys".to_string(), "device".to_string()].into());
     assert!(bluetooth_names(&[], &store).is_empty());
     assert!(bluetooth_connected(std::path::Path::new("/nonexistent"), std::path::Path::new("/nonexistent")).is_empty(), "no kernel links, nothing to ask");
+}
+
+#[test]
+fn a_download_the_update_centre_page_made_is_counted_and_told_once_by_its_fixed_name() {
+    let d = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("iyakki-dlmade-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    assert_eq!(downloads_made(&d), (0, (String::new(), false)));
+    let look = |n: u64, last: (String, bool)| MorePersonFacts { downloads: n, download_last: last, ..Default::default() };
+    let mut w = MorePersonWatch::default();
+    let (n, last) = downloads_made(&d);
+    assert!(w.observe("pat", look(n, last)).is_empty());
+    note_download_made(&d, "system update", true);
+    let (n, last) = downloads_made(&d);
+    assert_eq!(show(&w.observe("pat", look(n, last.clone()))), ["transfer.finished kind=download name=system update outcome=finished"]);
+    assert!(w.observe("pat", look(n, last)).is_empty());
+    note_download_made(&d, "system update", false);
+    let (n, last) = downloads_made(&d);
+    assert_eq!(show(&w.observe("pat", look(n, last))), ["transfer.finished kind=download name=system update outcome=failed"]);
+    let _ = std::fs::remove_dir_all(&d);
 }

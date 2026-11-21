@@ -30,7 +30,7 @@ function rig(over) {
     nav: { mediaDevices: { getUserMedia: async (c) => { calls.push(c); return stream; } }, clipboard: { read: async () => [], write: async () => {} } },
     document: { createElement: () => ({ getContext: () => ({ drawImage() {} }), play: async () => {}, toBlob() {} }) },
     AudioContext: Ctx, ClipboardItem: class { constructor(o) { this.o = o; } }, Blob: class { constructor(p, o) { this.p = p; } },
-    TextEncoder, isSecureContext: true, now: () => t, setInterval: () => 1,
+    TextEncoder, TextDecoder, isSecureContext: true, now: () => t, setInterval: () => 1,
   }, over || {});
   const changes = [];
   const m = M.create(env, { sendJson: (o) => sent.push(o), sendBinary: (b) => bin.push(b), onChange: (s) => changes.push(JSON.stringify(s.on)) });
@@ -159,6 +159,11 @@ const allow = (r, a) => r.m.onJson({ t: "media_state", mic: false, camera: false
   r = rig(); allow(r); r.env.nav.clipboard.write = async () => { throw new Error("NotAllowed"); };
   r.m.onBinary(png); await new Promise((q) => setTimeout(q, 5));
   ok(r.m.state.pendingCopy && r.m.state.pendingCopy.kind === "image", "without a gesture the item waits for a click");
+  // HTML from the session goes to the clipboard with its plain text beside it
+  r = rig(); allow(r); const w2 = []; r.env.nav.clipboard.write = async (x) => w2.push(x);
+  const html = new Uint8Array([0x12, ...new TextEncoder().encode("<p>Hi <b>you</b> &amp; me</p><p>two</p>")]); r.m.onBinary(html); await new Promise((q) => setTimeout(q, 5));
+  ok(w2.length === 1 && Object.keys(w2[0][0].o).sort().join() === "text/html,text/plain", "HTML is written with a plain-text part");
+  ok(w2[0][0].o["text/plain"].p[0] === "Hi you & me\ntwo", "the plain text has the words and the paragraph break: " + JSON.stringify(w2[0][0].o["text/plain"].p));
   console.log(bad ? "FAILED" : "ALL OK");
   process.exit(bad ? 1 : 0);
 })();

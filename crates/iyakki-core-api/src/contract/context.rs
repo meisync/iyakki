@@ -17,6 +17,9 @@ pub enum Transport {
     /// A UI program on this machine over a unix socket or a loopback socket the core listens on (F-SPLIT-07). Never local: the
     /// identity and scopes belong to the listener, and a local-only call is refused like for any other remote caller.
     LocalSocket,
+    /// A transport a newer release added: never local (the safest reading).
+    #[serde(other)]
+    Unknown,
 }
 
 impl Transport {
@@ -67,6 +70,9 @@ pub enum Risk {
     AskPerson,
     /// Only the machine's own screen may make it (unlock, answer a consent prompt, pair a client).
     LocalOnly,
+    /// A risk a newer release added: read as the strictest, `LocalOnly`, by every decision.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Risk {
@@ -76,6 +82,7 @@ impl Risk {
             Risk::Change => "change",
             Risk::AskPerson => "ask_person",
             Risk::LocalOnly => "local_only",
+            Risk::Unknown => "unknown",
         }
     }
 }
@@ -112,6 +119,7 @@ impl CallContext {
             Transport::DevMode => "devmode",
             Transport::Relay => "relay",
             Transport::LocalSocket => "uisocket",
+            Transport::Unknown => "unknown",
         };
         format!("{} via {via}: {call} [{}] {outcome}", self.identity.user, risk.id())
     }
@@ -119,7 +127,7 @@ impl CallContext {
 
 /// The first check of every call. `LocalOnly` refuses any remote caller; every other risk needs the scope when remote.
 pub fn guard(ctx: &CallContext, scope: &str, risk: Risk) -> CallResult<()> {
-    if risk == Risk::LocalOnly && !ctx.is_local() {
+    if matches!(risk, Risk::LocalOnly | Risk::Unknown) && !ctx.is_local() {
         return Err(CallError::new(ErrorCode::Denied, "core.local_only", "This can only be done at the machine itself.").hint("Ask the person at the machine."));
     }
     if !ctx.allows(scope) {

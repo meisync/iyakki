@@ -128,6 +128,24 @@ impl App for MarkdownTile {
             }
         }
     }
+    fn list_frame(&mut self, w: f32, h: f32, cx: &AppCx) -> Option<String> {
+        if self.since == u32::MAX {
+            self.since = 0;
+            self.take_waiting(cx);
+        }
+        self.host.look = look_now();
+        self.host.type_style = super::sample::type_now();
+        self.host.resize(w, h);
+        Some(self.host.record().to_text())
+    }
+    fn list_apply(&mut self, batch: &str, cx: &AppCx) -> Option<Result<(String, bool), String>> {
+        self.host.look = look_now();
+        self.host.type_style = super::sample::type_now();
+        let r = iyakki_ui_sdk::wire::apply_batch(&mut self.host, batch);
+        // a file the person chose in the list is read through the core now, so the frame shows it
+        self.open_choice(cx);
+        Some(r.map(|(_, left)| (self.host.record().to_text(), left)))
+    }
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, _tick: u64) {
         if self.since == u32::MAX {
             self.since = 0;

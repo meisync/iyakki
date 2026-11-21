@@ -328,18 +328,7 @@ impl StatusCache {
     /// The models to offer for an agent: what the CLI printed (fresh), else the documented list; then the ids the person typed and
     /// the one currently chosen if it is none of those.
     pub fn models_for(&self, a: &dyn ExternalAgent) -> Vec<ModelInfo> {
-        let mut v = self.cli_models(&a.id()).unwrap_or_else(|| a.builtin_models());
-        let mut extra: Vec<String> = a.custom_models();
-        let cur = a.cfg_model();
-        if !cur.is_empty() {
-            extra.push(cur);
-        }
-        for id in extra {
-            if valid_model_id(&id) && !v.iter().any(|m| m.id == id) {
-                v.push(ModelInfo::new(&id, &id, "", ModelSource::Custom));
-            }
-        }
-        v
+        models_with(self.cli_models(&a.id()), a)
     }
 
     pub fn get(&self, id: &str) -> Option<Status> {
@@ -456,13 +445,36 @@ impl StatusCache {
     }
 }
 
+/// The models to offer for an agent given what its CLI printed (`cli`, `None` when nothing fresh): the CLI's list, else the documented one; then
+/// the ids the person typed and the one currently chosen if it is none of those. Works on plain data so a screen can ask the cache through a
+/// trait object (`ExtStatusApi::cli_models`) and call this itself.
+pub fn models_with(cli: Option<Vec<ModelInfo>>, a: &dyn ExternalAgent) -> Vec<ModelInfo> {
+    let mut v = cli.unwrap_or_else(|| a.builtin_models());
+    let mut extra: Vec<String> = a.custom_models();
+    let cur = a.cfg_model();
+    if !cur.is_empty() {
+        extra.push(cur);
+    }
+    for id in extra {
+        if valid_model_id(&id) && !v.iter().any(|m| m.id == id) {
+            v.push(ModelInfo::new(&id, &id, "", ModelSource::Custom));
+        }
+    }
+    v
+}
+
 /// Every agent as a line of the model list, with the status found so far (unavailable ones are listed too).
 pub fn entries(cfg: &AgentsCfg, cache: &StatusCache) -> Vec<Entry> {
+    entries_with(cfg, &|id| cache.get(id))
+}
+
+/// [`entries`] over any way of asking for the status found so far (the cache itself, or a trait object of the services handle).
+pub fn entries_with(cfg: &AgentsCfg, get: &dyn Fn(&str) -> Option<Status>) -> Vec<Entry> {
     cfg.all()
         .into_iter()
         .filter(|a| a.id().starts_with("custom:") || if a.id() == CLAUDE_CODE { cfg.claude.enabled } else { cfg.copilot.enabled })
         .map(|a| {
-            let st = cache.get(&a.id());
+            let st = get(&a.id());
             let model = if a.cfg_model().is_empty() { "default".to_string() } else { a.cfg_model() };
             let (chip, ready, fix) = match &st {
                 Some(s) => (s.chip.clone(), s.ready(), s.fix.clone()),

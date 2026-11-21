@@ -71,6 +71,8 @@ pub mod attr {
     pub const CIPHER_SUITE_GROUP: u16 = 74;
     pub const WPA_VERSIONS: u16 = 75;
     pub const AKM_SUITES: u16 = 76;
+    /// Whether management frames are protected (`NL80211_MFP_REQUIRED` 1, `NL80211_MFP_OPTIONAL` 2).
+    pub const USE_MFP: u16 = 66;
     pub const KEY: u16 = 80;
     pub const AP_ISOLATE: u16 = 96;
     pub const FRAME_MATCH: u16 = 91;
@@ -90,13 +92,22 @@ pub mod attr {
     pub const KEY_NESTED_IDX: u16 = 2;
     pub const KEY_NESTED_CIPHER: u16 = 3;
     pub const KEY_NESTED_DEFAULT: u16 = 5;
+    /// Makes the key the default one for management frames (an integrity group key).
+    pub const KEY_NESTED_DEFAULT_MGMT: u16 = 6;
     pub const KEY_NESTED_DEFAULT_TYPES: u16 = 8;
 }
 
+/// Values of [`attr::USE_MFP`].
+pub const MFP_REQUIRED: u32 = 1;
+pub const MFP_OPTIONAL: u32 = 2;
 pub const IFTYPE_STATION: u32 = 2;
 pub const IFTYPE_AP: u32 = 3;
 pub const CIPHER_CCMP: u32 = 0x000f_ac04;
 pub const AKM_PSK: u32 = 0x000f_ac02;
+/// SAE (WPA3-personal), and the integrity cipher of the group management key (BIP-CMAC-128).
+pub const AKM_SAE: u32 = 0x000f_ac08;
+pub const CIPHER_AES_CMAC: u32 = 0x000f_ac06;
+pub const WPA_VERSION_3: u32 = 4;
 pub const WPA_VERSION_2: u32 = 2;
 pub const STA_FLAG_AUTHORIZED: u32 = 1;
 pub const STA_FLAG_AUTHENTICATED: u32 = 5;
@@ -292,12 +303,28 @@ pub struct ApParams {
     pub inactivity_secs: u16,
     /// Set for a card that runs the handshake itself: the key goes to the card and no frame handling is done here.
     pub pmk: Option<[u8; 32]>,
+    /// What the network offers: decides the key management the kernel is told (PSK, SAE or both) and the WPA versions.
+    pub security: crate::rsn::SecurityMode,
+}
+
+/// The key management the kernel is told for a network: the akm suites, the WPA versions and whether management frames are protected
+/// (`None`: not at all, as for plain WPA2). WPA3 requires protection, the transition mode only allows it; the beacon's own RSN element
+/// (see `rsn`) says the same to the phones, this is what the kernel keeps for the station checks.
+pub fn key_management(mode: crate::rsn::SecurityMode) -> (Vec<u32>, u32, Option<u32>) {
+    use crate::rsn::SecurityMode::*;
+    match mode {
+        Wpa2 => (vec![AKM_PSK], WPA_VERSION_2, None),
+        Transition => (vec![AKM_PSK, AKM_SAE], WPA_VERSION_2 | WPA_VERSION_3, Some(MFP_OPTIONAL)),
+        Wpa3 => (vec![AKM_SAE], WPA_VERSION_2 | WPA_VERSION_3, Some(MFP_REQUIRED)),
+    }
 }
 
 /// Start the access point: WPA2, CCMP, PSK, open-system authentication (the keys come from the handshake), SSID visible,
 /// a 20 MHz channel, beacon pieces and probe response supplied by us.
 pub fn start_ap(family: u16, seq: u32, p: &ApParams) -> Vec<u8> {
     let suites = |s: u32| s.to_le_bytes();
+    let (akms, versions, mfp) = key_management(p.security);
+    let akm_bytes: Vec<u8> = akms.iter().flat_map(|a| suites(*a)).collect();
     let m = Msg::new(family, REQ_ACK, seq, cmd::START_AP)
         .u32(attr::IFINDEX, p.ifindex)
         .u32(attr::BEACON_INTERVAL, p.beacon_interval_tu)
@@ -308,10 +335,10 @@ pub fn start_ap(family: u16, seq: u32, p: &ApParams) -> Vec<u8> {
         .u32(attr::HIDDEN_SSID, 0)
         .u32(attr::AUTH_TYPE, 0)
         .flag(attr::PRIVACY)
-        .u32(attr::WPA_VERSIONS, WPA_VERSION_2)
+        .u32(attr::WPA_VERSIONS, versions)
         .bytes(attr::CIPHER_SUITES_PAIRWISE, &suites(CIPHER_CCMP))
         .u32(attr::CIPHER_SUITE_GROUP, CIPHER_CCMP)
-        .bytes(attr::AKM_SUITES, &suites(AKM_PSK))
+        .bytes(attr::AKM_SUITES, &akm_bytes)
         .u32(attr::WIPHY_FREQ, p.freq_mhz)
         .u32(attr::CHANNEL_WIDTH, 0)
         .u32(attr::CENTER_FREQ1, p.freq_mhz)
@@ -319,6 +346,10 @@ pub fn start_ap(family: u16, seq: u32, p: &ApParams) -> Vec<u8> {
     // found on virtual radios: a radio without NL80211_FEATURE_INACTIVITY_TIMER refuses START_AP (EOPNOTSUPP) if this attribute is present
     // at all, so 0 means "leave it out" (the caller sets it from the capability probe)
     let m = if p.inactivity_secs > 0 { m.u16(attr::INACTIVITY_TIMEOUT, p.inactivity_secs) } else { m };
+    let m = match mfp {
+        Some(v) => m.u32(attr::USE_MFP, v),
+        None => m,
+    };
     let m = match &p.pmk {
         Some(k) => m.bytes(attr::PMK, k),
         None => m,
@@ -359,6 +390,19 @@ pub fn new_group_key(family: u16, seq: u32, ifindex: u32, idx: u8, gtk: &[u8; 16
         .u32(attr::IFINDEX, ifindex)
         .nest(attr::KEY, |m| m.bytes(attr::KEY_NESTED_DATA, gtk).u32(attr::KEY_NESTED_CIPHER, CIPHER_CCMP).u8(attr::KEY_NESTED_IDX, idx))
         .finish()
+}
+
+/// Install the integrity group key (IGTK, BIP-CMAC-128, key index 4 or 5) that protects broadcast management frames (no address).
+pub fn new_igtk(family: u16, seq: u32, ifindex: u32, idx: u8, igtk: &[u8; 16]) -> Vec<u8> {
+    Msg::new(family, REQ_ACK, seq, cmd::NEW_KEY)
+        .u32(attr::IFINDEX, ifindex)
+        .nest(attr::KEY, |m| m.bytes(attr::KEY_NESTED_DATA, igtk).u32(attr::KEY_NESTED_CIPHER, CIPHER_AES_CMAC).u8(attr::KEY_NESTED_IDX, idx))
+        .finish()
+}
+
+/// Make an integrity group key the one used to protect broadcast management frames.
+pub fn set_default_mgmt_key(family: u16, seq: u32, ifindex: u32, idx: u8) -> Vec<u8> {
+    Msg::new(family, REQ_ACK, seq, cmd::SET_KEY).u32(attr::IFINDEX, ifindex).nest(attr::KEY, |m| m.u8(attr::KEY_NESTED_IDX, idx).flag(attr::KEY_NESTED_DEFAULT_MGMT)).finish()
 }
 
 /// Make a group key the one used to send multicast frames.
@@ -643,6 +687,12 @@ impl<T: NetlinkTransport> ApControl<T> {
         self.run(|f, s| set_default_group_key(f, s, ifindex, idx))
     }
 
+    /// Install the integrity group key of a WPA3 or protected-frames network and make it the default for management frames.
+    pub fn install_igtk(&mut self, ifindex: u32, idx: u8, igtk: &[u8; 16]) -> Result<(), NlError> {
+        self.run(|f, s| new_igtk(f, s, ifindex, idx, igtk))?;
+        self.run(|f, s| set_default_mgmt_key(f, s, ifindex, idx))
+    }
+
     pub fn add_station(&mut self, ifindex: u32, sta: Mac, aid: u16, listen: u16, rates: &[u8], cap: u16) -> Result<(), NlError> {
         self.run(|f, s| new_station(f, s, ifindex, sta, aid, listen, rates, cap))
     }
@@ -654,7 +704,22 @@ impl<T: NetlinkTransport> ApControl<T> {
     pub fn remove_station(&mut self, ifindex: u32, sta: Mac, reason: u16) -> Result<(), NlError> {
         self.run(|f, s| del_station(f, s, ifindex, sta, reason))
     }
+
+    /// Asks the kernel to hand this program the management frames of one type that arrive on the interface (the frame control value with
+    /// type and subtype, [`FRAME_AUTH`] for authentication, [`FRAME_ASSOC_REQ`] for association requests).
+    pub fn register_mgmt(&mut self, ifindex: u32, frame_type: u16) -> Result<(), NlError> {
+        self.run(|f, s| register_frame(f, s, ifindex, frame_type))
+    }
+
+    /// Sends one management frame (an authentication answer of the SAE exchange, for one) on the access point's channel.
+    pub fn send_mgmt(&mut self, ifindex: u32, freq_mhz: u32, frame: &[u8]) -> Result<(), NlError> {
+        self.run(|f, s| send_frame(f, s, ifindex, freq_mhz, frame))
+    }
 }
+
+/// Frame control values for [`ApControl::register_mgmt`].
+pub const FRAME_AUTH: u16 = 0x00b0;
+pub const FRAME_ASSOC_REQ: u16 = 0x0000;
 
 #[cfg(test)]
 mod tests {
@@ -684,7 +749,7 @@ mod tests {
 
     #[test]
     fn a_card_that_runs_the_handshake_gets_the_key_and_others_do_not() {
-        let mut p = ApParams { ifindex: 7, ssid: b"x".to_vec(), freq_mhz: 2437, beacon_interval_tu: 100, dtim_period: 2, beacon_head: vec![1], beacon_tail: vec![2], probe_resp: vec![3], inactivity_secs: 0, pmk: None };
+        let mut p = ApParams { ifindex: 7, ssid: b"x".to_vec(), freq_mhz: 2437, beacon_interval_tu: 100, dtim_period: 2, beacon_head: vec![1], beacon_tail: vec![2], probe_resp: vec![3], inactivity_secs: 0, pmk: None, security: crate::rsn::SecurityMode::Wpa2 };
         let has = |m: &[u8]| {
             let msgs = split_messages(m).unwrap();
             let (_, a) = genl(msgs[0].payload).unwrap();
@@ -737,7 +802,7 @@ mod tests {
 
     #[test]
     fn start_ap_carries_everything_the_kernel_needs() {
-        let p = ApParams { ifindex: 7, ssid: b"IYAKKI-1A2B".to_vec(), freq_mhz: 2437, beacon_interval_tu: 100, dtim_period: 2, beacon_head: vec![1, 2, 3], beacon_tail: vec![4, 5], probe_resp: vec![6], inactivity_secs: 300, pmk: None };
+        let p = ApParams { ifindex: 7, ssid: b"IYAKKI-1A2B".to_vec(), freq_mhz: 2437, beacon_interval_tu: 100, dtim_period: 2, beacon_head: vec![1, 2, 3], beacon_tail: vec![4, 5], probe_resp: vec![6], inactivity_secs: 300, pmk: None, security: crate::rsn::SecurityMode::Wpa2 };
         let m = start_ap(FAM, 8, &p);
         let msgs = split_messages(&m).unwrap();
         assert_eq!(msgs.len(), 1);
@@ -757,6 +822,64 @@ mod tests {
         assert_eq!(find(&a, attr::PRIVACY).unwrap().len(), 0);
         assert_eq!(find(&a, attr::INACTIVITY_TIMEOUT).unwrap(), &300u16.to_le_bytes());
         assert_eq!(m.len() % 4, 0);
+    }
+
+    fn ap_attrs(security: crate::rsn::SecurityMode) -> Vec<(u16, Vec<u8>)> {
+        let p = ApParams { ifindex: 7, ssid: b"W3".to_vec(), freq_mhz: 5180, beacon_interval_tu: 100, dtim_period: 2, beacon_head: vec![1], beacon_tail: vec![2], probe_resp: vec![3], inactivity_secs: 0, pmk: None, security };
+        let m = start_ap(FAM, 9, &p);
+        let (_, a) = genl(split_messages(&m).unwrap()[0].payload).unwrap();
+        attrs(a).unwrap().into_iter().map(|(t, v)| (t, v.to_vec())).collect()
+    }
+
+    fn get(a: &[(u16, Vec<u8>)], t: u16) -> Option<&Vec<u8>> {
+        a.iter().find(|(x, _)| *x == t).map(|(_, v)| v)
+    }
+
+    #[test]
+    fn the_kernel_is_told_sae_and_protected_management_frames_for_wpa3_and_both_key_managements_for_the_transition() {
+        use crate::rsn::SecurityMode::*;
+        // WPA3: SAE only, protection required, WPA versions 2 and 3
+        let a = ap_attrs(Wpa3);
+        assert_eq!(get(&a, attr::AKM_SUITES).unwrap(), &AKM_SAE.to_le_bytes().to_vec());
+        assert_eq!(get(&a, attr::USE_MFP).unwrap(), &MFP_REQUIRED.to_le_bytes().to_vec());
+        assert_eq!(get(&a, attr::WPA_VERSIONS).unwrap(), &(WPA_VERSION_2 | WPA_VERSION_3).to_le_bytes().to_vec());
+        // transition: PSK and SAE in that order, protection optional
+        let a = ap_attrs(Transition);
+        let mut both = AKM_PSK.to_le_bytes().to_vec();
+        both.extend(AKM_SAE.to_le_bytes());
+        assert_eq!(get(&a, attr::AKM_SUITES).unwrap(), &both);
+        assert_eq!(get(&a, attr::USE_MFP).unwrap(), &MFP_OPTIONAL.to_le_bytes().to_vec());
+        // WPA2 stays as it was: PSK only, no protection attribute, version 2 only
+        let a = ap_attrs(Wpa2);
+        assert_eq!(get(&a, attr::AKM_SUITES).unwrap(), &AKM_PSK.to_le_bytes().to_vec());
+        assert!(get(&a, attr::USE_MFP).is_none());
+        assert_eq!(get(&a, attr::WPA_VERSIONS).unwrap(), &WPA_VERSION_2.to_le_bytes().to_vec());
+        // the pairwise and group ciphers are CCMP in every mode
+        assert_eq!(get(&a, attr::CIPHER_SUITE_GROUP).unwrap(), &CIPHER_CCMP.to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn the_integrity_group_key_goes_to_the_kernel_as_a_cmac_key_with_no_address_and_becomes_the_default_for_management_frames() {
+        let m = new_igtk(FAM, 3, 7, 4, &[9; 16]);
+        let (c, a) = genl(split_messages(&m).unwrap()[0].payload).unwrap();
+        assert_eq!(c, cmd::NEW_KEY);
+        let a = attrs(a).unwrap();
+        assert!(find(&a, attr::MAC).is_none());
+        let key = attrs(find(&a, attr::KEY).unwrap()).unwrap();
+        assert_eq!(find(&key, attr::KEY_NESTED_DATA).unwrap(), &[9; 16]);
+        assert_eq!(find(&key, attr::KEY_NESTED_CIPHER).unwrap(), &CIPHER_AES_CMAC.to_le_bytes());
+        assert_eq!(find(&key, attr::KEY_NESTED_IDX).unwrap(), &[4]);
+        let d = set_default_mgmt_key(FAM, 4, 7, 4);
+        let (c, a) = genl(split_messages(&d).unwrap()[0].payload).unwrap();
+        assert_eq!(c, cmd::SET_KEY);
+        let key = attrs(find(&attrs(a).unwrap(), attr::KEY).unwrap()).unwrap();
+        assert!(find(&key, attr::KEY_NESTED_DEFAULT_MGMT).is_some());
+        assert!(find(&key, attr::KEY_NESTED_DEFAULT).is_none(), "the group data key stays as it was");
+        // through the control layer: key first, then the default
+        let mut c = ApControl::new(Fake { sent: vec![], fail_with: None });
+        c.install_igtk(7, 4, &[9; 16]).unwrap();
+        let order: Vec<u8> = c.transport().sent.iter().map(|b| split_messages(b).unwrap()[0].payload[0]).filter(|c| *c != CTRL_CMD_GETFAMILY).collect();
+        assert_eq!(order, vec![cmd::NEW_KEY, cmd::SET_KEY]);
     }
 
     #[test]
@@ -851,7 +974,7 @@ mod tests {
     #[test]
     fn the_parsers_never_panic_on_junk() {
         let mut s = 11u32;
-        let good = start_ap(FAM, 1, &ApParams { ifindex: 1, ssid: b"x".to_vec(), freq_mhz: 2412, beacon_interval_tu: 100, dtim_period: 2, beacon_head: vec![0; 40], beacon_tail: vec![0; 30], probe_resp: vec![], inactivity_secs: 10, pmk: None });
+        let good = start_ap(FAM, 1, &ApParams { ifindex: 1, ssid: b"x".to_vec(), freq_mhz: 2412, beacon_interval_tu: 100, dtim_period: 2, beacon_head: vec![0; 40], beacon_tail: vec![0; 30], probe_resp: vec![], inactivity_secs: 10, pmk: None, security: crate::rsn::SecurityMode::Wpa2 });
         for n in 0..6000usize {
             let mut v = if n % 2 == 0 { good.clone() } else { (0..n % 200).map(|_| { s = s.wrapping_mul(1664525).wrapping_add(1013904223); (s >> 24) as u8 }).collect() };
             if n % 2 == 0 && !v.is_empty() {
@@ -900,7 +1023,7 @@ mod tests {
         let mut c = ApControl::new(Fake { sent: vec![], fail_with: None });
         assert!(c.wiphys().unwrap()[0].supports_ap());
         c.set_ap_mode(7).unwrap();
-        c.start_ap(&ApParams { ifindex: 7, ssid: b"n".to_vec(), freq_mhz: 2437, beacon_interval_tu: 100, dtim_period: 2, beacon_head: vec![0], beacon_tail: vec![0], probe_resp: vec![], inactivity_secs: 300, pmk: None }).unwrap();
+        c.start_ap(&ApParams { ifindex: 7, ssid: b"n".to_vec(), freq_mhz: 2437, beacon_interval_tu: 100, dtim_period: 2, beacon_head: vec![0], beacon_tail: vec![0], probe_resp: vec![], inactivity_secs: 300, pmk: None, security: crate::rsn::SecurityMode::Wpa2 }).unwrap();
         c.install_gtk(7, 1, &[5; 16]).unwrap();
         c.add_station(7, STA, 1, 10, &[0x82], 0x0431).unwrap();
         c.install_ptk(7, STA, &[6; 16]).unwrap();
@@ -922,7 +1045,7 @@ mod tests {
         assert_eq!(c.set_ap_mode(7), Err(NlError::Kernel(16)));
         let mut u = ApControl::new(UnsupportedTransport);
         assert_eq!(u.wiphys(), Err(NlError::NotSupported));
-        assert_eq!(u.start_ap(&ApParams { ifindex: 1, ssid: vec![], freq_mhz: 0, beacon_interval_tu: 0, dtim_period: 0, beacon_head: vec![], beacon_tail: vec![], probe_resp: vec![], inactivity_secs: 0, pmk: None }), Err(NlError::NotSupported));
+        assert_eq!(u.start_ap(&ApParams { ifindex: 1, ssid: vec![], freq_mhz: 0, beacon_interval_tu: 0, dtim_period: 0, beacon_head: vec![], beacon_tail: vec![], probe_resp: vec![], inactivity_secs: 0, pmk: None, security: crate::rsn::SecurityMode::Wpa2 }), Err(NlError::NotSupported));
         assert_eq!(NlError::NotSupported.to_string(), "not supported on this build");
     }
 }

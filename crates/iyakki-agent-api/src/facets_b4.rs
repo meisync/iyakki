@@ -315,6 +315,37 @@ pub trait HelpersB4: Send + Sync {
     fn upnp_start_for(&self, _data_dir: &std::path::Path, _user: &str, _audit: AuditLineB4) -> Result<String, String> {
         Err(UNAVAILABLE_B4.into())
     }
+    /// Casting (the Shares page buttons, `iyakki_agent::upnp_cast_desk`): look for players on the local network; their names.
+    fn cast_find(&self) -> Result<Vec<String>, String> {
+        Err(UNAVAILABLE_B4.into())
+    }
+    /// The items of the person's media server to cast: (id, title, is video).
+    fn cast_items(&self, _user: &str) -> Vec<(String, String, bool)> {
+        Vec::new()
+    }
+    /// Play item `item` of the media server on the player `name` (from `cast_find`).
+    fn cast_play(&self, _user: &str, _name: &str, _item: &str) -> Result<String, String> {
+        Err(UNAVAILABLE_B4.into())
+    }
+    fn cast_stop(&self, _name: &str) -> Result<String, String> {
+        Err(UNAVAILABLE_B4.into())
+    }
+    /// `action` is `pause`, `resume`, `by` (seconds from now, may be negative) or `to` (a second from the start).
+    fn cast_move(&self, _name: &str, _action: &str, _secs: i64) -> Result<String, String> {
+        Err(UNAVAILABLE_B4.into())
+    }
+    /// One line of progress and the position in seconds when the player said one.
+    fn cast_progress(&self, _name: &str) -> Result<(String, Option<u64>), String> {
+        Err(UNAVAILABLE_B4.into())
+    }
+    /// The data science toolkit as the Setup page shows it: a code (`none`, `current`, `upgrade`, `broken`) and a sentence.
+    fn datasci_state(&self, _data_dir: &std::path::Path) -> (String, String) {
+        ("none".into(), String::new())
+    }
+    /// "Verify toolkit": the self-test again in the person's Linux apps sandbox with no network; the sentence it saw.
+    fn datasci_verify(&self, _data_dir: &std::path::Path, _user: &str) -> Result<String, String> {
+        Err(UNAVAILABLE_B4.into())
+    }
     /// Who follows the media server for changes: the sentence and the rows (peer, service, seconds left).
     fn upnp_subscribers(&self, _user: &str) -> (String, Vec<(String, String, i64)>) {
         (String::new(), Vec::new())

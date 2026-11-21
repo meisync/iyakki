@@ -496,7 +496,7 @@ impl Family {
 }
 
 /// One picture model that could draw: where it is and what it is.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Cand {
     pub provider: String,
     pub model: String,

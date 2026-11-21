@@ -454,11 +454,7 @@ pub(crate) fn kubectl_apply(args: &[String], stdin: &[u8]) -> Result<String, Str
 }
 
 fn kubectl(args: &[String], stdin: &[u8]) -> Result<String, String> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("kubectl").args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("kubectl could not be started ({e}): install kubectl or use `iyakki cloud bundle` and apply the manifests elsewhere"))?;
-    child.stdin.take().ok_or("kubectl: no stdin")?.write_all(stdin).map_err(|e| e.to_string())?;
-    let o = child.wait_with_output().map_err(|e| e.to_string())?;
+    let o = iyakki_core_local::starters::kubectl_run(args, Some(stdin)).map_err(|e| format!("kubectl could not be started ({e}): install kubectl or use `iyakki cloud bundle` and apply the manifests elsewhere"))?;
     if o.status.success() {
         Ok(String::from_utf8_lossy(&o.stdout).into_owned())
     } else {

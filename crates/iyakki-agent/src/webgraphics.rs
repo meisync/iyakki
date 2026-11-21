@@ -7,7 +7,7 @@
 //!
 //! * The setting (`<data>/web-profile/web-graphics.json`, next to the `web-tuning` file): **Automatic** (default), **Software**
 //!   (safe: `LIBGL_ALWAYS_SOFTWARE=1` and the llvmpipe thread count) or **Hardware** (never fall back).
-//! * Automatic fall back: when the last finished session (`sessions.tsv`, [`iyakki_storage::crashlog`]) did not end cleanly AND the
+//! * Automatic fall back: when the last finished session (`sessions.tsv`, [`iyakki_core_local::keptlog`]) did not end cleanly AND the
 //!   engine log (`engine.log`) shows that the engine started on the graphics card in that session and nothing else was logged for
 //!   more than [`BLAME_WINDOW_S`] seconds after it, the next engine start draws in software. The fall back is remembered per graphics
 //!   card (`vendor:device`) in `web-graphics-state.json` until the person changes the setting or presses "Try hardware again", or
@@ -101,8 +101,8 @@ pub struct Prev {
     pub uptime_s: u64,
 }
 
-impl From<iyakki_storage::crashlog::Finished> for Prev {
-    fn from(f: iyakki_storage::crashlog::Finished) -> Prev {
+impl From<iyakki_core_local::keptlog::Finished> for Prev {
+    fn from(f: iyakki_core_local::keptlog::Finished) -> Prev {
         Prev { unclean: f.unclean(), boot_id: f.boot_id, started: f.started, uptime_s: f.uptime_s }
     }
 }
@@ -169,7 +169,7 @@ pub enum Evidence {
 /// engine log line) is within [`BLAME_WINDOW_S`] of that start.
 pub fn evidence(prev: Option<&Prev>, cur_started: i64, log: &[(i64, String)]) -> Evidence {
     let Some(p) = prev else { return Evidence::None };
-    let sane = iyakki_storage::crashlog::EARLIEST_SANE;
+    let sane = iyakki_core_local::keptlog::EARLIEST_SANE;
     if p.started < sane {
         return Evidence::None;
     }
@@ -421,8 +421,8 @@ impl World {
     pub fn real() -> World {
         let dir = crate::enginelog::dir();
         let now = crate::clock::now_unix();
-        let cur = iyakki_storage::crashlog::current_session();
-        let prev = iyakki_storage::crashlog::last_finished(&dir).filter(|f| cur.as_ref().is_none_or(|c| c.boot_id != f.boot_id)).map(Prev::from);
+        let cur = iyakki_core_local::keptlog::current_session();
+        let prev = iyakki_core_local::keptlog::KeptLog::at(&dir).previous_session(cur.as_ref()).map(Prev::from);
         World {
             gpus: crate::webengine::drm_gpus(),
             marker: std::fs::read_to_string(crate::webengine::GL_MARKER).unwrap_or_default(),

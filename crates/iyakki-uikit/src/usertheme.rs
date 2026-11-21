@@ -199,14 +199,24 @@ pub fn list_dir(dir: &Path) -> Vec<(String, Result<UserTheme, String>)> {
         .collect()
 }
 
-/// The folders a person's themes are looked for in: their own first, then the shared one.
+/// The folder of the theme files installed bundles brought; `iyakki_shared::bundle_members::THEME_DIR` is the same text (this crate takes no
+/// `iyakki-*` dependency, a test in `iyakki-apps` keeps the two equal).
+pub const BUNDLE_DIR: &str = "bundle-themes";
+
+/// The folders a person's themes are looked for in: their own first, then the shared one, then those of installed bundles.
 pub fn folders(data: &Path, user: &str) -> Vec<PathBuf> {
     let who: String = user.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
     let mut v = Vec::new();
-    if !who.is_empty() && !who.starts_with('.') {
-        v.push(data.join("themes").join(who));
+    let own = !who.is_empty() && !who.starts_with('.');
+    if own {
+        v.push(data.join("themes").join(&who));
     }
     v.push(data.join("themes"));
+    // the themes installed bundles brought (written by the store, F-CORE-26): the person's own, then the shared ones
+    if own {
+        v.push(data.join(BUNDLE_DIR).join(&who));
+    }
+    v.push(data.join(BUNDLE_DIR));
     v
 }
 

@@ -3,7 +3,7 @@
 use iyakki_wordtime as wordtime;
 
 /// Where the word times of a piece come from.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TimingSource {
     /// The engine's own word times.
     Native,
@@ -28,7 +28,7 @@ impl TimingSource {
 }
 
 /// Word times of one piece: where each word of its text starts (milliseconds), then the end of the sound.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Timed {
     pub begin: Vec<f32>,
     pub source: TimingSource,
@@ -44,7 +44,7 @@ impl Timed {
 use std::net::IpAddr;
 
 /// Where a speech server runs, as far as privacy goes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Locality {
     ThisComputer,
     Network,

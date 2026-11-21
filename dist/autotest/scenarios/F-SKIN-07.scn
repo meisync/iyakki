@@ -1,0 +1,11 @@
+# autotest pilot, batch A (2026-11-21). Written against the Feature text with sha 09c6badb6623b23b; honest subset only: everything not checked is under not-covered.
+row: F-SKIN-07
+targets: qemu
+profile: ram
+feature-sha: 09c6badb6623b23b
+doc: Light, High contrast and Dark apply on the real Display page and the page title stays readable (measured)
+clause: 1 Light, High contrast and Dark apply on the real Display page and the page title stays readable (measured)
+not-covered: widgets and a ChatView at 3 size classes, text 1x 2x 3x, two families, letter spacing
+not-covered: the Paper skin and every shipped skin's radii, shadows and blur
+not-covered: a skin switch is live and an app's own accent is corrected
+session-check: theme_switch

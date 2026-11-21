@@ -700,6 +700,72 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// Compile one of the helper's check programs (dist/webview/wpe-helper/*-check.c) with the host's C compiler.
+    fn compile_check(tag: &str, file: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        let cc = ["cc", "gcc", "clang"].iter().find(|c| std::process::Command::new(c).arg("--version").output().is_ok_and(|o| o.status.success()))?;
+        let dir = std::env::temp_dir().join(format!("iyakki-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist/webview/wpe-helper").join(file);
+        let exe = dir.join("check");
+        let out = std::process::Command::new(cc).args(["-std=gnu11", "-Wall", "-Wextra", "-Werror", "-o"]).arg(&exe).arg(&src).output().unwrap();
+        assert!(out.status.success(), "{file} does not compile: {}", String::from_utf8_lossy(&out.stderr));
+        Some((dir, exe))
+    }
+
+    #[test]
+    fn the_helpers_feed_reader_reads_what_the_shells_writer_wrote_and_refuses_half_pictures_and_other_files() {
+        let (dir, exe) = compile_check("feedc", "feed-check.c").expect("a C compiler");
+        let path = dir.join("feed.raw");
+        let run = |after: u64| String::from_utf8_lossy(&std::process::Command::new(&exe).arg(&path).arg(after.to_string()).output().unwrap().stdout).trim().to_string();
+        assert_eq!(run(0), "none", "no file yet");
+        let mut f = ScreenFeed::create(path.clone()).unwrap();
+        assert_eq!(run(0), "none", "an empty file is no picture");
+        let px: Vec<u8> = (0..5 * 3 * 4).map(|i| (i * 7) as u8).collect();
+        let sum: u32 = px.iter().map(|b| *b as u32).sum();
+        f.write(5, 3, &px).unwrap();
+        assert_eq!(run(0), format!("ok 5 3 2 {sum}"), "the first complete picture, seq 2");
+        assert_eq!(run(2), "none", "the same picture is not taken twice");
+        f.write(5, 3, &px).unwrap();
+        assert_eq!(run(2), format!("ok 5 3 4 {sum}"));
+        // a picture that is being written (odd seq) is never taken: patch the seq of a copy
+        let mut raw = std::fs::read(&path).unwrap();
+        raw[24..32].copy_from_slice(&5u64.to_le_bytes());
+        std::fs::write(&path, &raw).unwrap();
+        assert_eq!(run(0), "none", "odd seq: a half-written picture");
+        // not a feed file, a wrong version, a size that does not fit the file, a stride that is not width*4, a huge size
+        let mut bad = std::fs::read(&path).unwrap();
+        bad[24..32].copy_from_slice(&6u64.to_le_bytes());
+        let put = |name: &str, f: &dyn Fn(&mut Vec<u8>)| {
+            let mut b = bad.clone();
+            f(&mut b);
+            std::fs::write(&path, &b).unwrap();
+            assert_eq!(run(0), "none", "{name}");
+        };
+        put("magic", &|b| b[0] = b'X');
+        put("version", &|b| b[4] = 2);
+        put("format", &|b| b[20] = 1);
+        put("stride", &|b| b[16] = 9);
+        put("cut short", &|b| b.truncate(40));
+        put("huge", &|b| b[8..12].copy_from_slice(&100_000u32.to_le_bytes()));
+        put("zero", &|b| b[8..12].copy_from_slice(&0u32.to_le_bytes()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_portals_object_paths_follow_the_specification_and_a_start_needs_a_feed() {
+        let (dir, exe) = compile_check("portalc", "portal-check.c").expect("a C compiler");
+        let run = |args: &[&str]| String::from_utf8_lossy(&std::process::Command::new(&exe).args(args).output().unwrap().stdout).trim().to_string();
+        assert_eq!(run(&["request", ":1.42", "tok_1"]), "/org/freedesktop/portal/desktop/request/1_42/tok_1");
+        assert_eq!(run(&["session", ":1.7", "iyakki_session"]), "/org/freedesktop/portal/desktop/session/1_7/iyakki_session");
+        for (sender, token) in [("1.42", "t"), (":1.42", "a/b"), (":1.42", ""), (":1.4/2", "t"), (":", "t"), (":1.42", &"x".repeat(65)[..])] {
+            assert_eq!(run(&["request", sender, token]), "refused", "{sender} {token}");
+        }
+        assert_eq!(run(&["start", "/dev/shm/iyakki-screen-1-0.raw"]), "may");
+        assert_eq!(run(&["start", ""]), "may not", "without a feed from the shell the portal says ended");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn keys_buttons_words_and_the_indicator() {
         for (k, a) in [('1', Answer::Once), ('2', Answer::WhileOpen), ('3', Answer::Always), ('4', Answer::Block)] {

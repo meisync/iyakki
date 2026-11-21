@@ -29,6 +29,13 @@ pub const USAGE: &str = "iyakki pkg <command>
                                          --reference, a stock module of that kernel) fail unless the device would accept it
   driver-check <payload.json> [--kernel RELEASE] [--reference stock.ko]
                                          the checks a device runs on a driver pack's payload (names, sizes, modprobe lines, modules)
+  root-line --id ID --public name.pub|HEX [--days N]
+                                         the line for official-roots.txt from a root's PUBLIC key (the private half never leaves its machine)
+  root-pin --id ID --public name.pub|HEX --file official-roots.txt [--days N]
+                                         add that line to the file, only when the whole file still passes the audit afterwards
+  roots-check <official-roots.txt>       audit the file: unreadable lines, duplicates, windows, a root valid now
+  host-check <folder> [--roots roots.txt] [--previous N]
+                                         audit the folder to upload as the hosted catalog (signature of a pinned root, number, expiry, every package)
   publish --server URL --token-env NAME <pkg.iyp>
                                          push a signed package to a private store (the token is read from the environment variable NAME)";
 
@@ -304,33 +311,80 @@ pub fn run_at(args: &[String], now: i64) -> Result<String, String> {
             let file = a.pos.first().ok_or("inspect-module needs a .ko file")?;
             let bytes = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
             let reference = match a.one("reference") {
-                Some(r) => Some(iyakki_drivers::modinfo::parse(&std::fs::read(r).map_err(|e| format!("{r}: {e}"))?).map_err(|e| format!("{r}: {e}"))?.vermagic),
+                Some(r) => Some(iyakki_core_local::kmodpack::vermagic_of(&std::fs::read(r).map_err(|e| format!("{r}: {e}"))?).map_err(|e| format!("{r}: {e}"))?),
                 None => None,
             };
             let m = match a.one("kernel") {
-                Some(k) => iyakki_drivers::modinfo::check(&bytes, k, reference.as_deref()).map_err(|e| format!("{file}: {e}"))?,
-                None => iyakki_drivers::modinfo::parse(&bytes).map_err(|e| format!("{file}: {e}"))?,
+                Some(k) => iyakki_core_local::kmodpack::check(&bytes, k, reference.as_deref()).map_err(|e| format!("{file}: {e}"))?,
+                None => iyakki_core_local::kmodpack::inspect(&bytes).map_err(|e| format!("{file}: {e}"))?,
             };
             Ok(format!("name: {}\nvermagic: {}\nrelease: {}\nlicense: {}{}\ndepends: {}\nsize: {} bytes\n{}", m.name, m.vermagic, m.release(), m.license, if m.gpl_compatible() { "" } else { " (NON-FREE: loading it taints the kernel)" }, m.depends.join(","), bytes.len(), a.one("kernel").map_or("kernel release not checked".to_string(), |k| format!("OK: built for kernel {k}{}", if reference.is_some() { " with the same build flags as the stock modules" } else { "" }))))
         }
         "driver-check" => {
             let file = a.pos.first().ok_or("driver-check needs a payload file")?;
-            let p = iyakki_drivers::Pack::parse(&read(file)?)?;
+            let p = iyakki_core_local::kmodpack::parse_pack(&read(file)?)?;
             let reference = match a.one("reference") {
-                Some(r) => Some(iyakki_drivers::modinfo::parse(&std::fs::read(r).map_err(|e| format!("{r}: {e}"))?).map_err(|e| format!("{r}: {e}"))?.vermagic),
+                Some(r) => Some(iyakki_core_local::kmodpack::vermagic_of(&std::fs::read(r).map_err(|e| format!("{r}: {e}"))?).map_err(|e| format!("{r}: {e}"))?),
                 None => None,
             };
             let mut out = format!("pack ok: {} firmware file(s), {} module(s), {} modprobe line(s), loads {}\n", p.files.len(), p.modules.len(), p.modprobe.len(), if p.load.is_empty() { "nothing".to_string() } else { p.load.join(", ") });
             for m in &p.modules {
-                let bytes = iyakki_drivers::b64::decode(&m.data).ok_or_else(|| format!("module {} is not valid base64", m.name))?;
+                let bytes = iyakki_core_local::kmodpack::decode_payload(&m.data).ok_or_else(|| format!("module {} is not valid base64", m.name))?;
                 let info = match a.one("kernel") {
                     Some(k) if m.kernel != k => return Err(format!("module {} says kernel {} but you asked for {k}", m.name, m.kernel)),
-                    Some(k) => iyakki_drivers::modinfo::check(&bytes, k, reference.as_deref()).map_err(|e| format!("module {}: {e}", m.name))?,
-                    None => iyakki_drivers::modinfo::parse(&bytes).map_err(|e| format!("module {}: {e}", m.name))?,
+                    Some(k) => iyakki_core_local::kmodpack::check(&bytes, k, reference.as_deref()).map_err(|e| format!("module {}: {e}", m.name))?,
+                    None => iyakki_core_local::kmodpack::inspect(&bytes).map_err(|e| format!("module {}: {e}", m.name))?,
                 };
                 out.push_str(&format!("module {}: vermagic \"{}\"{}\n", m.name, info.vermagic.trim(), if info.gpl_compatible() { "" } else { ", non-free" }));
             }
             Ok(out)
+        }
+        "root-line" | "root-pin" => {
+            let id = a.need("id")?;
+            let public = a.need("public")?;
+            let hex = if public.len() == 64 && public.bytes().all(|b| b.is_ascii_hexdigit()) { public.to_string() } else { read(public)?.trim().to_string() };
+            let d = days(&a, "days", 3650)?;
+            let line = super::hosting::roots_line(id, &hex, now, now + d * 86_400)?;
+            if cmd == "root-line" {
+                return Ok(line);
+            }
+            let file = a.need("file")?;
+            let old = std::fs::read_to_string(file).unwrap_or_default();
+            let mut text = old.clone();
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&line);
+            text.push('\n');
+            let problems = super::hosting::roots_problems(&text, now);
+            if !problems.is_empty() {
+                return Err(format!("not pinned, {file} stays as it was:\n{}", problems.join("\n")));
+            }
+            write(file, &text, false)?;
+            Ok(format!("pinned root {id} in {file}; build the image again so devices carry it"))
+        }
+        "roots-check" => {
+            let f = a.pos.first().ok_or("roots-check needs the roots file")?;
+            let problems = super::hosting::roots_problems(&read(f)?, now);
+            if problems.is_empty() { Ok(format!("{f}: sound")) } else { Err(problems.join("\n")) }
+        }
+        "host-check" => {
+            let dir = a.pos.first().ok_or("host-check needs the folder")?;
+            let roots = match a.one("roots") {
+                Some(p) => Roots::parse(&read(p)?),
+                None => Roots::pinned(),
+            };
+            let previous = a.one("previous").map_or(Ok(0), |v| v.parse::<u64>().map_err(|_| "--previous is the number of the catalog published last".to_string()))?;
+            let r = super::hosting::check_hosting(Path::new(dir), &roots, previous, now);
+            let mut out = format!("catalog {} number {}: {} entries, {} packages checked\n", r.catalog_id, r.serial, r.entries, r.packages_checked);
+            for w in &r.warnings {
+                out.push_str(&format!("warning: {w}\n"));
+            }
+            if r.ok() {
+                Ok(out + "ready to upload")
+            } else {
+                Err(out + &r.problems.iter().map(|p| format!("problem: {p}")).collect::<Vec<_>>().join("\n"))
+            }
         }
         "publish" => {
             let file = a.pos.first().ok_or("publish needs a package file")?;
@@ -362,6 +416,31 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn the_root_commands_make_the_line_pin_it_only_when_the_file_stays_sound_and_audit_a_hosting_folder() {
+        let d = std::env::temp_dir().join(format!("iyakki-rootcmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let p = |n: &str| d.join(n).display().to_string();
+        run_at(&s(&["keygen", &p("r")]), NOW).unwrap();
+        let pubhex = std::fs::read_to_string(p("r.pub")).unwrap().trim().to_string();
+        let line = run_at(&s(&["root-line", "--id", "root1", "--public", &p("r.pub"), "--days", "30"]), NOW).unwrap();
+        assert_eq!(line, format!("root1 {pubhex} {NOW} {}", NOW + 30 * 86_400));
+        assert!(run_at(&s(&["root-line", "--id", "bad id", "--public", &pubhex]), NOW).is_err());
+        // pin: the file gains the line; a second pin of the same key or id is refused and the file is unchanged
+        run_at(&s(&["root-pin", "--id", "root1", "--public", &pubhex, "--file", &p("roots.txt")]), NOW).unwrap();
+        let after = std::fs::read_to_string(p("roots.txt")).unwrap();
+        assert_eq!(after.lines().count(), 1);
+        let e = run_at(&s(&["root-pin", "--id", "root2", "--public", &pubhex, "--file", &p("roots.txt")]), NOW).unwrap_err();
+        assert!(e.contains("twice") && e.contains("stays as it was"), "{e}");
+        assert_eq!(std::fs::read_to_string(p("roots.txt")).unwrap(), after);
+        assert!(run_at(&s(&["roots-check", &p("roots.txt")]), NOW).unwrap().contains("sound"));
+        // an audit of a folder with no catalog names the problem and exits with an error
+        let e = run_at(&s(&["host-check", &p("nothing"), "--roots", &p("roots.txt")]), NOW).unwrap_err();
+        assert!(e.contains("no catalog.json"), "{e}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -437,7 +516,7 @@ mod tests {
 
     #[test]
     fn a_driver_pack_is_checked_built_signed_and_verified_the_way_the_wifi_script_does() {
-        use iyakki_drivers::{b64, modinfo, pack, Pack};
+        use iyakki_core_local::driver_packs::{b64, modinfo, pack, Pack};
         let d = std::env::temp_dir().join(format!("iyakki-publish-drv-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();

@@ -736,9 +736,21 @@ impl LinuxApps {
             }
         }
         sp.binds = s.mounts.iter().chain(extra.iter()).map(|m| Bind { src: m.src.clone(), dst: m.dst.clone(), rw: m.rw }).collect();
-        sp.devices = super::linuxapps_devices::select(&super::linuxapps_devices::DevicePolicy::load(&self.devices_file(name)), Path::new("/dev"), true);
+        // sound goes through the mixer's pipe when the agent made one (the sandbox then holds no sound card); else the nodes as allowed
+        let grant = super::linuxapps_devices::grant(&super::linuxapps_devices::DevicePolicy::load(&self.devices_file(name)), Path::new("/dev"), true, name, &self.dir_of(name).join("sound"), None);
+        let blocked = super::linuxapps_devices::unreachable(&grant.devices, s.id_base > 0);
+        if !blocked.is_empty() {
+            // the program would find them shut: say so in the log, the person sees it in the listing of the sandbox
+            self.audit("linuxapps.devices.noaccess", &format!("{name}: {}", blocked.join(", ")));
+        }
+        sp.devices = grant.devices;
+        if let Some((src, dst)) = grant.bind {
+            sp.binds.push(Bind { src, dst, rw: false });
+        }
+        let mut env = o.env.clone();
+        env.extend(grant.env);
         sp.cwd = if !o.cwd.is_empty() { o.cwd.clone() } else if o.root { "/root".into() } else { "/home/user".into() };
-        sp.env = o.env.clone();
+        sp.env = env;
         sp.mem_mb = s.mem_mb;
         sp.cpu_pct = s.cpu_pct;
         sp.pids = s.pids;

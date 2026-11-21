@@ -13,10 +13,27 @@ use std::time::{Duration, Instant};
 
 use iyakki_shared::browserjobs::{Frame, PageState};
 use iyakki_shared::browserjobs::{PageEngine, Servicer};
+/// The queue of the assistant's browser jobs as the servicer sees it (a trait object of the services handle).
+struct Queue<'a>(&'a dyn iyakki_agent_api::BrowserJobsApi);
+impl iyakki_shared::browserjobs::JobQueue for Queue<'_> {
+    fn beat(&self, user: &str) {
+        self.0.beat(user)
+    }
+    fn take(&self, user: &str) -> Vec<iyakki_shared::browserjobs::Job> {
+        self.0.take(user)
+    }
+    fn complete(&self, id: u64, r: iyakki_shared::browserjobs::Reply) {
+        self.0.complete(id, r)
+    }
+    fn fail_all(&self, user: &str, why: &str) {
+        self.0.fail_all(user, why)
+    }
+}
+
 use iyakki_webview::proto::ToHelper;
 
 use super::browser_full::{Full, Note, Start, AREA_FULL};
-use crate::accounts::{AuditLog, Session};
+use crate::accounts::Session;
 use crate::gfx::{Face, Gfx};
 use crate::ui::{Event, Key, R, DIM, ERR, MUTED, OK, TEXT};
 
@@ -91,7 +108,7 @@ impl PageEngine for FullEngine<'_> {
 }
 
 impl AgentTab {
-    fn start(&mut self, _browser: &iyakki_shared::browserconsent::BrowserState, dir: &std::path::Path, session: &Session) -> Result<(), String> {
+    fn start(&mut self, _browser: &dyn iyakki_agent_api::BrowserStateApi, dir: &std::path::Path, session: &Session) -> Result<(), String> {
         let helper = self.helper_override.clone().or_else(|| crate::agent().host_probe().webengine_embedded_helper()).ok_or_else(|| format!("{}.", iyakki_shared::webengine::NOT_INSTALLED))?;
         let profile = crate::agent().webengine_prepare_profile(dir, &session.user)?;
         let full = Full::start(Start {
@@ -111,21 +128,21 @@ impl AgentTab {
     }
 
     /// Look at the queue: start the engine when there is work, answer what the helper has answered, close it when it is idle.
-    pub fn service(&mut self, browser: &iyakki_shared::browserconsent::BrowserState, dir: &std::path::Path, audit: &AuditLog, session: &Session) {
+    pub fn service(&mut self, browser: &dyn iyakki_agent_api::BrowserStateApi, jobs: &dyn iyakki_agent_api::BrowserJobsApi, dir: &std::path::Path, audit: &dyn iyakki_agent_api::AuditApi, session: &Session) {
         // whatever happens in here, every waiting tool gets an answer and the shell keeps running
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.service_inner(browser, dir, audit, session)));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.service_inner(browser, jobs, dir, audit, session)));
         if r.is_err() {
             let why = "the assistant's browser hit an internal error and was closed; it starts again on the next call";
-            self.servicer.abort(&browser.jobs, &session.user, why);
+            self.servicer.abort(&Queue(jobs), &session.user, why);
             self.full = None;
             self.problem = Some(why.to_string());
             audit.record(&session.user, "browser.agent.error", "internal error while servicing the browser");
         }
     }
 
-    fn service_inner(&mut self, browser: &iyakki_shared::browserconsent::BrowserState, dir: &std::path::Path, audit: &AuditLog, session: &Session) {
+    fn service_inner(&mut self, browser: &dyn iyakki_agent_api::BrowserStateApi, jobs: &dyn iyakki_agent_api::BrowserJobsApi, dir: &std::path::Path, audit: &dyn iyakki_agent_api::AuditApi, session: &Session) {
         let user = session.user.as_str();
-        let jobs = &browser.jobs;
+        let queue = Queue(jobs);
         jobs.beat(user);
         if self.full.is_none() {
             if jobs.pending_for(user) == 0 {
@@ -145,7 +162,7 @@ impl AgentTab {
         let (busy, close, gone) = {
             let Some(f) = self.full.as_mut() else { return };
             let mut eng = FullEngine { f, allow: &allow, refused: &mut refused };
-            let r = self.servicer.service(jobs, user, &mut eng);
+            let r = self.servicer.service(&queue, user, &mut eng);
             (r.busy, r.close, eng.state().gone)
         };
         for h in refused {
@@ -157,7 +174,7 @@ impl AgentTab {
         let idle = self.last_use.elapsed() > IDLE_CLOSE && jobs.pending_for(user) == 0;
         if close || idle || gone.is_some() {
             let why = if close { "the browser was closed".to_string() } else if let Some(g) = gone { format!("the browser engine stopped ({g}); it is restarted for the next call") } else { "the browser was closed after 10 idle minutes".to_string() };
-            self.servicer.abort(jobs, user, &why);
+            self.servicer.abort(&queue, user, &why);
             self.full = None;
             if !close && !idle {
                 // the engine died: the tab says so, and the next call starts a fresh one
@@ -196,34 +213,34 @@ impl AgentTab {
 }
 
 /// The person signed out: close their assistant tab and answer anything still waiting.
-pub fn close(browser: &iyakki_shared::browserconsent::BrowserState, user: &str) {
+pub fn close(jobs: &dyn iyakki_agent_api::BrowserJobsApi, user: &str) {
     let tab = tab_of(user);
     let mut t = tab.lock().unwrap_or_else(|e| e.into_inner());
-    t.servicer.abort(&browser.jobs, user, "the person signed out");
+    t.servicer.abort(&Queue(jobs), user, "the person signed out");
     t.full = None;
     t.problem = None;
 }
 
 /// Called on every shell tick: services the signed-in person's queue.
-pub fn tick(browser: &iyakki_shared::browserconsent::BrowserState, dir: &std::path::Path, audit: &Arc<AuditLog>, session: &Session) {
+pub fn tick(browser: &dyn iyakki_agent_api::BrowserStateApi, jobs: &dyn iyakki_agent_api::BrowserJobsApi, dir: &std::path::Path, audit: &Arc<dyn iyakki_agent_api::AuditApi>, session: &Session) {
     if !browser.has_audit() {
         let a = audit.clone();
-        browser.set_audit(Arc::new(move |u, e, d| a.record(u, e, d)));
+        browser.set_audit_sink(Arc::new(move |u, e, d| a.record(u, e, d)));
     }
     let tab = tab_of(&session.user);
     let mut t = tab.lock().unwrap_or_else(|e| e.into_inner());
-    t.service(browser, dir, audit, session);
+    t.service(browser, jobs, dir, &**audit, session);
 }
 
 // ------------------------------------------------------------------------------------------------ the view in the BROWSER app
 
 /// The assistant's tab as a page of the BROWSER app: a banner with the controls over the live picture.
-pub fn render(g: &mut Gfx, area: R, s: f32, browser: &iyakki_shared::browserconsent::BrowserState, user: &str) {
+pub fn render(g: &mut Gfx, area: R, s: f32, browser: &dyn iyakki_agent_api::BrowserStateApi, user: &str) {
     render_with(g, area, s, browser, user, Some("My tabs"));
 }
 
 /// [`render`] with the label of the button that leaves the view (`None`: no such button, the host has its own way back).
-pub fn render_with(g: &mut Gfx, area: R, s: f32, browser: &iyakki_shared::browserconsent::BrowserState, user: &str, leave: Option<&str>) {
+pub fn render_with(g: &mut Gfx, area: R, s: f32, browser: &dyn iyakki_agent_api::BrowserStateApi, user: &str, leave: Option<&str>) {
     let ctl = browser.control_view(user);
     let t = tab_of(user);
     let mut tab = t.lock().unwrap_or_else(|e| e.into_inner());
@@ -302,7 +319,7 @@ pub fn use_helper_for(user: &str, p: PathBuf) {
 }
 
 /// An event while the assistant's tab is showing. Returns false when the event is not for the page (the app handles it).
-pub fn handle(ev: &Event, browser: &iyakki_shared::browserconsent::BrowserState, user: &str) -> bool {
+pub fn handle(ev: &Event, browser: &dyn iyakki_agent_api::BrowserStateApi, user: &str) -> bool {
     let t = tab_of(user);
     let mut tab = t.lock().unwrap_or_else(|e| e.into_inner());
     match ev {
@@ -362,15 +379,7 @@ mod tests {
     use std::time::Duration;
 
     fn fake_helper() -> PathBuf {
-        let exe = std::env::current_exe().unwrap();
-        let dir = exe.ancestors().find(|d| d.file_name().is_some_and(|n| n == "debug" || n == "release")).expect("the profile folder (target/debug) above the test program").to_path_buf();
-        let p = dir.join("iyakki-fake-webview");
-        if !p.is_file() {
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-            let ok = std::process::Command::new(cargo).args(["build", "-q", "-p", "iyakki-webview", "--bin", "iyakki-fake-webview"]).status().map(|s| s.success()).unwrap_or(false);
-            assert!(ok && p.is_file(), "could not build the fake helper");
-        }
-        p
+        crate::apps::tests::fake_webview_binary()
     }
 
     /// Run the shell's tick on a thread until told to stop (the tools block, so something must service them).
@@ -385,7 +394,7 @@ mod tests {
             let (s2, svc, audit, session) = (stop.clone(), cx.services.clone(), cx.audit.clone(), cx.session.clone());
             let h = std::thread::spawn(move || {
                 while !s2.load(std::sync::atomic::Ordering::SeqCst) {
-                    tick(&svc.browser(), svc.dir(), &audit, &session);
+                    tick(&*svc.browser(), &*svc.browser_jobs(), svc.dir(), &audit, &session);
                     std::thread::sleep(Duration::from_millis(3));
                 }
             });
@@ -406,7 +415,7 @@ mod tests {
         let mut cx = cx_with_admin_store("webagent1");
         cx.session.user = "wa1".into();
         let _t = Ticker::new(&cx, fake_helper());
-        let jobs = &cx.browser().jobs;
+        let jobs = &cx.browser_jobs();
         // no page yet; navigating makes the engine start, report the page and answer scripts (the fake helper's canned replies)
         jobs.call("wa1", Op::Navigate("https://a.test/start".into()), Duration::from_secs(20)).unwrap();
         let t = std::time::Instant::now();
@@ -463,11 +472,11 @@ mod tests {
         let svc2 = svc.clone();
         let h = std::thread::spawn(move || {
             while !s2.load(std::sync::atomic::Ordering::SeqCst) {
-                tick(&svc2.browser(), svc2.dir(), &audit, &session);
+                tick(&*svc2.browser(), &*svc2.browser_jobs(), svc2.dir(), &audit, &session);
                 std::thread::sleep(Duration::from_millis(3));
             }
         });
-        let e = svc.browser().jobs.call("wa2", Op::State, Duration::from_secs(10)).unwrap_err();
+        let e = svc.browser_jobs().call("wa2", Op::State, Duration::from_secs(10)).unwrap_err();
         assert!(e.contains("could not be started"), "{e}");
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         h.join().unwrap();
@@ -482,22 +491,22 @@ mod tests {
         let svc = cx.services.clone();
         let mut g = Gfx::new(900, 600);
         svc.browser().note_doing("wa3", "click button \"Send\"", "chat.test");
-        render(&mut g, R::new(0.0, 0.0, 900.0, 600.0), 1.0, &svc.browser(), "wa3");
+        render(&mut g, R::new(0.0, 0.0, 900.0, 600.0), 1.0, &*svc.browser(), "wa3");
         let labels: Vec<String> = g.hits.iter().map(|h| h.label.to_string()).collect();
         assert!(labels.iter().any(|l| l == "Stop") && labels.iter().any(|l| l == "Take over"), "{labels:?}");
         assert!(svc.browser().control_view("wa3").active);
-        assert!(handle(&Event::Tab(TAB_TAKE_OVER), &svc.browser(), "wa3"));
+        assert!(handle(&Event::Tab(TAB_TAKE_OVER), &*svc.browser(), "wa3"));
         let v = svc.browser().control_view("wa3");
         assert!(v.taken_over && !v.active);
         let mut g = Gfx::new(900, 600);
-        render(&mut g, R::new(0.0, 0.0, 900.0, 600.0), 1.0, &svc.browser(), "wa3");
+        render(&mut g, R::new(0.0, 0.0, 900.0, 600.0), 1.0, &*svc.browser(), "wa3");
         let labels: Vec<String> = g.hits.iter().map(|h| h.label.to_string()).collect();
         assert!(labels.iter().any(|l| l == "Resume") && !labels.iter().any(|l| l == "Stop"), "{labels:?}");
-        assert!(handle(&Event::Tab(TAB_RESUME), &svc.browser(), "wa3"));
+        assert!(handle(&Event::Tab(TAB_RESUME), &*svc.browser(), "wa3"));
         assert!(!svc.browser().control_view("wa3").taken_over);
-        assert!(handle(&Event::Tab(TAB_STOP), &svc.browser(), "wa3"));
+        assert!(handle(&Event::Tab(TAB_STOP), &*svc.browser(), "wa3"));
         assert!(svc.browser().control_view("wa3").stopped);
-        assert!(!handle(&Event::Key(Key::Esc), &svc.browser(), "wa3"), "Esc leaves the view");
+        assert!(!handle(&Event::Key(Key::Esc), &*svc.browser(), "wa3"), "Esc leaves the view");
     }
 
     fn ticker_for(user: &str) -> (crate::apps::AppCx, Ticker) {
@@ -508,7 +517,7 @@ mod tests {
     }
 
     fn call(cx: &crate::apps::AppCx, op: Op, secs: u64) -> Result<Reply, String> {
-        cx.browser().jobs.call(&cx.session.user, op, Duration::from_secs(secs))
+        cx.browser_jobs().call(&cx.session.user, op, Duration::from_secs(secs))
     }
 
     /// Show `url`. A call that arrives while a dead engine has not been replaced yet is answered "stopped; restarted for the next
@@ -622,16 +631,16 @@ mod tests {
     fn signing_out_while_a_job_runs_answers_it_and_closes_the_tab() {
         let (cx, _t) = ticker_for("st4");
         open(&cx, "https://a.test/one");
-        let jobs = cx.browser().jobs.clone();
+        let jobs = cx.browser_jobs().clone();
         let h = std::thread::spawn(move || jobs.call("st4", Op::Eval { js: "HANG".into(), timeout_ms: 60_000 }, Duration::from_secs(120)));
         std::thread::sleep(Duration::from_millis(300));
         let t = std::time::Instant::now();
-        close(cx.browser(), "st4");
+        close(&*cx.browser_jobs(), "st4");
         let e = h.join().unwrap().unwrap_err();
         assert!(t.elapsed() < Duration::from_secs(5) && e.contains("signed out"), "{e}");
         assert!(!alive("st4"));
         // answered late or twice: harmless
-        cx.browser().jobs.complete(999_999, Reply::Ok);
+        cx.browser_jobs().complete(999_999, Reply::Ok);
         // stop / take over while idle: the next call reports it, nothing panics
         cx.browser().take_over("st4");
         assert!(cx.browser().check_control("st4").is_err());

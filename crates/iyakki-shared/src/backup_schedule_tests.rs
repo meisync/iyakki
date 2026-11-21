@@ -120,3 +120,55 @@ fn an_encrypted_schedule_reads_the_passphrase_file_and_failures_are_said_and_sti
     assert!(run(&l, &mut s, 1_800_000_000 + 4 * DAY, &stop).unwrap_err().contains("stopped"));
     assert!(was_stopped(&stop) && fs::read_dir(&dest).unwrap().count() == before);
 }
+
+#[test]
+fn a_schedule_with_full_every_writes_a_full_file_then_links_and_removes_whole_old_chains_only() {
+    let root = tmp("chain");
+    let l = layout(&root, "amy");
+    let dest = root.join("stick");
+    fs::create_dir_all(&dest).unwrap();
+    let mut s = sched(&dest);
+    s.full_every = 3;
+    s.keep = 1;
+    let mut names = Vec::new();
+    for i in 0..4 {
+        fs::write(l.data.join(format!("layout-amy.json")), format!("{{\"tiles\":{i}}}")).unwrap();
+        let c = run(&l, &mut s, 1_800_000_000 + i * DAY, &Progress::default()).unwrap();
+        names.push(c.path.file_name().unwrap().to_string_lossy().into_owned());
+    }
+    assert!(names[0].starts_with("iyakki-backup-") && names[1].starts_with("iyakki-incr-") && names[2].starts_with("iyakki-incr-") && names[3].starts_with("iyakki-backup-"), "{names:?}");
+    // keep 1 chain: the first chain (a full file and two links) went together, the new full file is alone
+    let left: Vec<String> = fs::read_dir(&dest).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(left, vec![names[3].clone()], "{left:?}");
+    assert_eq!(s.chains, vec![vec![names[3].clone()]]);
+    assert!(s.last_result.contains("removed 3"), "{}", s.last_result);
+    // a link of the middle of a chain restores in order with its full file
+    let mut s2 = sched(&dest);
+    s2.full_every = 1;
+    assert!(s2.validate().is_err(), "1 is not a chain length");
+}
+
+#[test]
+fn a_schedule_to_a_share_mounts_it_for_the_run_only_and_never_keeps_the_password() {
+    use crate::backup_share::FakeMounter;
+    let root = tmp("share");
+    let l = layout(&root, "amy");
+    let creds = root.join("creds.txt");
+    fs::write(&creds, "amy\nsecret-pw\n").unwrap();
+    let mut s = Schedule { enabled: true, share: "smb://nas.local/backups/iyakki".into(), credentials_file: creds.display().to_string(), keep: 2, ..Schedule::default() };
+    let fm = FakeMounter::default();
+    let work = root.join("work");
+    let c = run_with(&l, &mut s, 1_800_000_000, &Progress::default(), &fm, &work).unwrap();
+    assert!(c.path.starts_with(work.join("mnt")) && c.path.exists());
+    let calls = fm.calls.lock().unwrap().clone();
+    assert!(calls.len() == 2 && calls[0].starts_with("mount ") && calls[1].starts_with("umount"), "{calls:?}");
+    assert!(!calls[0].contains("secret-pw"), "the password is never on the mount line");
+    assert!(!work.join("creds").exists(), "the credentials file is removed");
+    assert!(s.last_result.contains("on the share") && !s.last_result.contains("secret-pw"), "{}", s.last_result);
+    assert!(s.describe(&Zone::utc(), 1_800_000_000).contains("the share smb://nas.local/backups/iyakki"));
+    // a failing mount is said and moves the slot
+    let bad = FakeMounter { fail_mount: true, ..Default::default() };
+    let mut s2 = s.clone();
+    let e = run_with(&l, &mut s2, 1_800_000_000 + DAY, &Progress::default(), &bad, &work).unwrap_err();
+    assert!(e.contains("could not be mounted") && s2.last_result.starts_with("failed:") && s2.last_run == 1_800_000_000 + DAY);
+}

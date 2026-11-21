@@ -186,8 +186,11 @@ impl iyakki_agent_api::StorePublish for StoreHandle {
     fn tile_open(&self, policy: &Policy, user: &str, entry: &iyakki_shared::store_tilehub::TileEntry, web: Arc<dyn iyakki_web::Fetch>) -> Result<Box<dyn iyakki_agent_api::TileRt>, String> {
         crate::store::tilehub::open(&self.svc, policy, user, entry, web).map(|r| Box::new(r) as Box<dyn iyakki_agent_api::TileRt>)
     }
-    fn tile_open_wasm(&self, policy: &Policy, user: &str, entry: &iyakki_shared::store_tilehub::TileEntry) -> Result<iyakki_tile_host::TileRunner, String> {
-        crate::store::tilehub::open_wasm(&self.svc, policy, user, entry)
+    fn tile_listed(&self, policy: &Policy, user: &str, key: &str) -> Option<iyakki_shared::store_tilehub::TileEntry> {
+        crate::store::tilehub::installed(&self.svc, policy, user).into_iter().find(|e| e.key == key)
+    }
+    fn tile_open_wasm(&self, policy: &Policy, user: &str, entry: &iyakki_shared::store_tilehub::TileEntry) -> Result<Box<dyn iyakki_agent_api::WasmTileRt>, String> {
+        crate::store::tilehub::open_wasm(&self.svc, policy, user, entry).map(|r| Box::new(r) as Box<dyn iyakki_agent_api::WasmTileRt>)
     }
     fn tile_pictures(&self, _policy: &Policy, user: &str, entry: &iyakki_shared::store_tilehub::TileEntry) -> Result<iyakki_tile_host::ImageTable, String> {
         crate::store::tilehub::wasm_pictures(&self.svc, user, entry)
@@ -319,8 +322,16 @@ impl iyakki_agent_api::TileRt for crate::store::tile::TileRuntime {
             s.revoke();
         }
     }
+    fn sdk_embed_calls(&mut self, id: u32) -> Vec<(String, String)> {
+        let Some(b) = self.sdk.as_ref().and_then(|s| s.embeds.as_ref()) else { return Vec::new() };
+        b.take_calls(id).into_iter().map(|(m, a)| (m, a.to_string())).collect()
+    }
+    fn sdk_embed_data(&mut self, id: u32) -> Option<iyakki_agent_api::TileEmbedData> {
+        let d = self.sdk.as_ref()?.embed_data(id)?;
+        Some(iyakki_agent_api::TileEmbedData { heading: d.heading, lines: d.lines, progress: d.progress })
+    }
     fn sdk_embeds(&self) -> Vec<iyakki_agent_api::TileEmbed> {
         let Some(b) = self.sdk.as_ref().and_then(|s| s.embeds.as_ref()) else { return Vec::new() };
-        b.snapshot().into_iter().map(|v| iyakki_agent_api::TileEmbed { id: v.id, kind: v.kind, target_json: v.target.to_string(), text: v.text, hosts: v.hosts, profile: v.profile }).collect()
+        b.snapshot().into_iter().map(|v| iyakki_agent_api::TileEmbed { id: v.id, kind: v.kind, target_json: v.target.to_string(), text: v.text, hosts: v.hosts, profile: v.profile, options_json: v.options.to_string() }).collect()
     }
 }

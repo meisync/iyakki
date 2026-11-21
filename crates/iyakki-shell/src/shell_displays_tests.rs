@@ -204,26 +204,26 @@ fn pop_ups_cover_only_the_working_display() {
     // F1 help covers the working display only: the other display's picture does not change
     sh.handle(&Event::Key(Key::Esc));
     frame(&mut sh, &mut g0, &mut g1);
-    let before = g1.pm.data().to_vec();
+    let before = g1.pm_mut().data().to_vec();
     sh.handle(&Event::Key(Key::F(1)));
     frame(&mut sh, &mut g0, &mut g1);
-    assert!(g1.pm.data()[1024 * 60 * 4..] == before[1024 * 60 * 4..], "the other display is untouched by the help popup (below its bar, whose clock may move on)");
+    assert!(g1.pm_mut().data()[1024 * 60 * 4..] == before[1024 * 60 * 4..], "the other display is untouched by the help popup (below its bar, whose clock may move on)");
 }
 
 #[test]
 fn identify_puts_a_big_number_on_every_display_for_a_few_seconds() {
     let (mut sh, mut g0, mut g1) = setup("pd6");
-    let before = (g0.pm.data().to_vec(), g1.pm.data().to_vec());
+    let before = (g0.pm_mut().data().to_vec(), g1.pm_mut().data().to_vec());
     hub().identify(now_ms() + 3000);
     frame(&mut sh, &mut g0, &mut g1);
-    assert_ne!(g0.pm.data(), &before.0[..]);
-    assert_ne!(g1.pm.data(), &before.1[..]);
+    assert_ne!(g0.pm_mut().data(), &before.0[..]);
+    assert_ne!(g1.pm_mut().data(), &before.1[..]);
     hub().identify(0);
     frame(&mut sh, &mut g0, &mut g1);
     // below the bar (its clock may have moved on a minute)
     let skip = 1024 * 60;
-    let diff = g1.pm.data().chunks(4).zip(before.1.chunks(4)).skip(skip).filter(|(a, b)| a != b).count();
-    let first = g1.pm.data().chunks(4).zip(before.1.chunks(4)).skip(skip).position(|(a, b)| a != b);
+    let diff = g1.pm_mut().data().chunks(4).zip(before.1.chunks(4)).skip(skip).filter(|(a, b)| a != b).count();
+    let first = g1.pm_mut().data().chunks(4).zip(before.1.chunks(4)).skip(skip).position(|(a, b)| a != b);
     assert_eq!(diff, 0, "back to the normal picture; {diff} pixels differ, the first at {first:?}");
 }
 
@@ -339,4 +339,39 @@ fn displays_known_before_sign_in_get_their_workspaces_and_saved_layouts_at_sign_
     sh.render_display(1, &mut g1);
     sh.render_display(0, &mut g0);
     assert_eq!(sh.display_layouts_for_test(), vec!["single", "cols-30-70"]);
+}
+
+#[test]
+fn a_second_display_has_no_dock_until_the_person_chose_one_then_draws_it_and_opens_an_app_from_it() {
+    use iyakki_core_api::Core as _;
+    let (mut sh, _) = shell_with_users("pd-dock");
+    let core = std::sync::Arc::new(iyakki_core_fake::FakeCore::new());
+    sh.set_core_for_test(core.clone());
+    let mut g0 = Gfx::new(1280, 720);
+    sh.render(&mut g0);
+    login(&mut sh, "alice", "alicepass1");
+    sh.set_mem_for_test(Some(MemFacts { total: 16 * GIB, available: 12 * GIB }));
+    sh.set_displays(&two(), &DisplayConfig::default());
+    let mut g1 = Gfx::new(1024, 600);
+    frame(&mut sh, &mut g0, &mut g1);
+    let docks = |sh: &Shell, k: usize| -> Vec<String> { sh.display_hits_for_test(k).iter().filter_map(|h| h.label.strip_prefix("dock ").map(String::from)).collect() };
+    assert!(docks(&sh, 1).is_empty(), "off by default on a second display");
+    // the person chose a bottom dock for display 1 through the core
+    core.desktop().set_screen_dock("alice", 1, "bottom").unwrap();
+    sh.display_put_for_test(1, 0, probe("OTHER").0, PApp::Settings);
+    frame(&mut sh, &mut g0, &mut g1);
+    let on_one = docks(&sh, 1);
+    assert!(!on_one.is_empty(), "the dock is drawn on display 1: {:?}", sh.display_hits_for_test(1).iter().map(|h| h.label.clone()).collect::<Vec<_>>());
+    // a press on an icon makes display 1 the working one and opens the app in its pane
+    let hit = sh.display_hits_for_test(1).into_iter().find(|h| h.label.starts_with("dock ")).unwrap();
+    sh.set_pointer_display(1);
+    let (x, y) = center(&hit.rect);
+    sh.handle(&Event::MouseDown(x, y));
+    assert_eq!(sh.displays_active_for_test(), 1);
+    assert!(sh.screen_name().starts_with("app:"), "{}", sh.screen_name());
+    // "off" for that display takes it away again
+    core.desktop().set_screen_dock("alice", 1, "off").unwrap();
+    sh.set_pointer_display(0);
+    frame(&mut sh, &mut g0, &mut g1);
+    assert!(docks(&sh, 1).is_empty());
 }

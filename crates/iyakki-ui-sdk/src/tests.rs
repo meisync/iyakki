@@ -49,7 +49,7 @@ impl UiApp for Probe {
         c.text(10.0, 10.0, 18.0, th.text, "Hello Probe", TextStyle::Bold);
         c.clipped(Rect::new(0.0, 40.0, w, 60.0), &mut |cc| {
             cc.rrect(Rect::new(5.0, 45.0, w - 10.0, 50.0), 8.0, th.card);
-            cc.hit(Rect::new(5.0, 45.0, w - 10.0, 50.0), Hit { action: 7, name: "Card".into(), role: Role::ListItem });
+            cc.hit(Rect::new(5.0, 45.0, w - 10.0, 50.0), Hit { action: 7, name: "Card".into(), role: Role::ListItem, ..Default::default() });
         });
         widgets::button(c, th, &cx.metrics(), Rect::new(10.0, 120.0, 140.0, 20.0), "Press me", 9, true);
     }
@@ -98,7 +98,7 @@ fn text_with_awkward_characters_cannot_break_the_wire_format() {
     let nasty = "line one\nline two %41 ~ \u{e9}\u{4e2d} \"q\" \t";
     c.text(1.0, 2.0, 12.0, [1, 2, 3, 255], nasty, TextStyle::Mono);
     c.text(1.0, 2.0, 12.0, [1, 2, 3, 255], "", TextStyle::Regular);
-    c.hit(Rect::new(0.0, 0.0, 5.0, 5.0), Hit { action: 1, name: "a b\nc".into(), role: Role::Link });
+    c.hit(Rect::new(0.0, 0.0, 5.0, 5.0), Hit { action: 1, name: "a b\nc".into(), role: Role::Link, ..Default::default() });
     let l = c.finish();
     let t = l.to_text();
     assert_eq!(t.lines().count(), 4, "one header and one line per operation: {t}");
@@ -146,7 +146,7 @@ fn the_pixel_canvas_applies_the_scale_to_everything_and_reports_logical_size() {
     let mut g = Gfx::new(200, 100);
     let mut c = RasterCanvas::new(&mut g, R { x: 0.0, y: 0.0, w: 200.0, h: 100.0 }, 2.0);
     assert_eq!(c.size(), (100.0, 50.0));
-    c.hit(Rect::new(10.0, 5.0, 20.0, 10.0), Hit { action: 3, name: "x".into(), role: Role::Button });
+    c.hit(Rect::new(10.0, 5.0, 20.0, 10.0), Hit { action: 3, name: "x".into(), role: Role::Button, ..Default::default() });
     drop(c);
     let hits = g.probes();
     let _ = hits;
@@ -161,7 +161,7 @@ fn a_hit_inside_a_clip_only_counts_inside_it() {
     assert!(l.hit_test(20.0, 105.0).is_none(), "outside the card");
     assert_eq!(l.hit_test(30.0, 125.0).map(|x| x.action), Some(9));
     let mut c = ListCanvas::new(100.0, 100.0);
-    c.clipped(Rect::new(0.0, 0.0, 10.0, 10.0), &mut |cc| cc.hit(Rect::new(0.0, 0.0, 50.0, 50.0), Hit { action: 1, name: "n".into(), role: Role::Button }));
+    c.clipped(Rect::new(0.0, 0.0, 10.0, 10.0), &mut |cc| cc.hit(Rect::new(0.0, 0.0, 50.0, 50.0), Hit { action: 1, name: "n".into(), role: Role::Button, ..Default::default() }));
     let l = c.finish();
     assert!(l.hit_test(5.0, 5.0).is_some());
     assert!(l.hit_test(30.0, 30.0).is_none(), "a region cut by its clip is not hit outside the clip");
@@ -526,8 +526,8 @@ fn a_translated_list_moves_everything_and_keeps_the_pages_actions_apart_from_the
     c.rect(Rect::new(0.0, 0.0, 100.0, 50.0), [1, 2, 3, 255]);
     c.clipped(Rect::new(0.0, 0.0, 100.0, 50.0), &mut |cc| {
         cc.text(5.0, 6.0, 12.0, [9, 9, 9, 255], "hi", TextStyle::Regular);
-        cc.hit(Rect::new(5.0, 6.0, 20.0, 10.0), Hit { action: 3, name: "link".into(), role: Role::Link });
-        cc.hit(Rect::new(0.0, 0.0, 1.0, 1.0), Hit { action: 9_500, name: "past the cap".into(), role: Role::Link });
+        cc.hit(Rect::new(5.0, 6.0, 20.0, 10.0), Hit { action: 3, name: "link".into(), role: Role::Link, ..Default::default() });
+        cc.hit(Rect::new(0.0, 0.0, 1.0, 1.0), Hit { action: 9_500, name: "past the cap".into(), role: Role::Link, ..Default::default() });
     });
     let l = c.finish();
     let t = l.translated(10.0, 20.0, 5_000, 9_000);

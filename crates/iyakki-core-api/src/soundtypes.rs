@@ -353,7 +353,7 @@ pub static MASTER_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 /// The one master volume of IYAKKI (Settings -> Sound, the volume keys, the Devices popover, the radio and media sliders all
 /// read and change this). It lives in the settings file; the softvol control `IYAKKI` (or, without one, `gain()` for the
 /// players that scale their samples) applies it, once per stream.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Master {
     pub percent: u32,
     pub muted: bool,
@@ -378,7 +378,7 @@ use std::time::Duration;
 pub const LOGOUT_WAIT: Duration = Duration::from_millis(700);
 
 /// The moments that have a sound.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Cue {
     Login,
     Logout,

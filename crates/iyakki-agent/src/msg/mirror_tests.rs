@@ -295,3 +295,167 @@ fn a_saved_room_can_be_left_out_of_the_copy_and_unread_copies_are_counted_per_ro
     assert!(r.audit.lock().unwrap().iter().any(|l| l.contains("msg.mirror.room account=home room=\"main\" on=false")), "{:?}", r.audit.lock().unwrap());
     assert!(PROMPT_RULE.contains("message_unread") && PROMPT_RULE.contains("message_room_mirror_set"));
 }
+
+// ---------------------------------------------------------------------------------------------------- verification and key tools
+
+#[derive(Debug)]
+struct NoNet;
+impl iyakki_proxy::Upstream for NoNet {
+    fn request(&self, _: &str, _: &str, _: &[(String, String)], _: &[u8]) -> Result<iyakki_proxy::UpstreamResponse, String> {
+        Err("no network in tests".into())
+    }
+}
+
+/// Answer the secret requests of `ana` from another thread, the way the screen's masked form does: the typed text goes to the vault.
+fn typist(services: Arc<crate::services::Services>, typed: Vec<&'static str>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let store = crate::gitkeys::ServicesStore::new(&services, "ana");
+        let mut done = 0;
+        let end = std::time::Instant::now() + Duration::from_secs(30);
+        while done < typed.len() && std::time::Instant::now() < end {
+            if let Some(req) = services.secret_requests.pending("ana").first().cloned() {
+                assert!(req.purpose.contains("passphrase") || req.purpose.contains("password"), "{req:?}");
+                let name = format!("svc.typed-{done}");
+                crate::gitkeys::SecretStore::set(&store, &name, typed[done]).unwrap();
+                services.secret_requests.resolve("ana", &req.id, iyakki_shared::secretreq::Outcome::Stored(name)).unwrap();
+                done += 1;
+            } else {
+                std::thread::yield_now();
+            }
+        }
+    })
+}
+
+#[test]
+fn the_key_tools_take_the_passphrase_from_the_screen_never_the_chat_and_a_second_device_reads_old_messages_after_an_import() {
+    use super::e2ee_olm::OlmAddon;
+    use super::e2ee::E2eeAddon;
+    let dir = temp("keytools");
+    let services = crate::services::Services::open(&dir.join("svc"), Arc::new(NoNet), Arc::new(NoNet)).unwrap();
+    services.on_login("ana", "anapass-12345", false);
+    let r = rig("keytools-acc", "ana");
+    let svc = Arc::new(r.svc);
+    let docs = dir.join("Documents");
+    // the old device holds a session key for a room (a key shared by another device)
+    let old = Arc::new(OlmAddon::open(Arc::new(MemStore::default()), "a", "@ana:hs", "OLD").unwrap());
+    let other = OlmAddon::open(Arc::new(MemStore::default()), "a", "@bob:hs", "BOB").unwrap();
+    let up = old.on_sync(&json!({})).unwrap();
+    let otk = up[0].body["one_time_keys"].as_object().unwrap().values().next().unwrap()["key"].as_str().unwrap().to_string();
+    let key = other.share_room_key("!r:hs", "@ana:hs", &old.curve25519_key(), &old.ed25519_key(), Some(&otk)).unwrap();
+    other.mark_shared("!r:hs").unwrap();
+    old.on_sync(&json!({"to_device": {"events": [{"type": "m.room.encrypted", "sender": "@bob:hs", "content": key}]}, "device_one_time_keys_count": {"signed_curve25519": 50}})).unwrap();
+    let (_, content) = other.encrypt("!r:hs", "m.room.message", &json!({"msgtype": "m.text", "body": "from before"})).unwrap();
+    let event = json!({"event_id": "$old1", "content": content});
+    let t = MessageTools::new(Arc::new(crate::assign::tests_support::NoTools), svc.clone()).with_mirror(services.clone(), "ana").with_addon(old.clone(), Duration::from_secs(20), 1000).with_keys_dir(docs.clone());
+    let defs = t.defs();
+    for n in ["message_keys_export", "message_keys_import", "message_verify"] {
+        assert_eq!(defs.iter().find(|d| d.spec.name == n).unwrap().risk, crate::agent::Risk::Ask, "{n}");
+        assert!(t.grant_blocker(n, &json!({})).is_some() && !t.pre_approved(n) && !t.approved_always(n), "{n}");
+        assert!(crate::agent::hard_ask(n, &json!({"action": "start"})).is_some(), "{n}");
+    }
+    assert!(!defs.iter().any(|d| d.spec.schema.to_string().contains("passphrase") && d.spec.name.starts_with("message_keys")), "no argument carries a passphrase");
+    assert!(t.refusal("message_keys_export", &json!({"passphrase": "x"})).is_none());
+    // export: typed twice, and a mismatch or a short one writes nothing
+    let h = typist(services.clone(), vec!["correct horse battery", "another one entirely"]);
+    assert!(t.call("message_keys_export", &json!({})).unwrap_err().contains("not the same"));
+    h.join().unwrap();
+    assert!(!docs.exists() || std::fs::read_dir(&docs).unwrap().next().is_none());
+    let h = typist(services.clone(), vec!["short", "short"]);
+    assert!(t.call("message_keys_export", &json!({})).unwrap_err().contains("shorter than 8"));
+    h.join().unwrap();
+    let h = typist(services.clone(), vec!["correct horse battery", "correct horse battery"]);
+    let said = t.call("message_keys_export", &json!({})).unwrap();
+    h.join().unwrap();
+    assert!(said.contains("matrix-room-keys-1.txt") && !said.contains("correct horse"), "{said}");
+    let text = std::fs::read_to_string(docs.join("matrix-room-keys-1.txt")).unwrap();
+    assert!(text.contains("BEGIN MEGOLM SESSION DATA") && !text.contains("from before"));
+    // the typed passphrases are not left in the vault
+    assert!(crate::gitkeys::SecretStore::names(&crate::gitkeys::ServicesStore::new(&services, "ana")).unwrap().iter().all(|n| !n.starts_with("svc.typed")));
+    // a second device imports it with the passphrase typed on its screen and reads the old message
+    let new = Arc::new(OlmAddon::open(Arc::new(MemStore::default()), "a", "@ana:hs", "NEW").unwrap());
+    assert!(new.decrypt("!r:hs", &event).is_err());
+    let t2 = MessageTools::new(Arc::new(crate::assign::tests_support::NoTools), svc.clone()).with_mirror(services.clone(), "ana").with_addon(new.clone(), Duration::from_secs(20), 1000).with_keys_dir(docs.clone());
+    assert!(t2.call("message_keys_import", &json!({"file": "../etc/passwd"})).is_err());
+    assert!(t2.call("message_keys_import", &json!({"file": "nothere.txt"})).unwrap_err().contains("no such file"));
+    let h = typist(services.clone(), vec!["wrong wrong wrong"]);
+    assert!(t2.call("message_keys_import", &json!({"file": "matrix-room-keys-1.txt"})).is_err(), "a wrong passphrase reads nothing");
+    h.join().unwrap();
+    assert!(new.decrypt("!r:hs", &event).is_err());
+    let h = typist(services.clone(), vec!["correct horse battery"]);
+    let said = t2.call("message_keys_import", &json!({"file": "matrix-room-keys-1.txt"})).unwrap();
+    h.join().unwrap();
+    assert!(said.contains("1 key session"), "{said}");
+    assert_eq!(new.decrypt("!r:hs", &event).unwrap()["body"], "from before");
+    // no typed passphrase in the log
+    assert!(!r.audit.lock().unwrap().join("\n").contains("correct horse"));
+    // without the INBOX wired in (no screen to type on) the key tools are not offered at all
+    let plain = MessageTools::new(Arc::new(crate::assign::tests_support::NoTools), svc.clone());
+    assert!(plain.defs().iter().all(|d| !d.spec.name.starts_with("message_keys")));
+}
+
+#[test]
+fn the_verify_tools_show_the_strings_on_the_card_and_approving_it_is_the_persons_yes() {
+    use super::e2ee_olm::OlmAddon;
+    let dir = temp("verifytools");
+    let services = crate::services::Services::open(&dir.join("svc"), Arc::new(NoNet), Arc::new(NoNet)).unwrap();
+    let r = rig("verifytools-acc", "ana");
+    let svc = Arc::new(r.svc);
+    let a = Arc::new(OlmAddon::open(Arc::new(MemStore::default()), "a", "@ana:hs", "A1").unwrap());
+    let t = MessageTools::new(Arc::new(crate::assign::tests_support::NoTools), svc.clone()).with_mirror(services, "ana").with_addon(a.clone(), Duration::from_secs(1), 1000);
+    assert!(t.call("message_verify_status", &json!({})).unwrap().contains("No device verifications"));
+    assert!(t.call("message_verify", &json!({"action": "sideways"})).is_err());
+    assert!(t.refusal("message_verify", &json!({"action": "confirm", "txn": "nope"})).is_some(), "no card for a verification that is not there");
+    let said = t.call("message_verify", &json!({"action": "start", "user": "@bob:hs", "device": "B1"})).unwrap();
+    assert!(said.contains("next sync"));
+    let status = t.call("message_verify_status", &json!({})).unwrap();
+    assert!(status.contains("@bob:hs / B1") && status.contains("asked"), "{status}");
+    let txn = status.split_whitespace().next().unwrap().to_string();
+    assert!(t.call("message_verify", &json!({"action": "confirm", "txn": txn})).is_err(), "the strings were never shown");
+    assert!(t.call("message_verify", &json!({"action": "cancel", "txn": txn})).unwrap().contains("Ended"));
+    assert!(t.call("message_verify_status", &json!({})).unwrap().contains("ended"));
+    let card = t.preview("message_verify", &json!({"action": "start", "user": "@bob:hs", "device": "B1"})).unwrap();
+    assert!(card.contains("emoji") && card.contains("B1"));
+    // the audit never holds the strings
+    assert!(!r.audit.lock().unwrap().join("\n").contains("Dog"));
+}
+
+#[test]
+fn encryption_is_switched_on_by_the_person_on_a_card_and_loads_the_add_on_and_the_key_tools_take_the_password_from_the_screen() {
+    let hs = FakeHs::start();
+    let dir = temp("e2eeloader");
+    let services = crate::services::Services::open(&dir.join("svc"), Arc::new(NoNet), Arc::new(NoNet)).unwrap();
+    services.on_login("ana", "anapass-12345", false);
+    let r = rig("e2eeloader-acc", "ana");
+    let acct = r.svc.add_matrix("Home", &hs.url(), pw(), "").unwrap();
+    let svc = Arc::new(r.svc);
+    let t = MessageTools::new(Arc::new(crate::assign::tests_support::NoTools), svc.clone()).with_mirror(services.clone(), "ana");
+    let defs = t.defs();
+    assert_eq!(defs.iter().find(|d| d.spec.name == "message_e2ee_set").unwrap().risk, crate::agent::Risk::Ask);
+    let on = json!({"on": true});
+    assert!(t.preview("message_e2ee_set", &on).unwrap().contains("Home"));
+    assert!(!t.pre_approved("message_e2ee_set") && !t.approved_always("message_e2ee_set") && t.grant_blocker("message_e2ee_set", &on).is_some());
+    assert!(crate::agent::hard_ask("message_e2ee_set", &on).is_some());
+    // off by default: no add-on, encrypted rooms refused
+    assert!(svc.first_addon().is_none());
+    assert!(t.call("message_verify_status", &json!({})).is_err());
+    assert!(t.call("message_e2ee_set", &json!({})).is_err(), "on must be said");
+    assert!(t.call("message_e2ee_set", &on).unwrap().contains("on"));
+    let a = svc.first_addon().expect("the add-on is loaded once the person switched it on");
+    assert!(a.name().contains("Olm"));
+    let again = svc.first_addon().unwrap();
+    assert!(Arc::ptr_eq(&a, &again), "one add-on per account for the run, so verifications in progress are kept");
+    assert!(t.call("message_verify_status", &json!({})).unwrap().contains("No device verifications"));
+    // a key request that is not there has no card; the cross-signing card says where the password goes
+    assert!(t.refusal("message_verify", &json!({"action": "share_key", "txn": "nope"})).is_some());
+    let card = t.preview("message_verify", &json!({"action": "cross_signing"})).unwrap();
+    assert!(card.contains("password") && card.contains("never sees"), "{card}");
+    let h = typist(services.clone(), vec!["anapass-12345"]);
+    assert!(t.call("message_verify", &json!({"action": "cross_signing"})).unwrap().contains("Keys made"));
+    h.join().unwrap();
+    assert!(a.cross_signing_state().contains("set up"));
+    assert!(!r.audit.lock().unwrap().join("\n").contains("anapass"), "the password is never in the audit");
+    // off again: the loaded add-on is dropped and the account reads unencrypted rooms only
+    assert!(t.call("message_e2ee_set", &json!({"on": false})).unwrap().contains("off"));
+    assert!(svc.first_addon().is_none());
+    let _ = acct;
+}

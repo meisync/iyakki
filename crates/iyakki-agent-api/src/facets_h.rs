@@ -81,7 +81,8 @@ pub trait ServicesHandle: Send + Sync {
     fn fleet_member_chips(&self) -> Vec<(String, bool)>;
     fn fleet_prompt_rule(&self) -> &'static str;
     fn flows_facet(&self) -> Arc<dyn FlowsFacet>;
-    fn flows_panel(&self, user: &str, policy: &iyakki_sec::policy::Policy) -> Option<Arc<dyn crate::FlowsPanel>>;
+    /// The account's flows environment as the FLOWS tile uses it (its jobs only: the engine, the store and the host of the real one never cross).
+    fn flows_jobs(&self, user: &str, policy: &iyakki_sec::policy::Policy) -> Option<Arc<dyn crate::FlowsJobs>>;
     fn gemini_live(&self) -> Arc<dyn GeminiLive>;
     fn generate_image_traced(&self, model: Option<(&str, &str)>, prompt: &str, size: &str, p: &iyakki_shared::providers::ImageParams) -> (Result<(String, String, Vec<u8>, &'static str), String>, iyakki_shared::providers::ImageTrace);
     fn git_keys(&self, user: &str, audit: AuditFn, session: Arc<Session>) -> GitKeys;
@@ -117,6 +118,27 @@ pub trait ServicesHandle: Send + Sync {
     fn set_voice_mic(&self, id: &str) -> Result<(), String>;
     fn sftp_server(&self, data: &std::path::Path, login: crate::SftpLogin, lookup: crate::SftpLookup, audit: Arc<dyn Fn(&str, &str) + Send + Sync>) -> Arc<dyn crate::SftpServer>;
     fn sftp_status_lines(&self, data: &std::path::Path) -> Vec<String>;
+    // ---- the file scope of the core (what a person's files, pickers and tools may reach): asked of the core so a UI program does not read the machine itself
+    /// May `user` (with `policy`) read `p`? `Err` is the sentence to show.
+    fn scope_check_read(&self, policy: &iyakki_sec::policy::Policy, user: &str, p: &std::path::Path) -> Result<(), String>;
+    /// May `user` write `p`?
+    fn scope_check_write(&self, policy: &iyakki_sec::policy::Policy, user: &str, p: &std::path::Path) -> Result<(), String>;
+    /// The person's home folder (a real path).
+    fn scope_home_root(&self, user: &str, data_dir: &std::path::Path) -> std::path::PathBuf;
+    /// The home folder for code that creates folders in it.
+    fn scope_home_root_for_writes(&self, user: &str, data_dir: &std::path::Path) -> std::path::PathBuf;
+    /// The `HOME` a program started for the person must get; `None` when this is not the IYAKKI system.
+    fn scope_system_home(&self, user: &str) -> Option<std::path::PathBuf>;
+    /// The folders the person's pickers and tools stay inside.
+    fn scope_roots(&self, policy: &iyakki_sec::policy::Policy, user: &str, data_dir: &std::path::Path) -> iyakki_core_api::FileRoots;
+    /// [`ServicesHandle::scope_roots`] with the home folder chosen by the caller.
+    fn scope_roots_with_home(&self, policy: &iyakki_sec::policy::Policy, user: &str, data_dir: &std::path::Path, home: std::path::PathBuf) -> iyakki_core_api::FileRoots;
+    /// Resolve `input` (absolute, or relative to `cwd`) to a canonical path.
+    fn scope_resolve(&self, cwd: &std::path::Path, input: &str) -> Result<std::path::PathBuf, String>;
+    /// Like `scope_resolve`, for a file about to be written.
+    fn scope_resolve_for_write(&self, cwd: &std::path::Path, input: &str) -> Result<std::path::PathBuf, String>;
+    /// Make the folder above `path`.
+    fn scope_ensure_parent(&self, path: &std::path::Path) -> Result<(), String>;
     fn show_all_ai(&self) -> bool;
     fn sound_settings(&self) -> iyakki_shared::audioout::SoundSettings;
     fn speech_kit(&self) -> Arc<dyn SpeechKit>;
@@ -137,20 +159,40 @@ pub trait ServicesHandle: Send + Sync {
     fn wrap_cloud_stream_tools(&self, inner: Arc<dyn Tools>, audit: Arc<dyn Fn(&str, &str) + Send + Sync>, can_change: bool) -> Arc<dyn Tools>;
     fn wrap_fleet_tools(&self, inner: Arc<dyn Tools>, os: Arc<dyn iyakki_core_api::Os>, gate: Arc<dyn Fleet>, audit: Arc<dyn Fn(&str, &str) + Send + Sync>) -> Arc<dyn Tools>;
     // ---- the members, as accessors (the same names as the fields of Services)
-    fn settings(&self) -> &Arc<Mutex<iyakki_shared::settings::SettingsStore>>;
-    fn inbox(&self) -> &iyakki_shared::inbox::Inbox;
-    fn calendar(&self) -> &iyakki_shared::calendar::CalendarStore;
-    fn study(&self) -> &iyakki_shared::study::StudyStore;
+    /// The system settings with the shape the old `Arc<Mutex<SettingsStore>>` had (`lock()` gives a guard); a snapshot, see [`SettingsRef`].
+    fn settings(&self) -> SettingsRef {
+        SettingsRef::new(Arc::new(SettingsSrc(self.settings_api())))
+    }
+    /// The system settings as the interface that can cross the core socket.
+    fn settings_api(&self) -> Arc<dyn SettingsApi>;
+    fn inbox(&self) -> Arc<dyn crate::member_stores::InboxApi>;
+    fn calendar(&self) -> Arc<dyn crate::member_stores::CalendarApi>;
+    fn study(&self) -> Arc<dyn crate::member_stores::StudyApi>;
+    /// The study plans that touch the calendar (add, remove, delete with their events); the core holds both stores.
+    fn study_calendar(&self) -> Arc<dyn crate::study_calendar::StudyCalendarApi>;
     fn secrets(&self) -> &iyakki_shared::vault::Secrets;
-    fn kb(&self) -> &Arc<Mutex<iyakki_memx::kb::KnowledgeBase>>;
-    fn devwatch(&self) -> &Arc<iyakki_shared::devwatch::DeviceWatch>;
-    fn browser(&self) -> &iyakki_shared::browserconsent::BrowserState;
-    fn screen(&self) -> &iyakki_shared::screencap::ScreenCapture;
-    fn camera(&self) -> &iyakki_shared::camtools::CameraHub;
-    fn devtools(&self) -> &iyakki_shared::devtools::DevTools;
-    fn ext_status(&self) -> &Arc<iyakki_shared::extagent::StatusCache>;
-    fn secret_requests(&self) -> &iyakki_shared::secretreq::SecretRequests;
-    fn usage(&self) -> &iyakki_shared::usagelog::UsageLog;
+    /// The secrets as the interface that can cross the core socket: whether a reference resolves, the provider list and the provider test. It
+    /// never hands out a plain value (D-SPLIT-03-SECRETS); a screen that needs only "key present" asks here instead of [`ServicesHandle::secrets`].
+    fn secrets_api(&self) -> Arc<dyn crate::member_stores::SecretsApi> {
+        Arc::new(self.secrets().clone())
+    }
+    fn kb(&self) -> Arc<dyn crate::member_stores::KnowledgeBaseApi>;
+    /// The knowledge base as the source the workspace history reads and writes.
+    fn kb_source(&self) -> Arc<dyn iyakki_memx::kb::KbSource> {
+        Arc::new(crate::KbHandle(self.kb()))
+    }
+    fn devwatch(&self) -> Arc<dyn crate::member_stores::DevWatchApi>;
+    fn browser(&self) -> Arc<dyn crate::member_stores::BrowserStateApi>;
+    /// The questions the assistant asks about the person's browser (look, act, step, hand over, permission) and their answers.
+    fn browser_consent(&self) -> Arc<dyn crate::member_stores::ConsentApi>;
+    /// The queue between the assistant's browser tools and the page engine the shell services.
+    fn browser_jobs(&self) -> Arc<dyn crate::member_stores::BrowserJobsApi>;
+    fn screen(&self) -> Arc<dyn crate::member_stores::ScreenCaptureApi>;
+    fn camera(&self) -> Arc<dyn crate::member_stores::CameraHubApi>;
+    fn devtools(&self) -> Arc<dyn crate::member_stores::DevToolsApi>;
+    fn ext_status(&self) -> Arc<dyn crate::member_stores::ExtStatusApi>;
+    fn secret_requests(&self) -> Arc<dyn crate::member_stores::SecretRequestsApi>;
+    fn usage(&self) -> Arc<dyn crate::member_stores::UsageLogApi>;
     fn sessions(&self) -> Arc<dyn SessionApi>;
     fn skills(&self) -> Arc<dyn SkillApi>;
     fn runs(&self) -> Arc<dyn RunApi>;
@@ -167,7 +209,10 @@ pub trait ServicesHandle: Send + Sync {
     fn qi_start_registry(&self, owner: &str, a: &RegistryArgs, k3s_present: bool, launch: &Launch) -> Result<Vec<Job>, String>;
     fn av_notify_stale(&self, user: &str);
     fn msg_mirror_tick(&self, user: &str, audit: iyakki_shared::gitkeys::AuditFn) -> bool;
+    fn rag_refresh_tick(&self, user: &str, policy: &iyakki_sec::policy::Policy, audit: iyakki_shared::gitkeys::AuditFn) -> bool;
     fn msg_offer_tools(&self, tools: Arc<dyn iyakki_shared::agent::Tools>, user: &str, audit: iyakki_shared::gitkeys::AuditFn) -> Arc<dyn iyakki_shared::agent::Tools>;
+    fn page_passkeys(&self, user: &str, audit: iyakki_shared::gitkeys::AuditFn) -> Option<Arc<std::sync::Mutex<dyn crate::PagePasskeyHost>>>;
+    fn page_push(&self, user: &str, audit: iyakki_shared::gitkeys::AuditFn) -> Option<Arc<std::sync::Mutex<dyn crate::PagePushHost>>>;
     fn msg_prompt_rules(&self, user: &str) -> String;
     fn ssh_host(&self, user: &str) -> Arc<dyn crate::SshHost>;
     fn ssh_session_tools(&self, tools: Arc<dyn iyakki_shared::agent::Tools>, user: &str, allows_host: Arc<dyn Fn(&str) -> bool + Send + Sync>, audit: iyakki_shared::gitkeys::AuditFn) -> Arc<dyn iyakki_shared::agent::Tools>;

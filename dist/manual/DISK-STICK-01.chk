@@ -1,0 +1,19 @@
+scenario: DISK-STICK-01
+title: Write the startup disk to a USB stick
+area: Install
+rows: F-INST-07, F-NET-17
+machines: any
+needs: person
+prereq: A spare USB stick (everything on it will be erased) and the image file. Another computer to try the stick on.
+step: Open the installer tile and choose the stick. Read the warning.
+expect: The stick is shown by name and size, and the warning says everything on it will be erased.
+clause: F-INST-07.warning
+step: Confirm and wait for the write to finish.
+expect: A progress bar moves and ends with a message that the stick is ready. Nothing else on the computer is touched.
+clause: F-INST-07.write
+step: Eject the stick from DISKS.
+expect: The page says it is safe to remove.
+clause: F-INST-07.eject
+step: Start another computer from the stick (hold the boot key of that computer).
+expect: IYAKKI starts and reaches the sign-in or first-start screen.
+clause: F-NET-17.boots

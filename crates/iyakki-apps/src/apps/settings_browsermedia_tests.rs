@@ -76,3 +76,46 @@ fn the_keys_are_reachable_at_the_five_usual_sizes() {
         }
     }
 }
+
+#[test]
+fn z_turns_hardware_video_decoding_on_and_off_in_the_tuning_file_keeping_the_other_words_and_only_for_an_administrator() {
+    use crate::apps::browser_tuning as bt;
+    assert!(bt::is_on("cpu vaapi lp:2") && !bt::is_on("vaapi:off") && !bt::is_on("vaapi:2 cpu") && !bt::is_on(""));
+    assert_eq!(bt::with_word("cpu lp:2\n", true), "cpu lp:2 vaapi\n");
+    assert_eq!(bt::with_word("vaapi cpu vaapi", false), "cpu\n");
+    assert_eq!(bt::with_word("vaapi", false), "");
+    assert_eq!(bt::with_word("vaapi", true), "vaapi\n", "never twice");
+    let cx = admin("bmedia3");
+    let mut a = SettingsApp::new(&cx);
+    a.go_to(Tab::Browser);
+    let file = cx.data_dir().join("web-profile").join("web-tuning");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "fps:20\n").unwrap();
+    assert!(!bt::load(&cx));
+    press(&mut a, &cx, 'z');
+    assert!(bt::load(&cx));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "fps:20 vaapi\n");
+    // the engine reads the word as its environment variable
+    assert_eq!(iyakki_agent::webengine::tuning_env(&std::fs::read_to_string(&file).unwrap(), 8).iter().filter(|(k, v)| k == "IYAKKI_WEBVIEW_VAAPI" && v == "1").count(), 1);
+    press(&mut a, &cx, 'z');
+    assert!(!bt::load(&cx));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "fps:20\n");
+    let lines = cx.audit.recent(40).join("\n");
+    assert!(lines.contains("Hardware video decoding: on.") && lines.contains("Hardware video decoding: off."), "{lines}");
+    // the chat tools: free status, a change that asks, the same file
+    assert!(bt::set(&cx, true).is_ok());
+    assert!(bt::load(&cx));
+}
+
+#[test]
+fn a_person_who_is_not_an_administrator_sees_the_state_and_cannot_change_it() {
+    use crate::apps::browser_tuning as bt;
+    let mut cx = admin("bmedia4");
+    cx.session.policy.manage_settings = false;
+    let mut a = SettingsApp::new(&cx);
+    a.go_to(Tab::Browser);
+    press(&mut a, &cx, 'z');
+    assert!(!bt::load(&cx), "refused");
+    assert!(bt::set(&cx, true).unwrap_err().contains("administrator"));
+    assert!(!cx.data_dir().join("web-profile").join("web-tuning").exists());
+}

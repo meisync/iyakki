@@ -558,7 +558,7 @@ impl RecView {
             let k = ((pic.w - 4.0 * s) / fw).min((pic.h - 4.0 * s) / fh);
             let (dw, dh) = (fw * k, fh * k);
             let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
-            g.pm.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(dw / fw, 0.0, 0.0, dh / fh, pic.x + (pic.w - dw) / 2.0, pic.y + (pic.h - dh) / 2.0), None);
+            g.pm_mut().draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(dw / fw, 0.0, 0.0, dh / fh, pic.x + (pic.w - dw) / 2.0, pic.y + (pic.h - dh) / 2.0), None);
         } else {
             let t = g.fit(13.0 * s, "No picture is shown. See the message below.", Face::Sans, pic.w - 24.0 * s);
             g.text(pic.x + 12.0 * s, pic.y + pic.h / 2.0 - 8.0 * s, 13.0 * s, MUTED, &t, Face::Sans);

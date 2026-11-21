@@ -396,7 +396,7 @@ impl LearnApp {
                                         Ok(i) => {
                                             let sc = &self.pic_scaled[i].4;
                                             let (dx, dy) = ((slot.x + (slot.w - sc.width() as f32) / 2.0).round() as i32, (slot.y + (slot.h - sc.height() as f32) / 2.0).round() as i32);
-                                            g.pm.draw_pixmap(dx, dy, sc.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
+                                            g.pm_mut().draw_pixmap(dx, dy, sc.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
                                             true
                                         }
                                         Err(e) => {

@@ -122,7 +122,7 @@ fn the_overview_shows_the_clusters_state_and_nothing_when_none_is_installed() {
     assert!(a.cluster_log.is_some());
     a.handle(&Event::Tab(92), &cx);
     assert!(a.cluster_log.is_none());
-    assert!(std::fs::read_to_string(cx.audit.path()).unwrap().contains("devcluster.logs"));
+    assert!(std::fs::read_to_string(cx.audit.path_buf()).unwrap().contains("devcluster.logs"));
 
     // an ordinary account sees the state but has no log button and cannot open the log
     let mut user = cx.clone();

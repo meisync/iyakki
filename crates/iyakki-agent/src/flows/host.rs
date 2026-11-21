@@ -98,6 +98,19 @@ fn resolve_location(base: &str, loc: &str) -> String {
     }
 }
 
+/// Runs a script step in the in-house JavaScript engine (F-SPLIT-03, D-S5-01: the core installs it, the tile no longer does): `args` is the
+/// input, `return` the result. The engine has no web modules, so a script can reach nothing; a time and memory limit apply.
+pub fn script_runner() -> JsFn {
+    Arc::new(|source: &str, args: &serde_json::Value, wall_ms: u64| {
+        let mut limits = iyakki_js::Limits::default();
+        limits.wall = std::time::Duration::from_millis(wall_ms.clamp(100, 60_000));
+        let mut e = iyakki_js::JsEngine::new(limits, vec![]).map_err(|e| e.to_string())?;
+        let code = format!("JSON.stringify((function(args){{ {source}\n}})({}))", serde_json::to_string(args).unwrap_or_else(|_| "null".into()));
+        let out = e.eval("flow-script", &code).map_err(|e| e.to_string())?;
+        Ok(serde_json::from_str(&out).unwrap_or(serde_json::Value::String(out)))
+    })
+}
+
 impl AgentHost {
     pub fn new(svc: &Arc<Services>, user: &str, policy: &Policy, data: &Path, flows_dir: &Path) -> AgentHost {
         AgentHost {
@@ -108,7 +121,7 @@ impl AgentHost {
             flows_dir: flows_dir.into(),
             runner: Arc::new(crate::wsexec::System),
             upstream: Arc::new(|o: &HttpOptions| iyakki_proxy::https::UreqUpstream::with_options(o).map(|u| Arc::new(u) as Arc<dyn Upstream>)),
-            js: Mutex::new(None),
+            js: Mutex::new(Some(script_runner())),
             k8s: Mutex::new(None),
             audit_sink: Mutex::new(None),
             backend: Mutex::new(None),

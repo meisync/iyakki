@@ -33,6 +33,11 @@ impl SaeAp {
         SaeAp { password: password.to_vec(), bssid, sta, secret, sae: None, done: false }
     }
 
+    /// Has the exchange begun (a commit was answered)? A token request leaves it false: nothing is kept for such a station.
+    pub fn started(&self) -> bool {
+        self.sae.is_some()
+    }
+
     pub fn is_done(&self) -> bool {
         self.done
     }

@@ -1,0 +1,11 @@
+id = "cli"
+title = "CLI"
+version = "0.1.0"
+ui_sdk = 1
+display_list = 1
+min_width = 320
+min_height = 480
+ports = ["terminal", "storage", "dock"]
+# the tile declares tile ABI 3 (a pinch changes the text size); the capabilities the tile calls, checked before anything reaches the core
+tile_abi = 3
+tile_caps = ["terminal", "storage", "dock"]

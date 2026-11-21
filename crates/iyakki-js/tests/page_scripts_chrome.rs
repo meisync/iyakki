@@ -97,7 +97,8 @@ fn in_chrome(html: &str, scripts: &HashMap<String, String>) -> String {
 fn ours(html: &str, scripts: &HashMap<String, String>) -> String {
     let web = Arc::new(Files(scripts.clone()));
     let mut log = String::new();
-    let res = run_page_with(html, &Url::parse("https://a.org/").unwrap(), web, |_| true, &SiteData::default(), Limits::default(), |e| {
+    let page = format!("<!doctype html><html><head></head><body>{html}</body></html>");
+    let res = run_page_with(&page, &Url::parse("https://a.org/").unwrap(), web, |_| true, &SiteData::default(), Limits::default(), |e| {
         log = e.eval("log", "(window.__log || []).join(',')").unwrap_or_default();
     });
     let _ = res;
@@ -133,6 +134,8 @@ fn script_order_and_what_scripts_see_match_a_real_chrome() {
         ("defer after blocking and inline, in order", "<script defer src=/d1.js></script><script src=/a.js></script><script defer src=/d2.js></script><script>(window.__log = window.__log || []).push('inline');</script>"),
         ("an inline script with defer is blocking", "<script defer>(window.__log = window.__log || []).push('inline-defer');</script><script defer src=/d1.js></script><script>(window.__log = window.__log || []).push('inline');</script>"),
         ("a module runs after the blocking scripts", "<script type=module src=/m.js></script><script src=/a.js></script><script defer src=/d1.js></script>"),
+        ("a blocking script sees only what is written above it", "<p>1</p><script src=/seesp.js></script><p>2</p><script src=/seesp.js></script><p>3</p><script defer src=/seesp.js></script>"),
+        ("a script added by a script runs after the adder", "<script src=/adds.js></script><script src=/b.js></script>"),
         ("a script that fails does not stop the next", "<script src=/a.js></script><script>throw new Error('x')</script><script src=/b.js></script>"),
     ];
     let mut bad = Vec::new();
@@ -144,16 +147,6 @@ fn script_order_and_what_scripts_see_match_a_real_chrome() {
         }
     }
     assert!(bad.is_empty(), "differences from Chrome:\n{}", bad.join("\n"));
-    // Known differences (KI in KNOWN-ISSUES.md): our loader runs the scripts after the whole page is read, and loads a script added by a
-    // script at once. The test fails when one of them is fixed, so that this list is updated.
-    let known: &[(&str, &str, &str, &str)] = &[
-        ("a blocking script sees only what is written above it", "<p>1</p><script src=/seesp.js></script><p>2</p><script src=/seesp.js></script><p>3</p><script defer src=/seesp.js></script>", "p3,p3,p3", "p1,p2,p3"),
-        ("a script added by a script runs after the adder", "<script src=/adds.js></script><script src=/b.js></script>", "dyn,adds,b", "adds,b,dyn"),
-    ];
-    for (name, html, want_ours, want_chrome) in known {
-        let (a, c) = (ours(html, &scripts), in_chrome(html, &scripts));
-        assert_eq!((a.as_str(), c.as_str()), (*want_ours, *want_chrome), "{name}: the known difference changed (fixed? update the list)");
-    }
     // async scripts race: only that it ran, after the blocking one
     let html = "<script async src=/y.js></script><script src=/a.js></script>";
     for (who, log) in [("ours", ours(html, &scripts)), ("chrome", in_chrome(html, &scripts))] {

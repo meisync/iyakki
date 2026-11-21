@@ -1,0 +1,22 @@
+{
+ "schema": 1,
+ "row": "F-RADIO-13",
+ "feature_sha": "adb14140c2a127f9",
+ "title": "the search box finds and plays a station",
+ "clauses": [
+  {
+   "id": "radio-search",
+   "text": "the search box finds and plays a station",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Open RADIO, press the slash key, type a station name, press Enter on a result.",
+     "expect": "The stations appear as the last entry of the list and Enter plays one (sound is for a person to judge).",
+     "runner_did": "Booted the image in QEMU and signed in a scratch account (when run through the runner)"
+    }
+   ]
+  }
+ ]
+}

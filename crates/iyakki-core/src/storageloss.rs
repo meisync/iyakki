@@ -261,6 +261,12 @@ pub fn write_compat_file(boot_root: &Path, on: bool, usb_id: &str) -> Result<Str
 
 /// Find the IYAKKI-BOOT partition, mount it for a moment, write the file, sync and unmount. Settings -> Storage calls this.
 pub fn write_compat_on_boot_partition(on: bool, usb_id: &str) -> Result<String, String> {
+    with_boot_partition(|root| write_compat_file(root, on, usb_id))?
+}
+
+/// Find the IYAKKI-BOOT partition (mounted where it is, or mounted for a moment on `/run/iyakki-boot`), run `f` on its top folder, sync
+/// and unmount again. The one place that knows how to reach the boot partition for a small change.
+pub fn with_boot_partition<R>(f: impl FnOnce(&Path) -> R) -> Result<R, String> {
     let env = SysEnv::real();
     let table = loss::parse_mountinfo(&env.mountinfo());
     let mut node = None;
@@ -277,14 +283,14 @@ pub fn write_compat_on_boot_partition(on: bool, usb_id: &str) -> Result<String, 
     }
     let node = node.ok_or("the IYAKKI-BOOT partition was not found (is this the installed system?)")?;
     if let Some(m) = table.iter().find(|m| m.source == format!("/dev/{node}") && m.fstype == "vfat") {
-        return write_compat_file(Path::new(&m.point), on, usb_id);
+        return Ok(f(Path::new(&m.point)));
     }
     #[cfg(target_os = "linux")]
     {
         let target = "/run/iyakki-boot";
         let _ = std::fs::create_dir_all(target);
         sys_mount(&format!("/dev/{node}"), target, Some("vfat"), libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, "")?;
-        let r = write_compat_file(Path::new(target), on, usb_id);
+        let r = f(Path::new(target));
         // SAFETY: sync takes no pointers.
         unsafe { libc::sync() };
         let t = c(target)?;
@@ -293,10 +299,11 @@ pub fn write_compat_on_boot_partition(on: bool, usb_id: &str) -> Result<String, 
         if rc != 0 {
             let _ = unsafe { libc::umount2(t.as_ptr(), libc::MNT_DETACH) };
         }
-        r
+        Ok(r)
     }
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = f;
         Err("only the Linux system mounts disks".into())
     }
 }
@@ -569,9 +576,8 @@ mod tests {
     #[test]
     fn a_probe_still_stuck_is_not_started_twice_and_does_not_hang_the_caller() {
         PROBE_BUSY.store(true, Ordering::SeqCst);
-        let t = std::time::Instant::now();
-        assert_eq!(probe_dir(Path::new("/nonexistent"), Duration::from_secs(5)), Probe::TimedOut);
-        assert!(t.elapsed() < Duration::from_secs(1));
+        // a wait of an hour: a probe that did wait for the stuck one would hang this test, one that does not returns at once
+        assert_eq!(probe_dir(Path::new("/nonexistent"), Duration::from_secs(3600)), Probe::TimedOut);
         PROBE_BUSY.store(false, Ordering::SeqCst);
     }
 

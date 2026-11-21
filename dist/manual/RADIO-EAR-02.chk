@@ -1,0 +1,16 @@
+scenario: RADIO-EAR-02
+title: Radio search
+area: Radio
+rows: F-RADIO-13
+machines: any
+needs: person
+prereq: Internet connection and working speakers.
+step: Open RADIO, press / (or the Search button) and type a word such as jazz.
+expect: A list of stations from the directory appears under the box.
+clause: search
+step: Choose one of the results.
+expect: It plays through the speakers.
+clause: play
+step: Search for a word no station has (for example xqzvw).
+expect: The screen says nothing was found, with no error text.
+clause: none

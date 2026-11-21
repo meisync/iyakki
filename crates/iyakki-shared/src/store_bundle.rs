@@ -1,6 +1,6 @@
 //! What happens to one member of an install bundle (data only). The plan and the apply stay in `iyakki_agent::store::bundle`.
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MemberState {
     Install,
     /// Not installed; the text is on the card ("not supported by this IYAKKI", "needs a newer IYAKKI").
@@ -11,13 +11,14 @@ pub enum MemberState {
 use iyakki_core_api::appcaps::CardLine;
 
 /// One group of the install card.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MemberCard {
     pub id: String,
     pub title: String,
     pub kind: String,
     pub optional: bool,
     pub state: MemberState,
+    #[serde(with = "crate::store_install::card_lines_wire")]
     pub lines: Vec<CardLine>,
     /// One plain sentence about what the member is or does on this computer, shown on the install card (the command line of an mcp server).
     pub note: String,

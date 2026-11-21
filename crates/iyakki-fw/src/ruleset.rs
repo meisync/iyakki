@@ -22,6 +22,9 @@ pub const BLOCKED_NOTE: &str = "count blocked attempts";
 /// Where `iyakki-remote` listens unless told otherwise.
 pub const REMOTE_PORT: u16 = 8443;
 pub const SHARE_PORTS: (u16, u16) = (8081, 8180);
+/// The TCP ports the media server (UPnP/DLNA) plays from, next to the shared folders' range, and the UDP port players find it by.
+pub const MEDIA_PORTS: (u16, u16) = (8181, 8190);
+pub const SSDP_PORT: u16 = 1900;
 /// Developer mode (`iyakki dev`), the only TCP port a direct link (one cable between two computers) lets in by default.
 pub const DEV_PORT: u16 = 7979;
 /// The small UDP "who is there" beacon of a direct link (`iyakki_agent::directlink`); no secrets in it.
@@ -271,6 +274,10 @@ fn preset_rules(p: Preset, ctx: &Ctx, out: &mut Vec<RuleSpec>) {
         Preset::NodePorts => allow("preset: Kubernetes NodePorts", &local, Proto::Both, &[PortRange { lo: 30000, hi: 32767 }], None, out),
         Preset::StoreNodePort => allow("preset: private store", &local, Proto::Tcp, &one(30301), None, out),
         Preset::DnsService => allow("preset: DNS service", &local, Proto::Both, &one(53), None, out),
+        Preset::MediaServer => {
+            allow("preset: media server (playing)", &local, Proto::Tcp, &[PortRange { lo: MEDIA_PORTS.0, hi: MEDIA_PORTS.1 }], None, out);
+            allow("preset: media server (finding players)", &local, Proto::Udp, &one(SSDP_PORT), None, out);
+        }
         Preset::WebServer => allow("preset: web server", &local, Proto::Tcp, &[PortRange { lo: 80, hi: 80 }, PortRange { lo: 443, hi: 443 }], None, out),
     }
 }

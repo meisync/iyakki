@@ -1,0 +1,8 @@
+{
+  "first": "saver",
+  "after_min": 15,
+  "then_off_min": 5,
+  "battery_shorter": false,
+  "style": "starfield",
+  "dim_pct": 25
+}

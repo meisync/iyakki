@@ -21,7 +21,7 @@ fn signed(tag: &str, w: u32, h: u32) -> (Shell, Gfx) {
 }
 
 fn px(g: &Gfx) -> Vec<u8> {
-    g.pm.data().to_vec()
+    g.pm_ref().data().to_vec()
 }
 
 /// The box (x0, y0, x1, y1) around every pixel that differs between two frames of the same size, and how many differ.
@@ -70,7 +70,7 @@ fn click_rect(sh: &mut Shell, g: &mut Gfx, r: R) {
     sh.handle(&Event::MouseMove(x, y));
     sh.handle(&Event::MouseDown(x, y));
     sh.handle(&Event::MouseUp(x, y));
-    sh.handle(&Event::MouseMove(1, g.pm.height() as i32 - 1));
+    sh.handle(&Event::MouseMove(1, g.pm_mut().height() as i32 - 1));
     sh.render(g);
 }
 
@@ -195,7 +195,7 @@ fn tesseract_here() -> bool {
 /// as `(text, height)` pairs, heights in the picture's own pixels).
 fn ocr(g: &Gfx, tag: &str) -> (String, Vec<(String, u32)>) {
     let (w, h) = (g.width() as usize, g.height() as usize);
-    let d = g.pm.data();
+    let d = g.pm_ref().data();
     let mut grey: Vec<u8> = d.chunks_exact(4).map(|p| ((p[0] as u32 * 30 + p[1] as u32 * 59 + p[2] as u32 * 11) / 100) as u8).collect();
     if grey.iter().map(|&v| v as u64).sum::<u64>() / (grey.len() as u64) < 128 {
         for v in &mut grey {

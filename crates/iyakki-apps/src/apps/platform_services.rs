@@ -407,7 +407,7 @@ impl PlatformPanel {
         for d in self.pl.services() {
             let mine: Vec<&Installed> = inst.iter().filter(|i| i.service == d.id).collect();
             let mut chips = vec![(d.kind.to_string(), MUTED)];
-            chips.push(if !mine.is_empty() { (format!("{} installed", mine.len()), OK) } else if self.probe.as_ref().is_some_and(|(_, p)| p.has(&d.id)) { ("running (installed outside Store)".into(), OK) } else { ("not installed".into(), DIM) });
+            chips.push(if !mine.is_empty() { (format!("{} installed", mine.len()), OK) } else { match self.probe.as_ref() { Some((_, p)) => { let (t, ok) = p.service_chip(&d.id); (t, if ok { OK } else { DIM }) } None => ("not installed".into(), DIM) } });
             rows.push(ListRow { kind: RowKind::Spec(d.id.into()), title: d.title, sub: d.card, chips });
             for i in mine {
                 let live = self.statuses.get(&i.id).cloned().unwrap_or_else(|| "checking…".into());
@@ -435,7 +435,7 @@ impl PlatformPanel {
             }
             let reg = match cached {
                 Some(p) => p,
-                None => iyakki_shared::clusterprobe::probe(pl.runner().clone(), devcluster::Choice::load(&pl.dir(), &pl.user()).as_ref()),
+                None => iyakki_shared::clusterprobe::probe(pl.runner().clone(), iyakki_shared::clusterprobe::effective_choice(devcluster::Choice::load(&pl.dir(), &pl.user()), devcluster::machine_kubeconfig().as_deref()).as_ref()),
             };
             Done::Status(m, reg)
         });
@@ -2023,7 +2023,7 @@ impl PlatformPanel {
         for d in self.pl.services() {
             let mine: Vec<&Installed> = inst.iter().filter(|i| i.service == d.id).collect();
             let mut chips = vec![(d.kind.to_string(), MUTED)];
-            chips.push(if !mine.is_empty() { (format!("{} installed", mine.len()), OK) } else if self.probe.as_ref().is_some_and(|(_, p)| p.has(&d.id)) { ("running (installed outside Store)".into(), OK) } else { ("not installed".into(), DIM) });
+            chips.push(if !mine.is_empty() { (format!("{} installed", mine.len()), OK) } else { match self.probe.as_ref() { Some((_, p)) => { let (t, ok) = p.service_chip(&d.id); (t, if ok { OK } else { DIM }) } None => ("not installed".into(), DIM) } });
             rows.push(ListRow { kind: RowKind::Spec(d.id.into()), title: d.title, sub: d.card, chips });
             for i in mine {
                 let live = before.get(&i.id).cloned().unwrap_or_else(|| "checking…".into());

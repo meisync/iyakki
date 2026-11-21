@@ -120,7 +120,7 @@ impl Tools for DisksFormatTools {
     fn describe(&self, name: &str, args: &Value) -> String {
         match Self::req_for(name, args) {
             Ok(Req::Format { part, fs, .. }) if is_format_tool(name) => format!("{} {part} as {} (erases everything on it)", if name == PLAN_TOOL { "Preview formatting" } else { "Format" }, fs.name()),
-            Ok(Req::Resize { part, bytes }) if is_format_tool(name) => format!("{} {part} to {}", if name == PLAN_TOOL { "Preview resizing" } else { "Resize" }, iyakki_storage::human(bytes)),
+            Ok(Req::Resize { part, bytes }) if is_format_tool(name) => format!("{} {part} to {}", if name == PLAN_TOOL { "Preview resizing" } else { "Resize" }, iyakki_core_local::storage::human(bytes)),
             _ if is_format_tool(name) => "Format or resize a partition".into(),
             _ => self.inner.describe(name, args),
         }

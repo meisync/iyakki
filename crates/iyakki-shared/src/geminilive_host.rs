@@ -3,7 +3,7 @@
 
 
 /// What the shell draws.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RunState {
     /// Connecting (the consent gate, the key and the network are being checked).
     Connecting,

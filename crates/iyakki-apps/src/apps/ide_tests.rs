@@ -1521,7 +1521,7 @@ fn ide_the_deploy_form_runs_build_load_apply_verify_with_each_step_approved_and_
     let lines = r.lines();
     assert!(!lines.iter().any(|l| l.starts_with("k3s server") || l.contains("sudo")), "{lines:?}");
     // audit entries carry the workspace and namespace
-    let log = std::fs::read_to_string(w.cx.audit.path()).unwrap_or_default();
+    let log = std::fs::read_to_string(w.cx.audit.path_buf()).unwrap_or_default();
     assert!(log.contains("k8s.deploy_build") && log.contains("Alpha:shop-dev"), "{log}");
 }
 
@@ -3034,14 +3034,14 @@ fn ide_the_project_settings_offer_to_forget_the_assistants_memory_of_the_workspa
     assert_eq!(f.fields.len(), 11, "nothing to forget, nothing to ask");
     key(&mut app, &w.cx, Key::Esc);
     for (chat, n) in [("s_one", 3), ("s_two", 2)] {
-        let h = History::new(w.cx.kb().clone(), &user, "Alpha", Some(chat));
+        let h = History::new(w.cx.kb_source(), &user, "Alpha", Some(chat));
         for i in 0..n {
             h.record("turn", "", &format!("{chat} step {i}"));
         }
     }
     let left = |chat: Option<&str>| match chat {
-        None => History::workspaces_of(&w.cx.kb(), &user).iter().map(|x| x.entries).sum::<usize>(),
-        Some(c) => History::sessions_of(&w.cx.kb(), &user, "Alpha").into_iter().find(|s| s.0 == c).map_or(0, |s| s.1),
+        None => History::workspaces_of(&*w.cx.kb_source(), &user).iter().map(|x| x.entries).sum::<usize>(),
+        Some(c) => History::sessions_of(&*w.cx.kb_source(), &user, "Alpha").into_iter().find(|s| s.0 == c).map_or(0, |s| s.1),
     };
     assert_eq!(left(None), 5);
     // saving with "keep it" forgets nothing

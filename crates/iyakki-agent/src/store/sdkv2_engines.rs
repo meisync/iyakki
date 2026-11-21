@@ -44,6 +44,10 @@ pub trait DashPort: Send + Sync {
     fn query(&self, user: &str, source: &str, text: &str, range: &Value, limit: usize) -> Result<(Value, Vec<Value>), String>;
     /// Add a panel to the person's dashboard called `dashboard` (made when there is none). Returns the panel id.
     fn add_panel(&self, user: &str, dashboard: &str, title: &str, source: &str, query: &str, visual: &str) -> Result<String, String>;
+    /// The panels of the person's dashboard called `dashboard`: `(title, source, query text)`, in order (for a dashboard viewer inside an app's page).
+    fn panel_queries(&self, _user: &str, _dashboard: &str) -> Result<Vec<(String, String, String)>, String> {
+        Err("this computer cannot list the panels of a dashboard for an app".into())
+    }
 }
 
 pub struct DashEngine {
@@ -121,6 +125,14 @@ impl DashPort for RealDash {
             return Ok((cols, rows));
         }
         Ok((serde_json::to_value(&f.columns).unwrap_or(json!([])), f.rows.iter().take(limit).map(|r| Value::Array(r.clone())).collect()))
+    }
+
+    fn panel_queries(&self, user: &str, dashboard: &str) -> Result<Vec<(String, String, String)>, String> {
+        if !crate::dash::tools::offered(&self.policy) {
+            return Err("your account may not use the dashboards".into());
+        }
+        let d = self.env(user).dashboards().find(dashboard).ok_or_else(|| format!("there is no dashboard called {dashboard}"))?;
+        Ok(d.panels.iter().map(|p| (p.title.clone(), p.source.clone(), p.query.text.clone())).collect())
     }
 
     fn add_panel(&self, user: &str, dashboard: &str, title: &str, source: &str, query: &str, visual: &str) -> Result<String, String> {

@@ -47,8 +47,7 @@ pub fn default_link(route_text: &str, info: &dyn Fn(&str) -> (String, bool)) -> 
 
 /// The machine now (asks the one module that reads the routing table and the interfaces: `iyakki_devctl`): for `updatecheck::due`.
 pub fn metered_now() -> Option<bool> {
-    let roots = iyakki_devctl::Roots::real();
-    let link = default_link(&iyakki_devctl::route_table(&roots), &|n| iyakki_devctl::iface_info(&roots, n));
+    let link = default_link(&iyakki_core_local::netfacts::route_text(), &iyakki_core_local::netfacts::iface_driver);
     metered(link.as_ref())
 }
 

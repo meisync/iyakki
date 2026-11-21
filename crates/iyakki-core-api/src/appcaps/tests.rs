@@ -7,16 +7,16 @@ fn req(name: &str, why: &str, param: Option<&str>) -> CapabilityRequest {
 #[test]
 fn the_catalogue_has_the_design_names_and_hard_asks() {
     let names: Vec<&str> = CATALOGUE.iter().map(|d| d.name).collect();
-    for n in ["camera.view", "camera.record", "microphone.listen", "speaker.play", "bluetooth.use", "usb.use", "files.read", "files.write", "net.connect", "net.listen", "screen.capture", "input.inject", "notify", "notify.receive", "schedule.use", "web.request.headers", "clipboard.client", "client.camera.offer", "client.microphone.offer"] {
+    for n in ["camera.view", "camera.record", "microphone.listen", "speaker.play", "bluetooth.use", "usb.use", "files.read", "files.write", "net.connect", "net.listen", "screen.capture", "input.inject", "notify", "notify.receive", "schedule.use", "web.request.headers", "web.content.script", "web.user.agent", "clipboard.client", "files.client", "client.camera.offer", "client.microphone.offer"] {
         assert!(names.contains(&n), "{n}");
     }
-    assert_eq!(names.len(), 56);
+    assert_eq!(names.len(), 65);
     let mut sorted = names.clone();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(sorted.len(), 56, "names are unique");
+    assert_eq!(sorted.len(), 65, "names are unique");
     let hard: Vec<&str> = CATALOGUE.iter().filter(|d| d.hard_ask).map(|d| d.name).collect();
-    assert_eq!(hard, ["camera.record", "microphone.listen", "net.listen", "screen.capture", "input.inject", "clipboard.client", "client.camera.offer", "client.microphone.offer", "system.memory.set", "net.scan", "system.hostname.set", "router.use", "router.strategy.set", "fleet.join", "fleet.manage", "fleet.assign", "fleet.receive", "tools.request"]);
+    assert_eq!(hard, ["camera.record", "microphone.listen", "net.listen", "screen.capture", "input.inject", "clipboard.client", "files.client", "client.camera.offer", "client.microphone.offer", "system.memory.set", "net.scan", "system.disk.install", "system.hostname.set", "router.use", "router.strategy.set", "fleet.join", "fleet.manage", "fleet.assign", "fleet.receive", "tools.request"]);
     assert!(is_hard_ask("not.a.capability"), "unknown fails closed");
     assert!(!is_hard_ask("notify.receive") && !is_hard_ask("schedule.use"));
     assert_eq!(CATALOGUE_VERSION, 0);
@@ -153,4 +153,17 @@ fn a_grant_with_an_end_is_held_until_its_second_and_a_bad_end_is_ignored() {
     assert!(!a.holds_at("camera.view", None, 100));
     assert!(a.holds_at("events.power", None, 10_000), "a value that is no number is no end");
     assert_eq!(a.ends().len(), 1);
+}
+
+#[test]
+fn a_limit_only_shortens_a_held_grant_and_can_be_taken_off_again() {
+    let mut a = Approval { who: "pat".into(), app: "n".into(), app_version: "1".into(), app_sha256: String::new(), at: 0, grants: vec![Grant { name: "camera.view".into(), param: None }], revoked: vec![], extra: Default::default() };
+    assert!(!a.set_end("notify", Some(500), 10), "a capability that is not held gets no end");
+    assert!(!a.set_end("camera.view", Some(10), 10), "an end that is not in the future is refused");
+    assert!(a.set_end("camera.view", Some(500), 10));
+    assert!(a.holds_at("camera.view", None, 499) && !a.holds_at("camera.view", None, 500));
+    assert!(a.set_end("camera.view", None, 10));
+    assert!(a.extra.is_empty() && a.holds_at("camera.view", None, 10_000), "no empty `ends` is left behind");
+    a.revoke("camera.view");
+    assert!(!a.set_end("camera.view", Some(500), 10), "a revoked grant cannot be limited");
 }

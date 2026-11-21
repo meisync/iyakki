@@ -1,0 +1,14 @@
+# The IYAKKI sandbox image for the NAMESPACE tier (F-SBX-03): the pod of a Job runs `iyakki linuxapp-init ...`, which builds the sandbox
+# itself (user, mount, pid, uts, ipc and net namespaces, limits, seccomp) and pivots into /opt/iyakki/rootfs. Built by
+# dist/sandbox/build-ns-image.sh from a small prepared context, never from the repository:
+#   iyakki     the static musl program (built outside, with the repository's release profile)
+#   rootfs/    the folder the sandboxed program sees as `/`: the operator's own minimal userland (nothing is shipped here)
+# FROM scratch: no shell, no package manager, no base image is pulled. The Job's command is the bare word `iyakki`, found through PATH=/.
+FROM scratch
+COPY iyakki /iyakki
+COPY rootfs/ /opt/iyakki/rootfs/
+ENV PATH=/
+ENV IYAKKI_LOG=info
+USER 10001:10001
+# no ENTRYPOINT and no CMD: the Job names the command (`iyakki linuxapp-init <plan>`); the pod is relaxed in one place only
+# (seccomp and AppArmor Unconfined, hostUsers: false) by the Job manifest, never by this image.

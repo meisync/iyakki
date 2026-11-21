@@ -57,7 +57,6 @@ fn read(d: &Path, rel: &str) -> String {
 
 #[test]
 fn the_function_key_mode_cycles_is_written_to_the_kernel_saved_and_audited() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
     let cx = admin("kb1");
     let sys = fake_sys("kb1");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(sys.clone());
@@ -89,7 +88,6 @@ fn the_function_key_mode_cycles_is_written_to_the_kernel_saved_and_audited() {
 
 #[test]
 fn the_choice_is_kept_when_the_machine_has_no_apple_keyboard() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
     let cx = admin("kb2");
     let sys = temp_dir("kb2-sys");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(sys.clone());
@@ -102,7 +100,7 @@ fn the_choice_is_kept_when_the_machine_has_no_apple_keyboard() {
 
 #[test]
 fn key_repeat_is_chosen_from_steps_and_validated() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+    let _shared = super::live_input(); // reads the process-wide input state: holds the input lock
     let cx = admin("kb3");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb3"));
     goto(&mut a, &cx, Tab::Keyboard);
@@ -119,7 +117,6 @@ fn key_repeat_is_chosen_from_steps_and_validated() {
 
 #[test]
 fn the_page_lists_the_detected_controls_and_the_test_buttons_work() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
     let cx = admin("kb4");
     let sys = fake_sys("kb4");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(sys.clone());
@@ -151,7 +148,6 @@ fn the_page_lists_the_detected_controls_and_the_test_buttons_work() {
 
 #[test]
 fn the_table_of_keys_scrolls_and_the_page_draws_at_four_sizes() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
     let cx = admin("kb5");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb5"));
     goto(&mut a, &cx, Tab::Keyboard);
@@ -173,7 +169,6 @@ fn the_table_of_keys_scrolls_and_the_page_draws_at_four_sizes() {
 
 #[test]
 fn only_administrators_have_the_page_and_a_forced_request_changes_nothing() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
     let (mut ucx, _) = (admin("kb6"), 0);
     ucx.session.user = "amy".into();
     ucx.session.role = iyakki_sec::policy::Role::User;
@@ -194,7 +189,6 @@ fn only_administrators_have_the_page_and_a_forced_request_changes_nothing() {
 
 #[test]
 fn the_touch_bar_choices_cycle_save_and_are_audited() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
     let cx = admin("kb7");
     let sys = fake_sys("kb7");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(sys.clone());
@@ -233,7 +227,6 @@ fn the_touch_bar_choices_cycle_save_and_are_audited() {
 
 #[test]
 fn the_touch_bar_buttons_are_inside_the_page_at_every_size_and_in_panes() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
     let cx = admin("kb8");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb8"));
     goto(&mut a, &cx, Tab::Keyboard);
@@ -265,7 +258,7 @@ fn render_page(a: &mut SettingsApp, cx: &AppCx, w: u32, h: u32) {
 
 #[test]
 fn the_scroll_choices_are_saved_audited_applied_and_have_defaults_and_limits() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+    let _shared = super::live_input(); // reads the process-wide input state: holds the input lock
     let cx = admin("kb-scroll");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-scroll"));
     goto(&mut a, &cx, Tab::Keyboard);
@@ -297,7 +290,6 @@ fn the_scroll_choices_are_saved_audited_applied_and_have_defaults_and_limits() {
 
 #[test]
 fn only_administrators_change_the_scroll_choices() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
     let mut cx = admin("kb-scroll-user");
     cx.session.user = "amy".into();
     cx.session.role = iyakki_sec::policy::Role::User;
@@ -311,7 +303,6 @@ fn only_administrators_change_the_scroll_choices() {
 
 #[test]
 fn the_scroll_test_list_scrolls_by_pixels_in_small_steps_and_by_notches_and_stays_in_bounds() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
     let cx = admin("kb-test");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-test"));
     goto(&mut a, &cx, Tab::Keyboard);
@@ -348,7 +339,7 @@ fn the_scroll_test_list_scrolls_by_pixels_in_small_steps_and_by_notches_and_stay
 
 #[test]
 fn raw_wheel_events_reach_the_settings_list_as_smooth_pixels_end_to_end() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+    let _shared = super::live_input(); // reads the process-wide input state: holds the input lock
     crate::scrolleng::request_config(crate::scrolleng::ScrollConfig::default());
     crate::scrolleng::set_raw(false);
     let cx = admin("kb-e2e");
@@ -381,7 +372,6 @@ fn raw_wheel_events_reach_the_settings_list_as_smooth_pixels_end_to_end() {
 
 #[test]
 fn the_probe_touch_screen_button_switches_the_panel_off_and_on_and_a_second_press_resets_the_hub() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
     let cx = admin("kb-touch");
     let sys = temp_dir("kb-touch-sys");
     let hub = sys.join("devices/usb1/1-5");
@@ -409,7 +399,7 @@ fn the_probe_touch_screen_button_switches_the_panel_off_and_on_and_a_second_pres
 
 #[test]
 fn the_input_profile_cycles_applies_at_once_is_saved_and_old_files_load() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+    let _shared = super::live_input(); // reads the process-wide input state: holds the input lock
     let cx = admin("kb-profile");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-profile"));
     goto(&mut a, &cx, Tab::Keyboard);
@@ -434,7 +424,7 @@ fn the_input_profile_cycles_applies_at_once_is_saved_and_old_files_load() {
 
 #[test]
 fn reset_to_profile_defaults_puts_the_pointer_choices_back_and_leaves_the_keyboard_alone() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+    let _shared = super::live_input(); // the profile is read from the process-wide input profile: holds the input lock
     let cx = admin("kb-reset");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-reset"));
     goto(&mut a, &cx, Tab::Keyboard);
@@ -454,7 +444,6 @@ fn reset_to_profile_defaults_puts_the_pointer_choices_back_and_leaves_the_keyboa
 
 #[test]
 fn every_row_with_a_control_has_a_help_line_and_the_buttons_exist() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
     let cx = admin("kb-help");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-help"));
     goto(&mut a, &cx, Tab::Keyboard);
@@ -472,7 +461,7 @@ fn every_row_with_a_control_has_a_help_line_and_the_buttons_exist() {
 
 #[test]
 fn the_reset_touch_screen_button_is_next_to_the_probe_button_and_a_plain_status_line_is_shown() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+    let _shared = super::live_input(); // reads the process-wide input state: holds the input lock
     let cx = admin("kb-touch-reset");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(temp_dir("kb-touch-reset-sys"));
     goto(&mut a, &cx, Tab::Keyboard);
@@ -491,7 +480,7 @@ fn speeds(cx: &AppCx) -> (u32, u32) {
 
 #[test]
 fn pointer_speed_steps_by_five_and_by_preset_stays_in_range_is_saved_applied_and_audited() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+    let _shared = super::live_input(); // reads the process-wide input state: holds the input lock
     let cx = admin("kb-pointer");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-pointer"));
     goto(&mut a, &cx, Tab::Keyboard);
@@ -537,7 +526,6 @@ fn pointer_speed_steps_by_five_and_by_preset_stays_in_range_is_saved_applied_and
 
 #[test]
 fn the_pointer_step_function_is_total() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
     for now in 0..=400u32 {
         for (up, preset) in [(true, false), (false, false), (true, true), (false, true)] {
             let n = pointer_next(now, up, preset);
@@ -550,7 +538,6 @@ fn the_pointer_step_function_is_total() {
 
 #[test]
 fn only_administrators_change_the_pointer_speed() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
     let mut cx = admin("kb-pointer-user");
     cx.session.user = "amy".into();
     cx.session.role = iyakki_sec::policy::Role::User;
@@ -565,7 +552,7 @@ fn only_administrators_change_the_pointer_speed() {
 
 #[test]
 fn the_pointer_buttons_are_on_the_page_at_every_size_and_work_by_click() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+    let _shared = super::live_input(); // reads the process-wide input state: holds the input lock
     let cx = admin("kb-pointer-btn");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-pointer-btn"));
     goto(&mut a, &cx, Tab::Keyboard);
@@ -596,7 +583,7 @@ fn the_pointer_buttons_are_on_the_page_at_every_size_and_work_by_click() {
 
 #[test]
 fn searching_mouse_pointer_speed_cursor_or_touchpad_finds_the_keyboard_page() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+    let _shared = super::live_input(); // reads the process-wide input state: holds the input lock
     let cx = admin("kb-pointer-search");
     for word in ["mouse", "pointer", "speed", "cursor", "sensitivity", "touchpad", "mouse speed", "pointer speed"] {
         let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-pointer-search"));
@@ -612,7 +599,7 @@ fn searching_mouse_pointer_speed_cursor_or_touchpad_finds_the_keyboard_page() {
 
 #[test]
 fn three_finger_drag_is_off_by_default_toggles_on_the_page_reaches_the_touchpad_and_the_reset_turns_it_off() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+    let _shared = super::live_input(); // reads the process-wide input state: holds the input lock
     let cx = admin("kb-3f");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-3f"));
     goto(&mut a, &cx, Tab::Keyboard);
@@ -628,7 +615,6 @@ fn three_finger_drag_is_off_by_default_toggles_on_the_page_reaches_the_touchpad_
 
 #[test]
 fn home_swipe_is_on_with_three_fingers_by_default_and_the_page_turns_it_off_and_picks_two_fingers() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
     let cx = admin("kb-swipe");
     let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-swipe"));
     goto(&mut a, &cx, Tab::Keyboard);

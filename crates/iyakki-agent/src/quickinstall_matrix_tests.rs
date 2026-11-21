@@ -19,6 +19,7 @@ struct Fake {
     marks: Vec<(Item, String)>,
     afters: Vec<String>,
     deps: Vec<(Item, DepState)>,
+    ytdlp: Option<Result<String, String>>,
 }
 
 impl StepEnv for Fake {
@@ -72,6 +73,10 @@ impl StepEnv for Fake {
     fn request_after(&mut self, what: &str) -> Result<(), String> {
         self.afters.push(what.into());
         Ok(())
+    }
+    fn ytdlp_install(&mut self) -> Result<String, String> {
+        self.calls.push("ytdlp".into());
+        self.ytdlp.clone().unwrap_or_else(|| Err("no fetch here".into()))
     }
     fn lemonade_ready(&mut self) -> bool {
         false
@@ -192,4 +197,19 @@ fn the_vault_handoff_names_the_token_entry_and_never_shows_the_token() {
     let never = |_: &str| Err::<(), String>("the vault is locked".into());
     let e = matrix::handoff(&read, &never, &|_| {}, 2, Duration::ZERO).unwrap_err();
     assert!(e.contains("svc.matrix.registration-token") && e.contains("kubectl -n iyakki-matrix get secret matrix-registration") && !e.contains(PW), "{e}");
+}
+
+#[test]
+fn the_video_site_downloader_is_a_media_setup_item_that_shows_its_licence_marks_on_success_and_marks_nothing_on_failure() {
+    assert_eq!(Item::parse("ytdlp"), Some(Item::YtDlp));
+    assert_eq!(Item::YtDlp.group(), Group::Media);
+    assert!(Item::ALL.contains(&Item::YtDlp) && Item::YtDlp.needs().is_empty());
+    assert!(Item::YtDlp.licence().contains("Unlicense") && Item::YtDlp.licence().contains("does not ship"));
+    let mut ok = Fake { ytdlp: Some(Ok("installed at tools/yt-dlp".into())), ..Fake::default() };
+    run_step(Item::YtDlp, &mut ok, Duration::from_secs(60), Duration::from_secs(5)).unwrap();
+    assert!(ok.lines.iter().any(|l| l.contains("Unlicense")) && ok.marks.iter().any(|m| m.0 == Item::YtDlp), "{:?}", ok.lines);
+    // a refused download (no pin, a wrong checksum, no network) leaves no marker
+    let mut bad = Fake::default();
+    let e = run_step(Item::YtDlp, &mut bad, Duration::from_secs(60), Duration::from_secs(5)).unwrap_err();
+    assert!(e.contains("no fetch here") && bad.marks.is_empty(), "{e}");
 }

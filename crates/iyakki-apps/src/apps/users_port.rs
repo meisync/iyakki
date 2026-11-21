@@ -35,7 +35,7 @@ pub trait UsersPort {
 pub struct CxPort<'a>(pub &'a AppCx);
 
 impl CxPort<'_> {
-    fn store(&self) -> std::sync::MutexGuard<'_, crate::accounts::UserStore> {
+    fn store(&self) -> crate::accounts::UsersGuard {
         self.0.store.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
@@ -48,7 +48,7 @@ impl UsersPort for CxPort<'_> {
         self.0.session.policy.manage_users
     }
     fn users(&self) -> Vec<UserRecord> {
-        self.0.store.lock().map(|s| s.list().to_vec()).unwrap_or_default()
+        self.0.store.lock().map(|s| s.list()).unwrap_or_default()
     }
     fn create_user(&self, name: &str, password: &str, role: Role) -> Result<(), AccountError> {
         self.store().create_user(&self.0.session, name, password, role)

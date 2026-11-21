@@ -147,7 +147,7 @@ fn osk_pictures() {
         sh.osk.touched(sh.tick);
         click_field(&mut sh, &mut g, 1);
         sh.render(&mut g);
-        g.pm.save_png(format!("{dir}/{name}.png")).expect("png");
+        g.pm_mut().save_png(format!("{dir}/{name}.png")).expect("png");
     }
 }
 

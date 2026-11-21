@@ -2,16 +2,19 @@
 //!
 //! [`Session`] drives [`crate::avdtp_src::Source`] over two message channels (the signalling channel and, once the sink accepted
 //! Open, the media channel), then turns PCM of any rate and channel count into SBC frames ([`crate::sbc::Encoder`]) and RTP
-//! packets ([`crate::avdtp_src::Packetizer`]). Sockets are not here: a [`Channel`] is the real L2CAP socket in
+//! packets ([`crate::avdtp_src::Packetizer`]), or, when the person has the audio add-on and the headphones offer AAC, into AAC frames
+//! made by the add-on's coder ([`crate::a2dp_aac`]) in LATM packets. Sockets are not here: a [`Channel`] is the real L2CAP socket in
 //! [`crate::a2dp_send_sys`] and a scripted one in the tests, so the protocol and the encoding are tested against this crate's own
 //! sink and decoder, not against a radio. Pacing keeps the sound from being sent faster than it plays.
 
 use std::collections::VecDeque;
 use std::io;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::avdtp::{Msg, MsgType, Reassembler};
 use crate::avdtp_src::{frames_per_packet, Packetizer, Source, SrcAction, SrcState};
+use crate::a2dp_aac::{AacBackend, AacConfig, AacEncode, AacPacketizer};
 use crate::bthid::{Channel, Recv};
 use crate::sbc::{ChannelMode, Encoder, Params};
 
@@ -106,8 +109,8 @@ pub struct Session<S: Channel, M: Channel> {
     media: M,
     src: Source,
     re: Reassembler,
-    enc: Encoder,
-    pack: Packetizer,
+    enc: Option<Encoder>,
+    pack: Option<Packetizer>,
     conv: Option<Converter>,
     pend: VecDeque<i16>,
     frames: Vec<Vec<u8>>,
@@ -115,7 +118,16 @@ pub struct Session<S: Channel, M: Channel> {
     packets: u64,
     delay: Option<u16>,
     ended: bool,
-    params: Params,
+    /// The SBC settings (None for an AAC stream).
+    params: Option<Params>,
+    aac: Option<AacTx>,
+}
+
+/// The AAC half of a session: the coder (the add-on's, behind [`AacEncode`]), the packetiser and the settings.
+struct AacTx {
+    enc: Box<dyn AacEncode>,
+    pack: AacPacketizer,
+    cfg: AacConfig,
 }
 
 fn next_msg<S: Channel>(sig: &mut S, re: &mut Reassembler, wait: Duration) -> Result<Option<Msg>, String> {
@@ -144,8 +156,14 @@ fn send_msg<S: Channel>(sig: &mut S, m: &Msg) -> Result<(), String> {
 impl<S: Channel, M: Channel> Session<S, M> {
     /// Runs the set-up: Discover, capabilities, Set Configuration, Open, the media channel (`open_media`), Start. `paced` makes
     /// [`write`](Self::write) wait so that the sound is not sent faster than it plays.
-    pub fn open(mut sig: S, open_media: impl FnOnce() -> io::Result<M>, paced: bool, step_wait: Duration) -> Result<Session<S, M>, String> {
-        let mut src = Source::new();
+    pub fn open(sig: S, open_media: impl FnOnce() -> io::Result<M>, paced: bool, step_wait: Duration) -> Result<Session<S, M>, String> {
+        Session::open_with(sig, open_media, paced, step_wait, None)
+    }
+
+    /// [`open`](Self::open), and with `aac` (the add-on's coders) AAC is chosen when the headphones offer it; otherwise SBC.
+    pub fn open_with(mut sig: S, open_media: impl FnOnce() -> io::Result<M>, paced: bool, step_wait: Duration, aac: Option<Arc<dyn AacBackend>>) -> Result<Session<S, M>, String> {
+        let mut src = if aac.is_some() { Source::new().with_aac() } else { Source::new() };
+        let mut cfg_aac: Option<AacConfig> = None;
         let mut re = Reassembler::default();
         let mut cfg: Option<Params> = None;
         let mut media: Option<M> = None;
@@ -169,6 +187,7 @@ impl<S: Channel, M: Channel> Session<S, M> {
             for a in acts {
                 match a {
                     SrcAction::Configured(p) => cfg = Some(p),
+                    SrcAction::ConfiguredAac(c) => cfg_aac = Some(c),
                     SrcAction::Opened => {
                         let f = open_media.take().ok_or("opened twice")?;
                         media = Some(f().map_err(|e| format!("could not open the audio channel: {e}"))?);
@@ -187,15 +206,27 @@ impl<S: Channel, M: Channel> Session<S, M> {
                 }
             }
         }
+        let ssrc = 0x4959_414b ^ (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(1));
+        let media = media.ok_or("no audio channel")?;
+        if let (Some(c), Some(b)) = (cfg_aac, aac) {
+            let enc = b.encoder(&c)?;
+            let pacer = paced.then(|| Pacer { start: Instant::now(), sent: 0, rate: c.rate, lead: Duration::from_millis(120) });
+            return Ok(Session { sig, media, src, re, enc: None, pack: None, conv: None, pend: VecDeque::new(), frames: vec![], pacer, packets: 0, delay: None, ended: false, params: None, aac: Some(AacTx { enc, pack: AacPacketizer::new(ssrc), cfg: c }) });
+        }
         let params = cfg.ok_or("the device never agreed on settings")?;
         let enc = Encoder::new(params).map_err(|e| e.to_string())?;
-        let ssrc = 0x4959_414b ^ (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(1));
         let pacer = paced.then(|| Pacer { start: Instant::now(), sent: 0, rate: params.sample_rate(), lead: Duration::from_millis(120) });
-        Ok(Session { sig, media: media.ok_or("no audio channel")?, src, re, enc, pack: Packetizer::new(ssrc, &params), conv: None, pend: VecDeque::new(), frames: vec![], pacer, packets: 0, delay: None, ended: false, params })
+        Ok(Session { sig, media, src, re, enc: Some(enc), pack: Some(Packetizer::new(ssrc, &params)), conv: None, pend: VecDeque::new(), frames: vec![], pacer, packets: 0, delay: None, ended: false, params: Some(params), aac: None })
     }
 
-    pub fn params(&self) -> &Params {
-        &self.params
+    /// The SBC settings; None when the stream is an AAC one.
+    pub fn params(&self) -> Option<&Params> {
+        self.params.as_ref()
+    }
+
+    /// The AAC settings; None when the stream is an SBC one.
+    pub fn aac_config(&self) -> Option<&AacConfig> {
+        self.aac.as_ref().map(|a| &a.cfg)
     }
 
     pub fn state(&self) -> SrcState {
@@ -207,7 +238,7 @@ impl<S: Channel, M: Channel> Session<S, M> {
     }
 
     pub fn info(&self) -> SendInfo {
-        SendInfo { codec: crate::a2dp::codec_text(&self.params), packets: self.packets, delay: self.delay }
+        SendInfo { codec: self.aac.as_ref().map(|a| crate::a2dp_aac::codec_text(&a.cfg)).or_else(|| self.params.as_ref().map(crate::a2dp::codec_text)).unwrap_or_default(), packets: self.packets, delay: self.delay }
     }
 
     /// Answers what the device said on the signalling channel (a delay report, a close) without waiting.
@@ -240,16 +271,26 @@ impl<S: Channel, M: Channel> Session<S, M> {
         if rate == 0 || channels == 0 || channels > 8 {
             return Err("this sound has no usable rate or channel count".into());
         }
+        let (out_rate, out_ch) = match (&self.aac, &self.params) {
+            (Some(a), _) => (a.cfg.rate, a.cfg.channels as usize),
+            (None, Some(p)) => (p.sample_rate(), p.channels()),
+            _ => return Err("no audio settings".into()),
+        };
         if !self.conv.as_ref().is_some_and(|c| c.matches(rate, channels)) {
-            self.conv = Some(Converter::new(rate, channels, self.params.sample_rate(), self.params.channels()));
+            self.conv = Some(Converter::new(rate, channels, out_rate, out_ch));
         }
         let out = self.conv.as_mut().map(|c| c.run(pcm)).unwrap_or_default();
+        if self.aac.is_some() {
+            return self.write_aac(&out, out_ch);
+        }
+        let (Some(enc), Some(params)) = (self.enc.as_mut(), self.params) else { return Err("no audio settings".into()) };
         self.pend.extend(out);
-        let need = self.enc.frame_input_len();
-        let per = frames_per_packet(MEDIA_MTU, self.params.frame_len());
+        let need = enc.frame_input_len();
+        let per = frames_per_packet(MEDIA_MTU, params.frame_len());
         while self.pend.len() >= need {
             let chunk: Vec<i16> = self.pend.drain(..need).collect();
-            self.frames.push(self.enc.encode(&chunk).map_err(|e| e.to_string())?);
+            let frame = self.enc.as_mut().ok_or("no audio settings")?.encode(&chunk).map_err(|e| e.to_string())?;
+            self.frames.push(frame);
             if self.frames.len() >= per {
                 self.flush()?;
             }
@@ -260,12 +301,29 @@ impl<S: Channel, M: Channel> Session<S, M> {
         Ok(())
     }
 
+    /// AAC: the sound (already at the stream's rate) goes to the add-on's coder; the frames that are ready are sent, one per packet. The
+    /// wait that keeps the stream in time is on the sound going in, since the coder works in its own process.
+    fn write_aac(&mut self, pcm: &[i16], channels: usize) -> Result<(), String> {
+        if let Some(p) = self.pacer.as_mut() {
+            p.wait((pcm.len() / channels.max(1)) as u64);
+        }
+        let Some(a) = self.aac.as_mut() else { return Err("no audio settings".into()) };
+        a.enc.feed(pcm)?;
+        for f in a.enc.drain()? {
+            let pkt = a.pack.packet(&f);
+            self.media.send(&pkt).map_err(|e| format!("the sound could not be sent: {e}"))?;
+            self.packets += 1;
+        }
+        Ok(())
+    }
+
     fn flush(&mut self) -> Result<(), String> {
         let n = self.frames.len();
-        let pkt = self.pack.packet(&self.frames);
+        let (Some(pack), Some(params)) = (self.pack.as_mut(), self.params) else { return Err("no audio settings".into()) };
+        let pkt = pack.packet(&self.frames);
         self.frames.clear();
         if let Some(p) = self.pacer.as_mut() {
-            p.wait((n * self.params.frame_samples()) as u64);
+            p.wait((n * params.frame_samples()) as u64);
         }
         self.media.send(&pkt).map_err(|e| format!("the sound could not be sent: {e}"))?;
         self.packets += 1;
@@ -332,6 +390,8 @@ pub struct Sender<S: Channel + Send + 'static, M: Channel + Send + 'static> {
     connect: Box<dyn Fn(&str) -> Result<(S, Box<dyn FnOnce() -> io::Result<M> + Send>), String> + Send + Sync>,
     live: std::sync::Mutex<Live<S, M>>,
     paced: bool,
+    /// The coders of the add-on, asked at each start (None: SBC only).
+    aac: Option<Box<dyn Fn() -> Option<Arc<dyn AacBackend>> + Send + Sync>>,
 }
 
 struct Live<S: Channel, M: Channel> {
@@ -342,7 +402,13 @@ struct Live<S: Channel, M: Channel> {
 
 impl<S: Channel + Send + 'static, M: Channel + Send + 'static> Sender<S, M> {
     pub fn new(paced: bool, connect: impl Fn(&str) -> Result<(S, Box<dyn FnOnce() -> io::Result<M> + Send>), String> + Send + Sync + 'static) -> Self {
-        Sender { connect: Box::new(connect), live: std::sync::Mutex::new(Live { session: None, device: String::new(), why: String::new() }), paced }
+        Sender { connect: Box::new(connect), live: std::sync::Mutex::new(Live { session: None, device: String::new(), why: String::new() }), paced, aac: None }
+    }
+
+    /// AAC is used when `f` returns the add-on's coders at the time of a start and the headphones offer AAC.
+    pub fn with_aac(mut self, f: impl Fn() -> Option<Arc<dyn AacBackend>> + Send + Sync + 'static) -> Self {
+        self.aac = Some(Box::new(f));
+        self
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Live<S, M>> {
@@ -374,7 +440,17 @@ impl<S: Channel + Send + 'static, M: Channel + Send + 'static> SendControl for S
             Ok(x) => x,
             Err(e) => return fail(e),
         };
-        match Session::open(sig, media, self.paced, Duration::from_secs(5)) {
+        let backend = self.aac.as_ref().and_then(|f| f());
+        let first = Session::open_with(sig, media, self.paced, Duration::from_secs(5), backend.clone());
+        // headphones that offer AAC but refuse it: the same stream again with SBC only
+        let opened = match (first, backend) {
+            (Err(_), Some(_)) => match (self.connect)(address) {
+                Ok((sig, media)) => Session::open_with(sig, media, self.paced, Duration::from_secs(5), None),
+                Err(e) => Err(e),
+            },
+            (r, _) => r,
+        };
+        match opened {
             Ok(s) => {
                 let mut g = self.lock();
                 g.session = Some(s);

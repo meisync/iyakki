@@ -91,7 +91,7 @@ fn the_set_up_runs_to_streaming_and_a_tone_arrives_decoded_at_the_right_pitch() 
     let (mut s, wire, sink) = open(None);
     assert_eq!(s.state(), SrcState::Streaming);
     assert_eq!(sink.lock().unwrap().state(), crate::avdtp::StreamState::Streaming);
-    let p = *s.params();
+    let p = *s.params().unwrap();
     assert_eq!(p.sample_rate(), 44100);
     s.write(&tone(44100, 2, 1.0, 440.0), 44100, 2).unwrap();
     let (pcm, rate, ch) = decode_all(&wire);
@@ -285,4 +285,129 @@ fn an_independent_decoder_reads_the_frames_the_stream_sent_to_the_same_sound() {
     eprintln!("stream frames decoded by an independent decoder against ours: {n} samples, largest difference {max}");
     // two independent decoders of a lossy codec differ by a few steps (fixed against floating point arithmetic)
     assert!(max <= 8, "{max}");
+}
+
+// ------------------------------------------------------------------------------------------------ AAC through the add-on's coders
+
+mod aac {
+    use super::*;
+    use crate::a2dp_aac::{latm_unwrap, AacBackend, AacConfig, AacDecode, AacEncode, AacStream, FRAME_SAMPLES};
+
+    /// An encoder that makes one 10-byte "frame" for every 1024 sample frames fed (the first byte tells which), and a decoder for it.
+    struct FakeEnc {
+        ch: usize,
+        pend: Vec<i16>,
+        n: u8,
+    }
+    impl AacEncode for FakeEnc {
+        fn feed(&mut self, pcm: &[i16]) -> Result<(), String> {
+            self.pend.extend_from_slice(pcm);
+            Ok(())
+        }
+        fn drain(&mut self) -> Result<Vec<Vec<u8>>, String> {
+            let mut out = Vec::new();
+            while self.pend.len() >= FRAME_SAMPLES * self.ch {
+                self.pend.drain(..FRAME_SAMPLES * self.ch);
+                self.n = self.n.wrapping_add(1);
+                out.push(vec![self.n; 10]);
+            }
+            Ok(out)
+        }
+    }
+    struct NullDec;
+    impl AacDecode for NullDec {
+        fn feed(&mut self, _: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+        fn drain(&mut self) -> Result<Vec<i16>, String> {
+            Ok(vec![])
+        }
+    }
+    struct Backend {
+        fail_encoder: bool,
+        configs: Mutex<Vec<AacConfig>>,
+    }
+    impl AacBackend for Backend {
+        fn available(&self) -> bool {
+            true
+        }
+        fn decoder(&self, _: &AacConfig) -> Result<Box<dyn AacDecode>, String> {
+            Ok(Box::new(NullDec))
+        }
+        fn encoder(&self, c: &AacConfig) -> Result<Box<dyn AacEncode>, String> {
+            if self.fail_encoder {
+                return Err("the audio add-on could not be started".into());
+            }
+            self.configs.lock().unwrap().push(*c);
+            Ok(Box::new(FakeEnc { ch: c.channels as usize, pend: vec![], n: 0 }))
+        }
+    }
+    fn backend(fail: bool) -> Arc<Backend> {
+        Arc::new(Backend { fail_encoder: fail, configs: Mutex::default() })
+    }
+
+    fn open_with(sink: Sink, b: Option<Arc<dyn AacBackend>>) -> (Session<SinkSig, Wire>, Wire, Arc<Mutex<Sink>>) {
+        let sink = Arc::new(Mutex::new(sink));
+        let sig = SinkSig { sink: sink.clone(), out: VecDeque::new(), re: Reassembler::default(), delay_after_start: None, closed: false };
+        let wire = Wire::default();
+        let w2 = wire.clone();
+        let s = Session::open_with(sig, move || Ok(w2), false, Duration::from_millis(10), b).unwrap();
+        (s, wire, sink)
+    }
+
+    #[test]
+    fn headphones_that_offer_aac_get_aac_frames_in_latm_packets_when_the_add_on_is_there() {
+        let b = backend(false);
+        let (mut s, wire, sink) = open_with(Sink::new().with_aac(), Some(b.clone()));
+        assert_eq!(s.state(), SrcState::Streaming);
+        assert!(s.params().is_none());
+        let c = *s.aac_config().unwrap();
+        assert_eq!(c, AacConfig { rate: 48000, channels: 2, bit_rate: 128_000 });
+        assert_eq!(sink.lock().unwrap().config_aac().map(|c| (c.rate, c.channels)), Some((48000, 2)));
+        assert_eq!(s.info().codec, "AAC 48 kHz stereo");
+        s.write(&tone(48000, 2, 1.0, 440.0), 48000, 2).unwrap();
+        let pk = wire.0.lock().unwrap().clone();
+        assert_eq!(pk.len(), 46);
+        // the receiving side reads the packets back: one frame each, in order, 1024 samples apart on the clock
+        let mut stream = AacStream::new(c, Box::new(NullDec));
+        for (i, p) in pk.iter().enumerate() {
+            let r = parse_rtp(p).unwrap();
+            assert_eq!((r.seq as usize, r.timestamp as usize), (i, i * 1024));
+            assert_eq!(latm_unwrap(r.payload).unwrap(), &[i as u8 + 1; 10][..]);
+            stream.on_media(p);
+        }
+        assert_eq!(stream.stats.frames, 46);
+        // sound at another rate and channel count is converted first
+        s.write(&tone(44100, 1, 0.5, 440.0), 44100, 1).unwrap();
+        assert!(wire.0.lock().unwrap().len() > 46);
+        assert_eq!(s.info().packets as usize, wire.0.lock().unwrap().len());
+    }
+
+    #[test]
+    fn headphones_that_offer_only_sbc_or_a_source_without_the_add_on_use_sbc() {
+        let (s, _, _) = open_with(Sink::new(), Some(backend(false)));
+        assert!(s.aac_config().is_none());
+        assert_eq!(s.params().unwrap().sample_rate(), 44100);
+        let (s, _, sink) = open_with(Sink::new().with_aac(), None);
+        assert!(s.aac_config().is_none());
+        assert!(sink.lock().unwrap().config_aac().is_none());
+        assert!(s.info().codec.starts_with("SBC"));
+    }
+
+    #[test]
+    fn when_the_add_on_cannot_start_its_encoder_the_sender_falls_back_to_sbc_and_says_so_in_the_view() {
+        let b = backend(true);
+        let b2 = b.clone();
+        let sender = Sender::<SinkSig, Wire>::new(false, |_| {
+            let sig = SinkSig { sink: Arc::new(Mutex::new(Sink::new().with_aac())), out: VecDeque::new(), re: Reassembler::default(), delay_after_start: None, closed: false };
+            let media: Box<dyn FnOnce() -> io::Result<Wire> + Send> = Box::new(|| Ok(Wire::default()));
+            Ok((sig, media))
+        })
+        .with_aac(move || Some(b2.clone() as Arc<dyn AacBackend>));
+        sender.start("00:11:22:33:44:55", "Buds").unwrap();
+        let v = sender.view();
+        assert!(v.active);
+        assert!(v.codec.starts_with("SBC"), "{}", v.codec);
+        assert!(b.configs.lock().unwrap().is_empty());
+    }
 }

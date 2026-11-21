@@ -273,8 +273,36 @@ fn slots() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Slot>> {
     S.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Where the three shell-side calls go when the shell is not in the process that answers `iyakki dev state` (the UI program over the core's
+/// socket, F-SPLIT-03): the core keeps the slots, the program asks it. The safety rules of [`build`] still run in the core, on the raw frame.
+pub trait RemoteState: Send + Sync {
+    /// "A screen is being drawn here" (the core's `alive`).
+    fn heartbeat(&self);
+    /// Should this frame be drawn with text capture on?
+    fn wanted(&self) -> bool;
+    /// A captured frame, raw.
+    fn publish(&self, raw: &Raw);
+}
+
+static REMOTE: OnceLock<std::sync::Arc<dyn RemoteState>> = OnceLock::new();
+
+/// Send the shell-side calls of this process to `r` instead of the slots of this process (once: the first program start wins; `false` when one is
+/// installed already). Only the UI program over the socket installs one.
+pub fn install_remote(r: std::sync::Arc<dyn RemoteState>) -> bool {
+    REMOTE.set(r).is_ok()
+}
+
 /// The shell side, every beat: "a screen is being drawn here".
 pub fn heartbeat(data_dir: &Path) {
+    if let Some(r) = REMOTE.get() {
+        return r.heartbeat();
+    }
+    local_heartbeat(data_dir)
+}
+
+/// The slots of THIS process, whatever [`install_remote`] says: what the core's own end of the remote calls uses (a process that is both the
+/// core and the program, as a test harness is, must not send the core's call back to itself).
+pub fn local_heartbeat(data_dir: &Path) {
     slots().entry(data_dir.to_path_buf()).or_default().alive = Some(Instant::now());
 }
 
@@ -284,11 +312,27 @@ pub fn alive(data_dir: &Path) -> bool {
 
 /// The shell side: should this frame be drawn with text capture on?
 pub fn wanted(data_dir: &Path) -> bool {
+    if let Some(r) = REMOTE.get() {
+        return r.wanted();
+    }
+    local_wanted(data_dir)
+}
+
+/// See [`local_heartbeat`].
+pub fn local_wanted(data_dir: &Path) -> bool {
     slots().get(data_dir).and_then(|s| s.want_until).is_some_and(|t| Instant::now() < t)
 }
 
 /// The shell side: a captured frame.
 pub fn publish(data_dir: &Path, raw: &Raw) {
+    if let Some(r) = REMOTE.get() {
+        return r.publish(raw);
+    }
+    local_publish(data_dir, raw)
+}
+
+/// See [`local_heartbeat`].
+pub fn local_publish(data_dir: &Path, raw: &Raw) {
     let snap = build(raw);
     let mut g = slots();
     let s = g.entry(data_dir.to_path_buf()).or_default();

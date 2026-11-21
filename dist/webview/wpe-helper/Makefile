@@ -28,7 +28,11 @@ site-probe.h: site-probe.js
 video-recover.h: video-recover.js
 	sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' video-recover.js > $@
 
-webview-helper: helper.c proto.h extsnap.h micscan.h media-probe.h dev-probe.h page-env.h video-recover.h site-probe.h
+# media-cap.js (the video ceiling and the decoder switch the person or the tenant chose) the same way
+media-cap.h: media-cap.js
+	sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' media-cap.js > $@
+
+webview-helper: helper.c proto.h extsnap.h mediapolicy.h media-cap.h micscan.h media-probe.h dev-probe.h page-env.h video-recover.h site-probe.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -Wl,--strip-debug -o $@ helper.c $(LDLIBS)
 
 # The shared camera: a GStreamer plugin the web process loads (camshare.c). The engine opens one source per getUserMedia call and a
@@ -71,6 +75,14 @@ WEBEXTLIBS = $(shell $(PKG_CONFIG) --libs $(WEBEXTPKGS))
 libiyakkiwebext.so: webext.c extsnap.h
 	$(CC) $(CFLAGS) $(WEBEXTCFLAGS) $(LDFLAGS) -shared -fPIC -Wl,--strip-debug -o $@ webext.c $(WEBEXTLIBS)
 
+# The screen portal (screenportal.c, feed reader in screenfeed.h, names in portalpure.h): a program the helper starts when IYAKKI_WEBVIEW_SCREEN=1.
+# It needs dbus-daemon and pipewire (with its GStreamer plug-in) at run time. Not run in this tree.
+PORTALPKGS = gio-unix-2.0 glib-2.0 gstreamer-1.0 gstreamer-app-1.0
+PORTALCFLAGS = $(shell $(PKG_CONFIG) --cflags $(PORTALPKGS))
+PORTALLIBS = $(shell $(PKG_CONFIG) --libs $(PORTALPKGS))
+iyakki-screenportal: screenportal.c portalpure.h screenfeed.h
+	$(CC) $(CFLAGS) $(PORTALCFLAGS) $(LDFLAGS) -Wl,--strip-debug -o $@ screenportal.c $(PORTALLIBS)
+
 mic-check: mic-check.c micshare.c micscan.h devlist.h
 	$(CC) $(CFLAGS) $(MICCFLAGS) $(LDFLAGS) -o $@ mic-check.c $(MICLIBS)
 
@@ -101,6 +113,9 @@ install-websink: libgstiyakkiwebsink.so
 install-mp3: libgstiyakkimp3.so
 	install -D -m 0755 libgstiyakkimp3.so $(DESTDIR)/usr/lib/gstreamer-1.0/libgstiyakkimp3.so
 
+install-portal: iyakki-screenportal
+	install -D -m 0755 iyakki-screenportal $(DESTDIR)/usr/libexec/iyakki/iyakki-screenportal
+
 install-webext: libiyakkiwebext.so
 	install -D -m 0755 libiyakkiwebext.so $(DESTDIR)/usr/lib/iyakki/webext/libiyakkiwebext.so
 
@@ -108,6 +123,7 @@ install-mic: libgstiyakkimic.so
 	install -D -m 0755 libgstiyakkimic.so $(DESTDIR)/usr/lib/gstreamer-1.0/libgstiyakkimic.so
 
 clean:
-	rm -f libiyakkiwebext.so ext-check webview-helper media-probe.h dev-probe.h page-env.h video-recover.h libgstiyakkicamshare.so camshare-check websink-check libgstiyakkimic.so mic-check libgstiyakkimp3.so libgstiyakkiwebsink.so
+	rm -f iyakki-screenportal libiyakkiwebext.so ext-check webview-helper media-probe.h dev-probe.h page-env.h video-recover.h libgstiyakkicamshare.so camshare-check websink-check libgstiyakkimic.so mic-check libgstiyakkimp3.so libgstiyakkiwebsink.so
 
-.PHONY: install-webext install install-camshare install-mic install-mp3 install-websink check clean
+# media-cap.h and the other generated headers are listed under `clean` with the rest
+.PHONY: install-portal install-webext install install-camshare install-mic install-mp3 install-websink check clean

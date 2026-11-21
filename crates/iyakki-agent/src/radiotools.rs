@@ -649,7 +649,7 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str) ->
                     break;
                 }
                 tried += 1;
-                match start_and_wait(svc, p, user, c) {
+                match start_and_wait(svc, p, user, c, &cands) {
                     Ok(kbps) => {
                         *svc.radio_dir.now.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(c.clone());
                         let mut shown = c.clone();
@@ -711,14 +711,15 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str) ->
         }
         "radio_status" => Ok(match radio.state() {
             RadioState::Idle => "The radio is not playing.".into(),
-            RadioState::Connecting(n) => format!("Connecting to {}.", clean_name(&n)),
+            RadioState::Connecting(n) => format!("Connecting to {}.{}", clean_name(&n), radio.notice().map_or(String::new(), |t| format!(" ({}.)", clean_name(&t)))),
             RadioState::Playing { station, title, kbps } => format!(
-                "{} {}{}{}. Volume {}%.",
+                "{} {}{}{}. Volume {}%.{}",
                 if radio.is_paused() { "Paused:" } else { "Playing" },
                 clean_name(&station),
                 if kbps > 0 { format!(" ({kbps} kbps)") } else { String::new() },
                 if title.is_empty() { String::new() } else { format!(", now: {}", clean_name(&title)) },
-                radio.volume()
+                radio.volume(),
+                radio.notice().map_or(String::new(), |t| format!(" ({}.)", clean_name(&t)))
             ),
             RadioState::Failed { station, why } => {
                 let waiting = radio.cert_problem().filter(|c| c.station == station && c.trustable).map(|c| format!(" [A certificate decision is waiting for the person: station {}, host {}, SHA-256 {}. Only if they ask to play it anyway, use radio_trust_certificate; they are asked first.]", clean_name(&c.station), c.host, iyakki_proxy::certinfo::fingerprint_groups(&c.sha256))).unwrap_or_default();
@@ -752,7 +753,7 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str) ->
             store.trust(&Station::new(&found.name, &found.url), &problem)?;
             svc.toollog.record(svc.tool_log_days(), user, "radio.trust", &problem.host, true, &format!("sha256 {}", iyakki_proxy::certinfo::short_fingerprint(&problem.sha256)));
             let again = find_by_name(svc, user, &problem.station).ok_or("the station was not kept")?;
-            match start_and_wait(svc, p, user, &again) {
+            match start_and_wait(svc, p, user, &again, &[]) {
                 Ok(_) => Ok(format!("Trusted the certificate of {} for {} and it plays now. It is remembered for this station only; when the certificate is renewed the person is asked again.", problem.host, problem.station)),
                 Err(why) => Err(format!("Trusted the certificate but the station still would not start: {why}")),
             }
@@ -798,13 +799,22 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str) ->
 }
 
 /// Starts one station and waits until it plays or fails. The audit entry names the host only.
-fn start_and_wait(svc: &Services, p: &Policy, user: &str, c: &Found) -> Result<u32, String> {
+fn start_and_wait(svc: &Services, p: &Policy, user: &str, c: &Found, around: &[Found]) -> Result<u32, String> {
     svc.toollog.record(svc.tool_log_days(), user, "radio.play", &radio::host_of(&c.url), true, "");
     let pol = p.clone();
     let allow: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(move |h| pol.allows_host(h));
     // a saved station carries the certificate its owner approved, when there is one
     let pin = StationStore::new(svc.dir(), user).list().into_iter().find(|s| s.name == c.name && s.url == c.url).and_then(|s| s.cert_pin);
-    svc.radio.play(&Station { cert_pin: pin, ..Station::new(&c.name, &c.url) }, allow, &svc.voice_settings().play_cmd);
+    // the stations the radio may move on to when this one drops: My stations when it is one of them, else what the search found
+    let mine = StationStore::new(svc.dir(), user).list();
+    let list: Vec<Station> = if mine.iter().any(|s| s.url == c.url) { mine } else { around.iter().filter(|f| p.allows_host(&radio::host_of(&f.url))).map(|f| Station::new(&f.name, &f.url)).collect() };
+    let (me, who) = (svc.me.clone(), user.to_string());
+    let audit: Arc<dyn Fn(&str, &str) + Send + Sync> = Arc::new(move |action, subject| {
+        if let Some(sv) = me.upgrade() {
+            sv.toollog.record(sv.tool_log_days(), &who, action, subject, true, "");
+        }
+    });
+    svc.radio.play_in(&Station { cert_pin: pin, ..Station::new(&c.name, &c.url) }, allow, &svc.voice_settings().play_cmd, iyakki_tile_api::radio::Around { list, audit: Some(audit) });
     let t0 = Instant::now();
     loop {
         match svc.radio.state() {

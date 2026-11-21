@@ -33,7 +33,7 @@ fn machine(p: Option<aiprofile::AiProfile>, show_all: bool, gpus: usize, nvidia:
 #[test]
 fn no_profile_hides_nothing_and_cloud_mode_keeps_its_own_rules() {
     let m = machine(None, false, 0, false);
-    assert!(Item::ALL.into_iter().filter(|i| i.fw_def().is_none() && *i != Item::FwHardware && !matches!(i, Item::GpuVulkan | Item::GpuNvidia | Item::MacFirmware | Item::MacCamera)).all(|i| m.shows(i)));
+    assert!(Item::ALL.into_iter().filter(|i| i.fw_def().is_none() && *i != Item::FwHardware && !matches!(i, Item::GpuVulkan | Item::GpuNvidia | Item::GpuRocm | Item::MacFirmware | Item::MacCamera)).all(|i| m.shows(i)));
     assert_eq!(m.ai_line(), None);
     assert_eq!(m.hidden_ai_note(), None);
     // cloud: the profile is not consulted, Lemonade stays as before

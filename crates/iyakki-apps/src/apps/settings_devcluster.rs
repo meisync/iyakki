@@ -445,6 +445,7 @@ impl SettingsApp {
             Key::Char('p') => self.dc_upgrade(cx),
             Key::Char('a') => self.dc_autostart(cx),
             Key::Char('f') => self.dc_fixed_ip(cx),
+            Key::Char('n') => self.dc_offline(cx),
             Key::Char('z') => self.dc_typed_form(cx, DcForm::Reset),
             Key::Char('U') => self.dc_typed_form(cx, DcForm::Uninstall),
             _ => {}
@@ -900,6 +901,21 @@ impl SettingsApp {
         }
     }
 
+    /// "Offline on purpose": with no network at all, k3s is given a default route that goes nowhere so that it starts; a real route always wins.
+    fn dc_offline(&mut self, cx: &AppCx) {
+        if !self.admin(cx) {
+            return;
+        }
+        if cx.k3sdev().installed().is_none() {
+            return self.fail("IYAKKI has not installed a cluster here.");
+        }
+        let on = !cx.k3sdev().offline_on_purpose();
+        match cx.k3sdev().set_offline_on_purpose(on, &cx.session.user) {
+            Ok(()) => self.ok(if on { "Offline is on: when this machine has no network at the next start, k3s gets a route that goes nowhere so that it can start. A real network is used whenever there is one." } else { "Offline is off: k3s waits for a real network." }),
+            Err(e) => self.fail(e),
+        }
+    }
+
     fn dc_autostart(&mut self, cx: &AppCx) {
         if !self.admin(cx) {
             return;
@@ -1119,7 +1135,7 @@ impl SettingsApp {
                 let running = matches!(h.state.as_str(), "running" | "starting");
                 let mut b: Vec<(&str, [u8; 4], char)> = Vec::new();
                 b.push(if running { ("Stop", ERR, 'o') } else { ("Start", ACCENT, 'b') });
-                b.extend([("Restart", TEXT, 'e'), ("Logs", TEXT, 'l'), ("Upgrade", TEXT, 'p'), ("Autostart", TEXT, 'a'), ("Fixed address", TEXT, 'f'), ("Reset", ERR, 'z'), ("Uninstall", ERR, 'U')]);
+                b.extend([("Restart", TEXT, 'e'), ("Logs", TEXT, 'l'), ("Upgrade", TEXT, 'p'), ("Autostart", TEXT, 'a'), ("Fixed address", TEXT, 'f'), ("Offline", TEXT, 'n'), ("Reset", ERR, 'z'), ("Uninstall", ERR, 'U')]);
                 ("Local cluster managed by IYAKKI".into(), d, b)
             }
             Situation::Foreign(f) | Situation::Window { found: f } if !f.is_empty() => {

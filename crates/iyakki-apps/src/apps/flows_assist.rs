@@ -78,9 +78,9 @@ impl FlowsApp {
             self.assist = AssistUi::default();
             return;
         };
-        let book = self.env.assist_store();
+        let book = super::flows_remote::assist(&*self.env);
         let b = book.book(&id);
-        let mode = self.env.store().published(&id).map(|f| f.defaults.assist.mode).unwrap_or_default();
+        let mode = self.env.published(&id).map(|f| f.defaults.assist.mode).unwrap_or_default();
         let ui = AssistUi { mode, sugs: book.open_list(&id), watch: b.watch.clone(), paused: b.paused, cooling: b.cooldown_until_ms > book.now() };
         if ui.sugs.iter().map(|s| (&s.id, s.status)).collect::<Vec<_>>() != self.assist.sugs.iter().map(|s| (&s.id, s.status)).collect::<Vec<_>>() || ui.watch != self.assist.watch || ui.paused != self.assist.paused || ui.cooling != self.assist.cooling || ui.mode != self.assist.mode {
             self.redraw = true;
@@ -156,7 +156,7 @@ impl FlowsApp {
 
     fn reload_draft(&mut self) {
         let Some(id) = self.cur.clone() else { return };
-        if let Some(f) = self.env.store().get_draft(&id) {
+        if let Some(f) = self.env.get_draft(&id) {
             self.flow = f;
         }
         self.stamp = super::flows::stamp_of(&self.env, &id);
@@ -202,12 +202,12 @@ impl FlowsApp {
     /// After a rollback the person confirmed: the watch ends, autopilot pauses and the suggestion is marked.
     pub(super) fn assist_rolled_back(&mut self) {
         let Some(id) = self.cur.clone() else { return };
-        let book = self.env.assist_store();
+        let book = super::flows_remote::assist(&*self.env);
         if let Some(w) = book.watch(&id) {
             let _ = book.set_watch(&id, None);
             let _ = book.set_status(&id, &w.suggestion, Status::RolledBack);
             let _ = book.set_paused(&id, true);
-            iyakki_flow::host::Host::audit(self.env.host(), "flow.assist.rollback", &format!("{id} v{} rolled back by {}; autopilot paused", w.version, self.env.who()));
+            self.env.audit("flow.assist.rollback", &format!("{id} v{} rolled back by {}; autopilot paused", w.version, self.env.who()));
         }
         self.update_assist();
     }
@@ -217,7 +217,7 @@ impl FlowsApp {
         if self.cur.is_some() {
             return;
         }
-        let book = self.env.assist_store();
+        let book = super::flows_remote::assist(&*self.env);
         let sug: Vec<String> = self.flows.iter().filter(|f| !book.open_list(&f.id).is_empty()).map(|f| f.id.clone()).collect();
         let off = !book.global().enabled;
         if sug != self.sug_flows || off != self.assist_off {
@@ -229,11 +229,11 @@ impl FlowsApp {
 
     /// The kill switch for every flow of this account: assist (copilot and autopilot) does nothing while it is stopped.
     pub(super) fn assist_toggle_kill(&mut self) {
-        let book = self.env.assist_store();
+        let book = super::flows_remote::assist(&*self.env);
         let stopped = !book.global().enabled;
         match book.set_enabled(stopped) {
             Ok(()) => {
-                iyakki_flow::host::Host::audit(self.env.host(), if stopped { "flow.assist.resume_all" } else { "flow.assist.stop_all" }, &format!("by {}", self.env.who()));
+                self.env.audit(if stopped { "flow.assist.resume_all" } else { "flow.assist.stop_all" }, &format!("by {}", self.env.who()));
                 self.say(if stopped { "Assist is on again for the flows that have it switched on." } else { "Assist is stopped for every flow: no suggestions, no autopilot, until you switch it on again." }, true);
             }
             Err(e) => self.say(e, false),
@@ -244,11 +244,11 @@ impl FlowsApp {
 
     pub(super) fn assist_toggle_pause(&mut self) {
         let Some(id) = self.cur.clone() else { return };
-        let book = self.env.assist_store();
+        let book = super::flows_remote::assist(&*self.env);
         let on = !book.paused(&id);
         match book.set_paused(&id, on) {
             Ok(()) => {
-                iyakki_flow::host::Host::audit(self.env.host(), if on { "flow.assist.pause" } else { "flow.assist.resume" }, &format!("{id} by {}", self.env.who()));
+                self.env.audit(if on { "flow.assist.pause" } else { "flow.assist.resume" }, &format!("{id} by {}", self.env.who()));
                 self.say(if on { "Autopilot is paused for this flow." } else { "Autopilot is on again for this flow." }, true);
             }
             Err(e) => self.say(e, false),

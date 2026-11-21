@@ -112,6 +112,10 @@ fn who(name: &str, manage: bool, dir: &Path) -> Who {
 }
 
 fn rig_with(tag: &str, source: Option<Arc<dyn RecSource>>, h264: bool) -> Rig {
+    rig_decoding(tag, source, h264, Arc::new(NoH264))
+}
+
+fn rig_decoding(tag: &str, source: Option<Arc<dyn RecSource>>, h264: bool, support: Arc<dyn crate::cameras::H264Support>) -> Rig {
     let dir = std::fs::canonicalize(crate::testdir::unique("camrec", tag)).unwrap();
     let vault = Arc::new(Vault::default());
     let audit = Arc::new(Mutex::new(vec![]));
@@ -123,7 +127,7 @@ fn rig_with(tag: &str, source: Option<Arc<dyn RecSource>>, h264: bool) -> Rig {
         secrets: vault.clone(),
         people: Arc::new(|| vec!["amy".into(), "bob".into(), "root".into(), "eve".into()]),
         usb: Arc::new(NoUsb),
-        h264: Arc::new(NoH264),
+        h264: support,
         encode: Arc::new(|_, _, _| vec![0xFF, 0xD8, 0, 0, 0]),
         after_save: Arc::new(move |p| s2.lock().unwrap().push(p.to_path_buf())),
         audit: Arc::new(move |u, e, d| a2.lock().unwrap().push(format!("{u}|{e}|{d}"))),
@@ -354,6 +358,94 @@ fn the_real_rtsp_client_records_a_fake_camera_and_the_pictures_decode() {
     r.rec.shutdown();
 }
 
+/// A TLS front with a fresh self-signed certificate in front of a plain fake camera: the way an rtsps camera looks to the recorder.
+fn tls_front(plain_port: u16) -> u16 {
+    use std::io::{Read, Write};
+    let ck = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    let der = ck.cert.der().to_vec();
+    let key = rustls::pki_types::PrivateKeyDer::try_from(ck.key_pair.serialize_der()).unwrap();
+    let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider())).with_safe_default_protocol_versions().unwrap().with_no_client_auth().with_single_cert(vec![rustls::pki_types::CertificateDer::from(der)], key).unwrap();
+    let cfg = Arc::new(cfg);
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let cfg = cfg.clone();
+            std::thread::spawn(move || {
+                let Ok(mut plain) = std::net::TcpStream::connect(("127.0.0.1", plain_port)) else { return };
+                let _ = plain.set_read_timeout(Some(Duration::from_millis(10)));
+                let _ = s.set_read_timeout(Some(Duration::from_millis(10)));
+                let Ok(c) = rustls::ServerConnection::new(cfg) else { return };
+                let mut tls = rustls::StreamOwned::new(c, s);
+                let mut buf = [0u8; 16384];
+                loop {
+                    match tls.read(&mut buf) {
+                        Ok(0) => return,
+                        Ok(n) => {
+                            if plain.write_all(&buf[..n]).is_err() {
+                                return;
+                            }
+                        }
+                        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                        Err(_) => return,
+                    }
+                    match plain.read(&mut buf) {
+                        Ok(0) => return,
+                        Ok(n) => {
+                            if tls.write_all(&buf[..n]).and_then(|_| tls.flush()).is_err() {
+                                return;
+                            }
+                        }
+                        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                        Err(_) => return,
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+#[test]
+fn an_encrypted_camera_is_recorded_only_after_the_person_trusted_its_certificate() {
+    let cam = FakeCamera::rtsp(Config { frames: vec![JPG.to_vec()], interval_ms: 15, ..Default::default() });
+    let front = tls_front(cam.port);
+    let r = rig("rtsps");
+    let src: Arc<dyn RecSource> = Arc::new(NetSource(r.vault.clone()));
+    let r = Rig { rec: Arc::new(Recorder::new(r.hub.clone(), RecEnv { source: src, free_space: Arc::new(|_| Some(500_000 * MIB)), now_ms: Arc::new(system_ms), zone: Arc::new(Zone::utc), on_active: Arc::new(|_| {}), segment_ms: 200, retention_every: Duration::from_secs(3600), backoff_ms: 20, retry_after: Duration::from_millis(60) })), ..r };
+    let w = r.amy();
+    let id = r.hub.save(&w, None, &NewSpec { name: "Secure".into(), address: format!("rtsps://localhost:{front}/live"), user: String::new(), allowed: vec![] }, None).unwrap();
+    let data = r.hub.env().data.clone();
+    // before the person's yes the certificate is shown, not trusted: nothing is recorded and the state says why
+    r.on(&id);
+    assert!(wait_for(10, || crate::camtls::TrustStore::load(&data).pending.contains_key(&id)), "the certificate waits for the person");
+    assert_eq!(r.rec.status(&w, &id).unwrap().segments, 0);
+    // the person's yes goes through the same one-step change the recorder's retries use: a retry cannot save an older copy over it
+    crate::camtls::TrustStore::change(&data, |st| st.approve(&id)).unwrap();
+    assert!(wait_for(20, || r.rec.status(&w, &id).unwrap().segments >= 1), "after the yes the recorder stores what the encrypted camera sends");
+    r.off(&id);
+    r.rec.shutdown();
+}
+
+#[test]
+fn a_live_view_that_opens_a_wanted_camera_first_keeps_the_connection_where_the_recorder_finds_it() {
+    let cam = FakeCamera::rtsp(Config { frames: vec![JPG.to_vec()], interval_ms: 15, ..Default::default() });
+    let r = rig("livefirst-real");
+    let src: Arc<dyn RecSource> = Arc::new(NetSource(r.vault.clone()));
+    let r = Rig { rec: Arc::new(Recorder::new(r.hub.clone(), RecEnv { source: src, free_space: Arc::new(|_| Some(500_000 * MIB)), now_ms: Arc::new(system_ms), zone: Arc::new(Zone::utc), on_active: Arc::new(|_| {}), segment_ms: 200, retention_every: Duration::from_secs(3600), backoff_ms: 20, retry_after: Duration::from_millis(60) })), ..r };
+    let w = r.amy();
+    let id = r.hub.save(&w, None, &NewSpec { name: "Fake".into(), address: format!("rtsp://127.0.0.1:{}/live", cam.port), user: String::new(), allowed: vec![] }, None).unwrap();
+    // a recorder is going to want this camera: the live view that gets there first holds the connection in the shared table
+    let _wanted = r.hub.share().want(&id);
+    assert!(wait_for(10, || r.hub.view(&w, &id, false).ok().flatten().is_some()), "the live view shows a picture");
+    assert!(r.hub.share().held(&id), "its connection is in the table, so a recorder can look through it");
+    r.on(&id);
+    assert!(wait_for(10, || r.rec.status(&w, &id).unwrap().segments >= 1), "and the recorder stores what it reads there");
+    r.off(&id);
+    r.hub.stop_all();
+    r.rec.shutdown();
+}
+
 #[test]
 fn h264_is_stored_as_annex_b_with_parameter_sets_first_and_playback_says_it_needs_the_add_on() {
     let r = rig_with("h264", None, true);
@@ -377,6 +469,70 @@ fn h264_is_stored_as_annex_b_with_parameter_sets_first_and_playback_says_it_need
     let bytes = std::fs::read(&out.path).unwrap();
     assert!(bytes.starts_with(&[0, 0, 0, 1, 0x67]) && bytes.windows(5).any(|w| w == [0, 0, 0, 1, 0x65]));
     assert!(out.note.contains("player"));
+    r.rec.shutdown();
+}
+
+#[test]
+fn a_recorder_started_while_the_live_view_holds_the_camera_records_through_it_and_opens_its_own_when_it_lets_go() {
+    let r = rig("livefirst");
+    let id = r.add("Door", "amy", &[]);
+    // the live view opened the camera first (a camera that allows one connection): it owns the connection and pumps it
+    let mut owner = r.hub.share().tee(&id, Box::new(ScriptedFeed { n: 0, interval: Duration::from_millis(8), h264: false }));
+    let stop = Arc::new(AtomicBool::new(false));
+    let s2 = stop.clone();
+    let pump = std::thread::spawn(move || {
+        while !s2.load(Ordering::SeqCst) {
+            let _ = owner.next();
+        }
+    });
+    r.on(&id);
+    assert!(wait_for(5, || r.rec.status(&r.amy(), &id).unwrap().segments >= 1), "the recorder stores what the live view reads");
+    assert_eq!(r.script.opens.load(Ordering::SeqCst), 0, "the camera was never opened a second time");
+    stop.store(true, Ordering::SeqCst);
+    pump.join().unwrap();
+    assert!(wait_for(5, || r.script.opens.load(Ordering::SeqCst) >= 1), "when the live view lets go the recorder opens its own connection");
+    r.off(&id);
+    r.rec.shutdown();
+}
+
+/// A decoder that shows a 2x2 picture for every access unit after it has seen a key frame, and keeps what it was fed.
+struct SeenDecoder(Arc<Mutex<Vec<Vec<u8>>>>);
+impl crate::cameras::H264Decoder for SeenDecoder {
+    fn decode(&mut self, au: &iyakki_rtsp::rtp::AccessUnit) -> Result<Option<(u32, u32, Vec<u8>)>, String> {
+        let mut seen = self.0.lock().unwrap();
+        seen.push(au.nals.iter().map(|n| n[0] & 0x1f).collect());
+        let started = seen.iter().any(|t| t.contains(&5));
+        Ok(started.then(|| (2, 2, vec![7; 16])))
+    }
+}
+struct WithDecoder(Arc<Mutex<Vec<Vec<u8>>>>);
+impl crate::cameras::H264Support for WithDecoder {
+    fn decoder(&self) -> Option<Box<dyn crate::cameras::H264Decoder>> {
+        Some(Box::new(SeenDecoder(self.0.clone())))
+    }
+    fn hint(&self) -> String {
+        String::new()
+    }
+}
+
+#[test]
+fn h264_recordings_play_through_the_add_on_decoder_from_the_key_frame_before_the_picture() {
+    let fed = Arc::new(Mutex::new(Vec::new()));
+    let r = rig_decoding("h264play", None, true, Arc::new(WithDecoder(fed.clone())));
+    let id = r.add("Yard", "amy", &[]);
+    r.on(&id);
+    assert!(wait_for(5, || r.rec.status(&r.amy(), &id).unwrap().segments >= 2));
+    r.off(&id);
+    let e = &r.rec.entries(&id)[0];
+    let pf = r.rec.playback_frame(&r.amy(), &id, e.start_ms, Seek::AtOrAfter).unwrap().expect("a picture");
+    assert_eq!((pf.width, pf.height), (2, 2));
+    assert!(pf.ts_ms >= e.start_ms);
+    let first = fed.lock().unwrap().first().cloned().unwrap();
+    assert_eq!(first, vec![7, 8], "the parameter sets are given to the decoder before any picture");
+    let later = r.rec.playback_frame(&r.amy(), &id, pf.ts_ms, Seek::After).unwrap();
+    assert!(later.is_some(), "stepping on shows the next picture");
+    // the decoder is only given what is needed: the sets and frames from a key frame on, never an earlier delta frame alone
+    assert!(fed.lock().unwrap().iter().skip(1).next().is_some_and(|t| t.contains(&5)));
     r.rec.shutdown();
 }
 
@@ -963,5 +1119,19 @@ fn a_deleted_or_cut_ledger_is_noticed_and_read_back_from_its_second_copy_which_i
     std::fs::write(r.rec.cam_dir(&id).join("seals.txt"), std::fs::read_to_string(&copy).unwrap().lines().next().unwrap().to_string() + "\n").unwrap();
     let p = problems(&r);
     assert!(p.iter().any(|t| t.contains("lost 1 line")), "{p:?}");
+    r.rec.shutdown();
+}
+
+#[test]
+fn a_running_recorder_holds_the_camera_for_sharing_and_lets_go_when_it_stops() {
+    let r = rig("leasehold");
+    let id = r.add("Garage", "amy", &[]);
+    assert!(crate::clientmedia::leases().holders(&id).is_empty());
+    r.on(&id);
+    iyakki_testkit::wait::wait_until(Duration::from_secs(30), || crate::clientmedia::leases().holders(&id).iter().any(|h| h.who == "Recorder" && !h.exclusive && h.local));
+    // a shared hold: a client may still look, and a program wanting the camera for itself is told who has it
+    assert!(crate::clientmedia::leases().exclusive_holder(&id).is_none());
+    r.off(&id);
+    iyakki_testkit::wait::wait_until(Duration::from_secs(30), || crate::clientmedia::leases().holders(&id).is_empty());
     r.rec.shutdown();
 }

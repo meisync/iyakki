@@ -1089,7 +1089,7 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
         } else if is_loader_boot_cfg(n) {
             // the loader reads exactly the RAM disk a row names: a menu made for a full image must not land on a lean stick unchanged (KI-200)
             let text = std::fs::read_to_string(staging.join(n)).map_err(|e| e.to_string())?;
-            let (out, changes) = iyakki_storage::bootcfg::fix_for_volume(&text, &vol.root);
+            let (out, changes) = iyakki_core_local::bootmenu::fixed_for(&text, &vol.root);
             for c in &changes {
                 env.dm.log(who, "", "dev.update.file", &format!("boot.cfg: entry {} names {} which is not on the volume; {} is used", c.entry, c.from, c.to), true);
             }
@@ -1104,7 +1104,7 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
         }
     }
     // the loader's menu file names a RAM disk that is on the volume (also when this update brought none): repair what an older push left
-    if let Err(e) = iyakki_storage::bootcfg::fix_volume(&vol.root).map(|ls| ls.iter().for_each(|l| env.dm.log(who, "", "dev.update.bootcfg", &format!("boot.cfg repaired: {l}"), true))) {
+    if let Err(e) = iyakki_core_local::bootmenu::repair(&vol.root).map(|ls| ls.iter().for_each(|l| env.dm.log(who, "", "dev.update.bootcfg", &format!("boot.cfg repaired: {l}"), true))) {
         env.dm.log(who, "", "dev.update.bootcfg", &format!("boot.cfg could not be repaired: {e}"), false);
     }
     // 5. done: the marker goes, then the staged files
@@ -1131,7 +1131,7 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
 
 /// Is this path the loader's menu file (`EFI/iyakki-boot/boot.cfg`)?
 fn is_loader_boot_cfg(rel: &str) -> bool {
-    rel.eq_ignore_ascii_case(iyakki_storage::bootcfg::BOOT_CFG)
+    iyakki_core_local::bootmenu::is_boot_cfg(rel)
 }
 
 /// Repair-at-update (KI-200): when the loader's `boot.cfg` names a RAM disk that is not on the boot volume and its lean or full sibling is, the
@@ -1145,7 +1145,7 @@ pub fn repair_boot_cfg(env: &Env, who: &str) {
             return;
         }
     };
-    match iyakki_storage::bootcfg::fix_volume(&vol.root) {
+    match iyakki_core_local::bootmenu::repair(&vol.root) {
         Ok(lines) => lines.iter().for_each(|l| env.dm.log(who, "", "dev.update.bootcfg", &format!("boot.cfg repaired: {l}"), true)),
         Err(e) => env.dm.log(who, "", "dev.update.bootcfg", &format!("boot.cfg could not be repaired: {e}"), false),
     }

@@ -84,12 +84,12 @@ fn forward_hook_kinds_nobody_here_knows_or_has_code_for_are_skipped_and_reported
 
 #[test]
 fn the_hook_kind_numbers_names_and_capabilities_are_frozen() {
-    let want = [(1, "request.headers", "web.request.headers"), (2, "response.headers", "web.response.headers"), (3, "request.block", "web.request.block"), (4, "content.script", "web.content.script"), (5, "page.action", "web.page.action")];
+    let want = [(1, "request.headers", "web.request.headers"), (2, "response.headers", "web.response.headers"), (3, "request.block", "web.request.block"), (4, "content.script", "web.content.script"), (5, "page.action", "web.page.action"), (6, "user.agent", "web.user.agent")];
     for (k, name, cap) in want {
         assert_eq!(hook::name(k), Some(name));
         assert_eq!(hook::capability(k), Some(cap));
     }
-    assert_eq!(hook::name(6), None);
+    assert_eq!(hook::name(7), None);
 }
 
 #[test]

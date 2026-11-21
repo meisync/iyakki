@@ -88,7 +88,7 @@ pub fn run_with(env: &dyn Env, a: &[String], out: &mut dyn FnMut(&str), read_lin
             Ok(())
         }
         "gadget" => match a.get(1).map(String::as_str) {
-            Some(w @ ("on" | "off")) => gadget_run(w == "on", Path::new("/sys/class/udc"), &gadget::RealFs, out),
+            Some(w @ ("on" | "off")) => gadget_run(w == "on", &iyakki_core_local::kernelfacts::udc_in(Path::new(iyakki_core_local::kernelfacts::SYS)), &gadget::RealFs, out),
             _ => Err("usage: iyakki dev usb gadget on|off (on the computer that has the USB device controller)".into()),
         },
         _ => Err(USAGE.into()),

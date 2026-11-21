@@ -117,6 +117,20 @@ impl Shell {
 }
 
 impl Workspace {
+    /// The content of every pane (an empty pane is `None`), for the heartbeat of a view that is not showing.
+    pub(crate) fn each_content(&mut self, f: &mut dyn FnMut(&mut Option<(Box<dyn App>, PApp)>)) {
+        for p in self.panes.iter_mut() {
+            f(&mut p.content);
+        }
+    }
+
+    /// Draw every pane again on the next frame (a workspace that was kept aside comes back).
+    pub(crate) fn mark_all_dirty(&mut self) {
+        for p in self.panes.iter_mut() {
+            p.dirty = true;
+        }
+    }
+
     /// Every app the panes of this workspace hold.
     pub(super) fn each_app(&mut self, f: &mut dyn FnMut(&mut Box<dyn App>)) {
         for p in self.panes.iter_mut() {
@@ -517,7 +531,7 @@ impl Shell {
 
     pub(super) fn panes_key(&mut self, k: LayoutKey) {
         // desktop views have their own keys and are not a pane feature: they work whatever the screen features switch says
-        if matches!(k, LayoutKey::View(_) | LayoutKey::ViewStep { .. }) {
+        if matches!(k, LayoutKey::View(_) | LayoutKey::ViewStep { .. } | LayoutKey::ViewStepCustom { .. }) {
             self.views_key(k);
             return;
         }
@@ -584,7 +598,7 @@ impl Shell {
                     self.say_info("Only one display is connected");
                 }
             }
-            LayoutKey::Picker | LayoutKey::View(_) | LayoutKey::ViewStep { .. } => {}
+            LayoutKey::Picker | LayoutKey::View(_) | LayoutKey::ViewStep { .. } | LayoutKey::ViewStepCustom { .. } => {}
         }
     }
 
@@ -774,6 +788,16 @@ impl Shell {
                     }
                 }
                 self.ws_mark_all_dirty();
+                true
+            }
+            // an icon of the dock of a display other than the primary one: that display takes the focus and the app opens in its pane
+            Event::MouseDown(x, y) if !overlay && self.panes.d.multi && self.panes.d.move_src.is_none() && self.panes.d.pointer > 0 && self.screen_dock_app_at(self.panes.d.pointer, *x, *y).is_some() => {
+                let k = self.panes.d.pointer;
+                if let Some(app) = self.screen_dock_app_at(k, *x, *y) {
+                    self.focus_display(k);
+                    self.open(app);
+                    mark_stale!(self);
+                }
                 true
             }
             Event::MouseDown(..) if !overlay && self.panes.d.multi && self.panes.d.pointer != self.panes.d.active => {
@@ -1090,6 +1114,11 @@ impl Shell {
         }
         self.panes.ws = Some(ws);
         self.draw_bar_overlay(g, s);
+        // the dock this person chose for a display other than the primary one (F-SDK-30)
+        let showing = self.panes.d.drawing;
+        if self.panes.d.multi && showing > 0 {
+            self.draw_screen_dock(g, s, showing);
+        }
         for i in crashed {
             if self.panes.ws.as_ref().is_some_and(|ws| ws.focus == i) {
                 self.screen = Screen::Launcher;
@@ -1282,8 +1311,8 @@ impl Shell {
                 // copy the visible part under the strip
                 let rows = (ph as f32 - strip).round() as usize;
                 let (dw, sw_) = (pw as usize * 4, sw as usize * 4);
-                let src = sc.pm.data();
-                let dst = pg.pm.data_mut();
+                let src = sc.pm_mut().data();
+                let dst = pg.pm_mut().data_mut();
                 for row in 0..rows {
                     let (sy, dy) = (crop.round() as usize + row, strip.round() as usize + row);
                     if sy < sh as usize && dy < ph as usize {
@@ -1604,8 +1633,8 @@ fn shift_event(ev: &Event, by: (f32, f32)) -> Event {
 fn blit(g: &mut Gfx, src: &Gfx, x: i32, y: i32) {
     let (sw, sh) = (src.width() as i32, src.height() as i32);
     let (dw, dh) = (g.width() as i32, g.height() as i32);
-    let sdata = src.pm.data();
-    let ddata = g.pm.data_mut();
+    let sdata = src.pm_ref().data();
+    let ddata = g.pm_mut().data_mut();
     for row in 0..sh {
         let dy = y + row;
         if dy < 0 || dy >= dh {

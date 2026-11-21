@@ -192,9 +192,9 @@ fn something_the_person_must_answer_or_is_watching_keeps_the_screen_on() {
     sh.battery.plug_card = true;
     assert_eq!(sh.saver_keep_on_for_test(), Some("a battery card"));
     sh.battery.plug_card = false;
-    sh.loss.last = Some(iyakki_storage::loss::State::Lost);
+    sh.loss.last = Some(iyakki_core_local::storage::loss::State::Lost);
     assert_eq!(sh.saver_keep_on_for_test(), Some("the drive banner"));
-    sh.loss.last = Some(iyakki_storage::loss::State::Healthy);
+    sh.loss.last = Some(iyakki_core_local::storage::loss::State::Healthy);
     sh.ring = Some(Ring { items: vec![("tea".into(), true, "10:00".into())], since: 0, player: None, next_sound: 0 });
     assert_eq!(sh.saver_keep_on_for_test(), Some("an alarm"));
     sh.ring = None;
@@ -203,10 +203,10 @@ fn something_the_person_must_answer_or_is_watching_keeps_the_screen_on() {
     sh.fnk.power_card = false;
     assert_eq!(sh.saver_keep_on_for_test(), None);
     // held over time: the drive banner (the shell reads the drive's state itself) and a ringing alarm
-    iyakki_storage::loss::set_thread_override(Some(iyakki_storage::loss::Snapshot { state: iyakki_storage::loss::State::Lost, since: 10, lost_at: Some(10), ..Default::default() }));
+    iyakki_core_local::storage::loss::set_thread_override(Some(iyakki_core_local::storage::loss::Snapshot { state: iyakki_core_local::storage::loss::State::Lost, since: 10, lost_at: Some(10), ..Default::default() }));
     run(&mut sh, &clock, 30 * MIN);
     assert_eq!(sh.screen_stage(), Stage::Awake, "the drive banner holds the screen");
-    iyakki_storage::loss::set_thread_override(None);
+    iyakki_core_local::storage::loss::set_thread_override(None);
     run(&mut sh, &clock, 4 * MIN);
     assert_eq!(sh.screen_stage(), Stage::Awake, "the idle time counts from the moment the banner went");
     run(&mut sh, &clock, 2 * MIN);
@@ -218,9 +218,9 @@ fn something_that_appears_while_the_saver_runs_wakes_it() {
     let (mut sh, clock) = saver_shell("saver-appear", cfg());
     run(&mut sh, &clock, 5 * MIN + 1000);
     assert_eq!(sh.screen_stage(), Stage::Saver);
-    iyakki_storage::loss::set_thread_override(Some(iyakki_storage::loss::Snapshot { state: iyakki_storage::loss::State::Lost, since: 10, lost_at: Some(10), ..Default::default() }));
+    iyakki_core_local::storage::loss::set_thread_override(Some(iyakki_core_local::storage::loss::Snapshot { state: iyakki_core_local::storage::loss::State::Lost, since: 10, lost_at: Some(10), ..Default::default() }));
     run_fine(&mut sh, &clock, 700);
-    iyakki_storage::loss::set_thread_override(None);
+    iyakki_core_local::storage::loss::set_thread_override(None);
     assert_eq!(sh.screen_stage(), Stage::Awake, "the drive banner appeared");
     assert!(sh.take_stale());
 }

@@ -1,12 +1,15 @@
 //! The raw-terminal glue: single key presses without echo, and the terminal width.
 
+#[cfg(unix)]
 use std::io::Read;
 
 /// While alive the terminal delivers key presses immediately and without echo; restored on drop.
+#[cfg(unix)]
 pub struct Raw {
     saved: libc::termios,
 }
 
+#[cfg(unix)]
 impl Raw {
     pub fn enter() -> Option<Raw> {
         // SAFETY: tcgetattr/tcsetattr on stdin with a zero-initialised termios that tcgetattr fills.
@@ -48,6 +51,7 @@ impl Raw {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Raw {
     fn drop(&mut self) {
         // SAFETY: restoring the attributes saved in `enter`.
@@ -56,6 +60,7 @@ impl Drop for Raw {
     }
 }
 
+#[cfg(unix)]
 pub fn width() -> usize {
     // SAFETY: TIOCGWINSZ fills a winsize.
     unsafe {
@@ -64,7 +69,32 @@ pub fn width() -> usize {
     }
 }
 
+#[cfg(unix)]
 pub fn is_tty() -> bool {
     // SAFETY: isatty takes a file descriptor.
     unsafe { libc::isatty(0) != 0 && libc::isatty(1) != 0 }
+}
+
+/// Other systems have no raw terminal here (the window writer and the Windows steps are used there): no key reads, width 80, not a terminal.
+#[cfg(not(unix))]
+pub struct Raw;
+
+#[cfg(not(unix))]
+impl Raw {
+    pub fn enter() -> Option<Raw> {
+        None
+    }
+    pub fn read_bytes(&self) -> Vec<u8> {
+        Vec::new()
+    }
+}
+
+#[cfg(not(unix))]
+pub fn width() -> usize {
+    80
+}
+
+#[cfg(not(unix))]
+pub fn is_tty() -> bool {
+    false
 }

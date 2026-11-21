@@ -137,6 +137,8 @@ pub struct Held {
     pub holds: Vec<String>,
     /// Capability names taken away.
     pub revoked: Vec<String>,
+    /// Grants that end: capability name to the Unix second it ends (F-SDK-217).
+    pub ends: std::collections::BTreeMap<String, i64>,
 }
 
 /// Every stored approval, in a stable order.
@@ -148,7 +150,8 @@ pub fn held_list(data: &Path) -> Vec<Held> {
             holds.dedup();
             let mut revoked: Vec<String> = a.revoked.iter().map(|g| g.name.clone()).collect();
             revoked.dedup();
-            Held { installation, app: a.app, version: a.app_version, who: a.who, holds, revoked }
+            let ends = a.ends();
+            Held { installation, app: a.app, version: a.app_version, who: a.who, holds, revoked, ends }
         })
         .collect()
 }

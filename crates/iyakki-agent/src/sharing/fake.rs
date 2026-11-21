@@ -35,6 +35,12 @@ pub struct State {
     pub wifi_ap: bool,
     /// `wifi_ap_start` fails with this line when set.
     pub wifi_ap_error: Option<&'static str>,
+    /// The Bluetooth access point can be made (`nap_available`).
+    pub nap: bool,
+    /// `nap_start` fails with this line when set.
+    pub nap_error: Option<&'static str>,
+    /// What `nap_start` was told about phones seeing each other (the isolation setting).
+    pub nap_isolate: Option<bool>,
     pub io: Arc<Mutex<IoState>>,
     pub opened: Vec<(String, Ipv4Addr)>,
     /// When set, `open_io` makes real sockets on loopback with these ports.
@@ -174,6 +180,32 @@ impl Os for FakeOs {
         let mut s = self.st();
         s.calls.push("wifi_ap_stop".into());
         let n = crate::wifi_ap::AP_IFACE;
+        s.ifs.retain(|i| i.name != n);
+    }
+    fn nap_available(&mut self) -> Result<(), String> {
+        if self.st().nap {
+            Ok(())
+        } else {
+            Err("no controller".into())
+        }
+    }
+    fn nap_start(&mut self, isolate: bool) -> Result<String, String> {
+        let mut s = self.st();
+        s.calls.push("nap_start".into());
+        if let Some(e) = s.nap_error {
+            return Err(e.into());
+        }
+        s.nap_isolate = Some(isolate);
+        let name = iyakki_core_local::btshare::NAP_IFACE.to_string();
+        if !s.ifs.iter().any(|i| i.name == name) {
+            s.ifs.push(IfaceInfo::new(&name, LinkKind::BluetoothNap));
+        }
+        Ok(name)
+    }
+    fn nap_stop(&mut self) {
+        let mut s = self.st();
+        s.calls.push("nap_stop".into());
+        let n = iyakki_core_local::btshare::NAP_IFACE;
         s.ifs.retain(|i| i.name != n);
     }
     fn resolvers(&mut self) -> Vec<Ipv4Addr> {

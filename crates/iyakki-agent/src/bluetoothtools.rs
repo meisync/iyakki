@@ -3,10 +3,10 @@
 //! keys, so the device must be paired again). Pairing needs the person at the device (a number to compare, a PIN to type); the pairing tools are in `bluetoothpair`. Sending sound to headphones (A2DP source) is not built; a phone playing through this computer is `btaudiotools`.
 //!
 //! A paired phone is not an input device: `bluetooth_tether_status` (free), `bluetooth_tether_connect` and `bluetooth_tether_disconnect`
-//! (each asks) use its Bluetooth tethering as this computer's internet ([`iyakki_devctl::bt_pan`]); a failure comes back with its plain reason
+//! (each asks) use its Bluetooth tethering as this computer's internet ([`iyakki_core_local::devctl::bt_pan`]); a failure comes back with its plain reason
 //! (tethering is off on the phone, the phone refused, no controller ...).
 //!
-//! The work is [`iyakki_devctl::bthid::Devices`]; this file only finds the device, writes the card and waits for the result.
+//! The work is [`iyakki_core_local::devctl::bthid::Devices`]; this file only finds the device, writes the card and waits for the result.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,8 +15,8 @@ use serde_json::{json, Value};
 
 use crate::agent::{Risk, ToolDef, Tools};
 use crate::chat::ToolSpec;
-use iyakki_devctl::bt_pan::{Tether, TetherState};
-use iyakki_devctl::bthid::{find_device, DeviceView, Devices, LinkState};
+use iyakki_core_local::devctl::bt_pan::{Tether, TetherState};
+use iyakki_core_local::devctl::bthid::{find_device, DeviceView, Devices, LinkState};
 pub use iyakki_shared::bluetoothtools::{PROMPT_RULE};
 
 
@@ -39,12 +39,12 @@ pub struct BluetoothTools {
 
 impl BluetoothTools {
     pub fn new(inner: Arc<dyn Tools>, devs: Arc<dyn Devices>) -> BluetoothTools {
-        BluetoothTools { inner, devs, tether: iyakki_devctl::bt_pan::tether(), wait: Duration::from_secs(20), poll: Duration::from_millis(500) }
+        BluetoothTools { inner, devs, tether: iyakki_core_local::devctl::bt_pan::tether(), wait: Duration::from_secs(20), poll: Duration::from_millis(500) }
     }
 
     /// The tools over this computer's real Bluetooth hub.
     pub fn real(inner: Arc<dyn Tools>) -> BluetoothTools {
-        BluetoothTools::new(inner, Arc::new(iyakki_devctl::bthid_sys::RealDevices))
+        BluetoothTools::new(inner, Arc::new(iyakki_core_local::devctl::bthid_sys::RealDevices))
     }
 
     /// Another phone-tethering manager (tests use a fake).

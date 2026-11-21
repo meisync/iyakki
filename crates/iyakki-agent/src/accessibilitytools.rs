@@ -59,6 +59,7 @@ fn plan(cur: &Access, hc: bool, args: &Value) -> Result<(Access, bool), String> 
     flag("sticky_keys", &mut a.sticky_keys)?;
     flag("typing_echo", &mut a.typing_echo)?;
     flag("braille", &mut a.braille)?;
+    flag("braille_contracted", &mut a.braille_contracted)?;
     flag("high_contrast", &mut hc)?;
     if let Some(v) = args.get("slow_keys_ms") {
         let ms = v.as_u64().and_then(|m| u32::try_from(m).ok()).filter(|m| SLOW_CHOICES.contains(m)).ok_or_else(|| format!("`slow_keys_ms` must be one of {SLOW_CHOICES:?} (0 = off)"))?;
@@ -66,7 +67,7 @@ fn plan(cur: &Access, hc: bool, args: &Value) -> Result<(Access, bool), String> 
         any = true;
     }
     if !any {
-        return Err("say what to change: screen_reader, speak_notices, large_pointer, big_focus_ring, reduce_motion, sticky_keys, typing_echo, braille, slow_keys_ms or high_contrast".into());
+        return Err("say what to change: screen_reader, speak_notices, large_pointer, big_focus_ring, reduce_motion, sticky_keys, typing_echo, braille, braille_contracted, slow_keys_ms or high_contrast".into());
     }
     Ok((a, hc))
 }

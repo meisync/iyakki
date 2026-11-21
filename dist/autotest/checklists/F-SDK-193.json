@@ -1,0 +1,22 @@
+{
+ "schema": 1,
+ "row": "F-SDK-193",
+ "feature_sha": "2381e4035d18bee5",
+ "title": "the app_events_* chat tools run through the core with approvals",
+ "clauses": [
+  {
+   "id": "chat-tools",
+   "text": "the app_events_* chat tools run through the core with approvals",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant to list which events each app listens to, then to register one (approve the card), then to switch it off.",
+     "expect": "The list names apps and events and no payload; each change asks first.",
+     "runner_did": "Booted the image in QEMU and signed in a scratch account (when run through the runner)"
+    }
+   ]
+  }
+ ]
+}

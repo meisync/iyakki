@@ -70,6 +70,10 @@ struct Pair {
     d0: f64,
     mid0: (i32, i32),
     swiped: bool,
+    /// How far apart the fingers are now against when the gesture began (1.0: not at all); the pinch the tile hears (F-SDK-34).
+    total: f64,
+    /// Whether a pinch step was sent, so the end of the gesture is told too.
+    pinched: bool,
 }
 
 /// Two fingers that move this much further apart (or closer together) than they started are a pinch.
@@ -306,7 +310,12 @@ impl One {
                         }
                     }
                     Mode::Mouse => out.events.push(Event::MouseUp(self.last.0, self.last.1)),
-                    Mode::Scroll | Mode::Idle | Mode::Two => {}
+                    Mode::Two => {
+                        if let Some(p) = self.pair.filter(|p| p.pinched) {
+                            out.events.push(Event::PinchEnd { scale_milli: (p.total * 1000.0).round() as u32 });
+                        }
+                    }
+                    Mode::Scroll | Mode::Idle => {}
                 }
             }
             self.mode = Mode::Idle;
@@ -337,7 +346,7 @@ impl One {
         let mid = ((a.0 + b.0) / 2, (a.1 + b.1) / 2);
         if self.mode != Mode::Two {
             self.mode = Mode::Two;
-            self.pair = Some(Pair { d0: d, mid0: mid, swiped: false });
+            self.pair = Some(Pair { d0: d, mid0: mid, swiped: false, total: 1.0, pinched: false });
             return;
         }
         if !(self.moved || self.other_moved) {
@@ -347,7 +356,10 @@ impl One {
         let ratio = d / p.d0;
         if ratio >= PINCH_RATIO || ratio <= 1.0 / PINCH_RATIO {
             out.events.push(Event::Key(Key::Ctrl(if ratio > 1.0 { '+' } else { '-' })));
-            *p = Pair { d0: d, mid0: mid, swiped: false };
+            // the same gesture as a pinch for a tile that asked for it (it ignores the keys): the scale since the fingers landed
+            let total = (p.total * ratio).clamp(0.001, 100.0);
+            out.events.push(Event::Pinch { scale_milli: (total * 1000.0).round() as u32, x: mid.0, y: mid.1 });
+            *p = Pair { d0: d, mid0: mid, swiped: false, total, pinched: true };
         } else if !p.swiped && (mid.0 - p.mid0.0).abs() >= SWIPE_PX && (mid.0 - p.mid0.0).abs() > 2 * (mid.1 - p.mid0.1).abs() {
             // fingers moving left turn to the next page, as a page is pulled across
             let nav = if mid.0 < p.mid0.0 { Nav::Right } else { Nav::Left };
@@ -386,7 +398,7 @@ impl One {
 
 /// Turn the finger gestures on for the real backends, unless `iyakki.touchscroll=0` is on the kernel command line.
 pub fn init_from_cmdline() {
-    let cmd = iyakki_storage::cmdline_text();
+    let cmd = iyakki_core_api::device_types::storage::cmdline_text();
     let off = cmd.split_whitespace().any(|w| w == "iyakki.touchscroll=0");
     enable_gestures_by_default(!off);
 }
@@ -478,8 +490,8 @@ mod tests {
         let back = move_finger(&mut t, 1, 15500, 16384);
         assert_eq!(keys(&back), vec![Key::Ctrl('-')], "{back:?}");
         // lifting both sends no click and no menu
-        assert!(lift_slot(&mut t, 1).is_empty());
-        assert!(lift_slot(&mut t, 0).is_empty());
+        let lifted: Vec<Event> = lift_slot(&mut t, 1).into_iter().chain(lift_slot(&mut t, 0)).collect();
+        assert!(lifted.iter().all(|e| matches!(e, Event::PinchEnd { .. })), "only the end of the pinch is told: {lifted:?}");
         // the next single touch is a tap again
         land(&mut t, 100, 100);
         assert_eq!(lift(&mut t).len(), 3);
@@ -510,6 +522,35 @@ mod tests {
         land(&mut t, 16384, 8000);
         let all: Vec<Event> = (1..=8).flat_map(|i| slide(&mut t, 16384 + i * 300, 8000 + i * 1500)).collect();
         assert!(swipes(&all).is_empty() && scrolled(&all) > 0, "{all:?}");
+    }
+
+    #[test]
+    fn a_pinch_is_also_told_as_a_scale_since_the_fingers_landed_and_its_end_once() {
+        let mut t = gestures();
+        land(&mut t, 14000, 16384);
+        land_second(&mut t, 18000, 16384);
+        // the fingers go from 4000 to 8000 apart (a bit over 1.3 times), about 2.0 in all
+        let out = move_both(&mut t, (12000, 16384), (20000, 16384));
+        let pinches: Vec<(u32, i32)> = out.iter().filter_map(|e| if let Event::Pinch { scale_milli, x, .. } = e { Some((*scale_milli, *x)) } else { None }).collect();
+        assert_eq!(pinches.len(), 1, "{out:?}");
+        assert_eq!(pinches[0].0, 2000);
+        assert_eq!(keys(&out), vec![Key::Ctrl('+')], "the key of the old gesture is still sent");
+        // a second step builds on the first: from 8000 apart to 16000 is 2.0 again, 4.0 in all
+        let out = move_both(&mut t, (8000, 16384), (24000, 16384));
+        assert!(out.iter().any(|e| matches!(e, Event::Pinch { scale_milli: 3990..=4010, .. })), "{out:?}");
+        let up = lift_slot(&mut t, 0);
+        assert!(up.iter().filter(|e| matches!(e, Event::PinchEnd { scale_milli: 3990..=4010 })).count() <= 1);
+        let rest = lift_slot(&mut t, 1);
+        let ends = up.iter().chain(rest.iter()).filter(|e| matches!(e, Event::PinchEnd { scale_milli: 3990..=4010 })).count();
+        assert_eq!(ends, 1, "the end is told once: {up:?} {rest:?}");
+        // a swipe or a plain tap sends no pinch
+        let mut t = gestures();
+        land(&mut t, 20000, 16384);
+        land_second(&mut t, 24000, 16384);
+        let out = move_both(&mut t, (15000, 16384), (19000, 16384));
+        assert!(!out.iter().any(|e| matches!(e, Event::Pinch { .. } | Event::PinchEnd { .. })));
+        let rest: Vec<Event> = lift_slot(&mut t, 1).into_iter().chain(lift_slot(&mut t, 0)).collect();
+        assert!(!rest.iter().any(|e| matches!(e, Event::PinchEnd { .. })));
     }
 
     #[test]

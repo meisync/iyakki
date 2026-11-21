@@ -14,6 +14,11 @@ use iyakki_link::cloudclient::{pin_of, Target};
 use iyakki_link::pixelcodec::{Caps, Level, Opts, Streamer};
 use iyakki_link::wsproto::{accept_key, binary_frame, text_frame, Message, Parser};
 
+/// What the fake tenant answers to `GET /api/v1/voice/offer` (`{"addr":..,"offer":..}` as text); empty means 404.
+/// The bodies the fake tenant got on `POST /api/v1/voice/return`; while `VOICE_OFFER` is empty the route is 404.
+pub static VOICE_RETURNS: Mutex<Vec<String>> = Mutex::new(Vec::new()); // flaky-ok: only voice_cmd.rs reads it, its own test binary
+pub static VOICE_OFFER: Mutex<String> = Mutex::new(String::new()); // flaky-ok: set by the one test of voice_cmd.rs, its own test binary; no other test reads it
+
 pub const PASSWORD: &str = "right";
 pub const USER: &str = "alice";
 
@@ -173,6 +178,27 @@ fn serve_one(tls: &mut Tls, texts: &Mutex<Vec<String>>, bins: &Mutex<Vec<Vec<u8>
             } else {
                 answer(tls, 401, "", br#"{"error":"wrong name or password"}"#);
             }
+        }
+        ("GET", "/api/v1/voice/offer") => {
+            if h("authorization").as_deref() != Some("Bearer tok") {
+                return answer(tls, 401, "", br#"{"error":"sign in"}"#);
+            }
+            let body = VOICE_OFFER.lock().unwrap().clone();
+            if body.is_empty() {
+                answer(tls, 404, "", br#"{"error":"not found"}"#);
+            } else {
+                answer(tls, 200, "", body.as_bytes());
+            }
+        }
+        ("POST", "/api/v1/voice/return") => {
+            if h("authorization").as_deref() != Some("Bearer tok") {
+                return answer(tls, 401, "", br#"{"error":"sign in"}"#);
+            }
+            if VOICE_OFFER.lock().unwrap().is_empty() {
+                return answer(tls, 404, "", br#"{"error":"not found"}"#);
+            }
+            VOICE_RETURNS.lock().unwrap().push(body.clone());
+            answer(tls, 200, "", br#"{"ok":true}"#);
         }
         ("GET", "/api/v1/tenants") => {
             if h("authorization").as_deref() != Some("Bearer tok") {

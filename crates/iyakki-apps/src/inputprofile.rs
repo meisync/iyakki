@@ -64,8 +64,7 @@ pub fn apply(k: &KeyboardSettings) {
 
 /// Look at the kernel's device list again, then apply. Called from the shell's settings sync.
 pub fn refresh(k: &KeyboardSettings) {
-    let text = std::fs::read_to_string("/proc/bus/input/devices").unwrap_or_default();
-    set(k, ip::detect(&text));
+    set(k, ip::detect(&iyakki_core_local::kernelfacts::input_devices()));
 }
 
 /// Same with the list given (tests, fixtures).

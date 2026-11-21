@@ -12,9 +12,9 @@ use super::browser_data as bd;
 use super::browser_forms as bf;
 use super::AppCx;
 
-pub const TOOLS: [&str; 25] = ["browser_install_site", "site_apps_list", "site_app_remove", "browser_data_export", "browser_data_import", "browser_protection_choices", "browser_protection_choices_set", "browser_bookmarks", "browser_bookmark_folder", "browser_history_search", "browser_zoom_status", "browser_zoom_set", "browser_profile_status", "browser_profile_clear", "browser_thumbnails_status", "browser_thumbnails_set", "browser_downloads_list", "browser_download_open", "browser_reports_list", "browser_reports_clear", "browser_media_sites", "browser_media_site_forget", "browser_av_addon_status", "browser_media_policy_status", "browser_media_policy_set"];
+pub const TOOLS: [&str; 28] = ["browser_install_site", "site_apps_list", "site_app_open", "site_app_remove", "browser_data_export", "browser_data_import", "browser_data_to_tenant", "browser_data_from_tenant", "browser_protection_choices", "browser_protection_choices_set", "browser_bookmarks", "browser_bookmark_folder", "browser_history_search", "browser_zoom_status", "browser_zoom_set", "browser_profile_status", "browser_profile_clear", "browser_thumbnails_status", "browser_thumbnails_set", "browser_downloads_list", "browser_download_open", "browser_reports_list", "browser_reports_clear", "browser_media_sites", "browser_media_site_forget", "browser_av_addon_status", "browser_media_policy_status", "browser_media_policy_set"];
 
-pub const PROMPT_RULE: &str = "\nBROWSER DATA: browser_data_export copies the sealed browser data to a file for another computer and browser_data_import takes one in (both ask; the key is not in the file); browser_protection_choices and browser_protection_choices_set read and change what is kept of the protected browser data (checkpoint, lock screen, sites left out); browser_bookmarks lists folders (and one folder's bookmarks), browser_history_search finds visited pages by words (titles and sites only), browser_zoom_status lists zoom per site, browser_profile_status says which name/address fields are kept in the vault, never their values, browser_thumbnails_status says whether small pictures of often-visited pages are kept for the start page (all free). browser_bookmark_folder (new, move, rename, delete), browser_zoom_set, browser_profile_clear and browser_thumbnails_set (on, off, clear) ask first. You cannot set or read a saved name or address: the person types `profile set FIELD VALUE` in the browser's address bar. BROWSER DOWNLOADS: browser_downloads_list lists the saved files and which tile opens each (free); browser_download_open opens one saved file by its name in the tile that suits it (EDIT, DATA or MEDIA) and keeps the current screen aside so Back returns (asks first). BROWSER SITE REPORTS: browser_reports_list shows the reports the person saved with the Report site button or the ! key (time, site, status, engine, how many notes; free); browser_reports_clear deletes them (asks first). Reports stay on this computer; nothing is sent. browser_media_sites lists the sites the person allowed or blocked for camera, microphone and screen (free); browser_media_site_forget makes the browser ask again for one site (asks first; it never allows anything). browser_av_addon_status says whether the audio and video add-on (H.264, AAC) is installed and where an administrator installs it (free; installing is in Store, Setup and asks). browser_media_policy_status shows the tallest video the web engine is asked for and whether it may use the add-on's decoders (free); browser_media_policy_set changes either (asks first). SITE APPS: browser_install_site (asks), site_apps_list (free), site_app_remove (asks) make, list and delete a site app; never offer a way round a missing decryption module.";
+pub const PROMPT_RULE: &str = "\nBROWSER DATA: browser_data_export copies the sealed browser data to a file for another computer and browser_data_import takes one in (both ask; the key is not in the file); browser_data_to_tenant and browser_data_from_tenant move the sealed data to a cloud tenant you are signed in to and back (both ask; the tenant cannot read it; the key stays in your vault); browser_protection_choices and browser_protection_choices_set read and change what is kept of the protected browser data (checkpoint, lock screen, sites left out); browser_bookmarks lists folders (and one folder's bookmarks), browser_history_search finds visited pages by words (titles and sites only), browser_zoom_status lists zoom per site, browser_profile_status says which name/address fields are kept in the vault, never their values, browser_thumbnails_status says whether small pictures of often-visited pages are kept for the start page (all free). browser_bookmark_folder (new, move, rename, delete), browser_zoom_set, browser_profile_clear and browser_thumbnails_set (on, off, clear) ask first. You cannot set or read a saved name or address: the person types `profile set FIELD VALUE` in the browser's address bar. BROWSER DOWNLOADS: browser_downloads_list lists the saved files and which tile opens each (free); browser_download_open opens one saved file by its name in the tile that suits it (EDIT, DATA or MEDIA) and keeps the current screen aside so Back returns (asks first). BROWSER SITE REPORTS: browser_reports_list shows the reports the person saved with the Report site button or the ! key (time, site, status, engine, how many notes; free); browser_reports_clear deletes them (asks first). Reports stay on this computer; nothing is sent. browser_media_sites lists the sites the person allowed or blocked for camera, microphone and screen (free); browser_media_site_forget makes the browser ask again for one site (asks first; it never allows anything). browser_av_addon_status says whether the audio and video add-on (H.264, AAC) is installed and where an administrator installs it (free; installing is in Store, Setup and asks). browser_media_policy_status shows the tallest video the web engine is asked for and whether it may use the add-on's decoders (free); browser_media_policy_set changes either (asks first). SITE APPS: browser_install_site (asks), site_apps_list (free), site_app_open (asks), site_app_remove (asks) make, list, open and delete a site app; never offer a way round a missing decryption module.";
 
 fn site_ok(s: &str) -> bool {
     !s.is_empty() && s.len() <= 100 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
@@ -73,6 +73,17 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
     {
         let (c, e1) = (cx.clone(), env.clone());
         let schema = json!({"type": "object", "properties": {"name": {"type": "string", "description": "The site app's name from site_apps_list."}}, "required": ["name"]});
+        v.push(Entry::change("Browser", "site_app_open", "Open a site app in a tab of its own in the Browser, with the site's own profile and only its origins (the screen the person is on is kept aside so Back returns). The person approves a card first that names the site and what the tile may hold.", schema, |a| format!("Open the site app {}", a["name"].as_str().unwrap_or("")), move |a| {
+            let st = super::site_apps::load(&c);
+            let app = st.find(&arg_str(a, "name")?).cloned().ok_or("no site app has that name; call site_apps_list")?;
+            super::download_open::queue_chat(&c.session.user, "browser", &format!("site:{}", app.id));
+            e1.audit("browser.siteapp", &app.audit("open requested"));
+            Ok(format!("Opening {} in the Browser.", app.name))
+        }));
+    }
+    {
+        let (c, e1) = (cx.clone(), env.clone());
+        let schema = json!({"type": "object", "properties": {"name": {"type": "string", "description": "The site app's name from site_apps_list."}}, "required": ["name"]});
         v.push(Entry::change("Browser", "site_app_remove", "Remove a site app and delete its own cookies, storage and sign-ins. The person approves a card first.", schema, |a| format!("Remove the site app {} and forget its sign-ins", a["name"].as_str().unwrap_or("")), move |a| {
             let mut st = super::site_apps::load(&c);
             let app = st.find(&arg_str(a, "name")?).cloned().ok_or("no site app has that name; call site_apps_list")?;
@@ -111,6 +122,21 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
             super::browser_config::save(&c, &b);
             e.audit("settings.browser", &format!("Video quality: {}; add-on decoders {}.", super::browser_config::cap_words(b.video_max_height), if b.codecs { "allowed" } else { "off" }));
             Ok(format!("Video quality: {}. Add-on decoders: {}. It applies to the next page.", super::browser_config::cap_words(b.video_max_height), if b.codecs { "allowed" } else { "off" }))
+        }));
+    }
+    {
+        let c = cx.clone();
+        v.push(Entry::read("Browser", "browser_hw_decode_status", "Say whether the web engine decodes video on the graphics chip (VA-API) on this computer: on or off. It is a setting of this computer that an administrator changes.", no_args(), move |_| {
+            Ok(format!("Hardware video decoding: {}. It applies the next time the web engine starts, and the engine falls back to the processor by itself when the chip or its driver is missing.", super::browser_tuning::words(super::browser_tuning::load(&c))))
+        }));
+    }
+    {
+        let c = cx.clone();
+        let schema = json!({"type": "object", "properties": {"on": {"type": "boolean", "description": "true to decode video on the graphics chip, false for the processor"}}, "required": ["on"]});
+        v.push(Entry::change("Browser", "browser_hw_decode_set", "Turn hardware video decoding (VA-API) of the web engine on or off for this computer. Only an administrator may. It applies the next time the web engine starts. The person approves a card first.", schema, |a| format!("Hardware video decoding {}", if a["on"].as_bool() == Some(true) { "on" } else { "off" }), move |a| {
+            let on = a["on"].as_bool().ok_or("say on: true or false")?;
+            super::browser_tuning::set(&c, on)?;
+            Ok(format!("Hardware video decoding: {}. It applies the next time the web engine starts.", super::browser_tuning::words(on)))
         }));
     }
     {
@@ -280,6 +306,28 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
             let key = c.vault().user_get(&c.session.user, iyakki_shared::profilestore::VAULT_SECRET).ok().ok_or("this account's vault has no browser key, so the file cannot be opened here (the key is not moved by the file)")?;
             c.agent.profile_store().import_sealed(c.data_dir(), &c.session.user, path, &key, iyakki_schema::now_secs())?;
             e1.audit("settings.browser.data.import", "sealed file taken in");
+            Ok("The sealed browser data was checked with your browser key and taken in; it opens at your next sign-in. The data that was here is kept as the backup copy.".into())
+        }));
+    }
+    {
+        // moving the sealed file to a signed-in cloud tenant and back (F-VAULT-11): the tenant holds bytes it cannot read
+        let (c, e1) = (cx.clone(), env.clone());
+        let schema = json!({"type": "object", "properties": {"tenant": {"type": "string", "description": "The name of a cloud tenant you are signed in to (see the cloud strip)."}}, "required": ["tenant"]});
+        v.push(Entry::change("Browser", "browser_data_to_tenant", "Send the protected browser data, still sealed, to a cloud tenant you are signed in to, so the browser there can use your sign-ins. The tenant cannot read it: the key stays in your own vault and is not sent. Only while the data is sealed here (signed out of the browser). The person approves a card first.", schema, |a| format!("Send the sealed browser data to the tenant {}", a["tenant"].as_str().unwrap_or("?")), move |a| {
+            let t = arg_str(a, "tenant")?;
+            let n = c.agent.profile_store().send_to_tenant(c.data_dir(), &c.session.user, &t, iyakki_schema::now_secs())?;
+            e1.audit("settings.browser.data.to_tenant", &format!("{t}: {n} bytes"));
+            Ok(format!("The sealed browser data ({n} bytes) is on the tenant {t}. It opens only with the browser key in your own vault."))
+        }));
+    }
+    {
+        let (c, e1) = (cx.clone(), env.clone());
+        let schema = json!({"type": "object", "properties": {"tenant": {"type": "string", "description": "The name of a cloud tenant you are signed in to."}}, "required": ["tenant"]});
+        v.push(Entry::change("Browser", "browser_data_from_tenant", "Bring back the sealed browser data a cloud tenant holds for this account as the protected browser data here. It is checked with this account's own browser key first; the data that was here becomes the backup copy. Refused while the browser data is open. The person approves a card first.", schema, |a| format!("Take in the sealed browser data from the tenant {}", a["tenant"].as_str().unwrap_or("?")), move |a| {
+            let t = arg_str(a, "tenant")?;
+            let key = c.vault().user_get(&c.session.user, iyakki_shared::profilestore::VAULT_SECRET).ok().ok_or("this account's vault has no browser key, so the data cannot be opened here (the key is not moved by the data)")?;
+            c.agent.profile_store().fetch_from_tenant(c.data_dir(), &c.session.user, &t, &key, iyakki_schema::now_secs())?;
+            e1.audit("settings.browser.data.from_tenant", &t);
             Ok("The sealed browser data was checked with your browser key and taken in; it opens at your next sign-in. The data that was here is kept as the backup copy.".into())
         }));
     }
@@ -468,7 +516,7 @@ mod tests {
         let audits = Arc::new(Mutex::new(Vec::new()));
         let a2 = audits.clone();
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
-        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings, audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
         (cx, t, audits)
     }
@@ -547,6 +595,23 @@ mod tests {
         let b = super::super::browser_config::load(&cx);
         assert_eq!((b.video_max_height, b.codecs), (720, false));
         assert!(audits.lock().unwrap().iter().any(|l| l.contains("Video quality")), "audited");
+    }
+
+    #[test]
+    fn hardware_video_decoding_is_read_free_and_changed_only_after_a_card_by_an_administrator_and_audited() {
+        let (cx, t, _audits) = rig("chatbrowserhwdec");
+        let defs = t.defs();
+        assert_eq!(defs.iter().find(|d| d.spec.name == "browser_hw_decode_status").unwrap().risk, Risk::Safe);
+        assert_eq!(defs.iter().find(|d| d.spec.name == "browser_hw_decode_set").unwrap().risk, Risk::Ask);
+        assert!(t.call("browser_hw_decode_status", &json!({})).unwrap().starts_with("Hardware video decoding: off."));
+        assert!(t.call("browser_hw_decode_set", &json!({})).is_err(), "say on");
+        let r = t.call("browser_hw_decode_set", &json!({"on": true})).unwrap();
+        assert!(r.contains("Hardware video decoding: on."), "{r}");
+        assert!(super::super::browser_tuning::load(&cx));
+        assert!(t.call("browser_hw_decode_status", &json!({})).unwrap().starts_with("Hardware video decoding: on."));
+        assert!(cx.audit.recent(40).join("\n").contains("Hardware video decoding: on."), "audited");
+        t.call("browser_hw_decode_set", &json!({"on": false})).unwrap();
+        assert!(!super::super::browser_tuning::load(&cx));
     }
 
     #[test]
@@ -643,6 +708,52 @@ mod tests {
         st.open(&key).unwrap();
         assert!(t.call("browser_data_import", &a).unwrap_err().contains("open"));
         assert!(t.call("browser_data_export", &json!({"path": dir.join("again.iykbp").display().to_string()})).unwrap_err().contains("open"));
+    }
+
+    #[test]
+    fn the_sealed_browser_data_goes_to_a_signed_in_tenant_and_back_only_after_approval_with_the_vault_key() {
+        use iyakki_agent::profilestore::{ProfileKey, ProfileStore};
+        use iyakki_shared::profilestore::Status;
+        struct Slot(std::sync::Mutex<Option<Vec<u8>>>);
+        impl iyakki_agent_api::ProfileCarrier for Slot {
+            fn put(&self, b: &[u8]) -> Result<(), String> {
+                *self.0.lock().unwrap() = Some(b.to_vec());
+                Ok(())
+            }
+            fn get(&self) -> Result<Option<Vec<u8>>, String> {
+                Ok(self.0.lock().unwrap().clone())
+            }
+        }
+        let (cx, t, audits) = rig("chatdatatenant");
+        let defs = t.defs();
+        for n in ["browser_data_to_tenant", "browser_data_from_tenant"] {
+            assert_eq!(defs.iter().find(|d| d.spec.name == n).unwrap().risk, Risk::Ask, "{n}");
+        }
+        let dir = cx.data_dir().to_path_buf();
+        let a = json!({"tenant": "chat-move-tenant"});
+        // a tenant that is not signed in is named in words
+        assert!(t.call("browser_data_to_tenant", &a).unwrap_err().contains("not signed in"));
+        let st = ProfileStore::new(&dir, "root");
+        std::fs::create_dir_all(st.profile_path().join("data")).unwrap();
+        std::fs::write(st.profile_path().join("data/cookies.sqlite"), b"cookie rows").unwrap();
+        let key = ProfileKey::generate().unwrap();
+        st.protect(&key).unwrap();
+        cx.vault().user_set("root", iyakki_shared::profilestore::VAULT_SECRET, &key.to_hex()).unwrap();
+        let slot = std::sync::Arc::new(Slot(Default::default()));
+        cx.agent.profile_store().set_tenant_carrier("chat-move-tenant", Some(slot.clone()));
+        assert!(cx.agent.profile_store().tenant_carriers().contains(&"chat-move-tenant".to_string()));
+        let said = t.call("browser_data_to_tenant", &a).unwrap();
+        assert!(said.contains("cannot") || said.contains("opens only with the browser key"), "{said}");
+        assert!(slot.0.lock().unwrap().is_some());
+        assert!(audits.lock().unwrap().iter().any(|l| l.starts_with("settings.browser.data.to_tenant")));
+        // back: the same key takes it in; another key refuses
+        assert!(t.call("browser_data_from_tenant", &a).unwrap().contains("taken in"));
+        assert_eq!(st.status(), Status::Sealed);
+        let other = ProfileKey::generate().unwrap();
+        cx.vault().user_set("root", iyakki_shared::profilestore::VAULT_SECRET, &other.to_hex()).unwrap();
+        assert!(t.call("browser_data_from_tenant", &a).unwrap_err().contains("wrong key"));
+        cx.agent.profile_store().set_tenant_carrier("chat-move-tenant", None);
+        assert!(t.call("browser_data_from_tenant", &a).unwrap_err().contains("not signed in"));
     }
 }
 

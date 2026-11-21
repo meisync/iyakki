@@ -68,7 +68,7 @@ impl Deps {
             vault: Box::new(|client, scope| Box::new(Reader { client, scope })),
             gate: Box::new(|reach, start| {
                 if start {
-                    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+                    let cmdline = iyakki_shared::cloudmode::kernel_cmdline();
                     iyakki_fw::service::boot(&cmdline);
                 }
                 Ok(Arc::new(FirewallGate::real(reach)))

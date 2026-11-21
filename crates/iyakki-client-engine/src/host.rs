@@ -193,6 +193,22 @@ impl Host {
                     return -1;
                 }
             }
+            "app_open" => {
+                let (Some(app), Some(w), Some(h)) = (s(&v, "app"), int("w"), int("h")) else { return -1 };
+                if !e.app_open(app, w.max(0) as u32, h.max(0) as u32) {
+                    return -1;
+                }
+            }
+            "app_input" => {
+                if !e.app_input(s(&v, "lines").unwrap_or("")) {
+                    return -1;
+                }
+            }
+            "app_close" => {
+                if !e.app_close() {
+                    return -1;
+                }
+            }
             "offer_open" => {
                 if !e.offer_open(s(&v, "kind").unwrap_or("")) {
                     return -1;

@@ -127,8 +127,8 @@ fn a_damaged_container_is_reported_and_offers_nothing_dangerous() {
 
 // ---- the slow steps run on the settings job, not on the screen's thread ----
 
-use iyakki_storage::dm::fake::FakeKernel;
-use iyakki_storage::dm::{DmCmd, DmKernel};
+use iyakki_core_api::device_types::storage::dm::fake::FakeKernel;
+use iyakki_core_api::device_types::storage::dm::{DmCmd, DmKernel};
 use std::time::{Duration, Instant};
 
 /// The fake kernel with a pause in the two slow calls (making the file system, mounting): a stand-in for Argon2id and the copy.
@@ -394,4 +394,32 @@ fn a_move_that_fails_says_why_on_the_plan_card_and_in_the_audit_log() {
     let log = cx.audit.recent(400).join("\n");
     assert!(log.contains("failed: ") && log.contains("the test kernel refuses"), "{log}");
     assert!(!log.contains("rootpass12"), "{log}");
+}
+
+#[test]
+fn a_move_can_be_cancelled_from_the_page_and_leaves_the_files_where_they_were() {
+    let (cx, mut a) = page_with_home("ench-bg-cancel", Duration::from_millis(300), true);
+    press(&mut a, &cx, 'm');
+    type_in(&mut a, &cx, "rootpass12");
+    a.handle(&Event::Key(Key::Enter), &cx);
+    wait_idle(&mut a, &cx);
+    assert!(matches!(a.modal, Some(Modal::Confirm(ConfirmKind::EncMove, _))));
+    a.handle(&Event::Key(Key::Char('y')), &cx);
+    assert!(a.is_busy());
+    // while the move runs the only button is Cancel the move
+    assert_eq!(a.ench_buttons().iter().map(|b| b.0).collect::<Vec<_>>(), ["Cancel the move"]);
+    // a plain key still says the job is running; c cancels the move
+    press(&mut a, &cx, 'm');
+    assert!(!a.ench.cancel.load(std::sync::atomic::Ordering::SeqCst));
+    press(&mut a, &cx, 'c');
+    assert!(a.ench.cancel.load(std::sync::atomic::Ordering::SeqCst));
+    wait_idle(&mut a, &cx);
+    // the plan card comes back with the words of a cancel, the home folder still holds the file, and nothing was switched
+    let card = match &a.modal {
+        Some(Modal::Confirm(ConfirmKind::EncMove, t)) => t.clone(),
+        _ => panic!("the plan card must come back after a cancel: {:?} {:?}", a.status, a.ench.flow.notice),
+    };
+    assert!(card.contains("was cancelled") && card.contains("Nothing was changed"), "{card}");
+    assert_eq!(EncHome::for_status(cx.data_dir()).status("root").state, State::NotSetUp);
+    assert!(cx.audit.recent(400).join("\n").contains("enchome.move.cancel"));
 }

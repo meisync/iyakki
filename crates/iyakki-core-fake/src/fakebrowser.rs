@@ -179,7 +179,7 @@ fn draw(s: &Sess) -> String {
             }
             for (i, (label, _)) in p.links.iter().enumerate() {
                 let adv = c.text(8.0, y, size, pal.link, label, TextStyle::Regular);
-                c.hit(Rect::new(8.0, y, adv.max(10.0), size * 1.3), Hit { action: i as u32 + 1, name: label.clone(), role: Role::Link });
+                c.hit(Rect::new(8.0, y, adv.max(10.0), size * 1.3), Hit { action: i as u32 + 1, name: label.clone(), role: Role::Link, ..Default::default() });
                 y += size * 1.5;
             }
         }

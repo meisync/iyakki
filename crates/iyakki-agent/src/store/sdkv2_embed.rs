@@ -58,6 +58,116 @@ impl EmbedBoard {
     }
 }
 
+// ------------------------------------------------------------------------------------------------------------ what the other viewers show
+
+/// Seconds-resolution clock in milliseconds (the real one is the tile's; tests set their own).
+pub type NowMs = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+/// Most rows of a dashboard viewer and most panels it reads.
+pub const DASH_ROWS: usize = 8;
+const MEDIA_EVERY_MS: u64 = 500;
+const DASH_EVERY_MS: u64 = 5_000;
+
+/// What a `media` viewer (the app's own playback state) and a `dash` viewer (the person's dashboard data) show. Both read through the app's
+/// own backends, so the same permissions, limits and audit apply as for the app's own calls; the viewer adds no new access. The answer is kept
+/// for a moment (a playback 0.5 s, a dashboard 5 s), so the painter may ask on every frame.
+pub struct EmbedFeeds {
+    playback: Arc<dyn Backend>,
+    dash: Arc<dyn super::sdkv2_engines::DashPort>,
+    now: NowMs,
+    /// (app, viewer id) -> (when, what the viewer was, what it showed): a new viewer under an old id never gets the old picture.
+    kept: Mutex<BTreeMap<(String, u32), (u64, String, EmbedData)>>,
+}
+
+/// The same shape as `iyakki_agent_api::TileEmbedData`, kept here so this file stays free of the shell's types.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct EmbedData {
+    pub heading: String,
+    pub lines: Vec<String>,
+    pub progress: Option<(u64, u64)>,
+}
+
+fn mmss(secs: u64) -> String {
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
+
+impl EmbedFeeds {
+    pub fn new(playback: Arc<dyn Backend>, dash: Arc<dyn super::sdkv2_engines::DashPort>, now: NowMs) -> EmbedFeeds {
+        EmbedFeeds { playback, dash, now, kept: Mutex::new(BTreeMap::new()) }
+    }
+
+    /// What the viewer `view` of `who` shows, or `None` for a kind with no data of its own.
+    pub fn data(&self, who: &Who, view: &EmbedView) -> Option<EmbedData> {
+        let (every, key) = match view.kind.as_str() {
+            "media" => (MEDIA_EVERY_MS, (who.app.clone(), view.id)),
+            "dash" => (DASH_EVERY_MS, (who.app.clone(), view.id)),
+            _ => return None,
+        };
+        let now = (self.now)();
+        let sig = format!("{} {}", view.kind, view.options);
+        if let Some((at, was, d)) = self.kept.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            if now.saturating_sub(*at) < every && *was == sig {
+                return Some(d.clone());
+            }
+        }
+        let d = if view.kind == "media" { self.media(who, view) } else { self.dashboard(who, view) };
+        self.kept.lock().unwrap_or_else(|e| e.into_inner()).insert(key, (now, sig, d.clone()));
+        Some(d)
+    }
+
+    /// Forget what was kept for a viewer that is gone.
+    pub fn forget(&self, app: &str, id: u32) {
+        self.kept.lock().unwrap_or_else(|e| e.into_inner()).remove(&(app.to_string(), id));
+    }
+
+    fn media(&self, who: &Who, view: &EmbedView) -> EmbedData {
+        let file = view.options.get("file").and_then(Value::as_str).unwrap_or("");
+        let title = file.rsplit('/').next().unwrap_or(file).to_string();
+        match self.playback.call(who, "media.state", &json!({})) {
+            Ok(v) => {
+                let state = v.get("state").and_then(Value::as_str).unwrap_or("stopped");
+                let pos = v.get("position").and_then(Value::as_u64).unwrap_or(0);
+                let word = match state {
+                    "playing" => "Playing",
+                    "paused" => "Paused",
+                    "ended" => "Finished",
+                    "failed" => "Could not play",
+                    "stopped" => "Stopped",
+                    _ => "Ready",
+                };
+                EmbedData { heading: format!("{word} · {title}"), lines: vec![mmss(pos)], progress: Some((pos, 0)) }
+            }
+            Err(e) => EmbedData { heading: title, lines: vec![e.message], progress: None },
+        }
+    }
+
+    fn dashboard(&self, who: &Who, view: &EmbedView) -> EmbedData {
+        let name = view.options.get("dashboard").and_then(Value::as_str).unwrap_or("");
+        let fail = |m: String| EmbedData { heading: name.to_string(), lines: vec![m], progress: None };
+        let panels = match self.dash.panel_queries(&who.user, name) {
+            Ok(p) => p,
+            Err(e) => return fail(e),
+        };
+        let Some((title, source, text)) = panels.into_iter().next() else { return fail("this dashboard has no panels yet".into()) };
+        match self.dash.query(&who.user, &source, &text, &Value::Null, DASH_ROWS + 1) {
+            Ok((cols, rows)) => {
+                let names: Vec<String> = cols.as_array().map(|c| c.iter().map(|x| x.get("name").and_then(Value::as_str).unwrap_or("").to_string()).collect()).unwrap_or_default();
+                let cell = |v: &Value| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                let mut lines = vec![names.join("   ")];
+                lines.extend(rows.iter().take(DASH_ROWS).map(|r| r.as_array().map(|c| c.iter().map(cell).collect::<Vec<_>>().join("   ")).unwrap_or_default()));
+                if rows.len() > DASH_ROWS {
+                    lines.push("and more rows".into());
+                }
+                EmbedData { heading: format!("{name} · {title}"), lines, progress: None }
+            }
+            Err(e) => fail(e),
+        }
+    }
+}
+
 pub struct EmbedEngine {
     board: EmbedBoard,
     files: AppFile,

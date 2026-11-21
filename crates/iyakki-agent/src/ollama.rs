@@ -6,7 +6,8 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
+use iyakki_core_local::starters_launch::{server_launch, tool_path};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -152,20 +153,13 @@ impl OllamaServer {
         std::fs::create_dir_all(self.dir.join("home")).map_err(io_err)?;
         let log = std::fs::OpenOptions::new().create(true).append(true).open(self.log_path()).map_err(io_err)?;
         let log2 = log.try_clone().map_err(io_err)?;
-        use std::os::unix::process::CommandExt;
-        let child = Command::new(self.clis.bin_dir().join("ollama"))
-            .arg("serve")
-            .env_clear()
-            .env("PATH", format!("{}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", self.clis.bin_dir().display()))
-            .env("HOME", self.dir.join("home"))
-            .env("OLLAMA_HOST", format!("127.0.0.1:{}", self.port()))
-            .env("OLLAMA_MODELS", self.models_dir())
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(log2))
-            .process_group(0)
-            .spawn()
-            .map_err(|e| format!("could not start ollama: {e}"))?;
+        let env = [
+            ("PATH", tool_path(&self.clis.bin_dir()).into()),
+            ("HOME", self.dir.join("home").into_os_string()),
+            ("OLLAMA_HOST", format!("127.0.0.1:{}", self.port()).into()),
+            ("OLLAMA_MODELS", self.models_dir().into_os_string()),
+        ];
+        let child = server_launch(&self.clis.bin_dir().join("ollama"), &["serve".into()], &env, log, log2).spawn().map_err(|e| format!("could not start ollama: {e}"))?;
         *self.child.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(child);
         self.set_state(OllamaState::Starting);
         let gen = self.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;

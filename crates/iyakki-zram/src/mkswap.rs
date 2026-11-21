@@ -44,10 +44,17 @@ pub fn random_uuid() -> [u8; 16] {
 }
 
 /// The kernel's page size.
+#[cfg(unix)]
 pub fn page_size() -> usize {
     // SAFETY: sysconf takes an integer and returns a value.
     let p = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     if p >= 4096 { p as usize } else { 4096 }
+}
+
+/// Other systems: swap headers are only written on Linux, whose page size on the supported computers is 4096.
+#[cfg(not(unix))]
+pub fn page_size() -> usize {
+    4096
 }
 
 /// Write the header to the start of `path` (a block device or a file already `bytes` long).

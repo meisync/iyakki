@@ -152,6 +152,29 @@ impl SettingsApp {
         Ok(format!("The signature is good. IYAKKI {} ({}) is listed below; press i to install it (nothing is installed yet).", staged.version, staged.variant))
     }
 
+    /// A signed update at an https channel address is downloaded with its signature, checked before anything is unpacked, listed and selected
+    /// (the same as opening a file; nothing is installed). The address is the person's: the official channel address waits for the owner.
+    pub(super) fn upd_fetch_submit(&mut self, form: &Form, cx: &AppCx) -> Result<String, String> {
+        if !cx.session.policy.manage_settings {
+            return Err("only an administrator can download a system update".into());
+        }
+        let url = form.value(0).trim().to_string();
+        if !url.starts_with("https://") {
+            return Err("give the https address of the update file (it ends in .tgz; its signature is the same address with .sig added)".into());
+        }
+        let host = url.trim_start_matches("https://").split('/').next().unwrap_or("").to_string();
+        let c = self.upd_centre();
+        let staged = c.fetch_file(&url).inspect_err(|_| cx.audit.record(&cx.session.user, "system.update.fetch", &format!("refused from {host}")))?;
+        cx.audit.record(&cx.session.user, "system.update.fetch", &format!("opened {} from {host}", staged.version));
+        self.upd_load();
+        if let Some(i) = self.upd.found.iter().position(|f| f.dir == staged.dir) {
+            self.upd.sel = i;
+            self.upd.ask = UpdAsk::None;
+            self.upd_preview();
+        }
+        Ok(format!("The signature is good. IYAKKI {} ({}) was downloaded from {host} and is listed below; press i to install it (nothing is installed yet).", staged.version, staged.variant))
+    }
+
     /// One line per setup wizard that an install or update of the person's apps queued, with what it asks and runs when the app is installed.
     pub(super) fn upd_wizard_lines(&self, cx: &AppCx) -> Vec<String> {
         cx.storeapi()
@@ -206,6 +229,13 @@ impl SettingsApp {
                 }
                 let f = Form::new("Open a signed update file").path("Update file (.tgz; its .sig file must be next to it)", "", "a system update file from a USB stick or a folder; the signature is checked before anything is unpacked", crate::filepicker::PathKind::File, &["tgz"]);
                 self.open_form(FormKind::UpdateBundle, f);
+            }
+            Key::Char('d') => {
+                if !self.admin(cx) {
+                    return;
+                }
+                let f = Form::new("Download a signed update").text("Address (https, ends in .tgz)", "", "https://example.org/iyakki-x.tgz: the signature is fetched from the same address with .sig added and checked before anything is unpacked");
+                self.open_form(FormKind::UpdateFetch, f);
             }
             Key::Char('c') | Key::Char('m') | Key::Char('u') | Key::Char('t') => self.upd_check_key(k, cx),
             Key::Char('g') => {
@@ -293,7 +323,7 @@ impl SettingsApp {
     }
 
     pub(super) fn updates_buttons(&self) -> Vec<Btn> {
-        let mut v = vec![("Install", ACCENT, 'i'), ("Roll back", TEXT, 'r'), ("Choose folder", TEXT, 'f'), ("Open update file", TEXT, 'b'), ("Look again", TEXT, 's'), ("Check for updates", TEXT, 'c'), ("How often", TEXT, 'm'), ("Update list address", TEXT, 'u'), ("Use a store", TEXT, 't'), ("Review and apply", TEXT, 'v'), ("Channel", TEXT, 'g')];
+        let mut v = vec![("Install", ACCENT, 'i'), ("Roll back", TEXT, 'r'), ("Choose folder", TEXT, 'f'), ("Open update file", TEXT, 'b'), ("Download update", TEXT, 'd'), ("Look again", TEXT, 's'), ("Check for updates", TEXT, 'c'), ("How often", TEXT, 'm'), ("Update list address", TEXT, 'u'), ("Use a store", TEXT, 't'), ("Review and apply", TEXT, 'v'), ("Channel", TEXT, 'g')];
         if self.upd.ask != UpdAsk::None {
             v.insert(0, ("Yes, do it", ERR, 'y'));
             v.insert(1, ("No", TEXT, 'n'));

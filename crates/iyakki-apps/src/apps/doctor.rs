@@ -15,13 +15,15 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
-use std::sync::Arc;
 
 use iyakki_shared::diagshare::{self, Bundle};
 use iyakki_shared::doctor::{Action, Finding};
 use iyakki_shared::doctor::{self, Facts};
 
-use super::doctor_facts::{self as facts, SlowOut, SlowProbe};
+pub use super::doctor_manual::ManualTab;
+pub use super::doctor_port::Parts;
+use super::doctor_facts::SlowOut;
+use super::doctor_port::{CxPort, DoctorPort};
 use super::{App, AppCx, Flow};
 use crate::gfx::{rgb, Gfx, Icon};
 use crate::scrolllist::ScrollList;
@@ -36,35 +38,14 @@ pub(super) const T_SHARE: usize = 2;
 pub(super) const T_CLOSE: usize = 3;
 pub(super) const T_DISMISS: usize = 4;
 pub(super) const T_COPY: usize = 5;
+pub(super) const T_TAB_FINDINGS: usize = 6;
+pub(super) const T_TAB_MANUAL: usize = 7;
 /// The fix button of finding `i`.
 pub(super) const T_FIX: usize = 100;
 /// The save button for destination `i` of the preview.
 pub(super) const T_SAVE: usize = 300;
 pub(super) const A_LIST: usize = 61_310;
 pub(super) const A_PREVIEW: usize = 61_311;
-
-/// How the tile reads the world; tests replace every part.
-#[derive(Clone)]
-pub struct Parts {
-    pub gather: Arc<dyn Fn(&AppCx) -> Facts + Send + Sync>,
-    pub slow: SlowProbe,
-    pub inputs: Arc<dyn Fn(&AppCx, &[Finding]) -> diagshare::Inputs + Send + Sync>,
-    /// The person's home folder (the first place a bundle can be saved).
-    pub home: Arc<dyn Fn(&AppCx) -> PathBuf + Send + Sync>,
-    pub now: Arc<dyn Fn() -> i64 + Send + Sync>,
-}
-
-impl Parts {
-    pub fn real() -> Parts {
-        Parts {
-            gather: Arc::new(facts::gather),
-            slow: Arc::new(facts::slow_probe),
-            inputs: Arc::new(facts::bundle_inputs),
-            home: Arc::new(|cx| cx.core.file_scope().home_root(&cx.session.user, cx.data_dir())),
-            now: Arc::new(iyakki_clock::now_unix),
-        }
-    }
-}
 
 /// One place the bundle can be saved.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,6 +82,9 @@ pub struct DoctorApp {
     pub(super) slow_rx: Option<Receiver<SlowOut>>,
     pub(super) request: Option<(String, String)>,
     pub(super) dirty: bool,
+    /// The "Manual tests" tab (made when it is first opened) and whether it is the one showing.
+    pub(super) manual: Option<ManualTab>,
+    pub(super) tab_manual: bool,
     /// Checks made since the tile opened (tests).
     pub(super) rounds: u32,
 }
@@ -111,9 +95,14 @@ impl DoctorApp {
     }
 
     pub fn with_parts(cx: &AppCx, parts: Parts) -> DoctorApp {
+        DoctorApp::with_port(&CxPort(cx), parts)
+    }
+
+    /// The tile over any port (a fake in tests).
+    pub fn with_port(port: &dyn DoctorPort, parts: Parts) -> DoctorApp {
         let mut a = DoctorApp {
             parts,
-            admin: cx.session.policy.manage_settings,
+            admin: port.admin(),
             facts: Facts::default(),
             found: Vec::new(),
             sel: 0,
@@ -125,18 +114,20 @@ impl DoctorApp {
             slow_rx: None,
             request: None,
             dirty: true,
+            manual: None,
+            tab_manual: false,
             rounds: 0,
         };
-        a.check(cx);
+        a.check(port);
         a
     }
 
     /// Read the machine again: the cheap facts now, the slow ones on a thread.
-    pub(super) fn check(&mut self, cx: &AppCx) {
+    pub(super) fn check(&mut self, port: &dyn DoctorPort) {
         self.rounds += 1;
-        self.facts = (self.parts.gather)(cx);
+        self.facts = (self.parts.gather)(port);
         self.rediagnose();
-        let inp = facts::slow_input(cx);
+        let inp = port.slow_input();
         let probe = self.parts.slow.clone();
         let (tx, rx) = channel();
         let spawned = std::thread::Builder::new().name("iyakki-doctor".into()).spawn(move || {
@@ -178,10 +169,10 @@ impl DoctorApp {
     // ------------------------------------------------------------------------------------------------ fixes
 
     /// The fix of finding `i`.
-    pub(super) fn do_fix(&mut self, i: usize, cx: &AppCx) {
+    pub(super) fn do_fix(&mut self, i: usize, port: &dyn DoctorPort) {
         let Some(f) = self.found.get(i).cloned() else { return };
         let Some(fix) = f.fix else { return };
-        cx.audit.record(&cx.session.user, "doctor.fix", f.id);
+        port.audit("doctor.fix", f.id);
         match fix.action {
             Action::Settings(item) => {
                 self.request = Some(("settings".into(), item.into()));
@@ -192,11 +183,11 @@ impl DoctorApp {
                     self.request = Some(("settings".into(), "tab:developer".into()));
                     return;
                 }
-                match cx.agent.devmode().extend(cx.data_dir(), &cx.session.policy, &cx.session.user, 4) {
+                match port.extend_devmode(4) {
                     Ok(until) => {
-                        cx.audit.record(&cx.session.user, "devmode.extend", "4 h (from DOCTOR)");
+                        port.audit("devmode.extend", "4 h (from DOCTOR)");
                         self.ok(format!("Developer mode now switches off at {}.", iyakki_shared::devmode::stamp(until)));
-                        self.check(cx);
+                        self.check(port);
                     }
                     Err(e) => self.fail(e),
                 }
@@ -207,12 +198,12 @@ impl DoctorApp {
     // ------------------------------------------------------------------------------------------------ share diagnostics
 
     /// Build the bundle and show exactly what would be saved.
-    pub(super) fn open_share(&mut self, cx: &AppCx) {
-        let inp = (self.parts.inputs)(cx, &self.found);
+    pub(super) fn open_share(&mut self, port: &dyn DoctorPort) {
+        let inp = (self.parts.inputs)(port, &self.found);
         let bundle = diagshare::build(&inp);
         let text = diagshare::preview(&bundle);
         let lines = text.lines().map(str::to_string).collect();
-        let home = (self.parts.home)(cx);
+        let home = (self.parts.home)(port);
         let mut dests = vec![Dest { label: "my home folder".into(), dir: home.clone() }];
         // USB sticks and cards that DISKS opened in the home folder
         let mut media: Vec<Dest> = std::fs::read_dir(home.join("media"))
@@ -226,13 +217,13 @@ impl DoctorApp {
         media.truncate(4);
         dests.extend(media);
         self.preview = Some(Preview { bundle, text, lines, dests, scroll: ScrollList::default(), saved: None });
-        cx.audit.record(&cx.session.user, "doctor.share.preview", "");
+        port.audit("doctor.share.preview", "");
         self.msg = None;
         self.dirty = true;
     }
 
     /// Save to destination `i` of the open preview.
-    pub(super) fn save_to(&mut self, i: usize, cx: &AppCx) {
+    pub(super) fn save_to(&mut self, i: usize, port: &dyn DoctorPort) {
         let now = (self.parts.now)();
         let Some(p) = self.preview.as_mut() else { return };
         if p.saved.is_some() {
@@ -242,16 +233,46 @@ impl DoctorApp {
         match diagshare::save(&p.bundle, &d.dir, &diagshare::file_name(now)) {
             Ok(path) => {
                 p.saved = Some(path.clone());
-                cx.audit.record(&cx.session.user, "doctor.share.saved", &format!("{} bytes to {}", p.text.len(), d.label));
+                port.audit("doctor.share.saved", &format!("{} bytes to {}", p.text.len(), d.label));
                 self.ok(format!("Saved on {}: {}", d.label, path.display()));
             }
             Err(e) => self.fail(e),
         }
     }
 
+    // ------------------------------------------------------------------------------------------------ manual tests tab
+
+    /// Show the "Manual tests" tab (its checklists are read the first time).
+    pub(super) fn open_manual(&mut self, port: &dyn DoctorPort) {
+        if self.manual.is_none() {
+            self.manual = Some(ManualTab::open(port, self.parts.now.clone()));
+            port.audit("doctor.manual.open", "");
+        }
+        self.tab_manual = true;
+        self.preview = None;
+        self.dirty = true;
+    }
+
+    /// One event for the manual tab (shown): Esc at its top leaves to the findings.
+    pub(super) fn handle_manual(&mut self, ev: &Event, port: &dyn DoctorPort) -> Flow {
+        match ev {
+            Event::Tab(T_TAB_FINDINGS) => self.tab_manual = false,
+            Event::Tab(T_TAB_MANUAL) => {}
+            other => {
+                if let Some(m) = self.manual.as_mut() {
+                    if m.handle(other, port) == super::doctor_manual::Out::Leave {
+                        self.tab_manual = false;
+                    }
+                }
+            }
+        }
+        self.dirty = true;
+        Flow::Stay
+    }
+
     // ------------------------------------------------------------------------------------------------ keys
 
-    fn handle_preview(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+    fn handle_preview(&mut self, ev: &Event, port: &dyn DoctorPort) -> Flow {
         match ev {
             Event::Key(Key::Esc) | Event::Tab(T_CLOSE) => {
                 self.preview = None;
@@ -259,9 +280,9 @@ impl DoctorApp {
             }
             Event::Tab(T_COPY) => self.copy_saved_path(),
             Event::Key(Key::Char('c')) => self.copy_saved_path(),
-            Event::Tab(n) if *n >= T_SAVE => self.save_to(*n - T_SAVE, cx),
-            Event::Key(Key::Char(c)) if c.is_ascii_digit() && *c != '0' => self.save_to(*c as usize - '1' as usize, cx),
-            Event::Key(Key::Char('s')) | Event::Key(Key::Enter) => self.save_to(0, cx),
+            Event::Tab(n) if *n >= T_SAVE => self.save_to(*n - T_SAVE, port),
+            Event::Key(Key::Char(c)) if c.is_ascii_digit() && *c != '0' => self.save_to(*c as usize - '1' as usize, port),
+            Event::Key(Key::Char('s')) | Event::Key(Key::Enter) => self.save_to(0, port),
             Event::Key(k) => {
                 if let Some(p) = self.preview.as_mut() {
                     match k {
@@ -291,9 +312,11 @@ impl DoctorApp {
     }
 
     /// Open the share preview when asked by another tile (Settings' button): `open_item("share")`.
-    pub(super) fn open_item_inner(&mut self, item: &str, cx: &AppCx) {
+    pub(super) fn open_item_inner(&mut self, item: &str, port: &dyn DoctorPort) {
         if item == "share" {
-            self.open_share(cx);
+            self.open_share(port);
+        } else if item == "manual" {
+            self.open_manual(port);
         }
     }
 }
@@ -303,7 +326,13 @@ impl App for DoctorApp {
         "Doctor"
     }
     fn page(&self) -> String {
-        if self.preview.is_some() { "share".into() } else { "findings".into() }
+        if self.preview.is_some() {
+            "share".into()
+        } else if self.tab_manual {
+            "manual".into()
+        } else {
+            "findings".into()
+        }
     }
     fn icon(&self) -> Icon {
         Icon::Doctor
@@ -312,10 +341,12 @@ impl App for DoctorApp {
         ACCENT
     }
     fn hint(&self) -> String {
-        if self.preview.is_some() {
+        if self.tab_manual {
+            "n/p next/previous scenario · 1 pass · 2 fail · 3 cannot test · 4 skip · Enter next step · t note · e export · i import · Esc back".into()
+        } else if self.preview.is_some() {
             "s save in my home folder · 1-5 save in a place · ↑↓ scroll · Esc close".into()
         } else {
-            "↑↓ choose · Enter fix · r check again · s share diagnostics · Esc back".into()
+            "↑↓ choose · Enter fix · r check again · s share diagnostics · m manual tests · Esc back".into()
         }
     }
     fn help(&self) -> Vec<String> {
@@ -325,6 +356,7 @@ impl App for DoctorApp {
             "A fix button opens the page where you do the thing (the firewall, the vault, Sound, Time, the dev cluster). It never accepts a permission popup, a licence or your vault password for you, and it never restarts anything.",
             "Administrators also see the technical detail (addresses, ports, log lines) under each finding.",
             "s · Share diagnostics: builds a support bundle with secrets, page addresses, cookies and passwords removed and shows you exactly what would be saved. Save it in your home folder or on a USB stick (the drives DISKS opened) and send it yourself. Nothing is uploaded.",
+            "m · Manual tests: checklists a person goes through (sound by ear, touch, Bluetooth, camera, ...). Left: the scenarios by area with their state; right: the steps with the expected result. n / p next and previous scenario, 1 Pass, 2 Fail, 3 Cannot test, 4 Skip, Enter next step, t a note, f only this machine, o only what needs a person, e export all answers as one file, i merge the files of other machines. Each Pass, Fail or Cannot test writes a small evidence file in your home folder (manual-tests/human); Skip writes nothing.",
             "In the preview: s or Enter saves in the first place, 1 to 5 pick the place, c copies the saved file's path, Esc closes.",
         ]
         .iter()
@@ -333,28 +365,34 @@ impl App for DoctorApp {
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        let port = CxPort(cx);
         self.tip.event(ev);
+        if self.tab_manual && self.manual.is_some() {
+            return self.handle_manual(ev, &port);
+        }
         if self.preview.is_some() {
-            return self.handle_preview(ev, cx);
+            return self.handle_preview(ev, &port);
         }
         match ev {
             Event::Key(Key::Esc) => return Flow::Back,
             Event::Tab(T_DISMISS) => self.msg = None,
             Event::Tab(T_RECHECK) | Event::Key(Key::Char('r')) => {
                 self.msg = None;
-                self.check(cx);
+                self.check(&port);
             }
-            Event::Tab(T_SHARE) | Event::Key(Key::Char('s')) => self.open_share(cx),
+            Event::Tab(T_SHARE) | Event::Key(Key::Char('s')) => self.open_share(&port),
+            Event::Tab(T_TAB_MANUAL) | Event::Key(Key::Char('m')) => self.open_manual(&port),
+            Event::Tab(T_TAB_FINDINGS) => {}
             Event::Tab(n) if *n >= T_FIX && *n < T_SAVE => {
                 self.sel = *n - T_FIX;
-                self.do_fix(*n - T_FIX, cx);
+                self.do_fix(*n - T_FIX, &port);
             }
             Event::Row(i) => self.sel = (*i).min(self.found.len().saturating_sub(1)),
             Event::Key(Key::Up) => self.sel = self.sel.saturating_sub(1),
             Event::Key(Key::Down) => self.sel = (self.sel + 1).min(self.found.len().saturating_sub(1)),
             Event::Key(Key::Enter) => {
                 let i = self.sel;
-                self.do_fix(i, cx);
+                self.do_fix(i, &port);
             }
             Event::Key(k) => {
                 self.list.key(k);
@@ -368,6 +406,9 @@ impl App for DoctorApp {
     }
 
     fn scroll_px(&mut self, px: i32, _cx: &AppCx) -> bool {
+        if let Some(m) = self.manual.as_mut().filter(|_| self.tab_manual) {
+            return m.main.wheel_px(px) || m.nav.wheel_px(px);
+        }
         match self.preview.as_mut() {
             Some(p) => p.scroll.wheel_px(px),
             None => self.list.wheel_px(px),
@@ -377,11 +418,11 @@ impl App for DoctorApp {
         self.request.take()
     }
     fn open_item(&mut self, item: &str, cx: &AppCx) {
-        self.open_item_inner(item, cx);
+        self.open_item_inner(item, &CxPort(cx));
     }
     fn wants_redraw(&mut self) -> bool {
         self.take_slow();
-        self.tip.take_changed() | std::mem::take(&mut self.dirty) | self.checking
+        self.tip.take_changed() | std::mem::take(&mut self.dirty) | self.checking | self.manual.as_mut().is_some_and(|m| std::mem::take(&mut m.dirty))
     }
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
         self.take_slow();

@@ -5,7 +5,7 @@
 //!
 //! The tool set is the person's base chat tools with the SAME account chain the chat uses (`tool_chain::account_chain`: Settings, SSH, VPN,
 //! cameras, documents, the model router, fleet ... all with the chat's grants and approvals). Only what needs a chat's own open state
-//! (`tool_chain::CHAT_ONLY`: the open project's board, the flows and dashboard tiles, the task list) is not part of a voice session. Every call goes through the same wrappers, grants and approval cards:
+//! (`tool_chain::CHAT_ONLY`, now empty) is not part of a voice session; the board, the parallel tasks of the project opened last, the dashboard opened last and the flow open last are (`voice_tools`). Every call goes through the same wrappers, grants and approval cards:
 //! a tool that asks puts a card on the shell's board and only a press answers it.
 
 use std::sync::Arc;
@@ -16,13 +16,70 @@ use iyakki_shared::geminilive_host::{Board, Running};
 
 use super::AppCx;
 
-/// The tools of the account for a voice session.
+/// The workspace a spoken request means when it names none: the one the person opened last in the IDE (D-GEMVOICE-40-NAMING), the same
+/// "last one open" rule the CHAT tile follows for a flow. `None` when the person has no workspace or its folder is gone.
+pub fn last_workspace(cx: &AppCx) -> Option<super::chat::ProjectScope> {
+    let reg = iyakki_shared::workspace::Registry::load(cx.data_dir(), &cx.session.user);
+    let w = reg.last.as_deref().and_then(|id| reg.get(id)).or_else(|| reg.items.iter().max_by_key(|w| w.last_opened))?;
+    let root = std::path::PathBuf::from(&w.root);
+    root.is_dir().then(|| super::chat::ProjectScope { name: w.name.clone(), root: root.clone(), key: format!("ide:{}", w.name), features: root.join("FEATURES.md"), cluster: None })
+}
+
+/// The tools of the account for a voice session: the account chain of the chat, plus the open-state tools a spoken request needs a name
+/// for. By the default of D-GEMVOICE-40-NAMING a request that names no project, flow, dashboard or task list means the project the person
+/// opened last (its board tools, the same grants and cards as in the chat) and the flow they had open last; the dashboard tools and the task
+/// tools stay chat-only because each belongs to a tile that is open on the screen.
 pub fn voice_tools(cx: &AppCx) -> Arc<dyn iyakki_shared::agent::Tools> {
-    let t: Arc<dyn iyakki_shared::agent::Tools> = cx.services.user_tools(&cx.session.user, cx.session.policy.clone(), cx.host.clone(), cx.mcp_servers.clone(), None, None);
+    let policy = cx.session.policy.clone();
+    let project = (policy.cli == iyakki_sec::policy::CliLevel::Full).then(|| last_workspace(cx)).flatten();
+    let t: Arc<dyn iyakki_shared::agent::Tools> = cx.services.user_tools(&cx.session.user, policy, cx.host.clone(), cx.mcp_servers.clone(), None, None);
+    let t = match &project {
+        Some(p) => {
+            let mut opts = iyakki_shared::context::ContextOptions { use_docs: false, ..Default::default() };
+            let pp = super::core_run::project_parts(cx, p, None, false, false, "", &mut opts);
+            super::core_run::wrap_project_tools(cx, t, pp.policy.clone(), p, pp.kit.as_ref(), pp.platform)
+        }
+        None => t,
+    };
+    // the parallel tasks of that workspace: the SAME manager the IDE's Tasks tab holds while it is open (full terminal accounts only)
+    let tasks = project.as_ref().filter(|_| policy_full(cx)).map(|p| super::ide_tasks_run::shared_manager(cx, &p.root, &p.features, &p.name));
+    let t = match &tasks {
+        Some(m) => cx.tasks_facet().wrap_task_tools(t, m, "builtin", ""),
+        None => t,
+    };
+    // the dashboard the person opened last (the open-dashboard tools bind to it; a change is kept only by `dash_save`, which asks)
+    let t = match last_dashboard(cx) {
+        Some((env, state)) => Arc::new(iyakki_dash::tools::DashTools::new(t, env, state)) as Arc<dyn iyakki_shared::agent::Tools>,
+        None => t,
+    };
+    // the flow the person had open last, when there is one (the CHAT tile's own rule)
+    let user = cx.session.user.as_str();
+    let flow = cx.core.flows_view().last_flow_recorded(user).then(|| cx.flows_facet().open(user, &cx.session.policy).ok()).flatten().and_then(|env| env.last_flow().map(|(id, _)| (env, id)));
+    let t = match flow {
+        Some((env, id)) => env.wrap_tools(t, std::sync::Arc::new(std::sync::Mutex::new(iyakki_flowsx::spec::Open { flow: Some(id), tab: "design".into(), ..Default::default() }))),
+        None => t,
+    };
     // the same account chain as the chat (F-GEMVOICE-15): same tools, same grants, same approval cards
-    let t = super::tool_chain::account_chain(cx, t, &super::tool_chain::ChainScope::default());
-    // the jobs and the pending-work ledger: a spoken "tell me when it is done" is kept like a typed one (no workspace, no task list)
-    super::tool_chain::session_state_tools(cx, t, None, None, None)
+    let t = super::tool_chain::account_chain(cx, t, &super::tool_chain::ChainScope { project: project.as_ref().map(|p| (p.name.clone(), p.root.clone())), ext: None });
+    // the jobs and the pending-work ledger: a spoken "tell me when it is done" is kept like a typed one (no task list)
+    super::tool_chain::session_state_tools(cx, t, project.as_ref().map(|p| p.root.clone()), project.as_ref().map(|p| (p.name.as_str(), p.root.as_path())), tasks)
+}
+
+fn policy_full(cx: &AppCx) -> bool {
+    cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full
+}
+
+/// The dashboard the person opened last in DASH with the environment its tools need, for an account that may use dashboards.
+pub fn last_dashboard(cx: &AppCx) -> Option<(Arc<iyakki_dash::tools::Env>, iyakki_dash::session::Shared)> {
+    if !iyakki_dash::tools::offered(&cx.session.policy) {
+        return None;
+    }
+    let host = cx.services.dash_host();
+    let mut env = iyakki_dash::tools::Env::from_host_in(&host, &cx.session.user, &cx.session.policy, host.home_root(&cx.session.user));
+    let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+    env.audit = Arc::new(move |kind, detail| audit.record(&user, kind, detail));
+    let d = env.dashboards().last_opened()?;
+    Some((Arc::new(env), iyakki_dash::session::shared(d)))
 }
 
 /// What tests put in place of the machine's parts (the shell's tests run a whole manual turn against a fake live server).

@@ -84,7 +84,7 @@ impl RagApp {
         let base = std::path::PathBuf::from(&cx.cfg.rag_docs);
         let user = cx.session.user.clone();
         std::thread::spawn(move || {
-            let mut kb = svc.kb().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let kb = svc.kb();
             let (a1, _) = kb.ingest_dir(&format!("user/{user}"), &base.join(&user));
             let (a2, _) = kb.ingest_dir("shared", &base.join("shared"));
             let docs: usize = ["shared".to_string(), format!("user/{user}")].iter().filter_map(|n| kb.stats(n)).map(|s| s.docs).sum();
@@ -104,7 +104,7 @@ impl RagApp {
 
     /// The documents of this account's own namespace and the shared one.
     fn load_docs(&mut self, cx: &AppCx) {
-        let kb = cx.kb().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let kb = cx.kb();
         let mut v = Vec::new();
         for ns in Self::namespaces(cx).into_iter().rev() {
             for d in kb.docs(&ns) {
@@ -128,7 +128,7 @@ impl RagApp {
             self.status = Some(("You may not delete that document.".into(), false));
             return;
         }
-        if let Err(e) = cx.kb().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove_document(&d.ns, &d.id) {
+        if let Err(e) = cx.kb().remove_document(&d.ns, &d.id) {
             self.status = Some((format!("Could not remove it: {e}"), false));
             return;
         }
@@ -696,7 +696,7 @@ mod tests {
         assert!(!docs.join("shared/sample-guide.md").exists(), "the file is gone so it is not indexed again");
         let (hits, _) = cx.services.search(&["shared"], "deploy window", 5);
         assert!(hits.iter().all(|h| !h.text.contains("Tuesday")), "it can no longer be found");
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("rag.delete"), "{log}");
         // opening RAG again does not bring it back
         let mut again = RagApp::new(&cx);
@@ -785,7 +785,7 @@ mod tests {
         cx.services = services_in(&d, Arc::new(Offline));
         cx.session.user = "alice".into();
         // bob has already been indexed by an earlier session of his own
-        cx.kb().lock().unwrap().add_document("user/bob", "b.txt", "b.txt", "bob private plan zebra", BTreeMap::new()).unwrap();
+        cx.kb().add_document("user/bob", "b.txt", "b.txt", "bob private plan zebra", BTreeMap::new()).unwrap();
         let mut app = RagApp::new(&cx);
         settle(&mut app, &cx);
         typed(&mut app, &cx, "zebra");
@@ -898,7 +898,7 @@ mod tests {
         assert!(l.searches >= 1 && l.searches <= 12);
         assert_eq!(app.hit_tags.len(), app.results().len());
         assert!(app.hit_tags[0].starts_with("local · shared:"), "{:?}", app.hit_tags);
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("rag.research") && !log.contains("deploy key"), "the words are not logged: {log}");
         // the run is kept for the evidence page, also for the chat to find
         assert_eq!(iyakki_agent::ragtools::LedgerStore::open(cx.data_dir(), "tester").runs().len(), 1);

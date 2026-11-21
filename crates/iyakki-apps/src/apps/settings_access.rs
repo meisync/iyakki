@@ -57,6 +57,11 @@ impl SettingsApp {
                     self.ok(format!("Braille output {}. {found}", on_off(a.braille)));
                 }
             }
+            'g' => {
+                if let Some(a) = self.ac_save(cx, "braille grade", |a| a.braille_contracted = !a.braille_contracted) {
+                    self.ok(format!("Braille is now {}.", if a.braille_contracted { "contracted (grade 2)" } else { "uncontracted (grade 1)" }));
+                }
+            }
             'n' => {
                 if let Some(a) = self.ac_save(cx, "speak notices", |a| a.speak_notices = !a.speak_notices) {
                     self.ok(format!("Messages, errors and notices are {} read aloud.", if a.speak_notices { "now" } else { "no longer" }));
@@ -114,7 +119,7 @@ impl SettingsApp {
     }
 
     pub(super) fn access_buttons(&self) -> Vec<Btn> {
-        vec![("Screen reader", ACCENT, 'r'), ("Test the voice", TEXT, 't'), ("High contrast", TEXT, 'c'), ("Bigger text", TEXT, 'u'), ("Large pointer", TEXT, 'p'), ("Focus ring", TEXT, 'f'), ("Reduce motion", TEXT, 'm'), ("Sticky keys", TEXT, 'k'), ("Slow keys", TEXT, 'w'), ("Typing echo", TEXT, 'e'), ("Braille display", TEXT, 'b')]
+        vec![("Screen reader", ACCENT, 'r'), ("Test the voice", TEXT, 't'), ("High contrast", TEXT, 'c'), ("Bigger text", TEXT, 'u'), ("Large pointer", TEXT, 'p'), ("Focus ring", TEXT, 'f'), ("Reduce motion", TEXT, 'm'), ("Sticky keys", TEXT, 'k'), ("Slow keys", TEXT, 'w'), ("Typing echo", TEXT, 'e'), ("Braille display", TEXT, 'b'), ("Contracted braille", TEXT, 'g')]
     }
 
     pub(super) fn render_access(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
@@ -133,6 +138,7 @@ impl SettingsApp {
             ("Sticky keys".into(), "Shift, Ctrl, Alt and Super stay on for the next key.".into(), cfg.sticky_keys, 'k'),
             ("Typing echo".into(), "Say each letter as it is typed into a text field while the reader is on. A password field is never spoken.".into(), cfg.typing_echo, 'e'),
             ("Braille display".into(), "Sends what the reader says to a connected braille display (USB HID braille standard). The reader needs to be on.".into(), cfg.braille, 'b'),
+            ("Contracted braille".into(), "Grade 2: word signs and group signs (and, for, the, with, ch, sh, th, ing ...) so a line takes fewer cells. Off writes one cell a letter.".into(), cfg.braille_contracted, 'g'),
             (if cfg.slow_keys_ms == 0 { "Slow keys: off".into() } else { format!("Slow keys: {} ms", cfg.slow_keys_ms) }, "A key counts only after it was held a moment. W cycles the delay.".into(), cfg.slow_keys_ms > 0, 'w'),
         ];
         let cols = if a.w >= 760.0 * s { 2 } else { 1 };

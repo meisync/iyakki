@@ -586,13 +586,13 @@ impl FlowEnv {
                 let c = self.hook_create(&flow, &o, AGENT)?;
                 self.reveal_to_screen(&c);
                 stash_reveal(&self.user, Reveal { hook: c.id.clone(), flow: flow.clone(), path: c.path.clone(), secret: c.secret.clone() });
-                Ok(format!("Made webhook `{}` on flow `{flow}`{}. It is OFF. Its secret address{} is shown on the person's screen only (the Webhook panel of the flow, key w): you cannot see it, so do not ask for it. Next: the person publishes the flow (flow_publish), then webhook_enable `{}`.", c.id, if o.signed { " (signed: HMAC-SHA256)" } else { " (not signed: the address alone is the protection)" }, if c.secret.is_some() { " and shared secret" } else { "" }, c.id))
+                Ok(format!("Made webhook `{}` on flow `{flow}`{}. It is OFF. Its secret address{} is shown on the person's screen only (the Webhook panel of the flow, key w; on a web service the person fetches it once with the reveal call of the hooks API): you cannot see it, so do not ask for it. Next: the person publishes the flow (flow_publish), then webhook_enable `{}`.", c.id, if o.signed { " (signed: HMAC-SHA256)" } else { " (not signed: the address alone is the protection)" }, if c.secret.is_some() { " and shared secret" } else { "" }, c.id))
             }
             "webhook_regenerate" => {
                 let c = self.hook_regenerate(id, AGENT)?;
                 self.reveal_to_screen(&c);
                 stash_reveal(&self.user, Reveal { hook: c.id.clone(), flow: c.flow.clone(), path: c.path.clone(), secret: c.secret.clone() });
-                Ok(format!("Made webhook `{}` new. The old address stopped working. The new one{} is shown on the person's screen only (key w in the flow).", c.id, if c.secret.is_some() { " and the new shared secret" } else { "" }))
+                Ok(format!("Made webhook `{}` new. The old address stopped working. The new one{} is shown on the person's screen only (key w in the flow, or the reveal call of the hooks API on a web service).", c.id, if c.secret.is_some() { " and the new shared secret" } else { "" }))
             }
             "webhook_enable" => {
                 self.hook_enable(id, AGENT)?;

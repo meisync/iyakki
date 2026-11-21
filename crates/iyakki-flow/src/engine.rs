@@ -94,7 +94,7 @@ pub(crate) enum Ctl {
     Wake,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CardDecision {
     Approve { by: String },
     Reject { by: String, note: String },
@@ -137,7 +137,7 @@ pub struct Engine {
     pub(crate) inner: Arc<Inner>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct StartRequest {
     pub flow_id: String,
     /// A published version (None: the latest published).
@@ -186,14 +186,14 @@ impl StartRequest {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StartOutcome {
     pub run_id: String,
     /// An idempotency key matched an earlier run: nothing new was started.
     pub existing: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Counts {
     pub scheduled: usize,
     pub queued: usize,
@@ -203,14 +203,14 @@ pub struct Counts {
     pub done: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ApplyScope {
     Scheduled,
     Running,
     Both,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NodeUpdateInfo {
     pub flow_id: String,
     pub node: String,
@@ -221,7 +221,7 @@ pub struct NodeUpdateInfo {
     pub compatible: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ApplyReport {
     pub scheduled_updated: Vec<String>,
     /// Runs that will take the new definition at the node's next boundary.
@@ -230,7 +230,7 @@ pub struct ApplyReport {
     pub skipped_incompatible: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NodeTest {
     pub ok: bool,
     pub output: Value,

@@ -85,6 +85,19 @@ fn a_camera_with_ptz_is_found_and_moved_and_stopped() {
 }
 
 #[test]
+fn a_place_is_sent_as_one_absolute_move_inside_the_range_and_a_bad_place_never_leaves() {
+    let cam = FakeCam { has_ptz: true, ..Default::default() };
+    let p = PtzCamera::probe(client(&cam), "http://cam/d").unwrap().unwrap();
+    p.command(PtzCommand::Absolute { pan: -3.0, tilt: 0.25, zoom: 2.0 }).unwrap();
+    let last = cam.log.lock().unwrap().last().cloned().unwrap();
+    assert!(last.1.ends_with("/AbsoluteMove") && last.2.contains("<AbsoluteMove ") && last.2.contains("<Position>"), "{last:?}");
+    assert!(last.2.contains("x=\"-1.000\" y=\"0.250\"") && last.2.contains("<Zoom x=\"1.000\""), "clamped: pan to -1, zoom to 1: {}", last.2);
+    let n = cam.log.lock().unwrap().len();
+    assert!(p.command(PtzCommand::Absolute { pan: f32::NAN, tilt: 0.0, zoom: 0.0 }).is_err());
+    assert_eq!(cam.log.lock().unwrap().len(), n);
+}
+
+#[test]
 fn a_camera_without_ptz_is_a_plain_none_and_a_refusal_is_a_sentence() {
     let cam = FakeCam::default();
     assert!(PtzCamera::probe(client(&cam), "http://cam/onvif/device_service").unwrap().is_none());
@@ -169,4 +182,59 @@ fn the_ports_to_try_start_with_the_one_the_stream_address_names() {
     assert_eq!(candidate_ports("http://u:p@cam:8080/s"), [8080, 80, 8000, 2020]);
     assert_eq!(candidate_ports("http://[fe80::1]/s"), [80, 8000, 8080, 2020]);
     assert_eq!(candidate_ports("http://cam:9000/x")[0], 9000);
+}
+
+#[test]
+fn an_https_address_is_split_and_the_endpoints_to_try_put_the_encrypted_ones_where_the_address_says() {
+    assert_eq!(split_url("https://cam/p").unwrap(), (true, "cam:443".to_string(), "/p".to_string()));
+    assert_eq!(split_url("https://cam:8443/p").unwrap().1, "cam:8443");
+    assert_eq!(split_url("http://cam/p").unwrap().0, false);
+    assert!(split_url("ftp://cam").is_err() && split_url("https://u:p@cam/").is_err());
+    assert_eq!(device_url_for("rtsp://cam.lan/s", true, 443).as_deref(), Some("https://cam.lan/onvif/device_service"));
+    assert_eq!(device_url_for("rtsp://cam.lan/s", true, 8443).as_deref(), Some("https://cam.lan:8443/onvif/device_service"));
+    assert_eq!(candidate_endpoints("rtsp://cam:554/s"), [(false, 80), (false, 8000), (false, 8080), (false, 2020), (true, 443), (true, 8443)]);
+    assert_eq!(candidate_endpoints("https://cam:9443/s")[0], (true, 9443));
+    assert_eq!(candidate_endpoints("https://cam/s")[0], (true, 443));
+}
+
+/// A TLS server with a fresh self-signed certificate that answers every request with a SOAP reply. Its listener is bound before the port is known.
+fn tls_camera() -> u16 {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    let ck = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    let key = PrivateKeyDer::try_from(ck.key_pair.serialize_der()).unwrap();
+    let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider())).with_safe_default_protocol_versions().unwrap().with_no_client_auth().with_single_cert(vec![CertificateDer::from(ck.cert.der().to_vec())], key).unwrap();
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let cfg = Arc::new(cfg);
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let cfg = cfg.clone();
+            std::thread::spawn(move || {
+                let mut s = s;
+                let Ok(mut c) = rustls::ServerConnection::new(cfg) else { return };
+                let mut t = rustls::Stream::new(&mut c, &mut s);
+                let mut got = vec![0u8; 8192];
+                let _ = t.read(&mut got);
+                let _ = t.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong");
+                let _ = t.flush();
+            });
+        }
+    });
+    port
+}
+
+#[test]
+fn an_https_control_address_waits_for_the_persons_yes_on_the_certificate_then_speaks_through_the_pin() {
+    let port = tls_camera();
+    let d = crate::testdir::outside_project("onvif", "tls");
+    let url = format!("https://localhost:{port}/onvif/device_service");
+    // without the pin store an encrypted address is refused outright
+    assert!(HttpTransport::default().post(&url, "a", "<x/>").unwrap_err().contains("pinned"));
+    // first contact: the certificate is put in front of the person, with the camera's own approval card, and nothing is sent
+    let t = HttpTransport::with_tls(d.clone(), "cam-onvif");
+    let e = t.post(&url, "a", "<x/>").unwrap_err();
+    assert!(e.contains("camera_trust_set") && e.contains("fingerprint"), "{e}");
+    // the person approves it; the same call now works and the answer is read to its end
+    crate::camtls::TrustStore::change(&d, |st| st.approve("cam-onvif").map(|_| ())).unwrap();
+    assert_eq!(t.post(&url, "a", "<x/>").unwrap(), "pong");
 }

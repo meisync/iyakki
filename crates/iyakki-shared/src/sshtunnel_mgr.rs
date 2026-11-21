@@ -2,7 +2,7 @@
 
 
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum State {
     #[default]
     Stopped,
@@ -14,7 +14,7 @@ pub enum State {
 use crate::ssh::HostKey;
 use crate::sshtunnel::{self as tun, Fault, Tunnel};
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Status {
     pub state: State,
     /// The last problem in plain words; kept until the next success.
@@ -43,13 +43,13 @@ impl Status {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Row {
     pub tunnel: Tunnel,
     pub status: Status,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct TestReport {
     pub ok: bool,
     pub lines: Vec<String>,

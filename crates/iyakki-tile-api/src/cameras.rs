@@ -249,7 +249,37 @@ pub struct MotionRow {
     pub has_thumb: bool,
 }
 
+/// What listening to a camera's microphone is doing (F-CAM-20).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Listen {
+    /// Not listening.
+    Off,
+    /// Sound is going to the speaker.
+    Playing,
+    /// Listening is on, the camera has sent no sound yet.
+    Waiting,
+    /// It cannot be done, in a sentence for the person.
+    Unavailable(String),
+}
+
 pub trait CameraSource {
+    /// The fingerprint of the certificate an encrypted camera (rtsps, https) showed and that waits for the person's answer; `None` when
+    /// nothing waits (F-CAM-20).
+    fn trust_waiting(&self, _id: &str) -> Option<String> {
+        None
+    }
+    /// The person agreed to the waiting certificate whose fingerprint was shown (`shown`): it becomes the camera's pin. Refused with a sentence
+    /// when what waits is not what was shown (the camera presented another one meanwhile). The words for the person on success.
+    fn trust_approve(&self, _id: &str, _shown: &str) -> Result<String, String> {
+        Err("This computer cannot trust a camera's certificate here.".into())
+    }
+
+    /// Listen to the camera (`on`) or stop. Called on every drawn frame while the person listens: it drains the camera's sound and plays it
+    /// on the speaker; `on` false lets the speaker go. The default: no sound here.
+    fn listen(&self, _id: &str, _on: bool) -> Listen {
+        Listen::Unavailable("This computer cannot play camera sound.".into())
+    }
+
     /// The cameras this person may watch (USB cameras of this computer first), in a stable order.
     fn cameras(&self) -> Vec<CamInfo>;
     /// The newest picture of a camera; asking also keeps the stream going (it stops a few seconds after the last ask). `big` asks for

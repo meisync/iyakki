@@ -25,10 +25,10 @@ fn fan_control_is_read_freely_changed_with_a_card_and_a_bad_curve_is_refused_bef
     assert!(t.refusal("fan_control_set", &json!({"low": 90, "mark": 70})).is_some());
     assert!(t.refusal("fan_control_set", &json!({"max": 200})).is_some());
     assert!(t.refusal("fan_control_set", &json!({"enabled": "yes"})).is_some());
-    assert!(!r.dir.join(fanservice::SETTING_FILE).exists(), "a refusal writes nothing");
+    assert!(!r.dir.join(iyakki_core_local::fanctl::SETTING_FILE).exists(), "a refusal writes nothing");
     assert!(t.preview("fan_control_set", &json!({"enabled": true, "low": 55})).unwrap().contains("After: on"));
     t.call("fan_control_set", &json!({"enabled": true, "low": 55})).unwrap();
-    let s = fanservice::load(&r.dir);
+    let s = Fan::in_dir(&r.dir).setting();
     assert!(s.enabled && s.low == 55 && s.max == 86, "untouched fields stay: {s:?}");
     assert!(r.audits.lock().unwrap().iter().any(|a| a == "settings.fan on; curve: slowest up to 55 C, rising to the fastest at 86 C (mark 66 C), lowering only 2 C below the last rise" || a.starts_with("settings.fan")));
     // the tool never writes a fan file itself: only the service does
@@ -78,4 +78,22 @@ fn the_outgoing_plan_checks_and_shows_rules_but_applies_nothing() {
     assert!(!t2.defs().iter().any(|d| d.spec.name == "firewall_outgoing_plan"));
     let _ = std::fs::remove_dir_all(&r.dir);
     let _ = std::fs::remove_dir_all(&p.dir);
+}
+
+#[test]
+fn the_openvpn_download_address_is_set_by_chat_with_a_card_and_a_bad_value_writes_nothing() {
+    let r = rig("dlsource", true);
+    let t = tools(&r, entries(&r.env, r.dir.join("none")));
+    assert_policy(&t, &["download_source_status"], &["download_source_set"]);
+    assert!(t.call("download_source_status", &json!({})).unwrap().contains("vpn.openvpn_download: not usable"));
+    assert!(t.call("download_source_set", &json!({"key": "vpn.openvpn_download", "value": "http://x.example/o abc"})).is_err());
+    assert!(t.call("download_source_set", &json!({"key": "no.such", "value": ""})).is_err());
+    assert!(!r.dir.join("cli").join(crate::clis_sources::FILE).exists());
+    let sum = "ab".repeat(32);
+    t.call("download_source_set", &json!({"key": "vpn.openvpn_download", "value": format!("https://builds.example/o {sum}")})).unwrap();
+    assert!(t.call("download_source_status", &json!({})).unwrap().contains("builds.example"));
+    assert!(r.audits.lock().unwrap().iter().any(|a| a == "settings.download-source vpn.openvpn_download set"));
+    t.call("download_source_set", &json!({"key": "vpn.openvpn_download", "value": ""})).unwrap();
+    assert!(t.call("download_source_status", &json!({})).unwrap().contains("not usable"));
+    let _ = std::fs::remove_dir_all(&r.dir);
 }

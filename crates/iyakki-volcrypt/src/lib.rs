@@ -6,16 +6,23 @@
 //! header copies so a power cut during a change never loses the volume. Nothing here opens a disk, calls dm-crypt or needs root.
 
 pub mod container;
+pub mod convert;
 pub mod header;
 pub mod kw;
 pub mod luks1;
 pub mod luks2;
+pub mod luks2_export;
 pub mod mac;
 pub mod recovery;
+pub mod unlock;
 pub mod xts;
 
 #[cfg(test)]
 mod container_tests;
+#[cfg(test)]
+mod convert_tests;
+#[cfg(test)]
+mod unlock_tests;
 #[cfg(test)]
 mod header_tests;
 #[cfg(test)]

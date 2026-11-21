@@ -216,6 +216,13 @@ pub trait SessionResume: Send + Sync {
     fn apps(&self) -> Vec<String> {
         Vec::new()
     }
+    /// What each open app holds, as (app id, item) pairs of plain text (the path of the file an editor has open): kept in the ticket like the
+    /// ids, only for apps in the list of `remember_apps`. Does nothing by default.
+    fn remember_items(&self, _items: &[(String, String)]) {}
+    /// The (app id, item) pairs of the ticket to hand back to the apps through their `open_item`.
+    fn items(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// The machine's settings, read as text by the UI (the first domain a UI program outside the process gets over the contract socket).
@@ -614,6 +621,16 @@ pub trait Core: Send + Sync {
     /// The short system sounds: sign-in, sign-out, a notification, a finished job.
     fn cues(&self) -> &dyn crate::soundctl::CuePlayer {
         &crate::soundctl::NoCues
+    }
+    /// The kernel facts sound routing reads (`/proc/asound`, who holds a playback device, the mixer's controls): the one read side the
+    /// DEVICES, Settings sound and browser sound pages use for the output list and the card that is still starting (F-ARCH-06, KI-852).
+    /// The decisions (which output, the learned format, the software volume) stay in [`Core::sound`]. Default: no facts.
+    fn audio_route(&self) -> std::sync::Arc<dyn crate::audioroute::AudioRoute> {
+        std::sync::Arc::new(crate::audioroute::NoAudioRoute)
+    }
+    /// The route over the sound roots a page was given (`/proc` and `/sys` on the device, a made-up tree in a test). Default: the core's own.
+    fn audio_route_at(&self, _proc_root: &std::path::Path, _sys_root: &std::path::Path) -> std::sync::Arc<dyn crate::audioroute::AudioRoute> {
+        self.audio_route()
     }
     fn mixer(&self) -> &dyn Mixer;
     /// What the apps say about themselves right now (the home screen's icon lines, chips and Attention list).

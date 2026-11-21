@@ -70,7 +70,7 @@ impl Disp {
 struct Ctx<'a> {
     fonts: &'a super::webfont::FontSet,
     tree: &'a Tree,
-    st: &'a [Option<Computed>],
+    st: &'a [Option<iyakki_web::style::Shared>],
     vp: &'a Viewport,
     rects: Vec<Option<Rect>>,
     ua_margins: bool,
@@ -88,12 +88,12 @@ struct Ctx<'a> {
 }
 
 /// Estimate the boxes of the page.
-pub fn layout(tree: &Tree, styles: &[Option<Computed>], vp: &Viewport, ua_margins: bool) -> Boxes {
+pub fn layout(tree: &Tree, styles: &[Option<iyakki_web::style::Shared>], vp: &Viewport, ua_margins: bool) -> Boxes {
     layout_with_fonts(tree, styles, vp, ua_margins, &super::webfont::FontSet::default())
 }
 
 /// [`layout`] with the web fonts the page loaded: text set in a family that has one is measured with that font's advances and kerning.
-pub fn layout_with_fonts(tree: &Tree, styles: &[Option<Computed>], vp: &Viewport, ua_margins: bool, fonts: &super::webfont::FontSet) -> Boxes {
+pub fn layout_with_fonts(tree: &Tree, styles: &[Option<iyakki_web::style::Shared>], vp: &Viewport, ua_margins: bool, fonts: &super::webfont::FontSet) -> Boxes {
     let mut cx = Ctx { fonts, tree, st: styles, vp, rects: vec![None; tree.nodes.len()], ua_margins, abs: vec![Vec::new()], fl: Vec::new(), ph: vec![Some(vp.height)], cols: Vec::new(), first_mt: None };
     let html = tree.nodes[0].children.iter().copied().find(|&c| tree.tag(c) == Some("html"));
     let mut height = 0.0;
@@ -230,7 +230,7 @@ impl Run {
 
 impl<'a> Ctx<'a> {
     fn style(&self, n: usize) -> Option<&'a Computed> {
-        self.st.get(n).and_then(|s| s.as_ref())
+        self.st.get(n).and_then(|s| s.as_deref())
     }
 
     fn disp(&self, n: usize) -> Disp {
@@ -301,12 +301,14 @@ impl<'a> Ctx<'a> {
     /// The width of `text` set in the font of element `n`.
     fn text_w(&self, n: usize, text: &str) -> f32 {
         let c = self.style(n);
-        let web = c.and_then(|c| self.fonts.get(&c.family));
+        let wants_bold = c.is_some_and(|c| c.bold == Some(true)) || matches!(self.tree.tag(n), Some("h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "b" | "strong" | "th"));
+        let web = c.and_then(|c| self.fonts.get_styled(&c.family, wants_bold, c.italic == Some(true)));
         let mut w = match web {
-            Some(f) => f.text_em(text),
+            Some((f, _)) => f.text_em(text),
             None => glyphs::text_face(text, c.is_some_and(|c| c.mono), c.is_none_or(|c| c.serif)),
         } * self.font(n);
-        if c.is_some_and(|c| c.bold == Some(true)) || matches!(self.tree.tag(n), Some("h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "b" | "strong" | "th")) {
+        // a bold face of the page's own font is measured as it is; any other bold text gets the width a browser adds to a regular face
+        if wants_bold && !web.is_some_and(|(_, is_bold)| is_bold) {
             w *= 1.06;
         }
         w

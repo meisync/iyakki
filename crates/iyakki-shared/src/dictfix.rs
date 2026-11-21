@@ -99,7 +99,7 @@ impl Fixed {
 }
 
 /// Which model the correction would use, and whether it may be used now.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Target {
     /// No chat model is set up.
     NoModel,

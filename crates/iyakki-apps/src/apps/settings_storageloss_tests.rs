@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::apps::tests::{cx_with_admin_store, services_in, temp_dir, Offline};
-use iyakki_storage::loss::{self, Snapshot, State, UsbLink};
+use iyakki_core_api::device_types::storage::loss::{self, Snapshot, State, UsbLink};
 use std::cell::RefCell;
 use std::rc::Rc;
 

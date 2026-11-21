@@ -159,6 +159,11 @@ pub(crate) fn extract_hash(text: &str, file: &str) -> Option<String> {
     single
 }
 
+/// The keys of the downloads whose address is a setting (see [`crate::clis_sources`]).
+pub fn setting_keys() -> Vec<&'static str> {
+    CATALOG.iter().filter_map(|d| if let Source::Setting(k) = d.source { Some(k) } else { None }).collect()
+}
+
 impl CliManager {
     pub fn new(root: &Path) -> CliManager {
         CliManager { root: root.into(), streamer: Mutex::new(None), jobs: Mutex::new(HashMap::new()), state_lock: Mutex::new(()), python: Mutex::new("python3".into()), pgp_override: Mutex::new(None), npm: Mutex::new("npm".into()), node: Mutex::new("node".into()), on_installed: Mutex::new(None), system: Mutex::new(HashMap::new()), search: Mutex::new(None), parents: Mutex::new(HashMap::new()), target: Mutex::new(None), detect_present: Mutex::new(false) }
@@ -195,7 +200,10 @@ impl CliManager {
             return None;
         }
         let name = d.bins.first()?.0;
-        let path = format!("{}:{}:/usr/local/bin:/usr/bin:/bin", self.bin_dir().display(), self.search_path());
+        // the usual places are added to the machine's PATH; a search path that was set by hand (tests, a fixed set of stand-ins) is the whole
+        // story, so what happens to be installed in /usr/local/bin of the machine running the tests cannot change the answer
+        let usual = if self.search.lock().unwrap().is_some() { "" } else { ":/usr/local/bin:/usr/bin:/bin" };
+        let path = format!("{}:{}{usual}", self.bin_dir().display(), self.search_path());
         let found = path.split(':').filter(|p| !p.is_empty()).map(|p| Path::new(p).join(name)).find(|p| p.is_file() && p.metadata().is_ok_and(|m| m.permissions().mode() & 0o111 != 0))?;
         let out = run_quiet(&found.display().to_string(), d.version_args, 20).ok()?;
         // the runtimes must be good enough for the tools that use them
@@ -337,7 +345,7 @@ impl CliManager {
     /// The folder an npm tool is installed into (its own `npm_config_prefix`).
     pub fn npm_prefix(&self, id: &str) -> PathBuf {
         // the version folder the install uses: the pin, or "latest" for a tool that follows the vendor
-        self.pkg_dir(id).join(def(id).map(|d| d.pin).filter(|p| !p.is_empty()).unwrap_or("latest"))
+        self.pkg_dir(id).join(def(id).map(|d| self.pin_of(d)).filter(|p| !p.is_empty()).unwrap_or_else(|| "latest".into()))
     }
 
     /// The program to run for `name`: the one the manager was told to use, or (when it was not told) the catalogue's copy if one is
@@ -406,13 +414,25 @@ impl CliManager {
                 };
                 Some(format!("Run `npm install -g {}` with the install folder set to {} (npm_config_prefix for that one command only; no sudo, your shell files are untouched). npm downloads from {}.{node}{}", pinned_npm(d, pkg), self.npm_prefix(id).display(), d.hosts.join(", "), d.integrity_warning().map(|w| format!(" {w}")).unwrap_or_default()))
             }
-            Source::Pip(pkg) => Some(format!("Create a Python environment in {} and run `pip install {}` in it (no sudo). pip downloads from {}.{}{}", self.pkg_dir(id).display(), if d.pin.is_empty() { pkg.to_string() } else { format!("{pkg}=={}", d.pin) }, d.hosts.join(", "), first(&self.missing_needs(d)), d.integrity_warning().map(|w| format!(" {w}")).unwrap_or_default())),
+            Source::Pip(pkg) => Some(format!("Create a Python environment in {} and run `pip install {}` in it (no sudo). pip downloads from {}.{}{}", self.pkg_dir(id).display(), if d.pin.is_empty() { pkg.to_string() } else { format!("{pkg}=={}", self.pin_of(d)) }, d.hosts.join(", "), first(&self.missing_needs(d)), d.integrity_warning().map(|w| format!(" {w}")).unwrap_or_default())),
             Source::File(_) if d.id == "claude-code" => Some(format!("Download Anthropic's own build of Claude Code for this machine from downloads.claude.ai (no Node.js, no sudo): the version is read from Anthropic's release bucket, and the program is checked against the SHA-256 in Anthropic's release manifest before it is kept in {}. If that download cannot be fetched and Node.js is on the machine, `npm install -g @anthropic-ai/claude-code` is run instead (npm_config_prefix for that one command only).", self.pkg_dir(id).display())),
             Source::TarGz(_) if d.id == "github-copilot" => Some(format!("Download GitHub's own standalone build of the Copilot CLI for this machine from github.com/github/copilot-cli/releases (no Node.js, no sudo) and check it against the release's SHA256SUMS.txt before it is kept in {}.", self.pkg_dir(id).display())),
-            Source::Setting(key) => Some(format!("Nothing can be downloaded yet: the vendor publishes no build that runs on IYAKKI's images and the address is the setting `{key}`, which is empty until you or the image maker give one (https only, with its SHA-256). Nothing is fetched until then.")),
+            Source::Setting(key) => Some(match crate::clis_sources::get(&self.root, key) {
+                Ok(e) => format!("Download {} from {} (https only; `{key}` names it) and keep it only if its SHA-256 is exactly {}. A file with any other checksum is thrown away. It goes into {}; nothing is run during the download.", e.file_name(), e.host(), e.sha256, self.pkg_dir(id).display()),
+                Err(why) => format!("Nothing can be downloaded yet: the vendor publishes no build that runs on IYAKKI's images and the address is the setting `{key}` ({why}). Give an https address with its SHA-256 (the assistant tool `cli_source_set` or the file `{}`); nothing is fetched until then.", self.root.join(crate::clis_sources::FILE).display()),
+            }),
             Source::Python(v) => Some(format!("Run `uv python install {v}` with the install folder set to {} (no sudo). uv downloads Python from github.com.{}{}", self.pkg_dir(id).display(), first(&self.missing_needs(d)), d.integrity_warning().map(|w| format!(" {w}")).unwrap_or_default())),
             _ => d.integrity_warning(),
         }
+    }
+
+    /// The exact version a pinned tool is installed at: the code's pin, or another one the signed manifest names together with SHA-256
+    /// values for it (never for npm or a setting, which cannot be checked against such values). See `dlmanifest::pins::effective_pin`.
+    pub(crate) fn pin_of(&self, d: &CliDef) -> String {
+        if d.pin.is_empty() || !matches!(d.source, Source::File(_) | Source::TarGz(_) | Source::Zip(_) | Source::TarZst(_) | Source::TarXz(_) | Source::Pip(_)) {
+            return d.pin.to_string();
+        }
+        crate::dlmanifest::pins::effective_pin(&self.manifest_dir(), d.id, d.pin)
     }
 
     /// Where the signed downloads manifest keeps its last good copy and its check state.
@@ -421,6 +441,11 @@ impl CliManager {
     }
 
     /// The folder holding a link to every installed program; the chat and the terminal look here first.
+    /// The folder of this manager (the file of download addresses, `sources.json`, is in it).
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn bin_dir(&self) -> PathBuf {
         self.root.join("bin")
     }
@@ -579,7 +604,7 @@ impl CliManager {
 
     pub(crate) fn latest_version(&self, d: &CliDef, st: &dyn Streamer) -> Result<String, String> {
         if !d.pin.is_empty() {
-            return Ok(d.pin.to_string());
+            return Ok(self.pin_of(d));
         }
         // a signed downloads manifest (docs/development/DOWNLOADS-MANIFEST.md) may name the version; only for the items wired to it so far
         if let Some(v) = crate::dlmanifest::version_override(&self.manifest_dir(), d.id) {
@@ -611,6 +636,66 @@ impl CliManager {
             }
             VersionFrom::Latest => Ok("latest".into()),
         }
+    }
+
+    /// The download of a program whose address is a setting ([`crate::clis_sources`]): fails closed when the setting is empty or damaged,
+    /// stays on the host the setting names (redirects included), is limited in size and kept only when its SHA-256 is the one given.
+    /// A bare file is the program; `.tar.gz`/`.tgz` and `.zip` are unpacked by IYAKKI's own readers.
+    fn download_from_setting(&self, d: &CliDef, key: &str, st: &dyn Streamer, target: &Path, tmp: &Path) -> Result<(), String> {
+        let entry = crate::clis_sources::get(&self.root, key).map_err(|why| format!("{} has no download address yet ({why}). The vendor publishes no build that runs on IYAKKI's images and IYAKKI does not invent one: give an https address of a build you trust with its SHA-256. Nothing was fetched.", d.name))?;
+        self.set_job(d.id, |j| j.phase = format!("downloading from {}", entry.host()));
+        let (head, _) = self.open_follow(st, &entry.url, &[entry.host()])?;
+        let (max_download, max_unpacked) = d.limits();
+        let total = head.header("content-length").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        if total > max_download {
+            return Err(format!("the download is {} MB, more than the {} MB allowed", total >> 20, max_download >> 20));
+        }
+        self.set_job(d.id, |j| j.total = total);
+        let dl = tmp.join(format!("{}.download", d.id));
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&dl).map_err(|e| e.to_string())?);
+        let (mut hasher, mut body, mut got) = (Sha256::new(), head.body, 0u64);
+        let mut buf = vec![0u8; 128 * 1024];
+        loop {
+            let n = body.read(&mut buf).map_err(|e| format!("the download broke off: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            got += n as u64;
+            if got > max_download {
+                let _ = std::fs::remove_file(&dl);
+                return Err("the download is larger than allowed".into());
+            }
+            hasher.update(&buf[..n]);
+            out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            self.set_job(d.id, |j| j.done = got);
+        }
+        out.flush().map_err(|e| e.to_string())?;
+        drop(out);
+        let got_hash: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        if got_hash != entry.sha256 {
+            let _ = std::fs::remove_file(&dl);
+            return Err(format!("the download does not match the SHA-256 you gave (expected {}…, got {}…); nothing was installed", &entry.sha256[..12], &got_hash[..12]));
+        }
+        self.set_job(d.id, |j| j.phase = "unpacking".into());
+        let name = entry.file_name().to_ascii_lowercase();
+        let r = if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+            crate::archive::untar_gz(&dl, target, tmp).map(|_| ())
+        } else if name.ends_with(".zip") {
+            crate::archive::unzip(&dl, target).map(|_| ())
+        } else {
+            let dst = target.join(d.bins[0].1);
+            (|| -> Result<(), String> {
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                std::fs::copy(&dl, &dst).map_err(|e| e.to_string())?;
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())
+            })()
+        };
+        let _ = std::fs::remove_file(&dl);
+        let _ = max_unpacked;
+        r
     }
 
     pub(crate) fn run_install(&self, d: &'static CliDef, st: &dyn Streamer, by: &str) -> Result<(), String> {
@@ -662,9 +747,14 @@ impl CliManager {
                     }
                     // hash values in the signed manifest for this exact version: every file pip installs must match one (including dependencies)
                     let lock_file = target.join("requirements.lock");
-                    let lock = if d.pin.is_empty() { None } else { crate::dlmanifest::pins::pip_lock(&self.manifest_dir(), d.id, pkgname, d.pin) };
+                    let pin = self.pin_of(d);
+                    let lock = if pin.is_empty() { None } else { crate::dlmanifest::pins::pip_lock(&self.manifest_dir(), d.id, pkgname, &pin) };
+                    // a version the signed manifest moved is only ever installed against its hashes
+                    if pin != d.pin && lock.is_none() {
+                        return Err(format!("the signed download list names {pkgname} {pin} but its hash list does not cover {pkgname} itself; nothing was installed"));
+                    }
                     let lock_arg = lock_file.display().to_string();
-                    let spec = if d.pin.is_empty() { pkgname.to_string() } else { format!("{pkgname}=={}", d.pin) };
+                    let spec = if pin.is_empty() { pkgname.to_string() } else { format!("{pkgname}=={pin}") };
                     if let Some(text) = &lock {
                         std::fs::write(&lock_file, text).map_err(|e| e.to_string())?;
                         args.extend(["--require-hashes", "-r", lock_arg.as_str()]);
@@ -686,7 +776,10 @@ impl CliManager {
                     run_quiet_env(&uv, &["python", "install", spec], &env, 900)?;
                 }
                 Source::System => return Err(format!("{} comes with the system and is not downloaded", d.name)),
-                Source::Setting(key) => return Err(format!("{} has no download address yet: the OpenVPN project publishes source and distribution packages but no build that runs on IYAKKI's musl images, and IYAKKI does not invent one. Set `{key}` (an https address of a build you trust, with its SHA-256) to enable the download. Nothing was fetched.", d.name)),
+                Source::Setting(key) => {
+                    self.download_from_setting(d, key, st, &target, &tmp)?;
+                    verified = true; // the SHA-256 of the setting matched, or nothing is here
+                }
                 Source::Npm(pkgname) => self.npm_install(d, &pinned_npm(d, pkgname), &target, &tmp)?,
                 Source::File(u) | Source::TarGz(u) | Source::Zip(u) | Source::TarZst(u) | Source::TarXz(u) => {
                     // a signed manifest may have moved the address (within the tool's own hosts); a template this program cannot fill falls back to the code's
@@ -695,6 +788,7 @@ impl CliManager {
                         _ => self.tpl(u, &version)?,
                     };
                     let file = pct_decode(url.rsplit('/').next().unwrap_or("download"));
+                    let moved = !d.pin.is_empty() && version != d.pin;
                     // a manifest names this machine's build before anything large is fetched
                     let manifest_want = match d.checksum {
                         Some(Checksum::Manifest(mu)) => {
@@ -760,6 +854,8 @@ impl CliManager {
                                 let text = self.small(st, &self.checksum_address(d.id, u, &version)?, d.hosts)?;
                                 extract_hash(&text, &file).ok_or("the vendor's checksum file has no entry for this download")?
                             }
+                            // the code's table belongs to the code's pin: for a version the signed manifest moved, only the manifest's value counts
+                            (Checksum::Fixed(_), _) if moved => crate::dlmanifest::pins::sha256_for(&self.manifest_dir(), d.id, &version, &file).ok_or("the signed download list moved this tool to a newer version but names no SHA-256 for this machine's build")?,
                             (Checksum::Fixed(table), _) => fixed_hash(table, &file).ok_or("this pinned release has no published checksum for this machine's build")?,
                             (Checksum::Md5(u), _) => {
                                 let text = self.small(st, &self.tpl(u, &version)?, d.hosts)?;
@@ -778,8 +874,12 @@ impl CliManager {
                         }
                         verified = true;
                     }
-                    // our own SHA-256 in the signed manifest (for this exact version and file name) must match too
-                    if let Some(want) = crate::dlmanifest::pins::sha256_for(&self.manifest_dir(), d.id, &version, &file) {
+                    // our own SHA-256 in the signed manifest (for this exact version and file name) must match too; a moved version has to have one
+                    let own = crate::dlmanifest::pins::sha256_for(&self.manifest_dir(), d.id, &version, &file);
+                    if moved && own.is_none() {
+                        return Err("the signed download list moved this tool to a newer version but names no SHA-256 for this file; nothing was installed".into());
+                    }
+                    if let Some(want) = own {
                         if want != got_hash {
                             return Err(format!("the download does not match the SHA-256 pinned by IYAKKI (expected {}…, got {}…); nothing was installed", &want[..12], &got_hash[..12]));
                         }
@@ -1111,8 +1211,9 @@ impl CliManager {
             return Err(format!("{} comes with the system and is updated by its package manager, not from here.", d.name));
         }
         if !d.pin.is_empty() {
-            // this release of IYAKKI installs one exact version (see `CliDef::pin`); a newer one arrives with a newer IYAKKI
-            return Ok(d.pin.to_string());
+            // this release of IYAKKI installs one exact version (see `CliDef::pin`); a newer one arrives with a newer IYAKKI, or with a signed
+            // manifest that names it together with its SHA-256 values
+            return Ok(self.pin_of(d));
         }
         if matches!(d.version, VersionFrom::Latest) {
             // no number from the vendor's own address, but the registry the tool installs from has one
@@ -1400,35 +1501,20 @@ pub(crate) fn run_quiet(program: &str, args: &[&str], seconds: u64) -> Result<St
 
 /// [`run_quiet`] with some variables added for this one child.
 fn run_quiet_env(program: &str, args: &[&str], env: &[(&str, &str)], seconds: u64) -> Result<String, String> {
-    use std::process::{Command, Stdio};
-    let mut cmd = Command::new(program);
-    cmd.args(args).env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    for k in ["PATH", "LANG", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "TMPDIR"] {
-        if let Ok(v) = std::env::var(k) {
-            cmd.env(k, v);
-        }
-    }
+    use iyakki_core_local::starters_launch::{Launch, Stream};
+    let mut cmd = Launch::new(program).args(args).env_clear().stdin(Stream::Null).stdout(Stream::Piped).stderr(Stream::Piped).pass_env(["PATH", "LANG", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "TMPDIR"]);
     // a check that only asks for a version runs in a throw-away home: a program that writes a settings file on its first start
     // (Copilot does) must not litter the person's home or `/`
     let scratch = std::env::temp_dir().join("iyakki-check-home");
     let _ = std::fs::create_dir_all(&scratch);
-    cmd.env("HOME", &scratch);
+    cmd = cmd.env("HOME", &scratch);
     for (k, v) in env {
-        cmd.env(k, v);
+        cmd = cmd.env(k, v);
     }
     // a program that was written a moment ago can be "busy" while another thread's fork still holds the file
-    let mut child = None;
-    for attempt in 0..60 {
-        match cmd.spawn() {
-            Ok(c) => {
-                child = Some(c);
-                break;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 59 => std::thread::sleep(std::time::Duration::from_millis(50)),
-            Err(e) => return Err(format!("could not start {program}: {e}")),
-        }
-    }
-    let mut child = child.ok_or_else(|| format!("could not start {program}"))?;
+    let mut child = cmd.spawn_retrying(60, std::time::Duration::from_millis(50)).map_err(|e| format!("could not start {program}: {e}"))?;
+    // an install or a check started for a person is hers in "My processes" while it runs (KI-131)
+    let _claim = crate::procowner::current_user().map(|u| crate::procowner::claim(child.id(), &u, program.rsplit('/').next().unwrap_or(program)));
     let mut so = child.stdout.take().ok_or("no output pipe")?;
     let mut se = child.stderr.take().ok_or("no error pipe")?;
     let (tx, rx) = std::sync::mpsc::channel();
@@ -2411,7 +2497,10 @@ mod tests {
         assert!(j.finished && j.error.is_none() && j.phase.starts_with("installed \u{b7} ") && j.phase.contains("v1.30.0"), "{j:?}");
         assert!(m.installed().is_empty(), "nothing was downloaded or recorded");
         assert_eq!(*seen.lock().unwrap(), ["kubectl"]);
+        // helm is not in the folder of stand-ins: a copy in the usual places of the machine running the test (a CI runner has one) does not count
         assert_eq!(m.offer("helm", None), Offer::Install);
+        // the machine's own Node.js in /usr/bin or /usr/local/bin (a CI runner and our hosts have one) is outside the folder of stand-ins: it does not count either
+        assert!(m.present_elsewhere("nodejs").is_none());
         // the runtimes: a Node.js that is too old does not count
         std::fs::write(sys.join("node"), "#!/bin/sh\necho v16.1.0\n").unwrap();
         std::fs::set_permissions(sys.join("node"), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2475,13 +2564,49 @@ mod tests {
         let st = Arc::new(Fake { routes: Mutex::new(HashMap::new()), asked: Mutex::new(vec![]) });
         let m = manager("openvpn", st.clone());
         let plan = m.install_plan("openvpn").unwrap();
-        assert!(plan.contains("Nothing can be downloaded yet") && plan.contains("vpn.openvpn_download"), "{plan}");
+        assert!(plan.contains("Nothing can be downloaded yet") && plan.contains("vpn.openvpn_download") && plan.contains("is empty"), "{plan}");
         m.install("openvpn", "root").unwrap();
         let j = wait(&m, "openvpn");
         let e = j.error.unwrap();
         assert!(e.contains("no download address") && e.contains("does not invent") && e.contains("Nothing was fetched"), "{e}");
+        // a damaged value fails closed in the same way
+        std::fs::write(m.root().join(crate::clis_sources::FILE), r#"{"vpn.openvpn_download": "http://x.example/o abc"}"#).unwrap();
+        m.install("openvpn", "root").unwrap();
+        let j = wait(&m, "openvpn");
+        assert!(j.error.unwrap().contains("cannot be used"), "a plain-http address or a short checksum is refused");
         assert!(st.asked.lock().unwrap().is_empty(), "no request was made");
         assert!(m.is_installed("openvpn").is_none());
+    }
+
+    #[test]
+    fn openvpn_downloads_from_the_setting_keeps_only_the_given_checksum_and_stays_on_the_named_host() {
+        let prog = b"#!/bin/sh\necho 'OpenVPN 2.6.9 x86_64-iyakki'\n".to_vec();
+        let url = "https://builds.example/ovpn/openvpn";
+        // the right checksum: installed, marked verified
+        let st = Arc::new(Fake { routes: Mutex::new(HashMap::from([(url.to_string(), ok(&prog))])), asked: Mutex::new(vec![]) });
+        let m = manager("openvpn-ok", st.clone());
+        crate::clis_sources::set(m.root(), "vpn.openvpn_download", &format!("{url} {}", sha(&prog))).unwrap();
+        assert!(m.install_plan("openvpn").unwrap().contains(&sha(&prog)));
+        m.install("openvpn", "root").unwrap();
+        let j = wait(&m, "openvpn");
+        assert!(j.error.is_none() && j.finished, "{j:?}");
+        assert!(m.is_installed("openvpn").unwrap().verified);
+        assert_eq!(*st.asked.lock().unwrap(), vec![url.to_string()], "one request, to the address given");
+        // another checksum: refused, nothing kept
+        let st = Arc::new(Fake { routes: Mutex::new(HashMap::from([(url.to_string(), ok(&prog))])), asked: Mutex::new(vec![]) });
+        let m = manager("openvpn-bad", st);
+        crate::clis_sources::set(m.root(), "vpn.openvpn_download", &format!("{url} {}", "0".repeat(64))).unwrap();
+        m.install("openvpn", "root").unwrap();
+        let e = wait(&m, "openvpn").error.unwrap();
+        assert!(e.contains("does not match the SHA-256 you gave") && e.contains("nothing was installed"), "{e}");
+        assert!(m.is_installed("openvpn").is_none() && !m.bin_dir().join("openvpn").exists());
+        // a redirect to another host is not followed
+        let st = Arc::new(Fake { routes: Mutex::new(HashMap::from([(url.to_string(), (302, vec![("location".into(), "https://evil.example/openvpn".into())], vec![]))])), asked: Mutex::new(vec![]) });
+        let m = manager("openvpn-redirect", st.clone());
+        crate::clis_sources::set(m.root(), "vpn.openvpn_download", &format!("{url} {}", sha(&prog))).unwrap();
+        m.install("openvpn", "root").unwrap();
+        assert!(wait(&m, "openvpn").error.is_some());
+        assert_eq!(st.asked.lock().unwrap().len(), 1, "the other host was never asked");
     }
 
     #[test]

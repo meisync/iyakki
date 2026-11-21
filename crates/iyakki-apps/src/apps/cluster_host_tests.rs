@@ -82,7 +82,7 @@ fn switching_is_role_checked_audited_and_a_workspace_with_its_own_cluster_switch
     assert!(matches!(&out, HostOut::Switched(e) if e.id == "lab"), "{out:?}");
     assert_eq!(h.effective().unwrap().id, "lab");
     assert_eq!(Registry::load(cx.data_dir(), &cx.session.user).active_entry().id, "lab");
-    let a = std::fs::read_to_string(cx.audit.path()).unwrap().replace("\\\"", "\"");
+    let a = std::fs::read_to_string(cx.audit.path_buf()).unwrap().replace("\\\"", "\"");
     assert!(a.contains("cluster.switch") && a.contains("cluster \"lab\" (remote)"), "{a}");
     // keys: Down, Enter on the first row (local) goes back
     h.handle(&Event::Tab(BASE), &|_| None);
@@ -101,7 +101,7 @@ fn switching_is_role_checked_audited_and_a_workspace_with_its_own_cluster_switch
     w.handle(&Event::Tab(BASE + 10 + lab), &|_| None);
     let reg = Registry::load(cx.data_dir(), &cx.session.user);
     assert_eq!((reg.effective("Shop").id.as_str(), reg.active_entry().id.as_str()), ("lab", "local"));
-    let a = std::fs::read_to_string(cx.audit.path()).unwrap();
+    let a = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
     assert!(a.contains("(workspace Shop)"));
 }
 

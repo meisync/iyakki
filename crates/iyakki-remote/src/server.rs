@@ -1,8 +1,9 @@
 //! The listener: one thread per connection, TLS when an identity is given, a handful of routes, and the WebSocket that
 //! carries the screen.
 
-use crate::adapt::{Choice, Controller};
-use crate::codec::{Caps, Level, Opts, Streamer};
+use crate::adapt::Choice;
+use crate::picturepump::PicturePump;
+use crate::codec::Level;
 use crate::http::{self, Parse, Request, Response};
 use crate::input::{self, Input};
 use crate::page;
@@ -319,6 +320,28 @@ fn route(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
                 None => Response::error(401, "not signed in"),
             }
         }
+        // the Web Push pages (F-INBOX-09): a service worker and the subscribe page a person's own browser loads, with the one-time link the person's
+        // chat tool made (the link, not a session, is the proof). TLS only (a service worker needs a secure origin), and dark (503) until an
+        // administrator has set the public name; nothing else under /push is answered
+        (_, p) if iyakki_agent::webpush_page::owns(p) => {
+            let Some(pages) = sh.gate.push_pages().filter(|_| secure) else { return Response::error(404, "not found") };
+            if req.method == "POST" && (!same_origin(req) || req.header("origin").is_none()) {
+                return Response::error(403, "not allowed from here");
+            }
+            if !matches!(req.method.as_str(), "GET" | "POST") {
+                return Response::error(405, "method not allowed");
+            }
+            let full = match req.query.get("t") {
+                Some(t) => format!("{}?t={t}", req.path),
+                None => req.path.clone(),
+            };
+            let r = pages.handle(&req.method, &full, &req.body);
+            let mut out = Response::new(r.status, r.content_type, r.body).header("Cache-Control", "no-store").header("X-Content-Type-Options", "nosniff").header("Referrer-Policy", "no-referrer").header("Strict-Transport-Security", "max-age=31536000");
+            if req.path.ends_with("/sw.js") {
+                out = out.header("Service-Worker-Allowed", "/push/");
+            }
+            out
+        }
         // the web UI's own files (plain HTML, CSS and JS compiled in): no sign-in, nothing private in them, GET only
         (_, p) if iyakki_agent::webservice::ui::is_ui_path(p) => {
             let r = iyakki_agent::webservice::ui::serve(req).unwrap_or_else(|| Response::error(404, "not found"));
@@ -424,10 +447,7 @@ fn client_socket(mut conn: Conn, req: &Request, peer: SocketAddr, sh: &Shared) {
 
 /// Protocol version 2 state of one connection (present once the page said `hello`).
 struct V2 {
-    ctl: Controller,
-    st: Streamer,
-    caps: Caps,
-    armed: bool,
+    pic: PicturePump,
     last_stats: u64,
     last_level: Level,
     last_pong: u64,
@@ -464,9 +484,9 @@ fn serve_screen(conn: &mut Conn, screen: &mut dyn crate::screen::Screen, sh: &Sh
                         Input::Hello { v, deflate } => {
                             let version = v.min(PROTOCOL_VERSION);
                             if version >= 2 && v2.is_none() {
-                                let ctl = Controller::new(now);
-                                let level = ctl.level();
-                                v2 = Some(V2 { ctl, st: Streamer::new(), caps: Caps { deflate }, armed: false, last_stats: now, last_level: level, last_pong: 0 });
+                                let pic = PicturePump::new(now, deflate);
+                                let level = pic.ctl.level();
+                                v2 = Some(V2 { pic, last_stats: now, last_level: level, last_pong: 0 });
                                 screen.set_stream(true);
                             }
                             let m = serde_json::json!({ "t": "hello_ok", "v": if v2.is_some() { version } else { 1 }, "tile": crate::codec::TILE, "levels": Level::ALL.map(|l| l.name()), "max_message": MAX_WS_MESSAGE });
@@ -474,12 +494,12 @@ fn serve_screen(conn: &mut Conn, screen: &mut dyn crate::screen::Screen, sh: &Sh
                         }
                         Input::Ack(n) => {
                             if let Some(v) = v2.as_mut() {
-                                v.ctl.on_ack(n, now);
+                                v.pic.ctl.on_ack(n, now);
                             }
                         }
                         Input::Quality { level, saver } => {
                             if let Some(v) = v2.as_mut() {
-                                v.ctl.set_choice(level.map_or(Choice::Auto, Choice::Fixed), saver);
+                                v.pic.ctl.set_choice(level.map_or(Choice::Auto, Choice::Fixed), saver);
                             }
                         }
                         Input::Ping { ts, rtt } => {
@@ -488,7 +508,7 @@ fn serve_screen(conn: &mut Conn, screen: &mut dyn crate::screen::Screen, sh: &Sh
                                 if let Some(v) = v2.as_mut() {
                                     v.last_pong = now;
                                     if let Some(r) = rtt {
-                                        v.ctl.on_rtt(r);
+                                        v.pic.ctl.on_rtt(r);
                                     }
                                 }
                                 outbox.extend(ws::text_frame(&format!(r#"{{"t":"pong","ts":{ts}}}"#)));
@@ -514,7 +534,7 @@ fn serve_screen(conn: &mut Conn, screen: &mut dyn crate::screen::Screen, sh: &Sh
                         Input::Rich { .. } => {}
                         Input::Full => {
                             if let Some(v) = v2.as_mut() {
-                                v.st.reset();
+                                v.pic.st.reset();
                             }
                             screen.input(Input::Full);
                         }
@@ -522,7 +542,7 @@ fn serve_screen(conn: &mut Conn, screen: &mut dyn crate::screen::Screen, sh: &Sh
                             if let (Some(v), Input::Event(e)) = (v2.as_mut(), &other) {
                                 use iyakki_shell::ui::Event;
                                 if matches!(e, Event::Key(_) | Event::MouseDown(..) | Event::MouseUp(..) | Event::MouseRight(..) | Event::Scroll(_) | Event::Paste(_)) {
-                                    v.ctl.on_input();
+                                    v.pic.ctl.on_input();
                                 }
                             }
                             screen.input(other);
@@ -561,29 +581,14 @@ fn serve_screen(conn: &mut Conn, screen: &mut dyn crate::screen::Screen, sh: &Sh
                 }
             }
             Some(v) => {
-                v.ctl.tick(now);
-                if let Some(p) = screen.take_pixels() {
-                    v.armed = false;
-                    v.st.set_source(p.w as usize, p.h as usize, p.rgba);
+                if let Some(msg) = v.pic.turn(screen, now) {
+                    outbox.extend(ws::binary_frame(&msg));
                 }
-                if v.ctl.can_send(now) {
-                    if v.st.wants_encode(now) {
-                        let o = Opts { level: v.ctl.level(), caps: v.caps, budget: v.ctl.budget(), now_ms: now };
-                        if let Some(e) = v.st.encode(&o) {
-                            v.ctl.on_send(e.seq, e.msg.len(), now);
-                            outbox.extend(ws::binary_frame(&e.msg));
-                        }
-                    }
-                }
-                if !v.armed && v.ctl.can_send(now) {
-                    v.armed = true;
-                    screen.arm();
-                }
-                let level = v.ctl.level();
+                let level = v.pic.ctl.level();
                 if level != v.last_level || now.saturating_sub(v.last_stats) >= 1000 {
                     v.last_level = level;
                     v.last_stats = now;
-                    outbox.extend(ws::text_frame(&v.ctl.stats_json().to_string()));
+                    outbox.extend(ws::text_frame(&v.pic.ctl.stats_json().to_string()));
                 }
             }
         }

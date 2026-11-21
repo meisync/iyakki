@@ -3,7 +3,7 @@
 
 
 /// Where Lemonade runs its models: on the GPU (the default, when a GPU step is installed) or on the CPU.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Compute {
     Gpu,
     Cpu,

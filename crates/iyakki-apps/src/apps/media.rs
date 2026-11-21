@@ -217,6 +217,8 @@ pub struct MediaApp {
     route_override: Option<VideoRoute>,
     /// A download finished: look at the folders again once the current scan is done.
     rescan: bool,
+    /// The core's device broker was asked for the sound drivers (once, at the first thing that plays).
+    asked_audio: bool,
     /// Where the app was drawn last (the video fills it).
     area: R,
     ui_scale: f32,
@@ -300,6 +302,7 @@ impl MediaApp {
             route_override: None,
             native: None,
             rescan: false,
+            asked_audio: false,
             area: R::new(0.0, 0.0, 1280.0, 600.0),
             ui_scale: 1.0,
         };
@@ -637,6 +640,10 @@ impl MediaApp {
             self.say("That file is gone.", false);
             self.publish_queue(p);
             return;
+        }
+        // the first thing to play: the lazy device broker loads the sound drivers now (a no-op unless `iyakki.lazydrivers=1`)
+        if !std::mem::replace(&mut self.asked_audio, true) {
+            let _ = p.request_audio_drivers();
         }
         let label = self.label_of(&path);
         // a video with no player program goes to the embedded engine (the web image), or the person is told what is needed
@@ -1505,7 +1512,14 @@ impl MediaApp {
     /// buttons, a progress bar and the level display. Returns its height.
     fn draw_hero(&mut self, g: &mut Gfx, at: R, s: f32, tick: u64) -> f32 {
         let (x, w, y) = (at.x, at.w, at.y);
-        let ch = 178.0 * s;
+        // the transport row (three round buttons from the words' left edge) leaves no room for shuffle and repeat on a narrow card or at a large
+        // text size: they take a row of their own under it, and the card grows by that row
+        let second_row = {
+            let (tx0, bd0) = (x + 142.0 * s, 40.0 * s);
+            let plain = g.text_width(13.0 * s, &format!("Shuf {}", if self.shuffle { "on" } else { "off" }), Face::Bold) + g.text_width(13.0 * s, &format!("Rpt {}", self.repeat.label()), Face::Bold) + 2.0 * 13.0 * s * 1.7 + 8.0 * s;
+            tx0 + 3.0 * bd0 + 44.0 * s + plain > x + w - 16.0 * s
+        };
+        let ch = (178.0 + if second_row { 44.0 } else { 0.0 }) * s;
         let card = R::new(x, y, w, ch);
         let label = self.player.now_playing();
         let playing = label.is_some();
@@ -1597,6 +1611,9 @@ impl MediaApp {
         g.hit(next, Event::Tab(104), "Next");
         bx += bd + 16.0 * s;
         // the key hints go first when the two buttons do not fit side by side inside the card
+        let (sx0, sy) = if second_row { (card.x + 26.0 * s, by + bd + 12.0 * s) } else { (bx, by + 4.0 * s) };
+        let mut bx = sx0;
+        let by = sy - 4.0 * s;
         let (sw, rw) = (g.text_width(13.0 * s, &format!("Shuffle {} (z)", if self.shuffle { "on" } else { "off" }), Face::Bold), g.text_width(13.0 * s, &format!("Repeat {} (l)", self.repeat.label()), Face::Bold));
         let hints = bx + sw + rw + 2.0 * 13.0 * s * 1.7 + 8.0 * s <= card.x + card.w - 16.0 * s;
         // not even the plain labels fit side by side: shorter words (the person still sees on or off)
@@ -2545,7 +2562,7 @@ mod tests {
         let b = MediaApp::with_player(&CxPort(&cx), a.player.clone());
         assert!(b.shuffle && b.repeat == Repeat::Off);
         // the log names the files played
-        assert!(std::fs::read_to_string(cx.audit.path()).unwrap().contains("media.play"));
+        assert!(std::fs::read_to_string(cx.audit.path_buf()).unwrap().contains("media.play"));
     }
 
     #[test]
@@ -2851,7 +2868,7 @@ mod tests {
         assert!(matches!(a.mode, Mode::Browse));
         let it = cur(&a).unwrap();
         assert_eq!((it.effective_types().iter().cloned().collect::<Vec<_>>(), it.tags.iter().cloned().collect::<Vec<_>>()), (vec!["beats".to_string(), "melody".to_string()], vec!["rainy day".to_string()]));
-        assert!(std::fs::read_to_string(cx.audit.path()).unwrap().contains("media.tag"));
+        assert!(std::fs::read_to_string(cx.audit.path_buf()).unwrap().contains("media.tag"));
         key(&mut a, &cx, Key::Esc); // forget the search
         a.handle(&Event::Tab(6), &cx);
         let names = a.row_names();
@@ -3016,7 +3033,7 @@ mod tests {
         assert!(it.effective_types().contains("kuthu") && it.effective_types().contains("action") && it.tags.contains("nonsense") && it.tags.contains("gym mix"), "{:?} {:?}", it.effective_types(), it.tags);
         assert!(it.source_url.ends_with("/files/Remote%20Song.mp3"));
         assert!(a.library().audio("").iter().any(|t| t.title == "Remote Song"), "the library was scanned again: {:?} {:?}", a.library().tracks.iter().map(|t| t.path.clone()).collect::<Vec<_>>(), a.status_text());
-        assert!(std::fs::read_to_string(cx.audit.path()).unwrap().contains("media.download"));
+        assert!(std::fs::read_to_string(cx.audit.path_buf()).unwrap().contains("media.download"));
         let inbox = cx.inbox().list("root");
         assert!(inbox.iter().any(|n| n.kind == iyakki_shared::inbox::Kind::Download) && inbox.iter().any(|n| n.kind == iyakki_shared::inbox::Kind::Error && n.title.contains("Download failed")));
         // the same address again never overwrites
@@ -3317,14 +3334,7 @@ mod tests {
 
     /// The fake web engine helper of `iyakki-webview` (built on demand), as a script that starts it.
     fn fake_helper_script(tag: &str) -> std::path::PathBuf {
-        let exe = std::env::current_exe().unwrap();
-        let dir = exe.ancestors().find(|d| d.file_name().is_some_and(|n| n == "debug" || n == "release")).expect("the profile folder (target/debug) above the test program").to_path_buf();
-        let bin = dir.join("iyakki-fake-webview");
-        if !bin.is_file() {
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-            let ok = std::process::Command::new(cargo).args(["build", "-q", "-p", "iyakki-webview", "--bin", "iyakki-fake-webview"]).status().map(|s| s.success()).unwrap_or(false);
-            assert!(ok && bin.is_file(), "could not build the fake helper");
-        }
+        let bin = crate::apps::tests::fake_webview_binary();
         let script = temp_dir(&format!("{tag}-helper")).join("helper.sh");
         std::fs::write(&script, format!("#!/bin/sh\nexec {} --static \"$@\"\n", bin.display())).unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -3382,7 +3392,7 @@ mod tests {
         assert!(g.hits.iter().any(|h| h.label == "Stop (Esc)") && g.hits.iter().any(|h| h.ev == Event::Tab(201)));
         let px = |x: f32, y: f32| -> [u8; 4] {
             let o = ((y as u32 * g.width() + x as u32) * 4) as usize;
-            g.pm.data()[o..o + 4].try_into().unwrap()
+            g.pm_ref().data()[o..o + 4].try_into().unwrap()
         };
         assert_eq!(px(100.0, 72.0 + 40.0 + 100.0), [220, 40, 40, 255], "the engine's picture fills the page area");
         assert!(a.hint().contains("Space pause") && a.status_text().is_none());
@@ -3398,7 +3408,7 @@ mod tests {
         assert!(!a.video_playing());
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err(), "the server's port is closed");
-        assert!(std::fs::read_to_string(cx.audit.path()).unwrap().contains("media.video"));
+        assert!(std::fs::read_to_string(cx.audit.path_buf()).unwrap().contains("media.video"));
         // Esc again leaves the app as before
         assert!(matches!(a.handle(&Event::Key(Key::Esc), &cx), Flow::Back));
     }

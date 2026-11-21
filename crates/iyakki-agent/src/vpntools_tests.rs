@@ -144,3 +144,35 @@ fn describe_is_one_line_and_other_tools_pass_through() {
     assert!(is_vpn_tool("vpn_add") && !is_vpn_tool("ssh_tunnel_add"));
     assert!(PROMPT_RULE.contains("no VPN service"));
 }
+
+#[test]
+fn vpn_status_is_free_says_how_the_vpn_is_in_a_few_lines_and_changes_nothing() {
+    let r = rig("tools-status");
+    let t = tools(&r);
+    let defs = t.defs();
+    assert_eq!(defs.iter().find(|d| d.spec.name == STATUS_TOOL).unwrap().risk, Risk::Safe);
+    assert!(hard_ask(STATUS_TOOL, &json!({})).is_none() && t.preview(STATUS_TOOL, &json!({})).is_none() && t.refusal(STATUS_TOOL, &json!({})).is_none());
+    assert_eq!(t.describe(STATUS_TOOL, &json!({})), "Show how the VPN is");
+    assert!(is_vpn_tool(STATUS_TOOL) && !t.pre_approved(STATUS_TOOL), "a VPN tool is never pre-approved by the inner list");
+    // nothing enabled: traffic goes direct, and the helper is off by default
+    let none = t.call(STATUS_TOOL, &json!({})).unwrap();
+    assert!(none.contains("No VPN is enabled") && none.contains("helper is off"), "{none}");
+    // an imported profile that is not enabled yet is still "no VPN enabled"; enabling it shows the profile's own line
+    let path = write_conf(&r, "office.conf", &conf("0.0.0.0/0", "vpn.example.com:51820"));
+    t.call("vpn_add", &json!({"name": "Office", "path": path})).unwrap();
+    assert!(t.call(STATUS_TOOL, &json!({})).unwrap().contains("No VPN is enabled"));
+    let id = r.mgr.profiles()[0].id.clone();
+    r.mgr.set_enabled(&id, true, 1000).unwrap();
+    let on = t.call(STATUS_TOOL, &json!({})).unwrap();
+    assert!(on.contains("Office") && on.contains("FULL"), "{on}");
+    // no key text anywhere in the answer
+    assert!(!on.contains("PrivateKey") && !on.contains(&key(1)), "{on}");
+}
+
+#[test]
+fn both_kernel_fragments_build_wireguard_as_a_module() {
+    for f in ["dist/buildroot/board/iyakki/linux.fragment", "dist/buildroot/board/iyakki-aarch64/linux.fragment"] {
+        let text = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(f)).unwrap();
+        assert!(text.lines().any(|l| l.trim() == "CONFIG_WIREGUARD=m"), "{f} has no WireGuard");
+    }
+}

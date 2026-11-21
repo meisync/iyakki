@@ -7,6 +7,7 @@ use crate::archive::tests::tmp;
 use crate::wsexec::FakeRunner;
 use iyakki_proxy::StreamHead;
 use std::collections::HashMap;
+use std::process::Command;
 use std::io::Cursor;
 
 type Reply = (u16, Vec<(String, String)>, Vec<u8>);
@@ -1761,4 +1762,65 @@ fn the_process_guard_matches_a_real_server_not_a_helper_or_our_own_child() {
     f.sort();
     assert_eq!(f, vec!["k3s".to_string(), "k3s-agent".to_string(), "kubelet".to_string()]);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// ------------------------------------------------------------------------------------------------ a machine that is offline on purpose (F-K8S-13)
+
+#[test]
+fn a_machine_offline_on_purpose_gets_a_route_that_goes_nowhere_and_k3s_starts_without_waiting() {
+    let (w, _route) = world_net("k3sdev-offline", LOGARGS_K3S, false);
+    w.nodes_ready();
+    w.run.programs_add("ip");
+    w.run.answer("ip link add", "").answer("ip link set", "").answer("ip route replace", "");
+    assert!(!w.d.offline_on_purpose(), "off unless the person switched it on");
+    w.d.set_offline_on_purpose(true, "root").unwrap();
+    assert!(w.d.offline_on_purpose());
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    let lines = w.run.lines();
+    let at = |needle: &str| lines.iter().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("{needle}: {lines:?}"));
+    assert!(at(&format!("ip link add {NODE_NET_IF} type dummy")) < at("ip route replace default"), "the interface first, then the route: {lines:?}");
+    assert!(lines.iter().any(|l| l.contains(&format!("ip route replace default dev {NODE_NET_IF} metric 9999"))), "{lines:?}");
+    assert!(w.actions().contains(&"devcluster.offline-route".to_string()), "{:?}", w.actions());
+    assert!(w.d.take_alerts().is_empty(), "no failure, no alert");
+    assert!(log_text(&w).contains("Offline is on"), "{}", log_text(&w));
+    // switching it off takes the route off again
+    w.d.set_offline_on_purpose(false, "root").unwrap();
+    assert!(w.run.lines().iter().any(|l| l.contains(&format!("ip route del default dev {NODE_NET_IF} metric 9999"))), "{:?}", w.run.lines());
+    assert!(w.actions().contains(&"devcluster.offline".to_string()));
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn without_the_switch_no_route_is_made_and_the_wait_goes_on_as_before() {
+    let (w, _route) = world_net("k3sdev-offline-off", GOOD_K3S, false);
+    w.nodes_ready();
+    w.run.programs_add("ip");
+    w.d.start("root").unwrap();
+    assert!(wait_for(5, || w.d.health().note == NO_NET_YET), "{:?}", w.d.health());
+    assert!(w.d.health().line().contains("Offline"), "the waiting line says how a machine that stays offline gets out of it: {}", w.d.health().line());
+    assert!(!w.run.lines().iter().any(|l| l.contains("ip route")), "{:?}", w.run.lines());
+    assert_eq!(w.d.state(), Svc::Starting);
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn when_the_dummy_interface_cannot_be_made_the_wait_goes_on_and_the_reason_is_audited() {
+    let (w, _route) = world_net("k3sdev-offline-nodummy", GOOD_K3S, false);
+    w.nodes_ready();
+    w.run.programs_add("ip");
+    w.run.fail("ip link add", 2, "RTNETLINK answers: Operation not supported");
+    w.d.set_offline_on_purpose(true, "root").unwrap();
+    w.d.start("root").unwrap();
+    assert!(wait_for(5, || w.actions().contains(&"devcluster.offline-route-failed".to_string())), "{:?}", w.actions());
+    assert!(!w.run.lines().iter().any(|l| l.contains("ip route replace")), "no route without the interface");
+    assert_eq!(w.d.state(), Svc::Starting, "still waiting, not failed");
+    assert!(w.d.take_alerts().is_empty());
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn the_kernel_fragment_builds_the_dummy_interface_in() {
+    let frag = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist/buildroot/board/iyakki/linux.fragment")).unwrap();
+    assert!(frag.lines().any(|l| l.trim() == "CONFIG_DUMMY=y"), "no dummy interface, no stable node address and no offline route");
 }

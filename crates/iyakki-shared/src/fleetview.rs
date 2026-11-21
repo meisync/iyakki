@@ -76,7 +76,7 @@ pub struct OutItem {
     pub tests: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MemberView {
     pub id: String,
     pub fingerprint: String,
@@ -93,7 +93,7 @@ pub struct MemberView {
     pub heartbeat: Option<Heartbeat>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FleetView {
     pub id: String,
     pub short: String,
@@ -104,7 +104,7 @@ pub struct FleetView {
     pub members: Vec<MemberView>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OfferView {
     pub fleet: String,
     pub short: String,
@@ -112,7 +112,7 @@ pub struct OfferView {
     pub expires_in: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RequestView {
     pub id: String,
     pub fleet: String,
@@ -121,7 +121,7 @@ pub struct RequestView {
     pub fingerprint: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PendingView {
     pub ticket: String,
     pub addr: String,
@@ -131,7 +131,7 @@ pub struct PendingView {
     pub offer: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Status {
     pub me: String,
     pub my_fingerprint: String,
@@ -246,6 +246,9 @@ pub struct Heartbeat {
     pub mem_total_mb: u64,
     pub tasks_running: u32,
     pub models: Vec<String>,
+    /// The battery's charge in percent on a machine that has one (absent on a desktop, and from members older than this field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_pct: Option<u32>,
 }
 
 impl Heartbeat {
@@ -253,6 +256,7 @@ impl Heartbeat {
     pub fn sanitised(mut self) -> Heartbeat {
         self.cpu_load_pct = self.cpu_load_pct.min(1000);
         self.mem_used_pct = self.mem_used_pct.min(100);
+        self.battery_pct = self.battery_pct.map(|b| b.min(100));
         self.disk_free_mb = self.disk_free_mb.min(self.disk_total_mb.max(self.disk_free_mb));
         let mut names: Vec<String> = Vec::new();
         for m in self.models.iter() {
@@ -291,7 +295,7 @@ pub fn looks_secret(t: &str) -> bool {
 }
 
 /// What a confirmed fleet card does (the Settings page asks the services to run it: `ServicesHandle::fleet_act`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FleetAct {
     Create(String, String),
     Offer(String),

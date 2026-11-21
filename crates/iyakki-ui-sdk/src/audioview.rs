@@ -498,7 +498,7 @@ impl AudioView {
                 let seg = bar_w / SEEK_PARTS as f32;
                 for i in 0..SEEK_PARTS {
                     let hr = Rect::new(bar_x + i as f32 * seg, y, seg, t);
-                    c.hit(hr, Hit { action: self.base + A_SEEK0 + i, name: format!("Seek to {}%", (i + 1) * 100 / SEEK_PARTS), role: Role::Button });
+                    c.hit(hr, Hit { action: self.base + A_SEEK0 + i, name: format!("Seek to {}%", (i + 1) * 100 / SEEK_PARTS), role: Role::Button, ..Default::default() });
                 }
             } else {
                 c.outline(Rect::new(bar_x, by, bar_w, bar_h), bar_h / 2.0, m.line(Line::Hair), th.border);
@@ -634,7 +634,7 @@ impl AudioView {
             if mw > 0.0 {
                 c.text(r.right() - mw, r.y + ((r.h - fs * 0.8) / 2.0).max(0.0), fs * 0.8, th.dim, tag, TextStyle::Regular);
             }
-            c.hit(r, Hit { action: self.base + A_ROW0 + (i - self.scroll) as u32, name: it.name.clone(), role: Role::ListItem });
+            c.hit(r, Hit { action: self.base + A_ROW0 + (i - self.scroll) as u32, name: it.name.clone(), role: Role::ListItem, ..Default::default() });
         }
     }
 }

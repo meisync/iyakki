@@ -31,13 +31,15 @@ pub fn family_of(r: &Route) -> Option<&'static str> {
         "data_call" => "api:data",
         _ if id.starts_with("data_") => "api:data",
         _ if id.starts_with("runs_") => "api:chat",
-        _ if id.starts_with("flows_") => "api:flows",
+        // a webhook starts one of the caller's flows: it is part of the flows family (the administrator routes were taken out above)
+        _ if id.starts_with("flows_") || id.starts_with("hooks_") => "api:flows",
         _ if id.starts_with("sched_") => "api:schedules",
         _ if id.starts_with("files_") => "api:files",
         _ if id.starts_with("git_") => "api:git",
         _ if id.starts_with("notif_") => "api:notify",
         _ if id.starts_with("tile_") || id == "events" => "api:tiles",
         _ if id.starts_with("admin_") || id.starts_with("webaccess_") || r.access == Access::Admin => "api:admin",
+        "voice_offer" | "voice_return" => "api:tenant",
         _ if id.starts_with("tenant") || id.starts_with("tcfg") || id.starts_with("tapprovals_") || id.starts_with("tteam_") || id.starts_with("ns_") => "api:tenant",
         _ => "api:admin",
     })
@@ -55,7 +57,8 @@ pub fn allows(held: &[String], r: &Route) -> bool {
     if f == "api:admin" {
         return false;
     }
-    let read = matches!(r.method, "GET" | "HEAD");
+    // `hooks_reveal` is a GET but it hands out a webhook's secret address: it is never a read-only call, only the whole family may make it
+    let read = matches!(r.method, "GET" | "HEAD") && r.id != "hooks_reveal";
     held.iter().any(|s| s == f || (read && s.strip_suffix(":read") == Some(f)))
 }
 
@@ -231,4 +234,14 @@ mod tests {
         d.write("keys.json", &keys).unwrap();
         assert!(d.api_scopes("ci-runner").is_empty() && d.api_grants().is_empty());
     }
+    #[test]
+    fn the_read_form_of_a_family_never_reveals_a_webhook_address() {
+        let reveal = ROUTES.iter().find(|r| r.id == "hooks_reveal").expect("the hooks_reveal route exists");
+        assert_eq!(family_of(reveal), Some("api:flows"));
+        assert!(!allows(&["api:flows:read".to_string()], reveal), "a program that may only read flows cannot read a webhook's secret address");
+        assert!(allows(&["api:flows".to_string()], reveal), "the whole family may");
+        let list = ROUTES.iter().find(|r| r.id == "hooks_list").expect("the hooks_list route exists");
+        assert!(allows(&["api:flows:read".to_string()], list), "listing hooks stays a read");
+    }
+
 }

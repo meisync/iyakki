@@ -264,18 +264,23 @@ pub trait RecFeed: Send {
 
 pub trait RecSource: Send + Sync {
     fn open(&self, spec: &Spec) -> Result<Box<dyn RecFeed>, FeedErr>;
+    /// Open with the data folder at hand: an encrypted camera (rtsps, https) needs the person's trust choice for it, which is kept there.
+    /// Sources that have no use for it open as `open` does.
+    fn open_at(&self, spec: &Spec, _data: &Path) -> Result<Box<dyn RecFeed>, FeedErr> {
+        self.open(spec)
+    }
 }
 
 /// The real source: the in-house RTSP and HTTP clients.
 pub struct NetSource(pub Arc<dyn CamSecrets>);
 
-struct RtspRaw {
-    client: rtsp::client::Client<std::net::TcpStream>,
+struct RtspRaw<T: std::io::Read + std::io::Write + Send> {
+    client: rtsp::client::Client<T>,
     kind: RecKind,
     params: Vec<u8>,
 }
 
-impl RecFeed for RtspRaw {
+impl<T: std::io::Read + std::io::Write + Send> RecFeed for RtspRaw<T> {
     fn next(&mut self) -> Result<Unit, FeedErr> {
         loop {
             match self.client.next_media().map_err(crate::cameras::map_err)? {
@@ -295,12 +300,12 @@ impl RecFeed for RtspRaw {
     }
 }
 
-struct HttpRaw {
-    h: rtsp::httpmjpeg::HttpMjpeg<std::net::TcpStream>,
+struct HttpRaw<T: std::io::Read + std::io::Write + Send> {
+    h: rtsp::httpmjpeg::HttpMjpeg<T>,
     last: Option<Instant>,
 }
 
-impl RecFeed for HttpRaw {
+impl<T: std::io::Read + std::io::Write + Send> RecFeed for HttpRaw<T> {
     fn next(&mut self) -> Result<Unit, FeedErr> {
         if self.h.is_snapshot() {
             if let Some(t) = self.last {
@@ -320,7 +325,35 @@ impl RecFeed for HttpRaw {
 
 impl RecSource for NetSource {
     fn open(&self, spec: &Spec) -> Result<Box<dyn RecFeed>, FeedErr> {
-        let url = rtsp::url::parse(&spec.address).map_err(|e| FeedErr::Lost(scrub(&e)))?;
+        self.open_with(spec, None)
+    }
+    fn open_at(&self, spec: &Spec, data: &Path) -> Result<Box<dyn RecFeed>, FeedErr> {
+        self.open_with(spec, Some(data))
+    }
+}
+
+/// What the camera's SDP says it sends, as the recorder keeps it (H.265 and unknown codecs cannot be recorded yet).
+fn rec_kind<T: std::io::Read + std::io::Write + Send>(client: &rtsp::client::Client<T>) -> Result<(RecKind, Vec<u8>), FeedErr> {
+    Ok(match &client.codec {
+        rtsp::sdp::Codec::H264 { sps, pps, .. } => {
+            let mut p = Vec::new();
+            for n in [sps, pps] {
+                if !n.is_empty() {
+                    p.extend_from_slice(&[0, 0, 0, 1]);
+                    p.extend_from_slice(n);
+                }
+            }
+            (RecKind::H264, p)
+        }
+        rtsp::sdp::Codec::Mjpeg => (RecKind::Jpeg, vec![]),
+        rtsp::sdp::Codec::H265 { .. } => return Err(FeedErr::Lost("the camera sends H.265, which cannot be recorded yet".into())),
+        rtsp::sdp::Codec::Other(n) => return Err(FeedErr::Lost(format!("the camera sends {n}, which cannot be recorded"))),
+    })
+}
+
+impl NetSource {
+    fn open_with(&self, spec: &Spec, data: Option<&Path>) -> Result<Box<dyn RecFeed>, FeedErr> {
+        let url = rtsp::url::parse_any(&spec.address).map_err(|e| FeedErr::Lost(scrub(&e)))?;
         let creds = if spec.secret.is_empty() {
             if spec.user.is_empty() { None } else { Some((spec.user.clone(), String::new())) }
         } else {
@@ -332,21 +365,7 @@ impl RecSource for NetSource {
                 let t = crate::cameras::tcp(&url.host, url.port)?;
                 let peer = t.peer_addr().ok().map(|a| a.ip());
                 let client = rtsp::client::Client::open_with(t, &url, creds, peer).map_err(crate::cameras::map_err)?;
-                let (kind, params) = match &client.codec {
-                    rtsp::sdp::Codec::H264 { sps, pps, .. } => {
-                        let mut p = Vec::new();
-                        for n in [sps, pps] {
-                            if !n.is_empty() {
-                                p.extend_from_slice(&[0, 0, 0, 1]);
-                                p.extend_from_slice(n);
-                            }
-                        }
-                        (RecKind::H264, p)
-                    }
-                    rtsp::sdp::Codec::Mjpeg => (RecKind::Jpeg, vec![]),
-                    rtsp::sdp::Codec::H265 { .. } => return Err(FeedErr::Lost("the camera sends H.265, which cannot be recorded yet".into())),
-                    rtsp::sdp::Codec::Other(n) => return Err(FeedErr::Lost(format!("the camera sends {n}, which cannot be recorded"))),
-                };
+                let (kind, params) = rec_kind(&client)?;
                 Ok(Box::new(RtspRaw { client, kind, params }))
             }
             rtsp::url::Scheme::Http => {
@@ -354,8 +373,20 @@ impl RecSource for NetSource {
                 let h = rtsp::httpmjpeg::HttpMjpeg::open(Box::new(move || crate::cameras::tcp(&host, port).map_err(|e| rtsp::Error::Io(format!("{e:?}")))), &url, creds).map_err(crate::cameras::map_err)?;
                 Ok(Box::new(HttpRaw { h, last: None }))
             }
-            // not reachable today (the plain parser refuses encrypted addresses above); recording them is its own piece
-            rtsp::url::Scheme::Rtsps | rtsp::url::Scheme::Https => Err(FeedErr::Lost("recording an encrypted camera stream is not built yet".into())),
+            // encrypted: the certificate is judged first by the person's trust choice for this camera, the sign-in is sent only after that
+            rtsp::url::Scheme::Rtsps => {
+                let data = data.ok_or_else(|| FeedErr::Lost("recording an encrypted camera stream needs the data folder of the trust choice".into()))?;
+                let t = crate::camtls::connect_for(data, &spec.id, &url.host, url.port).map_err(FeedErr::Lost)?;
+                let client = rtsp::client::Client::open_with(t, &url, creds, None).map_err(crate::cameras::map_err)?;
+                let (kind, params) = rec_kind(&client)?;
+                Ok(Box::new(RtspRaw { client, kind, params }))
+            }
+            rtsp::url::Scheme::Https => {
+                let data = data.ok_or_else(|| FeedErr::Lost("recording an encrypted camera stream needs the data folder of the trust choice".into()))?;
+                let (host, port, data, id) = (url.host.clone(), url.port, data.to_path_buf(), spec.id.clone());
+                let h = rtsp::httpmjpeg::HttpMjpeg::open(Box::new(move || crate::camtls::connect_for(&data, &id, &host, port).map_err(rtsp::Error::Io)), &url, creds).map_err(crate::cameras::map_err)?;
+                Ok(Box::new(HttpRaw { h, last: None }))
+            }
         }
     }
 }
@@ -625,6 +656,9 @@ pub struct Recorder {
     root: PathBuf,
     st: Mutex<State>,
     file_lock: Mutex<()>,
+    /// One supervision step at a time: a step reads the settings first and acts after, so a step that read "on" and a change to "off"
+    /// (whose own step ran in between) must not end with the stale step starting the recorder that was just stopped.
+    tick_lock: Mutex<()>,
     idx: Mutex<HashMap<String, Vec<SegEntry>>>,
     play: Mutex<Option<(PathBuf, zeroize::Zeroizing<String>, Arc<Segment>)>>,
     zone: Mutex<Option<(Instant, Arc<Zone>)>>,
@@ -680,7 +714,7 @@ pub fn stop_all_for(data: &Path, user: &str) -> usize {
 impl Recorder {
     pub fn new(hub: Arc<Hub>, env: RecEnv) -> Recorder {
         let root = root_of(&hub.env().data);
-        Recorder { hub, env, root, st: Mutex::new(State::default()), file_lock: Mutex::new(()), idx: Mutex::new(HashMap::new()), play: Mutex::new(None), zone: Mutex::new(None) }
+        Recorder { hub, env, root, st: Mutex::new(State::default()), file_lock: Mutex::new(()), tick_lock: Mutex::new(()), idx: Mutex::new(HashMap::new()), play: Mutex::new(None), zone: Mutex::new(None) }
     }
 
     /// Check the files and the limits now, then supervise: recordings that are switched on (re)start by themselves, windows open and
@@ -1092,6 +1126,7 @@ impl Recorder {
 
     /// One supervision step (also called by the thread every two seconds): start and stop recorders, retention.
     pub fn tick(self: &Arc<Self>) {
+        let _one_step = self.tick_lock.lock().unwrap_or_else(|e| e.into_inner());
         let store = self.load();
         let local = self.local((self.env.now_ms)());
         let specs = self.hub.specs();
@@ -1232,6 +1267,12 @@ impl Recorder {
                 std::thread::sleep(Duration::from_millis(20).min(end.saturating_duration_since(Instant::now())));
             }
         };
+        // while this thread runs, a live view that opens the camera first keeps its connection where the recorder can use it
+        let _wants = self.hub.share().want(&spec.id);
+        // the recorder is the first program to take a hold through `Leases::hold_local` (F-CLIENT-05): a SHARED one named "Recorder", because
+        // the one capture is shared with every viewer (an exclusive hold would shut clients out of a camera the recorder only reads); a person
+        // who looks at the camera's holders sees it, and the hold goes with the worker (dropped when the thread ends)
+        let _hold = crate::clientmedia::leases().hold_local(&spec.id, "Recorder", false).ok();
         let (mut frames_total, mut bytes_total) = (0u64, 0u64);
         let since = (self.env.now_ms)();
         'outer: while !stop.load(Ordering::SeqCst) {
@@ -1246,9 +1287,11 @@ impl Recorder {
             self.fold_pending(&spec.id, &key);
             let seal_key: &RecKey = &key;
             set(RecState::Waiting("connecting to the camera".into()));
-            let mut feed = match self.env.source.open(&spec) {
+            // the live view opened the camera first: look through its connection (a camera that allows one connection, F-CAM-19)
+            let via_live = self.hub.share().subscribe(&spec.id).map(|v| Ok(Box::new(v) as Box<dyn RecFeed>));
+            let mut feed = match via_live.unwrap_or_else(|| self.env.source.open_at(&spec, &self.hub.env().data).map(|f| self.hub.share().tee(&spec.id, f))) {
                 // the live view may take its pictures from this connection (a camera that allows one connection, F-CAM-19)
-                Ok(f) => self.hub.share().tee(&spec.id, f),
+                Ok(f) => f,
                 Err(e) => {
                     let m = match e {
                         FeedErr::Lost(m) | FeedErr::Auth(m) | FeedErr::Busy(m) | FeedErr::Addon(m) => m,
@@ -1635,14 +1678,13 @@ impl Recorder {
                     return Err(m);
                 }
             };
-            if seg.scan.kind == RecKind::H264 {
-                return Err("This camera was recorded as H.264. Playing it needs the audio and video add-on (Store, Setup), which you download yourself. You can export the clip and open it in a player of your own.".into());
-            }
             let fr = &seg.scan.frames;
+            // the parameter sets of an H.264 segment are stored as a frame of their own; it is not a picture to stop at
+            let playable = |f: &fmt::FrameRef| f.flags & fmt::F_PARAMS == 0;
             let pick = match seek {
-                Seek::AtOrAfter => fr.iter().position(|f| f.ts_ms >= at_ms),
-                Seek::After => fr.iter().position(|f| f.ts_ms > at_ms),
-                Seek::Before => fr.iter().rposition(|f| f.ts_ms < at_ms),
+                Seek::AtOrAfter => fr.iter().position(|f| playable(f) && f.ts_ms >= at_ms),
+                Seek::After => fr.iter().position(|f| playable(f) && f.ts_ms > at_ms),
+                Seek::Before => fr.iter().rposition(|f| playable(f) && f.ts_ms < at_ms),
             };
             let Some(k) = pick else { continue };
             let frame = match seg.frame(k) {
@@ -1653,13 +1695,45 @@ impl Recorder {
                 }
                 Err(e) => return Err(e.to_string()),
             };
-            let img = iyakki_web::jpeg::decode(&frame.data).map_err(|_| "this picture could not be decoded".to_string())?;
-            let (w, h, rgba) = crate::cameras::shrink(img.width, img.height, &img.rgba, crate::cameras::BIG_W);
+            let (w, h, rgba) = if seg.scan.kind == RecKind::H264 {
+                match self.decode_h264(&seg, k) {
+                    Ok(p) => p,
+                    Err(m) => {
+                        log_event(&self.hub.env().data, cam, &who.user, "playback.error", &m, false);
+                        return Err(m);
+                    }
+                }
+            } else {
+                let img = iyakki_web::jpeg::decode(&frame.data).map_err(|_| "this picture could not be decoded".to_string())?;
+                crate::cameras::shrink(img.width, img.height, &img.rgba, crate::cameras::BIG_W)
+            };
             let prev_ms = if k > 0 { Some(fr[k - 1].ts_ms) } else { entries.get(i.wrapping_sub(1)).filter(|_| i > 0).map(|p| p.end_ms) };
             let next_ms = if k + 1 < fr.len() { Some(fr[k + 1].ts_ms) } else { entries.get(i + 1).map(|n| n.start_ms) };
             return Ok(Some(PlayFrame { ts_ms: frame.ts_ms, label: format!("{} {}", self.day_label(frame.ts_ms), self.clock_label(frame.ts_ms)), width: w, height: h, rgba: Arc::new(rgba), prev_ms, next_ms }));
         }
         Ok(None)
+    }
+
+    /// The picture at frame `k` of an H.264 segment: the parameter sets, then every frame from the key frame at or before `k`, through the
+    /// add-on's decoder (without it the person is pointed to the add-on and to the export, which needs no decoder).
+    fn decode_h264(&self, seg: &Segment, k: usize) -> Result<(u32, u32, Vec<u8>), String> {
+        let Some(mut dec) = self.hub.env().h264.decoder() else {
+            return Err("This camera was recorded as H.264. Playing it needs the audio and video add-on (Store, Setup), which you download yourself. You can export the clip and open it in a player of your own.".into());
+        };
+        let fr = &seg.scan.frames;
+        let start = (0..=k).rev().find(|&j| fr[j].flags & fmt::F_KEY != 0 && fr[j].flags & fmt::F_PARAMS == 0).ok_or_else(|| "this recording has no key frame before this picture, so it cannot be shown".to_string())?;
+        let mut order: Vec<usize> = fr.iter().position(|f| f.flags & fmt::F_PARAMS != 0).into_iter().collect();
+        order.extend(start..=k);
+        let mut shown = None;
+        for j in order {
+            let f = seg.frame(j).map_err(|e| e.to_string())?;
+            let au = rtsp::rtp::AccessUnit { nals: crate::camshare::nals_from_annex_b(&f.data), timestamp: 0 };
+            if let Some(p) = dec.decode(&au).map_err(|e| scrub(&e))? {
+                shown = Some(p);
+            }
+        }
+        let (w, h, rgba) = shown.ok_or_else(|| "the decoder gave no picture for this frame".to_string())?;
+        Ok(crate::cameras::shrink(w, h, &rgba, crate::cameras::BIG_W))
     }
 
     // ------------------------------------------------------------------------------ export

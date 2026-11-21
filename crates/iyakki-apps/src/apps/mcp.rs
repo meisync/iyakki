@@ -575,7 +575,7 @@ done
         app.handle(&Event::Key(Key::Char('d')), &cx);
         app.handle(&Event::Key(Key::Char('y')), &cx);
         assert!(!app.server_names().contains(&"iyakki-demo") && cx.mcp().list().iter().all(|s| s.name != "iyakki-demo"));
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("mcp.add") && log.contains("mcp.remove"), "{log}");
         // a bad name stays in the form with the reason
         app.handle(&Event::Key(Key::Char('n')), &cx);

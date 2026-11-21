@@ -13,7 +13,7 @@ fn embedded() -> (Embedded, std::path::PathBuf) {
         store: Arc::new(RunStore::new(&dir.join("runs"))),
         chat: Arc::new(Script { turns: Mutex::new(VecDeque::new()) }),
         tools: Arc::new(FakeSource { executed: Arc::new(Mutex::new(vec![])) }),
-        extras: Arc::new(FakeExtras { ready: AtomicBool::new(true), web: Mutex::new((false, 8443)), switched: Default::default(), progs: Default::default(), pscopes: Default::default(), paused: Default::default(), home: Default::default(), tile_status: Default::default() }),
+        extras: Arc::new(FakeExtras { ready: AtomicBool::new(true), web: Mutex::new((false, 8443)), switched: Default::default(), progs: Default::default(), pscopes: Default::default(), paused: Default::default(), home: Default::default(), tile_status: Default::default(), voice_ret: Default::default(), terminal: Default::default() }),
         system_prompt: "test".into(),
     });
     (Embedded::new(deps).expect("embedded"), dir)

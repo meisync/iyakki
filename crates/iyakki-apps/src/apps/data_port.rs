@@ -33,7 +33,7 @@ impl DataPort for CxPort<'_> {
             can_write: Arc::new(move |path| c2.file_scope().roots(&p2, &u2, &d2).write_ok(&p2, &u2, Path::new(path))),
             roots: Arc::new(move || c3.file_scope().roots(&p3, &u3, &d3)),
             recent: Some(cx.data_dir().join(format!("data-recent-{}.json", cx.session.user))),
-            host: Some(super::hostfiles::HostEnv::for_cx(cx)),
+            host: Some(super::hostfiles::env_for_cx(cx)),
         }
     }
     fn user(&self) -> String {

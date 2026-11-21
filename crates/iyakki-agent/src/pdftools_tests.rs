@@ -617,6 +617,59 @@ fn filling_a_form_asks_checks_before_asking_and_writes_a_new_file_never_the_orig
     assert!(t.call("pdf_form_fill", &same).unwrap_err().contains("new file"));
 }
 
+/// A form with a reset button, a sending button, a signed field and an unsigned one.
+fn buttons_form_pdf() -> Vec<u8> {
+    let objs: [(u32, &str); 8] = [
+        (1, "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R 5 0 R 6 0 R 7 0 R 8 0 R] /DA (/Helv 0 Tf 0 g) >> >>"),
+        (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 100] >>"),
+        (3, "<< /Type /Page /Parent 2 0 R /Annots [4 0 R 5 0 R 6 0 R 7 0 R 8 0 R] >>"),
+        (4, "<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /V (Ada) /DV (Anon) /Rect [10 70 110 90] >>"),
+        (5, "<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 65536 /T (clear) /Rect [10 40 60 60] /MK << /CA (Clear) >> /A << /S /ResetForm >> >>"),
+        (6, "<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 65536 /T (send) /Rect [70 40 120 60] /MK << /CA (Send) >> /A << /S /SubmitForm /F (https://example.org/in) >> >>"),
+        (7, "<< /Type /Annot /Subtype /Widget /FT /Sig /T (sig1) /Rect [10 5 90 30] /V << /Type /Sig /SubFilter /adbe.pkcs7.detached /Name (Grace Hopper) /Reason (Approved) /M (D:20260102030405Z) /ByteRange [0 10 20 5] /Contents <00> >> >>"),
+        (8, "<< /Type /Annot /Subtype /Widget /FT /Sig /T (sig2) /Rect [100 5 190 30] >>"),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offs = vec![0usize; 9];
+    for (n, b) in &objs {
+        offs[*n as usize] = out.len();
+        out.extend_from_slice(format!("{n} 0 obj\n{b}\nendobj\n").as_bytes());
+    }
+    let x = out.len();
+    out.extend_from_slice(b"xref\n0 9\n0000000000 65535 f \n");
+    for n in 1..9 {
+        out.extend_from_slice(format!("{:010} 00000 n \n", offs[n]).as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size 9 /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n").as_bytes());
+    out
+}
+
+#[test]
+fn signatures_and_buttons_are_told_and_a_reset_button_is_pressed_through_the_fill_tool() {
+    let mut f = Fake::default();
+    f.files.insert("/forms/b.pdf".into(), buttons_form_pdf());
+    let (t, fake) = tools(f);
+    let info = t.call("pdf_info", &json!({"path": "/forms/b.pdf"})).unwrap();
+    assert!(info.contains("2 signature fields") && info.contains("nothing is verified"), "{info}");
+    assert!(info.contains("sig1: holds a signature by Grace Hopper; reason: Approved; time: D:20260102030405Z; the file was changed after signing"), "{info}");
+    assert!(info.contains("sig2: not signed"), "{info}");
+    assert!(info.contains("clear (\"Clear\"): puts the form back to its defaults (pdf_form_fill with reset: \"clear\")"), "{info}");
+    assert!(info.contains("send (\"Send\"): sends the form to https://example.org/in (not done by this tool)"), "{info}");
+    // the reset is checked before the person is asked, and the sending button is refused with the reason
+    let bad = |a: Value| t.refusal("pdf_form_fill", &a);
+    assert!(bad(json!({"path": "/forms/b.pdf", "reset": "send"})).unwrap().contains("sending is not done"));
+    assert!(bad(json!({"path": "/forms/b.pdf", "reset": "nothing"})).unwrap().contains("no push button"));
+    assert!(bad(json!({"path": "/forms/b.pdf"})).unwrap().contains("say which fields"));
+    assert!(bad(json!({"path": "/forms/b.pdf", "reset": "clear"})).is_none());
+    let a = json!({"path": "/forms/b.pdf", "reset": "clear"});
+    let pv = t.preview("pdf_form_fill", &a).unwrap();
+    assert!(pv.contains("name = Anon"), "{pv}");
+    t.call("pdf_form_fill", &a).unwrap();
+    let w = fake.written.lock().unwrap();
+    let n = iyakki_pdf::Document::open(w[0].1.clone()).unwrap();
+    assert_eq!(n.editable_fields().into_iter().find(|f| f.name == "name").unwrap().value, "Anon");
+}
+
 /// A one page PDF that is only a picture of text drawn with a real font (a scan), at 150 dots per inch.
 fn scanned_sample(lines: &[&str]) -> Option<Vec<u8>> {
     let font = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../iyakki-shell/assets/DejaVuSans.ttf")).ok()?;

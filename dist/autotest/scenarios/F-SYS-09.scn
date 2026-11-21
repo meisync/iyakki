@@ -1,0 +1,8 @@
+# autotest pilot, batch A (2026-11-21). Written against the Feature text with sha a52393b9c736cbcf; honest subset only: everything not checked is under not-covered.
+row: F-SYS-09
+targets: qemu
+profile: ram
+feature-sha: a52393b9c736cbcf
+doc: system_processes and system_pod_busy answer read-only and redacted
+human: chat-processes | Ask the assistant for the busiest processes by memory, limit 5. Expect: A short list with command lines that show no secrets.
+not-covered: system_processes and system_pod_busy answer read-only and redacted

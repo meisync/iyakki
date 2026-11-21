@@ -781,3 +781,44 @@ fn aes_256_files_of_revision_6_and_5_open_with_the_user_and_the_owner_password_a
         }
     }
 }
+
+#[test]
+fn a_type1_program_may_write_its_codes_with_a_radix() {
+    let font = "<< /Type /Font /Subtype /Type1 /BaseFont /Foo /FontDescriptor 6 0 R >>";
+    // 8#141 is 97 (a), 16#62 is 98 (b), 8#1 is code 1
+    let head = "%!PS-AdobeFont-1.0: Foo\n/Encoding 256 array\ndup 8#141 /a put\ndup 16#62 /b put\ndup 8#1 /Eacute put\nreadonly def\ncurrentfile eexec";
+    assert_eq!(open(type1_pdf(font, head)).page_text(0).unwrap(), "ab\u{c9}");
+    // a radix that does not exist or digits that do not fit it are skipped, not a panic
+    let bad = "/Encoding 256 array\ndup 99#1 /a put\ndup 8#9 /b put\ndup 7 /c put\nreadonly def\ncurrentfile eexec";
+    let _ = open(type1_pdf(font, bad)).page_text(0);
+}
+
+#[test]
+fn a_type0_font_with_a_predefined_unicode_cmap_and_no_tounicode_reads_its_codes_as_unicode() {
+    use crate::font::is_unicode_cmap;
+    for ok in ["UniJIS-UCS2-H", "UniGB-UTF16-H", "UniCNS-UCS2-V", "UniKS-UCS2-H", "UniJIS-UCS2-HW-H"] {
+        assert!(is_unicode_cmap(ok), "{ok}");
+    }
+    for no in ["Identity-H", "90ms-RKSJ-H", "UniFoo-UCS2-H", "UniJIS-UTF8-H", "GBK-EUC-H", "Uni", ""] {
+        assert!(!is_unicode_cmap(no), "{no}");
+    }
+    let page = |enc: &str| {
+        assemble(
+            &[
+                (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+                (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 100] >>".to_vec()),
+                (3, b"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec()),
+                // U+65E5 U+672C (two CJK letters), U+0041
+                (4, stream("", b"BT /F1 12 Tf 20 50 Td <65E5672C0041> Tj ET")),
+                (5, format!("<< /Type /Font /Subtype /Type0 /BaseFont /Foo /Encoding /{enc} /DescendantFonts [6 0 R] >>").into_bytes()),
+                (6, b"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Foo /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 2 >> /DW 1000 >>".to_vec()),
+            ],
+            1,
+            "",
+        )
+    };
+    assert_eq!(open(page("UniJIS-UCS2-H")).page_text(0).unwrap(), "\u{65e5}\u{672c}A");
+    assert_eq!(open(page("UniJIS-UTF16-H")).page_text(0).unwrap(), "\u{65e5}\u{672c}A");
+    // an Identity CMap with no map of its own gives nothing invented
+    assert_eq!(open(page("Identity-H")).page_text(0).unwrap().trim(), "");
+}

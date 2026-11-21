@@ -115,6 +115,7 @@ pub fn describe(code: ErrorCode) -> Described {
         ErrorCode::Unsupported => d("Not available to a client", "That is not available from a client.", false, Action::None, 0),
         ErrorCode::Closed => d("Too slow", "The machine closed the connection because nothing was said for a while. The page connects again by itself.", false, Action::Wait, 0),
         ErrorCode::Internal => d("The machine had a problem", "The machine could not do that right now. The page tries again in a moment.", false, Action::Wait, 5),
+        ErrorCode::Unknown => d("A problem this page does not know", "The machine reported a problem this page has no words for, which means the machine is newer than this page. Reload the page to get the matching one.", false, Action::Reload, 0),
     }
 }
 
@@ -146,6 +147,9 @@ pub enum Out {
     /// A message of the media half: `ev` is its tag (`audio_ok`, `audio_closed`, `audio_flush`, `clipboard_text`, `clipboard_ok`, `camera_ok`,
     /// `camera_closed`, `offer_ok`, `offer_closed`, `media_err`) and `body` the whole message.
     Media { ev: String, body: serde_json::Value },
+    /// A message of the display-list mode (D-CLIENT-PROTO-DISPLAYLIST): `ev` is `app_list`, `app_closed` or `app_err` and `body` the whole message
+    /// (an `app_list` has `app` and `text`, the display list to hand to `ui_load`).
+    App { ev: String, body: serde_json::Value },
 }
 
 struct Pending {
@@ -168,6 +172,8 @@ pub struct Engine {
     version: u64,
     frame_errors: u32,
     reconnect: bool,
+    /// What `hello_ok` agreed on (the display-list mode is asked for only when it is in here).
+    agreed: Vec<String>,
     out: VecDeque<Out>,
 }
 
@@ -178,7 +184,7 @@ fn msg_text(m: &ClientMsg) -> Out {
 impl Engine {
     pub fn new(cfg: Config) -> Engine {
         let device = cfg.device.clone().filter(|d| !d.is_empty());
-        Engine { cfg, phase: Phase::Idle, device, challenge: None, pending: None, last_seq: 0, canvas: Canvas::default(), screen: (0, 0), viewport: None, version: 0, frame_errors: 0, reconnect: true, out: VecDeque::new() }
+        Engine { cfg, phase: Phase::Idle, device, challenge: None, pending: None, last_seq: 0, canvas: Canvas::default(), screen: (0, 0), viewport: None, version: 0, frame_errors: 0, reconnect: true, agreed: Vec::new(), out: VecDeque::new() }
     }
 
     pub fn phase(&self) -> Phase {
@@ -250,7 +256,7 @@ impl Engine {
         let hello = ClientMsg::Hello {
             v: proto::PROTOCOL_VERSION,
             min_v: proto::MIN_PROTOCOL_VERSION,
-            offered: [proto::cap::PICTURE, proto::cap::INPUT, proto::cap::EVENTS, proto::cap::CALLS].into_iter().chain(proto::cap::SERVER_MEDIA.iter().copied()).map(String::from).collect(),
+            offered: [proto::cap::SERVER, proto::cap::SERVER_MEDIA, proto::cap::SERVER_UI, proto::cap::SERVER_FILES].concat().into_iter().map(String::from).collect(),
             needed: vec![proto::cap::PICTURE.into(), proto::cap::INPUT.into()],
             client: self.cfg.client.clone(),
         };
@@ -271,6 +277,25 @@ impl Engine {
     }
 
     pub fn on_text(&mut self, text: &str) {
+        // the display-list mode's messages are read here with the engine's own JSON reader (see `proto::AppMsg`: the main reader is unchanged)
+        match proto::app_text(text) {
+            Ok(true) => {
+                let parsed = serde_json::from_str::<serde_json::Value>(text).map_err(|_| ()).and_then(|v| proto::app_from_value(&v).map(|_| v).map_err(|_| ()));
+                match parsed {
+                    Ok(body) => {
+                        let ev = body.get("t").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                        self.out.push_back(Out::App { ev, body });
+                    }
+                    Err(()) => self.out.push_back(Out::Notice { text: "a message from the machine was not understood (bad_message)".into() }),
+                }
+                return;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                self.out.push_back(Out::Notice { text: format!("a message from the machine was not understood ({})", e.code.as_str()) });
+                return;
+            }
+        }
         let m = match proto::decode_server(text) {
             Ok(m) => m,
             Err(e) => {
@@ -287,6 +312,7 @@ impl Engine {
                     return self.fail(ErrorCode::CapabilityMissing, None);
                 }
                 self.challenge = Some(challenge);
+                self.agreed = caps.clone();
                 if self.device.is_some() {
                     self.ask_signature();
                 } else if let Some(token) = self.cfg.token.take() {
@@ -358,6 +384,8 @@ impl Engine {
                 let ev = body.get("t").and_then(|t| t.as_str()).unwrap_or("").to_string();
                 self.out.push_back(Out::Media { ev, body });
             }
+            // a message of a type a newer machine added: said once as a notice, never an error, and the connection goes on (charter rule 2)
+            ServerMsg::Unknown => self.out.push_back(Out::Notice { text: "a message of a type this page does not know was ignored (the machine is newer than this page)".into() }),
         }
     }
 
@@ -439,6 +467,39 @@ impl Engine {
 
     fn signed_in(&self) -> bool {
         matches!(self.phase, Phase::Opening | Phase::Live)
+    }
+
+    // ------------------------------------------------------------------------------------------ display-list mode
+
+    /// True when the machine agreed to the display-list mode and the person is signed in.
+    pub fn app_ready(&self) -> bool {
+        self.signed_in() && self.agreed.iter().any(|c| c == proto::cap::DISPLAY_LIST)
+    }
+
+    /// Open an SDK app of the machine in display-list mode; its frames come as `Out::App` records with `ev` `app_list`.
+    pub fn app_open(&mut self, app: &str, w: u32, h: u32) -> bool {
+        if !self.app_ready() || app.is_empty() || app.len() > 64 {
+            return false;
+        }
+        self.say(&ClientMsg::AppOpen { app: app.into(), w, h });
+        true
+    }
+
+    /// Send input lines (the SDK's text input lines made with `ui_line`) to the open app; the answer is the next `app_list`.
+    pub fn app_input(&mut self, lines: &str) -> bool {
+        if !self.app_ready() || lines.len() > proto::MAX_TEXT / 2 {
+            return false;
+        }
+        self.say(&ClientMsg::AppInput { lines: lines.into() });
+        true
+    }
+
+    /// Close the app; the machine's screen picture carries on.
+    pub fn app_close(&mut self) -> bool {
+        self.app_ready() && {
+            self.say(&ClientMsg::AppClose);
+            true
+        }
     }
 
     /// Ask for the person's sound here. `side` is `client` (the machine's speakers stay quiet) or `both`.

@@ -1,5 +1,5 @@
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Bump {
     Patch,
     Minor,
@@ -40,7 +40,7 @@ impl Preflight {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoreChoice {
     pub id: String,
     pub name: String,
@@ -51,7 +51,7 @@ pub struct StoreChoice {
     pub private: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Card {
     pub store: String,
     pub server: String,
@@ -70,10 +70,10 @@ pub struct Card {
     pub files: Vec<String>,
     pub store_has: Option<String>,
     pub token_present: bool,
-    pub yank_note: &'static str,
+    pub yank_note: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Stop {
     /// Ask for the token in the masked dialog, then try again.
     NeedsToken,

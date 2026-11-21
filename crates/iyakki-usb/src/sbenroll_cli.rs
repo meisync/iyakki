@@ -70,7 +70,7 @@ pub fn assemble(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn load_signed(dir: &Path) -> Result<Signed, String> {
+pub fn load_signed(dir: &Path) -> Result<Signed, String> {
     let rd = |v: Var| std::fs::read(dir.join(format!("{}.auth", v.name()))).map_err(|e| format!("{}.auth: {e} (run --sb-assemble first)", v.name()));
     Ok(Signed { pk: rd(Var::Pk)?, kek: rd(Var::Kek)?, db: rd(Var::Db)? })
 }

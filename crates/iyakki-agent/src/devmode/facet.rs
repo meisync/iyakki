@@ -161,6 +161,12 @@ impl DevRelay for DevMode {
     fn relay_summary(&self) -> String {
         DevMode::relay_summary(self)
     }
+    fn relay_pin(&self) -> String {
+        DevMode::relay_pin(self)
+    }
+    fn set_relay_pin(&self, policy: &Policy, user: &str, pin: &str) -> Result<(), String> {
+        DevMode::set_relay_pin(self, policy, user, pin)
+    }
     fn network_wide(&self) -> bool {
         DevMode::network_wide(self)
     }

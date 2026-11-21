@@ -32,7 +32,7 @@ impl Actor {
 }
 
 /// What the person agreed to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Confirm {
     pub permissions: bool,
     pub warnings: bool,
@@ -52,15 +52,38 @@ use iyakki_core_api::appcaps::CapabilityRequest;
 use iyakki_core_api::appcaps::CardLine;
 use iyakki_core_api::bundle::Member;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Perm {
     pub canonical: String,
     pub words: String,
     pub sensitive: bool,
 }
 
+/// `Vec<CardLine>` on the wire. `CardLine` is a type of the core API, whose public surface only grows by the owner's review, so the store types carry
+/// it through this twin instead of a derive on the core type (F-SPLIT-03).
+pub mod card_lines_wire {
+    use iyakki_core_api::appcaps::CardLine;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct Wire {
+        name: String,
+        words: String,
+        hard_ask: bool,
+        is_new: bool,
+    }
+
+    pub fn serialize<S: Serializer>(lines: &[CardLine], s: S) -> Result<S::Ok, S::Error> {
+        lines.iter().map(|l| Wire { name: l.name.clone(), words: l.words.clone(), hard_ask: l.hard_ask, is_new: l.is_new }).collect::<Vec<_>>().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<CardLine>, D::Error> {
+        Ok(Vec::<Wire>::deserialize(d)?.into_iter().map(|w| CardLine { name: w.name, words: w.words, hard_ask: w.hard_ask, is_new: w.is_new }).collect())
+    }
+}
+
 /// What the person is shown before anything is installed.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Review {
     pub kind: String,
     pub name: String,
@@ -73,6 +96,7 @@ pub struct Review {
     /// The core capabilities (device and system access) the app asks for, as in its `app.json`.
     pub core_requests: Vec<CapabilityRequest>,
     /// The same, worded for the card, with the hard asks and (on an update) the new ones marked.
+    #[serde(with = "card_lines_wire")]
     pub core_lines: Vec<CardLine>,
     /// A bundle's members, grouped for the card (docs/development/CORE-ACCESS-MODEL.md section 6d); empty for an app without `contents`.
     pub members: Vec<crate::store_bundle::MemberCard>,
@@ -156,7 +180,7 @@ impl Review {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InstallError {
     /// The review said no.
     Refused(String),
@@ -179,7 +203,7 @@ impl std::fmt::Display for InstallError {
 
 
 /// One thing the store checked, with its result in words.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Step {
     pub label: String,
     pub ok: bool,
@@ -189,7 +213,7 @@ pub struct Step {
 // ---- moved from iyakki-agent (F-SPLIT-03) ----
 use crate::store_catalog::Entry;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Input {
     pub bytes: Vec<u8>,
     pub entry: Option<Entry>,
@@ -237,4 +261,24 @@ impl Record {
 
 pub fn scope_from_key(k: &str) -> Scope {
     k.strip_prefix("user/").map_or(Scope::Shared, |u| Scope::User(u.into()))
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    #[test]
+    fn the_card_lines_of_a_review_survive_the_wire_in_order_with_their_fields_named() {
+        let lines = vec![CardLine { name: "camera".into(), words: "see pictures from a camera".into(), hard_ask: true, is_new: false }, CardLine { name: "files".into(), words: "read your files".into(), hard_ask: false, is_new: true }];
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Holder {
+            #[serde(with = "card_lines_wire")]
+            lines: Vec<CardLine>,
+        }
+        let text = serde_json::to_string(&Holder { lines: lines.clone() }).unwrap();
+        let back: Holder = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.lines, lines);
+        // the wire form names the fields, so a reader of another version keeps working when a field is added later
+        assert!(text.contains("\"hard_ask\":true") && text.contains("\"is_new\":true"), "{text}");
+    }
 }

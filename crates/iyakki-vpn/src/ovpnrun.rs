@@ -134,6 +134,12 @@ pub struct Checked {
 /// Combine the profile's own static routes and the pushed ones. `full` is true when the whole machine goes through the tunnel; then
 /// a pushed `redirect-gateway` and the profile's both give the default route. DNS only counts for a full tunnel (as for WireGuard).
 pub fn check_pushed(p: &Pushed, profile_routes: &[Cidr], profile_redirect: bool, full: bool, ctx: &Context) -> Result<Checked, VpnError> {
+    check_pushed_with(p, profile_routes, profile_redirect, full, full, ctx)
+}
+
+/// As [`check_pushed`], with the choice of keeping the pushed DNS servers (`want_dns`) separate from the full tunnel: a HYBRID profile
+/// with domain rules needs the tunnel's resolver for the names of the rules (the forwarder asks it), though not for the machine.
+pub fn check_pushed_with(p: &Pushed, profile_routes: &[Cidr], profile_redirect: bool, full: bool, want_dns: bool, ctx: &Context) -> Result<Checked, VpnError> {
     if p.addresses.is_empty() {
         return Err(inv("the server did not give the tunnel an address"));
     }
@@ -154,7 +160,7 @@ pub fn check_pushed(p: &Pushed, profile_routes: &[Cidr], profile_redirect: bool,
         return Err(inv("the server pushed no routes, so nothing would go through the tunnel"));
     }
     let mut warnings = Vec::new();
-    let dns = if full && !p.dns.is_empty() {
+    let dns = if want_dns && !p.dns.is_empty() {
         let (d, w) = check_dns(&p.dns.iter().map(ToString::to_string).collect::<Vec<_>>(), ctx)?;
         warnings.extend(w);
         d

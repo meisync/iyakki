@@ -19,7 +19,7 @@ use super::{blink, App, AppCx, Flow};
 use crate::gfx::{rgb, Face, Gfx, Icon};
 use crate::ui::{Event, Key, Nav, TextField, DIM, ERR, MUTED, OK, R, TEXT};
 
-const ACCENT: [u8; 4] = rgb(110, 224, 160);
+pub(super) const ACCENT: [u8; 4] = rgb(110, 224, 160);
 const AREA_TEXT: usize = 1;
 const AREA_REVIEW: usize = 2;
 const F_QUERY: usize = 10;
@@ -891,6 +891,35 @@ impl EditApp {
                 }
             }
             None => self.open_save_as(),
+        }
+    }
+
+    /// Ctrl+Shift+V / the context menu: the newest copy is a picture, so keep it as a PNG next to the file and write a Markdown picture
+    /// line at the caret. Needs a saved Markdown file the person may write beside; says why in a sentence otherwise.
+    fn paste_picture(&mut self, cx: &AppCx) {
+        let (_, _, png) = match super::pastepic::newest_png() {
+            Ok(Some(p)) => p,
+            Ok(None) => return self.fail("The newest copy is not a picture: copy or screenshot one first."),
+            Err(e) => return self.fail(e),
+        };
+        if !matches!(self.hl.lang(), Lang::Markdown) {
+            return self.fail("A picture goes into a Markdown file. Use Ctrl+V for text.");
+        }
+        let Some(dir) = self.path.as_ref().and_then(|p| p.parent()).map(Path::to_path_buf) else {
+            return self.fail("Save the file first (Ctrl+S): the picture is kept next to it.");
+        };
+        if let Err(e) = cx.core.file_scope().check_write(&cx.session.policy, &cx.session.user, &dir) {
+            return self.fail(e);
+        }
+        match super::pastepic::save(&dir, &png) {
+            Ok(p) => {
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                cx.audit.record(&cx.session.user, "edit.paste_picture", &p.to_string_lossy());
+                let r = self.buf.insert(&format!("![pasted picture]({name})"));
+                self.do_edit(r);
+                self.ok(format!("Kept the picture as {name} next to this file."));
+            }
+            Err(e) => self.fail(e),
         }
     }
 
@@ -1935,6 +1964,11 @@ impl App for EditApp {
         }
     }
 
+    /// The file in the tab that shows (a saved one); what was typed and not saved is not kept.
+    fn resume_item(&self) -> Option<String> {
+        self.path.as_ref().map(|p| p.to_string_lossy().into_owned())
+    }
+
     fn take_host_save(&mut self) -> Option<(String, Vec<u8>)> {
         self.host_save.take()
     }
@@ -1955,6 +1989,10 @@ impl App for EditApp {
             v.push(Item::separator());
             v.push(Item::new("comment", "Comment line", "Ctrl+L"));
         }
+        if crate::ui::clipboard::newest_picture().is_some() && matches!(self.hl.lang(), Lang::Markdown) {
+            v.push(Item::separator());
+            v.push(Item::new("pastepic", "Paste picture", "Ctrl+Shift+V"));
+        }
         if self.path.as_ref().is_some_and(|p| p.parent().is_some_and(|d| d.is_dir())) {
             v.push(Item::separator());
             v.push(Item::new("share", "Share this file's folder…", ""));
@@ -1969,6 +2007,10 @@ impl App for EditApp {
     fn context_pick(&mut self, id: &str, cx: &AppCx) -> Flow {
         if id == "comment" {
             return self.handle(&Event::Key(Key::Ctrl('l')), cx);
+        }
+        if id == "pastepic" {
+            self.paste_picture(cx);
+            return Flow::Stay;
         }
         if id == "share" {
             if let Some(d) = self.path.as_ref().and_then(|p| p.parent()) {
@@ -2148,6 +2190,7 @@ impl App for EditApp {
             Event::Key(Key::Ctrl('e')) if self.md_capable() => self.md_set_edit(false),
             Event::Key(Key::Ctrl('s')) => self.save(cx),
             // a copy of the open file on the computer the window runs on (window mode): the shell asks where
+            Event::Key(Key::Ctrl('V')) => self.paste_picture(cx),
             Event::Key(Key::Ctrl('H')) => {
                 if !iyakki_shared::hostfiles::enabled() {
                     self.fail(iyakki_shared::hostfiles::UNAVAILABLE);
@@ -2319,6 +2362,22 @@ mod tests {
     }
 
     #[test]
+    fn the_open_file_is_what_a_restart_puts_back_and_a_new_editor_opens_it_again_through_open_item() {
+        let (cx, home) = world("e-resume");
+        let a = EditApp::new(&cx);
+        assert_eq!(a.resume_item(), None, "no file, nothing to put back");
+        let a = app_with(&cx, &home, "keep.txt", "one\n");
+        let item = a.resume_item().expect("the path");
+        assert!(item.ends_with("keep.txt"));
+        let mut b = EditApp::new(&cx);
+        b.open_item(&item, &cx);
+        assert_eq!(b.text(), "one\n");
+        let mut c = EditApp::new(&cx);
+        c.open_item("/etc/outside-the-scope", &cx);
+        assert_eq!(c.resume_item(), None, "a path outside the person's scope is refused");
+    }
+
+    #[test]
     fn open_edit_and_save_a_file_inside_the_users_scope() {
         let (cx, home) = world("e1");
         let mut a = app_with(&cx, &home, "hello.rs", "fn main() {\n}\n");
@@ -2385,6 +2444,32 @@ mod tests {
             let e = a.open_path(&cx, &home.join(f).to_string_lossy()).unwrap_err();
             assert!(e.contains(why), "{f}: {e}");
         }
+    }
+
+    #[test]
+    fn a_picture_on_top_of_the_clipboard_history_becomes_a_png_beside_a_saved_markdown_file_and_a_picture_line() {
+        let (cx, home) = world("pastepic");
+        crate::ui::clipboard::clear();
+        let mut a = app_with(&cx, &home, "notes.md", "# Notes\n");
+        key(&mut a, &cx, Key::Ctrl('V'));
+        assert!(a.status().is_some_and(|s| s.0.contains("not a picture")), "nothing copied");
+        crate::ui::clipboard::copy_image(2, 1, vec![10, 20, 30, 255, 40, 50, 60, 255]);
+        assert!(a.context_items(0, 0).iter().any(|i| i.id == "pastepic"), "the menu offers it while a picture is on top");
+        key(&mut a, &cx, Key::Nav { nav: Nav::End, shift: false, ctrl: true });
+        key(&mut a, &cx, Key::Ctrl('V'));
+        assert!(a.text().contains("![pasted picture](Pasted-picture-1.png)"), "{}", a.text());
+        assert_eq!(&std::fs::read(home.join("Pasted-picture-1.png")).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+        key(&mut a, &cx, Key::Ctrl('V'));
+        assert!(a.text().contains("Pasted-picture-2.png"), "a second picture gets its own number");
+        assert!(cx.audit.recent(20).iter().any(|l| l.contains("edit.paste_picture")));
+        // a code file takes text only; an unsaved buffer has no folder; text on top means no picture
+        let mut c = app_with(&cx, &home, "x.rs", "fn main() {}\n");
+        key(&mut c, &cx, Key::Ctrl('V'));
+        assert!(c.status().is_some_and(|s| s.0.contains("Markdown")) && !c.text().contains("pasted picture"));
+        crate::ui::clipboard::copy("words");
+        key(&mut a, &cx, Key::Ctrl('V'));
+        assert!(a.status().is_some_and(|s| s.0.contains("not a picture")));
+        assert!(!a.context_items(0, 0).iter().any(|i| i.id == "pastepic"));
     }
 
     #[test]
@@ -3231,7 +3316,7 @@ mod tests {
         let (cx, home) = world("mdpic");
         let mut a = app_with(&cx, &home, "README.md", "# IYAKKI\n\nAn **OS for agents**. See `iyakki dev` and [the guide](https://example.org).\n\n## Install\n\n- write the stick\n- boot it\n\n> a quote\n\n```\ncargo build\n```\n");
         a.ide = true;
-        render(&mut a, &cx).pm.save_png(out).unwrap();
+        render(&mut a, &cx).pm_mut().save_png(out).unwrap();
     }
 
 }

@@ -339,6 +339,22 @@ case $vm in "$rel "*) : ;; *) die 9 "vermagic '$vm' does not start with the kern
 printf '%s\n' "$insp" | grep -q '^depends:' || die 9 "could not read the module's dependencies"
 deps=$(printf '%s\n' "$insp" | sed -n 's/^depends: //p')
 say "the module depends on: ${deps:-nothing} (the device loads these first; the image kernel has them as modules)"
+# Secure Boot (F-BOOT-02): a computer that starts with Secure Boot refuses unsigned kernel modules, so when the image key is given
+# (IYAKKI_SB_KEY and IYAKKI_SB_CERT, the same two files the image build reads; never in the repository) the module is signed here with the
+# kernel tree's own scripts/sign-file and the signature marker is checked before anything is packed. Without the key the module stays
+# unsigned and the pack says so (the device then refuses it under Secure Boot, with the reason in plain words).
+signed=no
+if [ -n "${IYAKKI_SB_KEY:-}" ] && [ -n "${IYAKKI_SB_CERT:-}" ]; then
+  [ -f "$IYAKKI_SB_KEY" ] && [ -f "$IYAKKI_SB_CERT" ] || die 10 "IYAKKI_SB_KEY or IYAKKI_SB_CERT does not name a file"
+  signfile="${IYAKKI_SIGN_FILE:-$tree/scripts/sign-file}"
+  [ -x "$signfile" ] || die 10 "the kernel's scripts/sign-file was not found at $signfile (build the kernel tree with CONFIG_MODULE_SIG=y, or set IYAKKI_SIGN_FILE)"
+  "$signfile" sha256 "$IYAKKI_SB_KEY" "$IYAKKI_SB_CERT" "$ko" || die 10 "signing wl.ko with the image key failed"
+  tail -c 28 "$ko" | grep -q '~Module signature appended~' || die 10 "wl.ko has no module signature after signing"
+  signed=yes
+  say "wl.ko signed with the image key (Secure Boot computers load it)"
+else
+  say "wl.ko is NOT signed (no IYAKKI_SB_KEY/IYAKKI_SB_CERT): a computer that starts with Secure Boot refuses it"
+fi
 kobytes=$(wc -c < "$ko" | tr -d ' ')
 [ "$kobytes" -lt 8000000 ] || die 10 "wl.ko is $kobytes bytes; a pack takes at most 8 MiB per module"
 

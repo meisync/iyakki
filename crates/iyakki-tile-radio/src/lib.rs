@@ -787,6 +787,11 @@ impl RadioApp {
 
         // ---- the player
         let ch = (area.y + area.h - y - 250.0 * s).clamp_safe(286.0 * s, 310.0 * s);
+        // a narrow card (a phone, or large text): the transport buttons leave no room for the volume bars beside them, so the bars get a row
+        // of their own under the buttons and the card grows by that row (the level display below keeps clear of it)
+        let narrow = x + w - 26.0 * s - (x + 24.0 * s + 2.0 * (78.0 * s) + 12.0 * s + 34.0 * s + 3.0 * 46.0 * s + 10.0 * s + 36.0 * s + 18.0 * s) < 130.0 * s;
+        let extra = if narrow { 60.0 * s } else { 0.0 };
+        let ch = ch + extra;
         let card = R::new(x, y, w, ch);
         let glow = if playing { 0.35 + 0.65 * energy.min(1.0) } else { 0.15 };
         glow_card(g, card, s, CYAN, MAGENTA, glow);
@@ -814,8 +819,8 @@ impl RadioApp {
         let tw = card.x + card.w - tx - 26.0 * s;
         let (head, sub, color) = match &state {
             RadioState::Idle => ("Nothing is playing".to_string(), format!("{} · press Enter on a station", self.tab_name()), MUTED),
-            RadioState::Connecting(n) => (n.clone(), "tuning in…".to_string(), CYAN),
-            RadioState::Playing { station, title, kbps } => (station.clone(), if title.is_empty() { format!("on air{}", if *kbps > 0 { format!(" · {kbps} kbit/s") } else { String::new() }) } else { title.clone() }, OK),
+            RadioState::Connecting(n) => (n.clone(), p.notice().map_or_else(|| "tuning in…".to_string(), |t| format!("{t}…")), CYAN),
+            RadioState::Playing { station, title, kbps } => (station.clone(), if title.is_empty() { format!("on air{}{}", if *kbps > 0 { format!(" · {kbps} kbit/s") } else { String::new() }, p.notice().map_or(String::new(), |t| format!(" · {t}"))) } else { title.clone() }, OK),
             RadioState::Failed { station, why } => {
                 let waiting = p.cert_problem().is_some_and(|c| &c.station == station);
                 (format!("{station} did not play"), if waiting { "The server did not send its full certificate chain. Review its certificate below.".to_string() } else { why.clone() }, ERR)
@@ -888,7 +893,7 @@ impl RadioApp {
         }
         // volume: 20 bars you can click
         let vol = p.volume() as usize;
-        let vx = bx + 18.0 * s;
+        let (vx, by) = if narrow { (tx, by + 62.0 * s) } else { (bx + 18.0 * s, by) };
         let vw = (card.x + card.w - vx - 26.0 * s).clamp_safe(80.0 * s, 260.0 * s);
         let vol_label = g.fit(12.0 * s, &format!("VOLUME {vol}%"), Face::Bold, (card.x + card.w - vx - 8.0 * s).max(30.0 * s));
         g.text(vx, by - 2.0 * s, 12.0 * s, DIM, &vol_label, Face::Bold);
@@ -903,7 +908,7 @@ impl RadioApp {
         // the level display along the bottom
         let (sx, sw2) = (card.x + 26.0 * s, card.w - 52.0 * s);
         let base = card.y + card.h - 18.0 * s;
-        let maxh = (card.h - 196.0 * s).max(40.0 * s);
+        let maxh = (card.h - 196.0 * s - extra).max(40.0 * s);
         let bw = sw2 / BANDS as f32;
         for i in 0..BANDS {
             let idle = if active { 0.0 } else { 0.04 + 0.03 * (((tick as f32 * 0.05) + i as f32 * 0.7).sin() + 1.0) };

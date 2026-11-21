@@ -106,7 +106,19 @@ impl RadioPort for CxPort<'_> {
     fn play(&self, station: &Station) {
         let policy = self.0.session.policy.clone();
         let allow: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(move |h| policy.allows_host(h));
-        self.0.radio().play(station, allow, &self.0.services.voice_settings().play_cmd);
+        // the radio may move on within the person's own list, or the preset list that holds this station
+        let mine = self.store().list();
+        let list = if mine.iter().any(|s| s.url == station.url) {
+            mine
+        } else {
+            self.languages().iter().map(|l| l.stations).find(|st| st.iter().any(|(_, u)| *u == station.url)).map(|st| st.iter().map(|(n, u)| Station::new(n, u)).collect()).unwrap_or_default()
+        };
+        let (audit, user) = (self.0.audit.clone(), self.0.session.user.clone());
+        let around = iyakki_tile_api::radio::Around { list, audit: Some(Arc::new(move |action, subject| audit.record(&user, action, subject))) };
+        self.0.radio().play_in(station, allow, &self.0.services.voice_settings().play_cmd, around);
+    }
+    fn notice(&self) -> Option<String> {
+        self.0.radio().notice()
     }
     fn allows_host(&self, host: &str) -> bool {
         self.0.session.policy.allows_host(host)

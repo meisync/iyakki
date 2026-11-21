@@ -293,9 +293,10 @@ impl FakeFlows {
     }
 }
 
-fn run_of(e: &FlowEvent) -> &RunId {
+fn run_of(e: &FlowEvent) -> Option<&RunId> {
     match e {
-        FlowEvent::Started { run, .. } | FlowEvent::Step { run, .. } | FlowEvent::ApprovalNeeded { run, .. } | FlowEvent::ApprovalAnswered { run, .. } | FlowEvent::Frame { run, .. } | FlowEvent::Finished { run, .. } => run,
+        FlowEvent::Started { run, .. } | FlowEvent::Step { run, .. } | FlowEvent::ApprovalNeeded { run, .. } | FlowEvent::ApprovalAnswered { run, .. } | FlowEvent::Frame { run, .. } | FlowEvent::Finished { run, .. } => Some(run),
+        FlowEvent::Unknown => None,
     }
 }
 
@@ -355,7 +356,7 @@ impl Flows for FakeFlows {
         denied_audit(&self.audit, ctx, "flows.events", Risk::Read, guard(ctx, Scope::FLOWS_READ, Risk::Read))?;
         let mut b = self.log.lock().unwrap().read(resume, None, limit);
         if let Some(r) = run {
-            b.events.retain(|e| run_of(&e.body) == r);
+            b.events.retain(|e| run_of(&e.body) == Some(r));
         }
         Ok(b)
     }

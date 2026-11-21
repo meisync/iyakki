@@ -9,7 +9,7 @@ pub const JOB_LABEL_RESET: &str = "Reset private store";
 pub const JOB_LABEL_REMOVE: &str = "Remove private store";
 
 /// What is wrong, when something is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Why {
     ClusterDown,
     NoKubectl,
@@ -24,7 +24,7 @@ pub enum Why {
     CatalogOnly,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StoreState {
     NotInstalled,
     Healthy,
@@ -34,7 +34,7 @@ pub enum StoreState {
 }
 
 /// What the cluster and this device said.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Facts {
     pub namespace: bool,
     pub terminating: bool,
@@ -55,7 +55,7 @@ pub struct Facts {
     pub seed: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Report {
     pub state: StoreState,
     pub cluster: ClusterRef,
@@ -204,7 +204,7 @@ pub fn classify(f: &Facts, record: bool, source: bool) -> StoreState {
     StoreState::Healthy
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RemoveChoice {
     /// Keep the data volume (and the Secret, namespace and vault entries that go with it): the default.
     pub keep_data: bool,
@@ -218,7 +218,7 @@ impl Default for RemoveChoice {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Action {
     Repair,
     Reset,
@@ -308,7 +308,7 @@ pub fn only_kinds(manifest: &str, kinds: &[&str]) -> String {
     kept.join("---\n")
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct JobArgs {
     pub kubeconfig: String,
     pub context: String,

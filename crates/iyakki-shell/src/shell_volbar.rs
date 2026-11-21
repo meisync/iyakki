@@ -28,6 +28,8 @@ const HOLD_TICKS: u64 = 10;
 pub(super) const HOME_TAB: usize = 0x4D10;
 pub(super) const GEAR_TAB: usize = 0x4D11;
 pub(super) const MIC_TAB: usize = 0x4D15;
+/// The network icon (the Look's `network` item) in an app's header and on the tiles bar: opens the network panel.
+pub(super) const NET_TAB: usize = 0x4D16;
 /// The three buttons in the speaker's dropdown (`Event::Tab`): louder, quieter, mute or unmute.
 const BTN_UP: usize = 0x4D12;
 const BTN_DOWN: usize = 0x4D13;
@@ -49,6 +51,8 @@ const STRIP: f32 = 56.0;
 pub enum Extra {
     /// The permanent microphone glyph: only while My IYAKKI's microphone is open or it is muted (F-VOICE-39).
     Mic,
+    /// The Look's `network` item while an app is open (F-LAUNCH-25): opens the network panel.
+    Network,
     Settings,
     Speaker,
     Home,
@@ -130,6 +134,8 @@ pub(super) enum BarButton {
     Network,
     /// The Look's `apps` item: back to the tiles, like the Home icon (D-LAUNCH-25).
     Apps,
+    /// The Gemini voice assistant's microphone (EXPERIMENTAL, F-GEMVOICE-08): starts or ends a session; only while the assistant is on.
+    GemVoice,
 }
 
 /// The order the buttons take when the Look's top bar list does not ask for another: the shell's own, from the right edge inwards.
@@ -268,6 +274,9 @@ impl Shell {
         if mic {
             v.push(BarButton::Mic);
         }
+        if self.gv.offered || self.gv.open() {
+            v.push(BarButton::GemVoice);
+        }
         if !self.cloud.fn_keys_off && self.look.topbar.items.contains(&iyakki_uikit::look::BarItem::Volume) {
             v.push(BarButton::Speaker);
         }
@@ -309,7 +318,7 @@ impl Shell {
             Extra::Mic => slots.mic,
             Extra::Speaker => slots.speaker,
             Extra::Settings => slots.settings,
-            Extra::Home => None,
+            Extra::Network | Extra::Home => None,
         };
         self.bar_icon_rect(slot).map(|r| (r, self.size))
     }
@@ -341,6 +350,9 @@ impl Shell {
         let mut v = Vec::new();
         if glyph != iyakki_shared::voiceassist::MicGlyph::Off {
             v.push(Extra::Mic);
+        }
+        if self.look.topbar.items.contains(&iyakki_uikit::look::BarItem::Network) && !self.cloud.hides_app(PApp::Settings) {
+            v.push(Extra::Network);
         }
         if !self.cloud.hides_app(PApp::Settings) {
             v.push(Extra::Settings);
@@ -394,6 +406,11 @@ impl Shell {
                 g.icon(Icon::Mic, r.x + r.w / 2.0, r.y + r.h / 2.0, icon_px, ink);
                 g.hit(r, Event::Tab(MIC_TAB), tip);
             }
+            Extra::Network => {
+                crate::fx::chrome_button(g, r, s, hot || self.devpop.is_network_panel(), accent);
+                g.icon(Icon::Mesh, r.x + r.w / 2.0, r.y + r.h / 2.0, icon_px, if self.devpop.is_network_panel() { crate::fx::CYAN } else { MUTED });
+                g.hit(r, Event::Tab(NET_TAB), "network");
+            }
             Extra::Settings => {
                 let allowed = self.session.as_ref().is_some_and(|x| x.policy.allows_app(PApp::Settings));
                 let here = matches!(self.screen, Screen::App(_, PApp::Settings));
@@ -435,6 +452,19 @@ impl Shell {
         if let Some(f) = self.panes_focus_index() {
             self.ws_mark_dirty(f);
         }
+        mark_stale!(self);
+    }
+
+    /// Open or close the network panel (the Devices panel with only the network rows; each row leads to Settings -> Network).
+    pub(super) fn toggle_network_panel(&mut self) {
+        if self.session.is_none() || self.cloud.hides_app(PApp::Settings) {
+            return;
+        }
+        self.vol_close();
+        self.help = false;
+        self.brand.close();
+        self.installs.close();
+        self.devpop.toggle_network();
         mark_stale!(self);
     }
 
@@ -810,6 +840,11 @@ impl Shell {
                     if g.hovered(icon) {
                         let (_, tip) = mic_ink_tip();
                         draw_clock_tip(g, w, h, s, icon, &[("My IYAKKI".to_string(), false), (tip.to_string(), false)]);
+                    }
+                }
+                Extra::Network => {
+                    if g.hovered(icon) && !self.devpop.is_network_panel() {
+                        draw_clock_tip(g, w, h, s, icon, &[("Network".to_string(), false), ("Connections and where to change them".to_string(), false)]);
                     }
                 }
                 Extra::Home => {

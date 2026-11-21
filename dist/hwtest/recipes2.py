@@ -1,6 +1,6 @@
 """Batch 2 recipes (read-only unless a setting is named and put back). See recipes.py for the conventions."""
 import os, re, time, json, tempfile
-from hwcheck import recipe, fail, human, dev, Verdict, Ctx
+from hwcheck import require_hardware, not_applicable, recipe, fail, human, dev, Verdict, Ctx
 import recipes as _r1
 
 def nc(c, t): c.notcovered(t)
@@ -9,10 +9,19 @@ def nc(c, t): c.notcovered(t)
 def _btn_text(c, st): return "\n".join(c.buttons(st))
 
 
+
+def _tap_tab(c, name):
+    """Tap the tab called NAME in the top strip (found on screen: the tabs move when a count is added to the first one)."""
+    st = c.state()
+    m = re.search(r"^\s*(\d+),(\d+)\s+%s$" % re.escape(name), st.split("\nbuttons", 1)[0], re.M)
+    if not m: fail("no tab called %r on screen" % name)
+    dev("input", "tap", int(m.group(1)) + 10, int(m.group(2)) + 8); time.sleep(1.5)
+
 @recipe("F-DRIVERS-07", "STORE -> Installed -> Drivers chip on the Mac mini")
 def drivers07(c):
     """PASS when the Drivers chip exists beside MCP/CLI/Skills/Apps/Extensions and its view lists this Mac's drivers with a
     state ('driver X is loaded'), a Why button each, and Remove where a driver is removable."""
+    require_hardware(c, "apple")   # the expected list is this Mac's (i915, brcmfmac, T2)
     st = c.open_tile("STORE")
     for chip in (r"^MCP \d+$", r"^CLI \d+$", r"^Skills \d+$", r"^Apps \d+$", r"^Extensions \d+$", r"^Drivers \d+$"):
         c.expect(st, chip)
@@ -44,6 +53,12 @@ def disks04(c):
     the data partition shows its mount point, and no 'Advanced: change partitions' control is offered for the system drive.
     The engine's own refusal (typed name, dry run) was not exercised: it would write."""
     st = c.open_tile("DISKS"); c.shot("disks")
+    # the drive LIST marks the system drive "<size> · <bus> · SYSTEM"; the chip "SYSTEM DRIVE" is in the header of the SELECTED drive, which
+    # is the first in the list, not always the system one (on a PC booted from a stick the internal disk is first): Down walks the list
+    c.expect(st, r"· SYSTEM$", "the drive list marks one drive SYSTEM")
+    for _ in range(8):
+        if c.has(st, r"^SYSTEM DRIVE$"): break
+        st = c.key("Down", wait=0.8)
     c.expect(st, r"^SYSTEM DRIVE$"); c.expect(st, r"It cannot be unmounted, ejected or changed")
     c.expect(st, r"IYAKKI-DATA \(ext4\)"); c.expect(st, r"/var/lib/iyakki$")
     c.expect_absent(st, r"Advanced: change partitions")
@@ -258,7 +273,7 @@ def exta06(c):
 def store06(c):
     """PASS when Store Settings lists the built-in catalog ('always there, works offline'), shows that the official IYAKKI store
     is 'coming soon' (the default list is empty, as the row says) and has folder/USB catalog entries and the daily check line."""
-    c.open_tile("STORE"); dev("input", "tap", 560, 72); time.sleep(1.5); st = c.state("store-settings"); c.shot("store-settings")
+    c.open_tile("STORE"); _tap_tab(c, "Settings"); st = c.state("store-settings"); c.shot("store-settings")
     c.expect(st, r"^Built-in catalog$"); c.expect(st, r"always there, works offline")
     c.expect(st, r"coming soon: the project has not published its store address yet")
     c.expect(st, r"^Add a folder or USB stick$"); c.expect(st, r"^Daily check for updates$")
@@ -269,14 +284,14 @@ def store06(c):
 
 @recipe("F-CHECKUP-02", "CHECK-UP tile: the list of twelve steps")
 def checkup02(c):
-    """PASS when CHECK-UP opens with the summary '0 passed, 0 failed, 0 skipped, 12 not done yet', the twelve named steps (Screen,
+    """PASS when CHECK-UP opens with the summary '0 passed, 0 failed, 0 skipped, 14 not done yet', the fourteen named steps (Screen,
     Touch screen, Keyboard, Mouse or touch pad, Speaker, Microphone, Camera, External monitor, Network, Wi-Fi, Bluetooth, Battery
-    and power), 12 step controls, and Check again / Share result / Open DOCTOR. No step is run (they use the speaker, camera, mic)."""
+    and power, Graphics card for models, USB devices), 14 step controls, and Check again / Share result / Open DOCTOR. No step is run (they use the speaker, camera, mic)."""
     st = c.open_tile("CHECK-UP"); c.shot("checkup")
-    c.expect(st, r"^\d+ passed, \d+ failed, \d+ skipped, 12 not done yet$")
-    for name in ("Screen", "Touch screen", "Keyboard", "Mouse or touch pad", "Speaker", "Microphone", "Camera", "External monitor", "Network", "Wi-Fi", "Bluetooth", "Battery and power"):
+    c.expect(st, r"^\d+ passed, \d+ failed, \d+ skipped, 14 not done yet$")   # twelve hardware steps + GPU and USB (F-CHECKUP-04)
+    for name in ("Screen", "Touch screen", "Keyboard", "Mouse or touch pad", "Speaker", "Microphone", "Camera", "External monitor", "Network", "Wi-Fi", "Bluetooth", "Battery and power", "Graphics card for models", "USB devices"):
         c.expect(st, r"^%s$" % re.escape(name))
-    if sum(b == "step" for b in c.buttons(st)) != 12: fail("not 12 step controls")
+    if sum(b == "step" for b in c.buttons(st)) != 14: fail("not 14 step controls")
     for b in ("Check again", "Share result", "Open DOCTOR"):
         if b not in c.buttons(st): fail("button %r missing" % b)
     nc(c, "running any step (colour bars need eyes; speaker, microphone and camera steps use the hardware), a failed step's Settings link, keys y/n/k/f/d/r/s")
@@ -344,6 +359,11 @@ def devmode11(c):
     nc(c, "a secret (password) field being masked and a click refused while it has focus (would need a password screen); covered-button refusal; the caps on lines and buttons")
 
 
+def holds_scope(whoami, scope):
+    """True when `dev whoami` lists `[x] scope` (held), False when `[ ] scope` or absent."""
+    return re.search(r"^\s*\[x\] %s\s" % re.escape(scope), whoami, re.M) is not None
+
+
 @recipe("F-DEVMODE-12", "dev inbox and dev diag contents")
 def devmode12(c):
     """PASS when `dev inbox` gives counts by kind and source and titles without bodies, and `dev diag` has the sections version,
@@ -351,8 +371,11 @@ def devmode12(c):
     rc, out = c.run("inbox", name="inbox")
     if not re.search(r"^\d+ notifications, \d+ unread", out) or "by kind:" not in out or "by source:" not in out: fail("inbox summary lines missing")
     rc, out2 = c.run("inbox", "--bodies", name="inbox-bodies")
-    if rc == 0: fail("--bodies worked without the files:system scope (or the scope is held)")
-    c.log("--bodies refused: " + out2.strip()[:120])
+    # the answer must agree with the scopes this computer holds NOW (a paired test computer may hold all twelve: whoami says so)
+    held = holds_scope(c.run("whoami", name="whoami")[1], "files:system")
+    if held and rc != 0: fail("files:system is held but --bodies was refused: " + out2.strip()[:120])
+    if not held and rc == 0: fail("--bodies worked without the files:system scope")
+    c.log("files:system %s; --bodies %s" % ("held" if held else "not held", "answered" if rc == 0 else "refused: " + out2.strip()[:120]))
     p = os.path.join(c.dir, "diag.txt"); rc, out = dev("diag", "-o", p)
     d = open(p).read()
     for h in ("version and machine", "memory", "disks and mounts", "network", "services", "audit", "sound"):
@@ -360,7 +383,7 @@ def devmode12(c):
     if "cluster" not in d.lower(): fail("diag lacks the cluster")
     if re.search(r"(?i)(password|token|secret)\s*[=:]\s*\S{6,}|Bearer [A-Za-z0-9._-]{12,}", d): fail("secret-looking text in diag")
     c.log("diag: %d bytes, all sections present" % len(d))
-    nc(c, "the cluster node/pod names appear only with the kube scope (held here, so not tested without it); the open-app and shell-frame lines were not individually checked")
+    nc(c, "the refusal of --bodies without files:system is a unit test (inbox_bodies_need_the_files_system_scope_as_well_as_debug); on a computer that holds every scope only the answered case is seen; the cluster node/pod names appear only with the kube scope (not tested without it); the open-app and shell-frame lines were not individually checked")
 
 
 @recipe("F-KBD-19", "keyboard.profile: read, switch to pc and back (live, no restart)")
@@ -405,6 +428,7 @@ def drivers50(c):
 def drivers30(c):
     """PASS when the Mac drivers page says Apple's firmware is not shipped, that the files stay on this machine, are never
     uploaded and are not part of IYAKKI, and offers Download from Apple / From a folder or stick / From a disk image."""
+    require_hardware(c, "apple")
     c.home(); c.click("IYAKKI menu"); st = c.click("Mac drivers", wait=2); c.shot("mac-drivers")
     c.expect(st, r"Apple's firmware is not shipped\."); c.expect(st, r"These files are Apple's\. They stay on this machine, are never uploaded")
     for b in ("Download from Apple", "From a folder or stick", "From a disk image"):
@@ -417,6 +441,8 @@ def drivers30(c):
 def gpu06(c):
     """PASS when the kernel log has no nvidia module load, `dev info` lists only the i915 GPU and `dev status` Graphics is ready."""
     dm = c.run("dmesg", "--grep", "nvidia", "-n", 50, name="dmesg-nvidia")[1]
+    import hwmatch
+    if hwmatch.nvidia_card_present(dm): not_applicable("this machine has an NVIDIA card (the row is about a machine without one): " + dm.strip().splitlines()[0][:100])
     if [l for l in dm.splitlines() if l.strip()]: fail("kernel log mentions nvidia: " + dm.strip().splitlines()[0][:120])
     info = c.run("info", name="info")[1]
     if not re.search(r"gpu\s+card0 driver i915", info) or "nvidia" in info.lower(): fail("dev info shows a GPU other than i915 or nvidia text")

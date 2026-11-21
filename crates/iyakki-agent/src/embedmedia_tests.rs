@@ -3,7 +3,7 @@
 
 use super::embedmedia::*;
 use crate::audiofmt::{AacDecoder, Pcm};
-use crate::mixer::{EngineCfg, FakeSink, Mixer, MixerCfg};
+use crate::mixer::{EngineCfg, FakeSink, MixClock, Mixer, MixerCfg};
 use iyakki_core_api::media::{Media, MediaEvent, MediaSource, MediaSpec, MediaState};
 use iyakki_core_api::AuditSink;
 use std::io::Read;
@@ -111,11 +111,15 @@ struct Rig {
     m: AgentMedia,
     sink: FakeSink,
     audit: Arc<Audit>,
-    _rt: Box<dyn std::any::Any>,
 }
 
-fn rig(tag: &str, files: &[&str], remote: Vec<(&str, &str)>, realtime: bool) -> Rig {
-    let rt = crate::mixer::rt_serial();
+/// One period of the mixer: the step of the manual clock the rigs run on.
+const STEP: Duration = Duration::from_millis(20);
+
+/// The mixer of a rig runs on a manual clock: it mixes only the periods the test lets pass, and a period passes only when every sound
+/// that plays has audio queued for it (or has ended). What reaches the fake card then depends on the files and the code, never on how
+/// fast a decoder thread ran on a loaded machine.
+fn rig(tag: &str, files: &[&str], remote: Vec<(&str, &str)>) -> Rig {
     let home = std::env::temp_dir().join(format!("iyakki-embedmedia-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(home.join("music")).unwrap();
@@ -123,27 +127,79 @@ fn rig(tag: &str, files: &[&str], remote: Vec<(&str, &str)>, realtime: bool) -> 
         std::fs::copy(fixture(f), home.join("music").join(f)).unwrap();
     }
     let sink = FakeSink::new();
-    let cfg = MixerCfg { idle_ms: 100, engine: EngineCfg::default().no_prefill(), realtime, ..MixerCfg::default() };
+    let cfg = MixerCfg { idle_ms: 100, engine: EngineCfg::default().no_prefill(), raise_priority: false, ..MixerCfg::default() };
+    let clock = MixClock::manual();
+    let mixer = Mixer::start_with_clock(cfg, Box::new(sink.clone()), clock);
+    mixer.settle();
     let remote = remote.into_iter().map(|(u, f)| (u.to_string(), std::fs::read(fixture(f)).unwrap())).collect();
-    let host = Arc::new(Host { home, mixer: Mixer::start(cfg, Box::new(sink.clone())), sink: sink.clone(), remote: Mutex::new(remote), stations: vec![("Tone FM".into(), "https://radio.example.org/tone".into())], off: Mutex::new(false), net: Mutex::new(None) });
+    let host = Arc::new(Host { home, mixer: mixer, sink: sink.clone(), remote: Mutex::new(remote), stations: vec![("Tone FM".into(), "https://radio.example.org/tone".into())], off: Mutex::new(false), net: Mutex::new(None) });
     let audit = Arc::new(Audit::default());
-    Rig { host: host.clone(), m: AgentMedia::new(host, audit.clone()), sink, audit, _rt: Box::new(rt) }
+    Rig { host: host.clone(), m: AgentMedia::new(host, audit.clone()), sink, audit }
 }
 
 fn spec(name: &str) -> MediaSpec {
     MediaSpec::new(MediaSource::Home { name: name.into() })
 }
 
-/// Polls until `done` says so (or 15 s), returning every event seen.
-fn collect(m: &AgentMedia, id: &str, done: impl Fn(&[MediaEvent]) -> bool) -> Vec<MediaEvent> {
+impl Rig {
+    /// One step of the rig's time: a period of the mixer passes when every sound that plays has audio queued for it, else the test
+    /// gives the player threads a moment (a poll pause, not a timing: the clock did not move). True when the clock moved.
+    fn tick(&self) -> bool {
+        let (sounding, unfed) = self.host.mixer.feed_state(40);
+        if sounding > 0 && unfed == 0 {
+            self.host.mixer.advance(STEP);
+            true
+        } else {
+            std::thread::sleep(Duration::from_millis(2));
+            false
+        }
+    }
+
+    /// Lets `d` of the mixer's time pass while the sound keeps being fed.
+    fn run(&self, d: Duration) {
+        let end = self.host.mixer.clock().now() + d;
+        let t = Instant::now();
+        while self.host.mixer.clock().now() < end {
+            assert!(t.elapsed() < iyakki_testkit::BUDGET, "the sound was not fed");
+            self.tick();
+        }
+    }
+
+    /// Lets `d` of the mixer's time pass whatever is queued (waiting out what was already mixed, or showing that nothing more comes).
+    fn pass(&self, d: Duration) {
+        let end = self.host.mixer.clock().now() + d;
+        while self.host.mixer.clock().now() < end {
+            self.host.mixer.advance(STEP);
+        }
+    }
+
+    /// Waits until the session's thread has looked at the sound twice more: what it shows (the picture) then follows the mixer's time.
+    fn settle_player(&self, id: &str) {
+        let before = self.m.turns("ann", id);
+        iyakki_testkit::wait_until(iyakki_testkit::BUDGET, || self.m.turns("ann", id) >= before + 2);
+    }
+
+    /// Passes mixer periods until `cond` holds (a player thread or the mixer finished something).
+    fn pass_until(&self, what: &str, cond: impl Fn() -> bool) {
+        let t = Instant::now();
+        while !cond() {
+            assert!(t.elapsed() < iyakki_testkit::BUDGET, "{what}");
+            self.host.mixer.advance(STEP);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+/// Polls until `done` says so (30 s of real time at most), moving the mixer's time while sound is fed; returns every event seen.
+fn collect(r: &Rig, id: &str, done: impl Fn(&[MediaEvent]) -> bool) -> Vec<MediaEvent> {
     let mut all = Vec::new();
     let t = Instant::now();
-    while t.elapsed() < Duration::from_secs(15) {
-        all.extend(m.poll("ann", id));
+    while t.elapsed() < iyakki_testkit::BUDGET {
+        all.extend(r.m.poll("ann", id));
         if done(&all) {
             return all;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        r.tick();
     }
     panic!("timed out; events: {all:?}");
 }
@@ -168,10 +224,10 @@ fn heard(sink: &FakeSink) -> (usize, f64, i32, f64) {
 }
 
 fn plays_to_the_end(file: &str, codec: &str) {
-    let r = rig(&format!("end-{file}"), &[file], vec![], true);
+    let r = rig(&format!("end-{file}"), &[file], vec![]);
     let s = r.m.open("ann", "player", &spec(&format!("music/{file}"))).unwrap();
     assert!(!s.needs_approval);
-    let ev = collect(&r.m, &s.id, |e| has_state(e, MediaState::Ended));
+    let ev = collect(&r, &s.id, |e| has_state(e, MediaState::Ended));
     let info = ev.iter().find_map(|e| if let MediaEvent::Opened { info } = e { Some(info.clone()) } else { None }).expect("opened");
     assert_eq!(info.codec, codec);
     assert!(info.seekable && info.has_audio && !info.has_video, "{info:?}");
@@ -180,7 +236,7 @@ fn plays_to_the_end(file: &str, codec: &str) {
     assert!(ev.iter().any(|e| matches!(e, MediaEvent::Level { peak } if *peak > 100)), "a level meter value comes while it plays");
     assert!(ev.iter().any(|e| matches!(e, MediaEvent::Position { ms } if *ms > 0)));
     // let the mixer drain, then look at what reached the speaker
-    std::thread::sleep(Duration::from_millis(400));
+    r.pass(Duration::from_millis(400));
     let (n, secs, peak, hz) = heard(&r.sink);
     assert!(n > 0 && (0.8..1.2).contains(&secs), "{file}: {secs} s heard");
     assert!(peak > 5000 && peak < 20000, "{file}: peak {peak} (the tone is half scale)");
@@ -214,12 +270,12 @@ fn an_opus_file_is_decoded_and_reaches_the_mixer_at_the_right_pitch_and_length()
 
 #[test]
 fn files_the_player_cannot_decode_say_why_in_a_sentence() {
-    let r = rig("nodec", &[], vec![], false);
+    let r = rig("nodec", &[], vec![]);
     assert!(r.m.open("ann", "player", &spec("music/clip.mp4")).unwrap_err().contains("Video files"));
     assert!(r.m.open("ann", "player", &spec("music/clip.mkv")).unwrap_err().contains("Motion-JPEG"));
     std::fs::write(r.sink_home().join("music/broken.mp3"), vec![7u8; 5000]).unwrap();
     let s = r.m.open("ann", "player", &spec("music/broken.mp3")).unwrap();
-    let ev = collect(&r.m, &s.id, |e| has_state(e, MediaState::Failed));
+    let ev = collect(&r, &s.id, |e| has_state(e, MediaState::Failed));
     assert!(ev.iter().any(|e| matches!(e, MediaEvent::Error { .. })));
 }
 
@@ -239,54 +295,54 @@ impl Rig {
 
 #[test]
 fn pause_holds_the_sound_and_play_goes_on() {
-    let r = rig("pause", &["tone-1s.wav"], vec![], true);
+    let r = rig("pause", &["tone-1s.wav"], vec![]);
     let mut sp = spec("music/tone-1s.wav");
     sp.autoplay = false;
     let s = r.m.open("ann", "player", &sp).unwrap();
-    let ev = collect(&r.m, &s.id, |e| has_state(e, MediaState::Ready));
+    let ev = collect(&r, &s.id, |e| has_state(e, MediaState::Ready));
     assert!(!has_state(&ev, MediaState::Playing), "not playing before play");
-    std::thread::sleep(Duration::from_millis(200));
+    r.pass(Duration::from_millis(200));
     assert_eq!(heard(&r.sink).0, 0, "autoplay off: silence");
     r.m.play("ann", &s.id).unwrap();
-    collect(&r.m, &s.id, |e| has_state(e, MediaState::Playing));
-    std::thread::sleep(Duration::from_millis(250));
+    collect(&r, &s.id, |e| has_state(e, MediaState::Playing));
+    r.run(Duration::from_millis(250));
     r.m.pause("ann", &s.id).unwrap();
-    collect(&r.m, &s.id, |e| has_state(e, MediaState::Paused));
-    std::thread::sleep(Duration::from_millis(300));
+    collect(&r, &s.id, |e| has_state(e, MediaState::Paused));
+    r.pass(Duration::from_millis(300));
     let n1 = r.sink.lock().samples.len();
-    std::thread::sleep(Duration::from_millis(400));
+    r.pass(Duration::from_millis(400));
     let n2 = r.sink.lock().samples.len();
     assert!(n2 - n1 < 48_000 / 20 * 2, "paused: the mixer is fed no more than what was queued ({} samples more)", n2 - n1);
     r.m.play("ann", &s.id).unwrap();
-    collect(&r.m, &s.id, |e| has_state(e, MediaState::Ended));
+    collect(&r, &s.id, |e| has_state(e, MediaState::Ended));
 }
 
 #[test]
 fn a_seek_skips_the_start_and_speed_changes_the_length() {
-    let r = rig("seek", &["tone-1s.wav"], vec![], true);
+    let r = rig("seek", &["tone-1s.wav"], vec![]);
     let mut sp = spec("music/tone-1s.wav");
     sp.autoplay = false;
     let s = r.m.open("ann", "player", &sp).unwrap();
-    collect(&r.m, &s.id, |e| has_state(e, MediaState::Ready));
+    collect(&r, &s.id, |e| has_state(e, MediaState::Ready));
     r.m.seek("ann", &s.id, 500).unwrap();
     r.m.play("ann", &s.id).unwrap();
-    let ev = collect(&r.m, &s.id, |e| has_state(e, MediaState::Ended));
+    let ev = collect(&r, &s.id, |e| has_state(e, MediaState::Ended));
     assert!(ev.iter().any(|e| matches!(e, MediaEvent::Position { ms } if *ms == 500)), "the seek is announced: {ev:?}");
-    std::thread::sleep(Duration::from_millis(400));
+    r.pass(Duration::from_millis(400));
     let (_, secs, _, _) = heard(&r.sink);
     assert!((0.35..0.65).contains(&secs), "half a second left after the seek, heard {secs}");
 
     drop(r); // the mixers of the tests take turns: one rig at a time
-    let r2 = rig("rate", &["tone-1s.wav"], vec![], true);
+    let r2 = rig("rate", &["tone-1s.wav"], vec![]);
     let mut sp = spec("music/tone-1s.wav");
     sp.autoplay = false;
     let s2 = r2.m.open("ann", "player", &sp).unwrap();
-    collect(&r2.m, &s2.id, |e| has_state(e, MediaState::Ready));
+    collect(&r2, &s2.id, |e| has_state(e, MediaState::Ready));
     r2.m.set_rate("ann", &s2.id, 2000).unwrap();
     assert!(r2.m.set_rate("ann", &s2.id, 100).is_err());
     r2.m.play("ann", &s2.id).unwrap();
-    collect(&r2.m, &s2.id, |e| has_state(e, MediaState::Ended));
-    std::thread::sleep(Duration::from_millis(400));
+    collect(&r2, &s2.id, |e| has_state(e, MediaState::Ended));
+    r2.pass(Duration::from_millis(400));
     let (_, secs, _, hz) = heard(&r2.sink);
     assert!((0.35..0.65).contains(&secs), "double speed: half the time, heard {secs}");
     assert!(hz > 800.0, "the pitch follows the speed: {hz}");
@@ -294,60 +350,58 @@ fn a_seek_skips_the_start_and_speed_changes_the_length() {
 
 #[test]
 fn the_sessions_own_volume_and_mute_scale_the_sound() {
-    // the sound is heard through a real-time mixer thread on a shared host: a run in which the quiet session was heard at full level once
-    // (16018 against 16382, alone it never happens) is tried again, up to three times; a defect in the volume fails all of them
-    crate::mixer::retried_under_load(3, || {
-        let loud = rig("vol-loud", &["tone-1s.wav"], vec![], false);
+    {
+        let loud = rig("vol-loud", &["tone-1s.wav"], vec![]);
         let s = loud.m.open("ann", "player", &spec("music/tone-1s.wav")).unwrap();
-        collect(&loud.m, &s.id, |e| has_state(e, MediaState::Ended));
-        std::thread::sleep(Duration::from_millis(200));
+        collect(&loud, &s.id, |e| has_state(e, MediaState::Ended));
+        loud.pass(Duration::from_millis(200));
         let p_loud = heard(&loud.sink).2;
         drop(loud);
         let mut sp = spec("music/tone-1s.wav");
         sp.volume = Some(25);
-        let quiet = rig("vol-quiet", &["tone-1s.wav"], vec![], false);
+        let quiet = rig("vol-quiet", &["tone-1s.wav"], vec![]);
         let s = quiet.m.open("ann", "player", &sp).unwrap();
-        collect(&quiet.m, &s.id, |e| has_state(e, MediaState::Ended));
-        std::thread::sleep(Duration::from_millis(200));
+        collect(&quiet, &s.id, |e| has_state(e, MediaState::Ended));
+        quiet.pass(Duration::from_millis(200));
         let p_quiet = heard(&quiet.sink).2;
         drop(quiet);
         assert!(p_quiet > 0 && f64::from(p_quiet) < f64::from(p_loud) * 0.4, "{p_quiet} vs {p_loud}");
-        let muted = rig("vol-mute", &["tone-1s.wav"], vec![], false);
+        let muted = rig("vol-mute", &["tone-1s.wav"], vec![]);
         let mut sp = spec("music/tone-1s.wav");
         sp.autoplay = false;
         let s = muted.m.open("ann", "player", &sp).unwrap();
-        collect(&muted.m, &s.id, |e| has_state(e, MediaState::Ready));
+        collect(&muted, &s.id, |e| has_state(e, MediaState::Ready));
         muted.m.set_mute("ann", &s.id, true).unwrap();
         muted.m.play("ann", &s.id).unwrap();
-        collect(&muted.m, &s.id, |e| has_state(e, MediaState::Ended));
-        std::thread::sleep(Duration::from_millis(200));
+        collect(&muted, &s.id, |e| has_state(e, MediaState::Ended));
+        muted.pass(Duration::from_millis(200));
         // the mixer fades a new source to its level over one period (20 ms): a muted player may leak that and no more
         let l = muted.sink.lock();
         let audible = l.samples.iter().filter(|s| s.abs() > 300).count();
         assert!(audible < 2400, "mute is silence after the first period: {audible} audible samples of {}", l.samples.len());
         drop(l);
         assert!(muted.m.set_volume("ann", &s.id, 101).is_err());
-    });
+    }
 }
 
 #[test]
 fn a_remote_stream_asks_first_plays_after_yes_and_cannot_be_moved() {
-    let r = rig("remote", &[], vec![("https://radio.example.org/tone", "tone-1s.mp3")], true);
+    let r = rig("remote", &[], vec![("https://radio.example.org/tone", "tone-1s.mp3")]);
     let s = r.m.open("ann", "radio", &MediaSpec::new(MediaSource::Station { name: "Tone FM".into() })).unwrap();
     assert!(s.needs_approval);
-    let ev = collect(&r.m, &s.id, |e| e.iter().any(|x| matches!(x, MediaEvent::Approval { .. })));
+    let ev = collect(&r, &s.id, |e| e.iter().any(|x| matches!(x, MediaEvent::Approval { .. })));
     assert!(has_state(&ev, MediaState::AwaitingApproval));
-    std::thread::sleep(Duration::from_millis(200));
+    r.pass(Duration::from_millis(200));
     assert_eq!(heard(&r.sink).0, 0, "nothing is fetched or played before the person says yes");
     r.m.decide("ann", &s.id, true).unwrap();
     assert!(r.m.decide("ann", &s.id, true).is_err());
-    let ev = collect(&r.m, &s.id, |e| has_state(e, MediaState::Playing));
+    let ev = collect(&r, &s.id, |e| has_state(e, MediaState::Playing));
     assert!(ev.iter().any(|e| matches!(e, MediaEvent::Opened { info } if info.duration_ms.is_none() && !info.seekable)));
     assert!(r.m.seek("ann", &s.id, 100).unwrap_err().contains("live"));
     // the stream ends: for a station that is a failure in a sentence
-    let ev = collect(&r.m, &s.id, |e| has_state(e, MediaState::Failed));
+    let ev = collect(&r, &s.id, |e| has_state(e, MediaState::Failed));
     assert!(ev.iter().any(|e| matches!(e, MediaEvent::Error { text } if text.contains("stopped sending"))));
-    std::thread::sleep(Duration::from_millis(300));
+    r.pass(Duration::from_millis(300));
     let (_, _, _, hz) = heard(&r.sink);
     assert!((hz - 440.0).abs() < 30.0, "{hz}");
 
@@ -363,7 +417,7 @@ fn a_remote_stream_asks_first_plays_after_yes_and_cannot_be_moved() {
 
 #[test]
 fn one_session_per_app_other_people_are_refused_and_the_home_policy_holds() {
-    let r = rig("policy", &["tone-1s.wav", "tone-1s.mp3"], vec![], false);
+    let r = rig("policy", &["tone-1s.wav", "tone-1s.mp3"], vec![]);
     let first = r.m.open("ann", "player", &spec("music/tone-1s.wav")).unwrap();
     let second = r.m.open("ann", "player", &spec("music/tone-1s.mp3")).unwrap();
     assert!(r.m.pause("ann", &first.id).is_err(), "the app's earlier session is closed by the next open");
@@ -389,17 +443,17 @@ impl Rig {
 
 #[test]
 fn the_switch_closes_the_sound_at_once_and_refuses_new_sessions() {
-    let r = rig("switch", &["tone-1s.wav"], vec![], true);
+    let r = rig("switch", &["tone-1s.wav"], vec![]);
     let s = r.m.open("ann", "player", &spec("music/tone-1s.wav")).unwrap();
-    collect(&r.m, &s.id, |e| has_state(e, MediaState::Playing));
+    collect(&r, &s.id, |e| has_state(e, MediaState::Playing));
     assert!(r.m.enabled("ann") && r.m.open_sessions("ann") == 1);
     r.m.set_enabled("ann", false).unwrap();
     assert_eq!(r.m.open_sessions("ann"), 0);
     assert!(r.m.pause("ann", &s.id).is_err(), "the session is gone");
     assert!(r.m.open("ann", "player", &spec("music/tone-1s.wav")).unwrap_err().contains("switch is off"));
-    std::thread::sleep(Duration::from_millis(600));
+    r.pass_until("the sound did not stop", || r.host.mixer.sources().is_empty());
     let n1 = r.sink.lock().samples.len();
-    std::thread::sleep(Duration::from_millis(300));
+    r.pass(Duration::from_millis(300));
     assert!(r.sink.lock().samples.len() - n1 < 48_000 / 10 * 2, "the sound stopped");
     r.m.set_enabled("ann", true).unwrap();
     assert!(r.m.open("ann", "player", &spec("music/tone-1s.wav")).is_ok());
@@ -412,7 +466,7 @@ fn watch(r: &Rig, id: &str) -> (Vec<iyakki_core_api::media::MediaFrame>, Vec<Med
     let mut frames: Vec<iyakki_core_api::media::MediaFrame> = Vec::new();
     let mut events = Vec::new();
     let t = Instant::now();
-    while t.elapsed() < Duration::from_secs(15) {
+    while t.elapsed() < iyakki_testkit::BUDGET {
         events.extend(r.m.poll("ann", id));
         let after = frames.last().map_or(0, |f| f.seq);
         if let Some(f) = r.m.frame("ann", id, after).unwrap() {
@@ -421,14 +475,14 @@ fn watch(r: &Rig, id: &str) -> (Vec<iyakki_core_api::media::MediaFrame>, Vec<Med
         if has_state(&events, MediaState::Ended) || has_state(&events, MediaState::Failed) {
             return (frames, events);
         }
-        std::thread::sleep(Duration::from_millis(15));
+        r.tick();
     }
     panic!("timed out; events: {events:?}");
 }
 
 #[test]
 fn a_motion_jpeg_avi_plays_its_sound_through_the_mixer_and_its_pictures_follow_the_sound() {
-    let r = rig("avi", &["clip-1s.avi"], vec![], true);
+    let r = rig("avi", &["clip-1s.avi"], vec![]);
     let s = r.m.open("ann", "player", &spec("music/clip-1s.avi")).unwrap();
     let (frames, ev) = watch(&r, &s.id);
     let info = ev.iter().find_map(|e| if let MediaEvent::Opened { info } = e { Some(info.clone()) } else { None }).expect("opened");
@@ -444,14 +498,14 @@ fn a_motion_jpeg_avi_plays_its_sound_through_the_mixer_and_its_pictures_follow_t
     assert!(frames.first().unwrap().rgba != frames.last().unwrap().rgba, "the picture changes");
     assert!(frames.last().unwrap().pts_ms >= 700, "the pictures went on to the end: {}", frames.last().unwrap().pts_ms);
     // the sound is the clock and reached the speaker at the right pitch
-    std::thread::sleep(Duration::from_millis(400));
+    r.pass(Duration::from_millis(400));
     let (_, secs, _, hz) = heard(&r.sink);
     assert!((0.8..1.2).contains(&secs) && (hz - 440.0).abs() < 25.0, "{secs} s at {hz} Hz");
 }
 
 #[test]
 fn a_video_without_sound_is_driven_by_silence_of_its_own_length_and_a_seek_back_shows_the_first_picture_again() {
-    let r = rig("avisilent", &["clip-silent.avi"], vec![], true);
+    let r = rig("avisilent", &["clip-silent.avi"], vec![]);
     let s = r.m.open("ann", "player", &spec("music/clip-silent.avi")).unwrap();
     let (frames, ev) = watch(&r, &s.id);
     assert!(ev.iter().any(|e| matches!(e, MediaEvent::Opened { info } if info.has_video && info.duration_ms == Some(1000))));
@@ -465,40 +519,41 @@ fn a_video_without_sound_is_driven_by_silence_of_its_own_length_and_a_seek_back_
                 break;
             }
         }
-        assert!(t.elapsed() < Duration::from_secs(5), "no early picture after play");
-        std::thread::sleep(Duration::from_millis(15));
+        assert!(t.elapsed() < iyakki_testkit::BUDGET, "no early picture after play");
+        r.tick();
     }
 }
 
 #[test]
 fn a_paused_video_keeps_its_picture_and_a_sound_has_no_picture() {
-    let r = rig("avipause", &["clip-1s.avi", "tone-1s.wav"], vec![], true);
+    let r = rig("avipause", &["clip-1s.avi", "tone-1s.wav"], vec![]);
     let s = r.m.open("ann", "player", &spec("music/clip-1s.avi")).unwrap();
-    collect(&r.m, &s.id, |e| has_state(e, MediaState::Playing));
-    std::thread::sleep(Duration::from_millis(300));
+    collect(&r, &s.id, |e| has_state(e, MediaState::Playing));
+    r.run(Duration::from_millis(300));
     r.m.pause("ann", &s.id).unwrap();
-    collect(&r.m, &s.id, |e| has_state(e, MediaState::Paused));
+    collect(&r, &s.id, |e| has_state(e, MediaState::Paused));
     // what the mixer had queued ahead (about 300 ms) still plays out after a pause: the picture settles when the sound does
-    std::thread::sleep(Duration::from_millis(800));
+    r.pass(Duration::from_millis(800));
+    r.settle_player(&s.id);
     let a = r.m.frame("ann", &s.id, 0).unwrap().unwrap();
-    std::thread::sleep(Duration::from_millis(400));
+    r.pass(Duration::from_millis(400));
+    r.settle_player(&s.id);
     let b = r.m.frame("ann", &s.id, 0).unwrap().unwrap();
     assert_eq!(a.seq, b.seq, "paused: the same picture");
     assert!(r.m.frame("ann", &s.id, a.seq).unwrap().is_none(), "nothing new is given twice");
     r.m.seek("ann", &s.id, 0).unwrap();
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(r.m.frame("ann", &s.id, 0).unwrap().unwrap().seq, 1, "a seek to the start shows the first picture");
+    iyakki_testkit::wait_until(iyakki_testkit::BUDGET, || r.m.frame("ann", &s.id, 0).unwrap().is_some_and(|f| f.seq == 1));
     drop(r);
-    let r = rig("avisound", &["tone-1s.wav"], vec![], false);
+    let r = rig("avisound", &["tone-1s.wav"], vec![]);
     let w = r.m.open("ann", "player", &spec("music/tone-1s.wav")).unwrap();
     assert!(r.m.frame("ann", &w.id, 0).unwrap().is_none());
 }
 
 #[test]
 fn an_avi_that_is_not_motion_jpeg_says_so_in_a_sentence() {
-    let r = rig("avimpeg4", &["clip-mpeg4.avi"], vec![], false);
+    let r = rig("avimpeg4", &["clip-mpeg4.avi"], vec![]);
     let s = r.m.open("ann", "player", &spec("music/clip-mpeg4.avi")).unwrap();
-    let ev = collect(&r.m, &s.id, |e| has_state(e, MediaState::Failed));
+    let ev = collect(&r, &s.id, |e| has_state(e, MediaState::Failed));
     assert!(ev.iter().any(|e| matches!(e, MediaEvent::Error { text } if text.contains("only Motion-JPEG plays"))), "{ev:?}");
 }
 
@@ -527,25 +582,25 @@ fn serve_tone() -> Option<(std::process::Child, u16, PathBuf)> {
 #[test]
 fn an_internet_address_goes_through_the_account_host_policy_and_the_real_network_code() {
     let Some((mut child, port, dir)) = serve_tone() else { return };
-    let r = rig("net", &[], vec![], true);
+    let r = rig("net", &[], vec![]);
     let url = format!("http://127.0.0.1:{port}/tone.mp3");
     // the account does not reach this host: the person said yes, the core still refuses, in a sentence
     *r.host.net.lock().unwrap() = Some(vec!["radio.example.org".into()]);
     let s = r.m.open("ann", "radio", &MediaSpec::new(MediaSource::Stream { url: url.clone() })).unwrap();
-    collect(&r.m, &s.id, |e| e.iter().any(|x| matches!(x, MediaEvent::Approval { .. })));
+    collect(&r, &s.id, |e| e.iter().any(|x| matches!(x, MediaEvent::Approval { .. })));
     r.m.decide("ann", &s.id, true).unwrap();
-    let ev = collect(&r.m, &s.id, |e| has_state(e, MediaState::Failed));
+    let ev = collect(&r, &s.id, |e| has_state(e, MediaState::Failed));
     assert!(ev.iter().any(|e| matches!(e, MediaEvent::Error { text } if text.contains("may not reach 127.0.0.1"))), "{ev:?}");
     assert_eq!(heard(&r.sink).0, 0, "nothing was fetched");
     // the host is allowed: the real HTTP client fetches it and the stream plays
     *r.host.net.lock().unwrap() = Some(vec!["127.0.0.1".into()]);
     let s = r.m.open("ann", "radio", &MediaSpec::new(MediaSource::Stream { url })).unwrap();
-    collect(&r.m, &s.id, |e| e.iter().any(|x| matches!(x, MediaEvent::Approval { .. })));
+    collect(&r, &s.id, |e| e.iter().any(|x| matches!(x, MediaEvent::Approval { .. })));
     r.m.decide("ann", &s.id, true).unwrap();
-    collect(&r.m, &s.id, |e| has_state(e, MediaState::Playing));
+    collect(&r, &s.id, |e| has_state(e, MediaState::Playing));
     // a finished stream of a live source is a failure in a sentence, after the sound was heard
-    collect(&r.m, &s.id, |e| has_state(e, MediaState::Failed));
-    std::thread::sleep(Duration::from_millis(400));
+    collect(&r, &s.id, |e| has_state(e, MediaState::Failed));
+    r.pass(Duration::from_millis(400));
     let (_, secs, _, hz) = heard(&r.sink);
     assert!((0.8..1.2).contains(&secs) && (hz - 440.0).abs() < 30.0, "{secs} s at {hz} Hz");
     let _ = child.kill();

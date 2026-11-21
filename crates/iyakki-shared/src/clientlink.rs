@@ -92,6 +92,26 @@ pub fn enabled(data: &Path) -> bool {
     folder(data).join("enabled").is_file()
 }
 
+/// Does each person's client hear only that person's own sounds (the mixer's per-person buses, F-CLIENT-03) instead of the one sound of the
+/// machine? Off unless this marker exists (decision D-CLIENT-03: one sound per machine stays the default).
+pub fn sound_per_person(data: &Path) -> bool {
+    folder(data).join("sound-per-person").exists()
+}
+
+pub fn set_sound_per_person(data: &Path, on: bool) -> Result<(), String> {
+    let _g = lock(data);
+    let marker = folder(data).join("sound-per-person");
+    if on {
+        write_private(&marker, b"1\n")
+    } else {
+        match std::fs::remove_file(&marker) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
 pub fn set_enabled(data: &Path, on: bool) -> Result<(), String> {
     let _g = lock(data);
     let marker = folder(data).join("enabled");

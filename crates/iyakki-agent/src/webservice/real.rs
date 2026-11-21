@@ -11,10 +11,26 @@ use iyakki_core_api::{ApiError, ApiResult, AuditSink, Authenticator, HostApi, Pr
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+/// The tenant configuration's audit trail over the service's audit sink.
+struct AuditAsConfig(Arc<dyn AuditSink>);
+
+impl crate::tenantconfig::api::ConfigAudit for AuditAsConfig {
+    fn record(&self, who: &str, event: &str, detail: &str) {
+        self.0.record(who, event, detail);
+    }
+}
+
 pub struct ServicesTools {
     svc: Arc<Services>,
     host: Arc<dyn HostApi>,
     audit: Arc<dyn AuditSink>,
+}
+
+impl ServicesTools {
+    fn audit_fn(&self, user: &str) -> Arc<dyn Fn(&str, &str) + Send + Sync> {
+        let (sink, user) = (self.audit.clone(), user.to_string());
+        Arc::new(move |action, detail| sink.record(&user, action, detail))
+    }
 }
 
 impl ToolSource for ServicesTools {
@@ -23,6 +39,23 @@ impl ToolSource for ServicesTools {
         let user: Arc<dyn Tools> = Arc::new(UserTools::new(&p.user, p.policy.clone(), self.svc.clone(), self.host.clone(), Vec::<ServerSpec>::new()));
         // tiles_list (free): the cloud chat names the browser tiles too, the same as the desktop chat
         let user: Arc<dyn Tools> = Arc::new(crate::tilestools::TilesTools::new(user, crate::tilestools::TilesTools::builtin_catalog()));
+        // k8s_apply_yaml (asks): the person's clusters; one bound to a team environment goes through that team's deploy rules (F-TCFG-10),
+        // judged by the caller's own role in the team; one that is not bound is left to the card the person approves
+        let user: Arc<dyn Tools> = {
+            let be = Arc::new(crate::k8sexptools::RealBackend { svc: self.svc.clone(), role: iyakki_sec::policy::Role::ALL.into_iter().find(|r| r.name() == p.role).unwrap_or(iyakki_sec::policy::Role::Guest), user: p.user.clone(), audit: self.audit_fn(&p.user) });
+            let tools = crate::k8sexptools::K8sExpTools::new(user, be);
+            match crate::cloudaccess::Access::new(self.svc.dir()).roles().ok().flatten() {
+                Some(roles) => Arc::new(tools.with_gate(Arc::new(crate::tenantconfig::clustergate::PerTeamGate {
+                    dir: self.svc.dir().to_path_buf(),
+                    vault: crate::tenantconfig::vault::for_user(self.svc.dir(), &p.user),
+                    audit: Arc::new(AuditAsConfig(self.audit.clone())),
+                    roles,
+                    requester: p.user.clone(),
+                    now: Arc::new(|| crate::clock::now_unix().max(0) as u64),
+                }))),
+                None => Arc::new(tools),
+            }
+        };
         // deploy_team_host (asks): the team's local model host as a cluster Service, through the team's deploy rules
         Arc::new(crate::hostservicetools::TeamHostTools::new(
             user,
@@ -73,6 +106,10 @@ impl Extras for ServicesExtras {
         self.core.shared_cameras()
     }
 
+    fn terminal(&self) -> Arc<dyn iyakki_core_api::Terminal> {
+        self.core.shared_terminal()
+    }
+
     fn app_events(&self) -> Arc<dyn iyakki_core_api::AppEvents> {
         self.core.shared_app_events()
     }
@@ -115,6 +152,11 @@ impl Extras for ServicesExtras {
     fn hook_serve(&self, auth: &dyn Authenticator, audit: &dyn AuditSink, rq: &crate::flows::webhook::HookRequest) -> Option<crate::flows::webhook::Answer> {
         let world = crate::flows::hookenv::RealWorld { svc: &self.svc, auth, audit, only: None };
         Some(crate::flows::webhook::Hooks::shared(self.svc.dir()).serve(&world, rq))
+    }
+
+    fn hook_manage(&self, p: &Principal, op: crate::flows::hookapi::HookOp<'_>) -> ApiResult<Value> {
+        let env = crate::flows::FlowEnv::open(&self.svc, &p.user, &p.policy).map_err(ApiError::InvalidInput)?;
+        crate::flows::hookapi::run(&env, op).map_err(ApiError::InvalidInput)
     }
 
     fn flows(&self, p: &Principal) -> ApiResult<Vec<Value>> {
@@ -253,6 +295,14 @@ impl Extras for ServicesExtras {
         let cwd = crate::scope::user_home(&p.user);
         let cwd = if cwd.is_dir() { cwd } else { std::path::PathBuf::from("/") };
         crate::datatools::call(tool, args, &p.policy, &p.user, &cwd, self.svc.dir()).map_err(ApiError::InvalidInput)
+    }
+
+    fn voice_offer(&self, _p: &Principal) -> ApiResult<(String, String)> {
+        self.svc.cloud_voice_offer().map_err(ApiError::Unsupported)
+    }
+
+    fn voice_return(&self, _p: &Principal, addr: &str, offer: &str) -> ApiResult<()> {
+        self.svc.cloud_voice_return(addr, offer).map_err(ApiError::Unsupported)
     }
 
     fn web_access(&self, _p: &Principal) -> ApiResult<Value> {

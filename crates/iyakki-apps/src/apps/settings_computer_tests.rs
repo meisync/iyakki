@@ -9,20 +9,26 @@ use iyakki_sec::policy::Role;
 
 struct Fake(&'static str, &'static str);
 impl HardwareFacts for Fake {
-    fn dmi(&self) -> iyakki_hwinfo::DmiIdentity {
-        iyakki_hwinfo::DmiIdentity { sys_vendor: Some(self.0.into()), product_name: Some(self.1.into()), ..Default::default() }
+    fn dmi(&self) -> iyakki_core_api::device_types::hwinfo::DmiIdentity {
+        iyakki_core_api::device_types::hwinfo::DmiIdentity { sys_vendor: Some(self.0.into()), product_name: Some(self.1.into()), ..Default::default() }
     }
 }
 
 const SIZES: [(u32, u32); 6] = [(390, 844), (600, 1000), (800, 1280), (1280, 800), (1920, 1080), (844, 390)];
 
 /// An administrator on a Macmini8,1 that has also been used on a Legion; the Legion is the one running now when `on_legion`.
+/// The store behind the services of the test (they are the real ones, so a test may attach the computer the page is about).
+fn real_store(cx: &AppCx) -> Arc<std::sync::Mutex<iyakki_shared::settings::SettingsStore>> {
+    cx.services.as_any().downcast_ref::<iyakki_agent::services::Services>().expect("the real services").settings.clone()
+}
+
 fn rig(tag: &str, on_legion: bool) -> (AppCx, SettingsApp) {
     let mut cx = cx_with_admin_store(tag);
     let d = temp_dir(&format!("{tag}-svc"));
     cx.services = services_in(&d, Arc::new(Offline));
     {
-        let mut st = cx.settings().lock().unwrap();
+        let store = real_store(&cx);
+        let mut st = store.lock().unwrap();
         let mac = Computers::open(cx.data_dir(), &Fake("Apple Inc.", "Macmini8,1"), 1_700_000_000, st.get());
         st.attach_computers(mac);
         st.update(|s| {
@@ -53,7 +59,7 @@ fn draw(a: &mut SettingsApp, cx: &AppCx, w: u32, h: u32) -> Gfx {
 }
 
 fn computers(cx: &AppCx) -> Computers {
-    cx.settings().lock().unwrap().computers().unwrap().clone()
+    real_store(cx).lock().unwrap().computers().unwrap().clone()
 }
 
 #[test]
@@ -199,4 +205,31 @@ fn the_startup_disk_keys_ask_first_and_the_restart_switch_is_kept_and_audited() 
     a2.go_to(Tab::Computer);
     key(&mut a2, &cx2, 'b');
     assert!(a2.modal.is_none());
+}
+
+#[test]
+fn the_startup_disk_line_and_the_four_changes_go_through_the_cores_handle_after_the_yes_and_a_refusal_is_the_message() {
+    let (mut cx, mut a) = rig("pc-startup-core", true);
+    let fake = Arc::new(iyakki_core_fake::FakeOs::new());
+    cx.os = fake.clone();
+    // nothing is written before the yes
+    key(&mut a, &cx, 'b');
+    assert!(fake.startup_disk_fake().calls().is_empty());
+    key(&mut a, &cx, 'y');
+    assert_eq!(fake.startup_disk_fake().calls(), vec!["apply(first)"]);
+    assert!(a.status.as_ref().is_some_and(|(m, ok)| *ok && m.contains("Boot0002 is first")), "{:?}", a.status);
+    for (k, call) in [('n', "apply(next)"), ('v', "apply(revert)"), ('e', "apply(register)")] {
+        key(&mut a, &cx, k);
+        key(&mut a, &cx, 'y');
+        assert_eq!(fake.startup_disk_fake().calls().last().map(String::as_str), Some(call));
+    }
+    // the page reads its line from the handle too
+    assert!(fake.startup_disk_fake().state().own);
+    // a firmware that refuses is the answer the person reads, and nothing else is recorded
+    fake.startup_disk_fake().set(|s| s.read_only = true);
+    let before = fake.startup_disk_fake().calls().len();
+    key(&mut a, &cx, 'b');
+    key(&mut a, &cx, 'y');
+    assert_eq!(fake.startup_disk_fake().calls().len(), before);
+    assert!(a.status.as_ref().is_some_and(|(m, ok)| !*ok && m.contains("read-only")), "{:?}", a.status);
 }

@@ -327,7 +327,7 @@ impl UiApp for MarkdownApp {
                 widgets::surface(c, th, &m, r, if on { th.accent } else { th.card }, Radius::Md, false);
                 let t = fit(c, m.size(TypeRole::Label), name, TextStyle::Regular, r.w - 2.0 * m.gap(Space::Md));
                 c.text(r.x + m.gap(Space::Md), r.y + (r.h - m.size(TypeRole::Label)) / 2.0, m.size(TypeRole::Label), th.text, &t, TextStyle::Regular);
-                c.hit(r, Hit { action: A_PICK + k as u32, name: name.clone(), role: Role::ListItem });
+                c.hit(r, Hit { action: A_PICK + k as u32, name: name.clone(), role: Role::ListItem, ..Default::default() });
             }
             return;
         }
@@ -414,7 +414,7 @@ impl UiApp for MarkdownApp {
         });
         self.page = shown.saturating_sub(1).max(1);
         // the whole text area is one named region for a screen reader (the words themselves are drawn as text)
-        c.hit(text_area, Hit { action: A_BODY, name: format!("{}: {} lines, from line {}", self.title, self.lines, self.top + 1), role: Role::Text });
+        c.hit(text_area, Hit { action: A_BODY, name: format!("{}: {} lines, from line {}", self.title, self.lines, self.top + 1), role: Role::Text, ..Default::default() });
         // bottom bar: top, links
         let bw = ((bar.w - m.gap(Space::Md)) / 2.0).max(0.0);
         widgets::button(c, th, &m, Rect::new(bar.x, bar.y, bw, bar.h), "Top", A_TOP, false);

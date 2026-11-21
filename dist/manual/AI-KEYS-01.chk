@@ -1,0 +1,16 @@
+scenario: AI-KEYS-01
+title: Live provider answer
+area: Assistant
+rows: F-AI-02
+machines: any
+needs: person
+prereq: You have your own key for one provider (OpenAI, Claude or Gemini). Never type it anywhere but the Settings page that asks for it.
+step: Open Settings, Assistants and add your key for the provider.
+expect: The key is accepted and is not shown again in clear text.
+clause: key
+step: Open Chat and ask a short question.
+expect: An answer arrives within a few seconds and names no key.
+clause: answer
+step: Remove the key from Settings.
+expect: The assistant says it has no key for that provider and asks you to add one.
+clause: remove

@@ -36,7 +36,7 @@ pub struct RealNet;
 impl NetEnv for RealNet {
     fn run(&mut self, argv: &[String]) -> Result<(), String> {
         let (cmd, rest) = argv.split_first().ok_or("an empty command")?;
-        let o = std::process::Command::new(cmd).args(rest).output().map_err(|e| format!("{cmd}: {e}"))?;
+        let o = iyakki_core_local::starters::run_program(Path::new(cmd), rest).map_err(|e| format!("{cmd}: {e}"))?;
         if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).trim().to_string()) }
     }
     fn resolve(&mut self, server: Ipv4Addr, name: &str) -> Vec<Ipv4Addr> {
@@ -68,9 +68,9 @@ impl NetEnv for RealNet {
 
 /// The interfaces of this computer from `/sys/class/net`, `/proc/net/route` and the addresses.
 pub fn read_ifaces_real() -> Vec<Iface> {
-    let route = std::fs::read_to_string("/proc/net/route").unwrap_or_default();
+    let route = iyakki_core_local::net::ipv4_routes_text();
     let gws = net::gateways_from_route(&route);
-    let v4 = iyakki_devctl::ipv4_addresses();
+    let v4 = iyakki_core_local::devctl::ipv4_addresses();
     let mut out = Vec::new();
     for e in std::fs::read_dir(crate::sysinfo::net_class_root()).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
@@ -91,7 +91,7 @@ pub fn read_ifaces_real() -> Vec<Iface> {
 /// What the machine looks like to the card (blocks for a few seconds: one connection test). Call it from a worker, not from drawing.
 pub fn situation_now(sys: &Path) -> Situation {
     let ifaces = read_ifaces_real();
-    let route = std::fs::read_to_string("/proc/net/route").unwrap_or_default();
+    let route = iyakki_core_local::net::ipv4_routes_text();
     let mut internet_on = Vec::new();
     if let Ok(addrs) = ("git.kernel.org", 443).to_socket_addrs() {
         for a in addrs.filter(|a| a.is_ipv4()) {
@@ -153,7 +153,7 @@ pub fn view_now(data: &Path, home: &Path) -> HwView {
     } else {
         format!("{} file(s) for {}, about {} KB with the licence texts.", plan.groups.iter().map(|g| g.files.len()).sum::<usize>(), plan.groups.iter().map(|g| g.title.as_str()).collect::<Vec<_>>().join(", "), bytes.max(plan.groups.iter().map(|g| g.bytes()).sum::<u64>()) >> 10)
     };
-    let situation = situation_now(Path::new("/sys"));
+    let situation = situation_now(Path::new(iyakki_core_local::kernelfacts::SYS));
     let staging = fwextra::staging_dir(home);
     let has_staging = std::fs::read_dir(&staging).map(|d| d.flatten().next().is_some()).unwrap_or(false);
     let link_iface = situation.ifaces.iter().find(|i| i.kind == Kind::Link && i.carrier).map(|i| i.name.clone());
@@ -187,7 +187,7 @@ pub fn fetch_to_folder(fetch: &mut dyn FnMut(&str, u64, &Path) -> Result<(), Str
         }
         fetch(&m.url(p), *size, &dest)?;
         let bytes = std::fs::read(&dest).map_err(|e| format!("{}: {e}", dest.display()))?;
-        if bytes.len() as u64 != *size || iyakki_drivers::pack::sha256_hex(&bytes) != *sha {
+        if bytes.len() as u64 != *size || iyakki_core_local::kmodpack::sha256_hex(&bytes) != *sha {
             let _ = std::fs::remove_file(&dest);
             return Err(format!("{p} does not match the pinned size and sha256; it was deleted"));
         }
@@ -250,7 +250,7 @@ pub fn hardware_main(args: &[String], data: &Path, user: &str) -> i32 {
             crate::qprintln!("Total {} KB with the licence texts.", sel.bytes(m) >> 10);
         }
         if has(args, "--list") {
-            let situation = situation_now(Path::new("/sys"));
+            let situation = situation_now(Path::new(iyakki_core_local::kernelfacts::SYS));
             crate::qprintln!("Ways to get the files:");
             for o in net::offers(&situation) {
                 crate::qprintln!("  [{}] {}", if o.ready { "ready" } else if o.needs_click { "on your click" } else { "not now" }, o.line);
@@ -322,7 +322,7 @@ pub fn firmware_main(args: &[String]) -> i32 {
                 Some(f) => std::fs::read_to_string(&f).unwrap_or_default(),
                 None => env.kernel_log(),
             };
-            let plan = fwextra::build_plan(&fwextra::parse_log(&text, m), &fwextra::read_devs(Path::new("/sys")), m);
+            let plan = fwextra::build_plan(&fwextra::parse_log(&text, m), &fwextra::read_devs(Path::new(iyakki_core_local::kernelfacts::SYS)), m);
             for l in plan.lines() {
                 crate::qprintln!("{l}");
             }
@@ -350,7 +350,7 @@ fn fetch_main(args: &[String], m: &Manifest) -> i32 {
     } else if let Some(d) = &device {
         // ask the device for its kernel log over the developer-mode link
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("iyakki"));
-        match std::process::Command::new(exe).args(["dev", "dmesg", "--device", d]).output() {
+        match iyakki_core_local::starters::run_program(&exe, &["dev".into(), "dmesg".into(), "--device".into(), d.clone()]) {
             Ok(o) if o.status.success() => fwextra::build_plan(&fwextra::parse_log(&String::from_utf8_lossy(&o.stdout), m), &[], m),
             Ok(o) => {
                 crate::qprintln!("error: could not read the kernel log of {d}: {}", String::from_utf8_lossy(&o.stderr).trim());
@@ -385,7 +385,7 @@ fn fetch_main(args: &[String], m: &Manifest) -> i32 {
             return 2;
         };
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("iyakki"));
-        let st = std::process::Command::new(exe).args(["dev", "files", "push"]).arg(&s.folder).arg("~/firmware-extra").args(["--device", &d]).status();
+        let st = iyakki_core_local::starters::run_status(&exe, &["dev".into(), "files".into(), "push".into(), s.folder.display().to_string(), "~/firmware-extra".into(), "--device".into(), d.clone()]);
         match st {
             Ok(x) if x.success() => crate::qprintln!("Sent. On the device open Store, Setup, Hardware firmware: it checks every file again, shows the licences, and installs only after you click there."),
             _ => {
@@ -414,7 +414,7 @@ fn root() -> bool {
 
 pub fn share_main(args: &[String]) -> i32 {
     let ifaces = read_ifaces_real();
-    let route = std::fs::read_to_string("/proc/net/route").unwrap_or_default();
+    let route = iyakki_core_local::net::ipv4_routes_text();
     let link = match net::pick_link(&ifaces, flag(args, "--device").as_deref()) {
         Ok(l) => l,
         Err(e) => {
@@ -435,7 +435,7 @@ pub fn share_main(args: &[String]) -> i32 {
         }
     };
     let share = net::Share { link: link.clone(), uplink };
-    let prev = std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward").map(|s| s.trim().to_string()).unwrap_or_else(|_| "0".into());
+    let prev = iyakki_core_local::net::ip_forward_text();
     let cmds = if undo {
         let p = std::fs::read_to_string(prev_forward_file(&link)).map(|s| s.trim().to_string()).unwrap_or_else(|_| "0".into());
         net::unshare_commands(&share, &p)

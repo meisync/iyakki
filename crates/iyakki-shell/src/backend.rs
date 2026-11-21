@@ -45,7 +45,7 @@ impl GraphicsMode {
     /// `Some(true)` when it already was, `Some(false)` when it had to be set again, `None` when there is no console.
     fn reassert() -> Option<bool> {
         use std::os::fd::AsRawFd;
-        for path in ["/dev/tty0", "/dev/console"] {
+        for path in iyakki_core_local::kernelfacts::CONSOLE_NODES {
             let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(path) else { continue };
             let mut mode: libc::c_int = -1;
             // SAFETY: KDGETMODE writes one int to the pointer given.
@@ -65,7 +65,7 @@ impl GraphicsMode {
 
     pub(crate) fn enter() -> GraphicsMode {
         use std::os::fd::AsRawFd;
-        for path in ["/dev/tty0", "/dev/console"] {
+        for path in iyakki_core_local::kernelfacts::CONSOLE_NODES {
             if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(path) {
                 let mut mode: libc::c_int = -1;
                 // SAFETY: KDGETMODE writes one int to the pointer given.
@@ -339,11 +339,13 @@ struct FrameStats {
     worst: Duration,
     /// The slowest of the tile-only frames (`worst` is the slowest of all): tells a hitch of the whole-scene draw from the live paint.
     worst_live: Duration,
+    /// When the last INFO frame line was logged (kept across windows).
+    last_info: Option<Instant>,
 }
 
 impl FrameStats {
     fn new() -> FrameStats {
-        FrameStats { since: Instant::now(), frames: 0, live: 0, render: Duration::ZERO, present: Duration::ZERO, worst: Duration::ZERO, worst_live: Duration::ZERO }
+        FrameStats { since: Instant::now(), frames: 0, live: 0, render: Duration::ZERO, present: Duration::ZERO, worst: Duration::ZERO, worst_live: Duration::ZERO, last_info: None }
     }
 
     /// A frame that painted only the live picture: `draw` is the time to copy it into the scene.
@@ -361,8 +363,13 @@ impl FrameStats {
         if self.since.elapsed() >= Duration::from_secs(10) {
             let n = self.frames.max(1);
             let ms = |d: Duration| d.as_secs_f64() * 1000.0;
-            let sys = |p: &str| std::fs::read_to_string(p).map(|s| s.trim().to_string()).unwrap_or_else(|_| "?".into());
-            log::info!(
+            let (cpu_khz, cpu_governor) = iyakki_core_local::machinefacts::cpu0_speed();
+            let level = frame_line_level(self.worst, self.last_info.map(|t| t.elapsed()));
+            if level == log::Level::Info {
+                self.last_info = Some(Instant::now());
+            }
+            log::log!(
+                level,
                 "shell: {} frames in {:.0}s, draw {:.1} ms, screen write {:.1} ms, slowest {:.0} ms (tile-only {:.0} ms), {} tile-only; cpu0 {} kHz, governor {}; by reason: {}",
                 self.frames,
                 self.since.elapsed().as_secs_f64(),
@@ -371,12 +378,40 @@ impl FrameStats {
                 ms(self.worst),
                 ms(self.worst_live),
                 self.live,
-                sys("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"),
-                sys("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"),
+                cpu_khz,
+                cpu_governor,
                 crate::stale_stats::take_table(),
             );
+            let last_info = self.last_info;
             *self = FrameStats::new();
+            self.last_info = last_info;
         }
+    }
+}
+
+/// How the ten-second frame line is logged: INFO (which lands in the kernel ring) only for the first one, for a window with a slow frame
+/// and then at most once an hour; every other window goes out at DEBUG so the ring keeps the boot lines (KI-1014).
+fn frame_line_level(worst: Duration, since_last_info: Option<Duration>) -> log::Level {
+    match since_last_info {
+        None => log::Level::Info,
+        Some(_) if worst >= Duration::from_millis(250) => log::Level::Info,
+        Some(t) if t >= Duration::from_secs(3600) => log::Level::Info,
+        Some(_) => log::Level::Debug,
+    }
+}
+
+#[cfg(test)]
+mod frame_line_tests {
+    use super::*;
+
+    #[test]
+    fn the_frame_line_goes_to_the_kernel_ring_once_then_only_for_a_slow_window_or_each_hour() {
+        let quick = Duration::from_millis(20);
+        assert_eq!(frame_line_level(quick, None), log::Level::Info);
+        assert_eq!(frame_line_level(quick, Some(Duration::from_secs(10))), log::Level::Debug);
+        assert_eq!(frame_line_level(quick, Some(Duration::from_secs(3599))), log::Level::Debug);
+        assert_eq!(frame_line_level(quick, Some(Duration::from_secs(3600))), log::Level::Info);
+        assert_eq!(frame_line_level(Duration::from_millis(250), Some(Duration::from_secs(10))), log::Level::Info);
     }
 }
 
@@ -517,7 +552,7 @@ fn hand_over(screen: &Mutex<Screen>, paused: &AtomicBool, idle: &AtomicBool, fb_
                 reopened = true;
                 break;
             }
-            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => std::thread::sleep(Duration::from_millis(100)), // flaky-ok: production retry while the display driver hands the screen back (not test code; the scan starts its test region too early)
         }
     }
     let result = if reopened { result } else { result.and(Err("the screen did not come back".to_string())) };
@@ -556,6 +591,8 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
     crate::display::set_driven(w, h);
     log::info!("shell: {}", fb.display_line());
     let mut gfx = Gfx::new(w, h);
+    let mut band_pool = iyakki_uikit::gfx::BandPool::new();
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
     let t_gfx = t_start.elapsed();
     // The first scan of the input devices is done by the input thread right after the first picture is on the screen: opening an
     // event device the kernel is still setting up can block for seconds (5.3 s seen on a Mac mini 2018 at boot), and the screen
@@ -749,7 +786,15 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                 }
                 first = false;
                 let t0 = Instant::now();
+                // opt-in (Look, effects, `parallel_draw`): the frame's drawing calls are written down and replayed band by band on every core
+                let par = shell.parallel_draw();
+                if par {
+                    gfx.record_begin();
+                }
                 shell.render(&mut gfx);
+                if par {
+                    gfx.record_finish(&mut band_pool, cpus);
+                }
                 let t1 = Instant::now();
                 let mut s = lock(&screen);
                 // the screen holds `scene` + pointer: take the pointer off, update the changed rows, put it back
@@ -780,6 +825,10 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                     });
                     // the end of "power on to sign-in screen": the kernel's own clock stamps this line (see dist/buildroot/boot-time.py)
                     log::info!("shell: first picture on screen ({}x{}, first frame took {} ms, {} ms after the display was opened)", w, h, (t1 - t0).as_millis(), t_start.elapsed().as_millis());
+                    // the RAM in use at the sign-in screen, for the per-image budget (F-PKG-05; dist/buildroot/boot-time.py reads this line)
+                    if let Some(l) = iyakki_core_local::sysinfo::idle_ram_line(&iyakki_core_local::sysinfo::SysRoots::real()) {
+                        log::info!("shell: {l}");
+                    }
                 }
                 stats.frame(t1 - t0, last_render - t1);
                 crate::apps::browser_media::feed_screen(gfx.width(), gfx.height(), gfx.rgba());

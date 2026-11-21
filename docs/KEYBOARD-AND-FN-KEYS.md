@@ -56,6 +56,7 @@ A person can have several named desktop views on one screen (Settings, Desktop v
 |---|---|
 | Ctrl+Alt+Super+1 to 9 | Jump to view N (the Super key is the Windows key, or Command on a Mac keyboard). Ctrl+Alt+1 to 9 without Super still apply a pane layout. |
 | Ctrl+Alt+PageUp / PageDown | Previous / next view (browser-style set). Also works from the browser window. |
+| Ctrl+Alt+(your key) | Your own previous / next view keys, if you set them (the assistant: `views_keys` with `custom_prev` and `custom_next`; a letter other than M, Q, L, S, or [ ] , .). |
 | Control+Command+Q (or Control+Option+Q) in the Mac profile, Control+Windows+Q in the PC profile | Asks "Sign out? Open apps close and the vault locks." from any screen once signed in: Enter or y signs out, Esc or n stays (the buttons also take a click or a touch). Not shown on the sign-in screen or over the lock screen. After a sign-out the sign-in screen says "You signed out" for a few seconds. |
 | Control+Command+Left / Right | Previous / next view (Mac-style set). With Alt held it is a pane snap, as before. |
 

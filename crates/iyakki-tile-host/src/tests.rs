@@ -365,3 +365,35 @@ fn a_pinch_reaches_an_abi_3_tile_and_is_dropped_before_older_tiles() {
     }
     assert!(pinch.iter().all(Event::needs_events_abi));
 }
+
+#[test]
+fn a_frame_sent_as_json_comes_back_as_the_same_display_list_and_a_bad_one_is_refused_in_words() {
+    use crate::export::{from_json, to_json};
+    use iyakki_tile_abi::{Color, DisplayList, Op, Rect, Role};
+    let mut l = DisplayList::new();
+    l.push(Op::Rect { r: Rect::new(0, 0, 100, 20), color: Color(1, 2, 3, 255) });
+    l.push(Op::RoundRect { r: Rect::new(1, 1, 10, 10), radius: 3, color: Color(9, 9, 9, 128) });
+    l.push(Op::Outline { r: Rect::new(2, 2, 10, 10), thickness: 1, color: Color(0, 0, 0, 255) });
+    l.push(Op::Line { x1: 0, y1: 0, x2: 5, y2: 5, thickness: 2, color: Color(5, 5, 5, 255) });
+    l.push(Op::Text { x: 4, y: 4, face: 0, size: 14, color: Color(255, 255, 255, 255), text: "Hello \"tenant\"".into() });
+    l.push(Op::PushClip { r: Rect::new(0, 0, 50, 50) });
+    l.push(Op::Image { handle: 7, r: Rect::new(0, 0, 8, 8) });
+    l.push(Op::PopClip);
+    l.push(Op::Hit { id: 3, r: Rect::new(0, 0, 40, 20) });
+    l.push(Op::Access { id: 3, role: Role::Button, r: Rect::new(0, 0, 40, 20), name: "Go".into(), value: String::new(), flags: 0 });
+    let v: serde_json::Value = serde_json::from_str(&to_json(&l, 320, 200)).unwrap();
+    let (back, w, h) = from_json(&v).unwrap();
+    assert_eq!((w, h), (320, 200));
+    assert_eq!(back, l);
+    for (what, doc) in [
+        ("unknown op", serde_json::json!({"width": 1, "height": 1, "ops": [{"op": "script"}]})),
+        ("no ops", serde_json::json!({"width": 1, "height": 1})),
+        ("bad colour", serde_json::json!({"width": 1, "height": 1, "ops": [{"op": "rect", "x": 0, "y": 0, "w": 1, "h": 1, "color": "red"}]})),
+        ("huge coordinate", serde_json::json!({"width": 1, "height": 1, "ops": [{"op": "rect", "x": 99999999, "y": 0, "w": 1, "h": 1, "color": "#000000"}]})),
+        ("no size", serde_json::json!({"ops": []})),
+    ] {
+        assert!(from_json(&doc).is_err(), "{what}");
+    }
+    let many: Vec<serde_json::Value> = (0..200_000).map(|_| serde_json::json!({"op": "pop_clip"})).collect();
+    assert!(from_json(&serde_json::json!({"width": 1, "height": 1, "ops": many})).unwrap_err().contains("limits"));
+}

@@ -68,8 +68,8 @@ restores by picture), `appearance` (skipped when the build has no such page), `m
 
 ## QEMU mode
 
-`--qemu BUILD_DIR` boots `images/` of that folder the way `dist/qemu/dev-pair-test.py` does (same command line; that script has no importable
-function, so `qemu_guest.py` mirrors it: keep the two in step), makes a scratch account, switches developer mode on, reads the one-time code off the
+`--qemu BUILD_DIR` boots `images/` of that folder the way `dist/qemu/dev-pair-test.py` does (the `Vm` class of that script is the boot recipe and the pairing steps, and
+`qemu_guest.py` calls it: nothing is mirrored), makes a scratch account, switches developer mode on, reads the one-time code off the
 screen with tesseract, pairs this computer and grants the diagnostic scopes. **Without tesseract the pairing code cannot be read**: the guest is
 booted, two monitor screenshots (first screen, Home) are checked (not blank, they differ) and every other scenario is SKIPPED with that reason.
 Set `IYAKKI_DEVTEST_KEEP=1` to keep the scratch folder.

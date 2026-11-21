@@ -75,7 +75,7 @@ fn a_due_schedule_runs_once_by_itself_records_the_result_and_waits_for_its_next_
     beat(&mut sh);
     finish(&mut sh);
     assert_eq!(files(&stick), 2, "a second one a day later (the stamp of the name is the clock's)");
-    let audit = std::fs::read_to_string(sh.env.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(sh.env.audit.path_buf()).unwrap_or_default();
     assert!(audit.contains("backup.scheduled"), "{audit}");
     // the apps that listen heard it, by words only (the second finished run replaced the first: a state of the same kind coalesces only by kind)
     let heard = core.app_events().poll("alice", "sample", 10);

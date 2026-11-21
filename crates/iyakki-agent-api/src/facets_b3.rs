@@ -64,6 +64,14 @@ pub trait ClientMediaFacet: Send + Sync {
     fn set_permission(&self, _data: &Path, _device_id: &str, _name: &str, _on: bool, _by: &str, _now: i64) -> Result<&'static str, String> {
         Err(UNAVAILABLE_B3.into())
     }
+    /// The role a device is on (`viewer`, `listener`, `presenter`, `full`), or `custom` when its switches were set one by one.
+    fn device_role(&self, _data: &Path, _device_id: &str) -> String {
+        "custom".into()
+    }
+    /// Put a device on a role of the table (grants what it has, takes the other grantable switches away). The caller writes the audit line.
+    fn set_device_role(&self, _data: &Path, _device_id: &str, _role: &str, _by: &str, _now: i64) -> Result<(), String> {
+        Err(UNAVAILABLE_B3.into())
+    }
     /// Which client cameras and microphones this machine is using right now (the red sign).
     fn indicator(&self) -> Indicator {
         Indicator::default()
@@ -99,7 +107,7 @@ pub trait ComputerHooksFacet: Send + Sync {
 }
 
 /// What Settings -> This computer shows.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ComputerPage {
     pub me_id: String,
     pub me_label: String,
@@ -220,6 +228,14 @@ pub trait VpnManager: Send + Sync {
     /// Whether the privileged VPN helper is switched on for this person (`None`: no helper on this system).
     fn helper_on(&self) -> Option<bool> {
         None
+    }
+    /// Type the user name and password of an OpenVPN profile that asks for them (they go to the vault, nowhere else; never a chat tool).
+    fn set_credentials(&self, _id: &str, _user: &str, _pass: &str) -> Result<(), String> {
+        Err(UNAVAILABLE_B3.into())
+    }
+    /// Does the vault hold the login of this profile?
+    fn has_credentials(&self, _id: &str) -> bool {
+        false
     }
     /// Switch the privileged helper on or off (init starts or stops it; the manager uses it from the next sign-in).
     fn set_helper(&self, _on: bool) -> Result<(), String> {

@@ -1,0 +1,22 @@
+{
+ "schema": 1,
+ "row": "F-SYS-09",
+ "feature_sha": "a52393b9c736cbcf",
+ "title": "system_processes and system_pod_busy answer read-only and redacted",
+ "clauses": [
+  {
+   "id": "chat-processes",
+   "text": "system_processes and system_pod_busy answer read-only and redacted",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant for the busiest processes by memory, limit 5.",
+     "expect": "A short list with command lines that show no secrets.",
+     "runner_did": "Booted the image in QEMU and signed in a scratch account (when run through the runner)"
+    }
+   ]
+  }
+ ]
+}

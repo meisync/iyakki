@@ -126,7 +126,7 @@ fn chat_rig(cx0: &AppCx) -> (AppCx, iyakki_shared::settingstools::SettingsTools)
     let cx = cx0.clone();
     let dir = cx.data_dir().to_path_buf();
     let settings = Arc::new(std::sync::Mutex::new(iyakki_shared::settings::SettingsStore::open(&dir.join("settings.json")).unwrap()));
-    let env = Env { dir: dir.clone(), user: "root".into(), admin: true, settings, audit: Arc::new(|_, _| {}) };
+    let env = Env { dir: dir.clone(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(|_, _| {}) };
     let mut entries = crate::apps::chat_browser_data::entries(&cx, &env);
     entries.extend(crate::apps::chat_camvision::entries(&cx, &env));
     let t = SettingsTools::new(Arc::new(NoTools), true, entries);
@@ -337,4 +337,24 @@ fn the_chat_installs_lists_and_removes_a_site_app_and_the_list_says_what_the_sit
     let said = t.call("site_app_remove", &serde_json::json!({"name": "films"})).unwrap();
     assert!(said.contains("sign-ins are deleted") && !prof.exists(), "{said}");
     assert!(t.call("site_app_remove", &serde_json::json!({"name": "films"})).is_err());
+}
+
+#[test]
+fn the_chat_opens_a_site_app_by_name_and_the_shell_gets_one_request_for_this_person_only() {
+    let cx = admin("siteapp-open1");
+    let (cx, t) = chat_rig(&cx);
+    let defs = t.defs();
+    assert_eq!(defs.iter().find(|d| d.spec.name == "site_app_open").expect("the tool exists").risk, iyakki_agent::agent::Risk::Ask, "opening a site asks first");
+    assert!(t.call("site_app_open", &serde_json::json!({"name": "films"})).unwrap_err().contains("site_apps_list"), "no such site app");
+    assert!(crate::apps::download_open::take_chat(&cx.session.user).is_none(), "a refused call queues nothing");
+    t.call("browser_install_site", &serde_json::json!({"url": "https://www.example.org/start", "title": "Example", "name": "Films"})).unwrap();
+    let id = crate::apps::site_apps::load(&cx).apps[0].id.clone();
+    let said = t.call("site_app_open", &serde_json::json!({"name": "films"})).unwrap();
+    assert!(said.contains("Films"), "{said}");
+    assert!(crate::apps::download_open::take_chat("someone-else").is_none());
+    let (tile, item) = crate::apps::download_open::take_chat(&cx.session.user).expect("queued");
+    assert_eq!(tile, "browser");
+    assert_eq!(crate::apps::download_open::item_for(&tile, &item), format!("site:{id}"), "the browser's own open-item hand-over");
+    assert!(crate::apps::download_open::take_chat(&cx.session.user).is_none(), "taken once");
+    assert!(t.describe("site_app_open", &serde_json::json!({"name": "Films"})).contains("Films"));
 }

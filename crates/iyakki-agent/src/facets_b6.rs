@@ -365,6 +365,9 @@ impl iyakki_agent_api::HelpersB6 for RealHelpersB6 {
     fn access_revoke(&self, data: &std::path::Path, installation: &str, capability: &str) -> Result<bool, String> {
         crate::accessbroker_revoke::revoke(data, installation, capability)
     }
+    fn access_limit(&self, data: &std::path::Path, installation: &str, capability: &str, hours: Option<u32>) -> Result<bool, String> {
+        crate::accessbroker_revoke::limit(data, installation, capability, hours, crate::clock::now_unix())
+    }
     fn dl_fetch_start(&self, dir: &std::path::Path, force: bool) -> bool {
         crate::dlmanifest::fetch::start(dir, force)
     }

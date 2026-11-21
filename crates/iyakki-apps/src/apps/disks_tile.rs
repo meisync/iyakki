@@ -1,20 +1,16 @@
 //! DISKS: see every drive of the machine, mount and unmount partitions, eject safely, and (administrators, behind "Advanced")
 //! change partitions (docs/DISKS.md).
 //!
-//! The engine is `iyakki_disksx::disks` (listing, superblock probing, mount and eject) and `iyakki_disksx::disks_part` (the partition
-//! manager with its safety rules). This file is the state and the keys; `disks_tile_ui.rs` draws it. Nothing blocks the screen:
+//! The engine is the core's [`DiskEngine`] (`cx.os.disk_engine()`: listing, mount and eject, the partition manager with its safety rules,
+//! unlocking; F-ARCH-06): the tile holds no engine of its own and starts no program. This file is the state and the keys; `disks_tile_ui.rs` draws it. Nothing blocks the screen:
 //! scanning, mounting, ejecting and partition changes run on short threads whose answers are picked up on the heartbeat, and the
 //! tile looks for new drives with two small `/proc` reads every couple of seconds while it is on screen.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use iyakki_shared::disks::{Actor, MountOpts, MountPlan, Table};
-use iyakki_disksx::disks::{may_use, Disk, Disks, Part, Snapshot};
+use iyakki_core_api::diskmodel::{check_confirmation_for, may_use, Actor, Confirm, Disk, DiskEngine, FormatFs, MountOpts, MountPlan, Part, PartOp, Snapshot, Table};
 use iyakki_diskcrypt::{wipe_string, CryptKind, Secret};
-use iyakki_disksx::disks_helper::CryptRunner;
-use iyakki_shared::disks_part::{Confirm};
-use iyakki_disksx::disks_part::{check_confirmation_for, FormatFs, PartOp};
 use iyakki_sec::policy::Role;
 
 use super::{App, AppCx, Flow};
@@ -155,13 +151,11 @@ pub(super) struct Running {
 }
 
 pub struct DisksApp {
-    pub(super) engine: Arc<Disks>,
-    /// Opens and closes LUKS and BitLocker volumes (the helper programs; a made-up one in tests).
-    pub(super) crypt: Arc<dyn CryptRunner>,
+    pub(super) engine: Arc<dyn DiskEngine>,
     /// The assistant asked for the password box of this partition; shown once the drives are listed.
     want_unlock: Option<String>,
     /// The assistant asked (and the person approved) a format or resize: its review is shown once the drives are listed.
-    want_op: Option<iyakki_disksx::disksformattools::Req>,
+    want_op: Option<iyakki_core_api::diskmodel::FormatRequest>,
     /// How long the Cancel countdown runs after the last button (5 seconds; zero only in tests).
     pub(super) cancel_window: std::time::Duration,
     pub(super) who: Actor,
@@ -211,13 +205,13 @@ impl DisksApp {
     pub fn new(cx: &AppCx) -> DisksApp {
         // the shell's tests (and the monkey) never see a real drive: they get the made-up machine
         #[cfg(any(test, feature = "testing"))]
-        let engine = Arc::new(iyakki_disksx::disks_fake::machine().disks());
+        let engine: Arc<dyn DiskEngine> = iyakki_disksx::disks_fake::machine_engine();
         #[cfg(not(any(test, feature = "testing")))]
-        let engine = Arc::new(Disks::real());
+        let engine: Arc<dyn DiskEngine> = cx.os.disk_engine();
         DisksApp::with_engine(cx, engine, false)
     }
 
-    pub fn with_engine(cx: &AppCx, engine: Arc<Disks>, inline: bool) -> DisksApp {
+    pub fn with_engine(cx: &AppCx, engine: Arc<dyn DiskEngine>, inline: bool) -> DisksApp {
         // the drives go into the signed-in person's own home, owned by that account (its passwd entry; the IYAKKI process's own
         // user when the account has none)
         let user = cx.session.user.clone();
@@ -225,19 +219,14 @@ impl DisksApp {
         let (home, uid, gid) = (format!("/home/{user}"), 1000, 1000);
         #[cfg(not(any(test, feature = "testing")))]
         let (home, (uid, gid)) = (cx.agent.scope_home_root(&user, std::path::Path::new("/var/lib/iyakki")).display().to_string(), cx.agent.disks_account_owner(&user, "/etc/passwd").unwrap_or_else(process_owner));
+        // exFAT, NTFS, resizing and the unlock helpers use the programs the person installed (the tests never start one)
         #[cfg(not(any(test, feature = "testing")))]
-        let crypt: Arc<dyn CryptRunner> = Arc::new(iyakki_disksx::disks_helper::ProcRunner::real(&cx.clis().bin_dir()));
-        // the tests never start a program: the helpers are "not installed" unless a test sets its own runner
-        #[cfg(any(test, feature = "testing"))]
-        let crypt: Arc<dyn CryptRunner> = Arc::new(iyakki_disksx::disks_helper::ProcRunner::new(Arc::new(iyakki_disksx::disks_helper::FakeSys::default()), "/none", "/none"));
-        // exFAT, NTFS and resizing use the programs the person installed (the tests never start one)
-        #[cfg(not(any(test, feature = "testing")))]
-        engine.set_tools(Arc::new(iyakki_disksx::disks_fmt::ProcTools::real(&cx.clis().bin_dir())));
+        engine.use_programs(&cx.clis().bin_dir().to_string_lossy());
+        let want_op = engine.take_format_request(cx.data_dir(), &cx.session.user);
         let mut a = DisksApp {
             engine,
-            crypt,
             want_unlock: cx.agent.disksunlocktools_take_request(cx.data_dir(), &cx.session.user),
-            want_op: iyakki_disksx::disksformattools::take_request(cx.data_dir(), &cx.session.user),
+            want_op,
             cancel_window: std::time::Duration::from_secs(iyakki_shared::disks_part::CANCEL_WINDOW_SECS),
             who: Actor { user, role: cx.session.role, uid, gid, home },
             snap: Snapshot::default(),
@@ -325,7 +314,7 @@ impl DisksApp {
             None => Err(String::new()),
         };
         self.unlock_plan = match self.part() {
-            Some(p) if p.crypt.is_some() => self.engine.plan_unlock(&self.snap, &self.who, &p.name, &*self.crypt),
+            Some(p) if p.crypt.is_some() => self.engine.plan_unlock(&self.snap, &self.who, &p.name),
             _ => Err(String::new()),
         };
         if !self.is_admin() {
@@ -426,7 +415,7 @@ impl DisksApp {
     }
 
     /// Run `f` (a mount, an eject, a partition change) off the screen's thread; the answer is picked up on a heartbeat.
-    fn run(&mut self, what: &str, cx: &AppCx, f: impl FnOnce(&Disks, &dyn Fn(&str, &str)) -> Result<String, String> + Send + 'static) {
+    fn run(&mut self, what: &str, cx: &AppCx, f: impl FnOnce(&dyn DiskEngine, &dyn Fn(&str, &str)) -> Result<String, String> + Send + 'static) {
         if self.job.is_some() {
             self.say("Wait for the current job to finish.", false);
             return;
@@ -434,7 +423,7 @@ impl DisksApp {
         let slot: Slot<Result<String, String>> = Arc::new(Mutex::new(None));
         let (e, s2, audit) = (self.engine.clone(), slot.clone(), Self::audit_fn(cx));
         let work = move || {
-            let r = f(&e, &audit);
+            let r = f(&*e, &audit);
             if let Ok(mut g) = s2.lock() {
                 *g = Some(r);
             }
@@ -571,10 +560,10 @@ impl DisksApp {
         }
         let secret = Secret::new(&f.field.value);
         wipe_string(&mut f.field.value);
-        let (part, who, runner) = (f.part.clone(), self.who.clone(), self.crypt.clone());
+        let (part, who) = (f.part.clone(), self.who.clone());
         self.modal = Modal::None;
         self.run("Unlocking the drive", cx, move |d, a| {
-            let r = d.unlock(&who, &part, &secret, &*runner, a);
+            let r = d.unlock(&who, &part, &secret, a);
             drop(secret);
             r.map(|m| {
                 let mut t = format!("Opened at {} (read-only).", m.target);
@@ -605,8 +594,8 @@ impl DisksApp {
             self.say("This partition is not unlocked.", false);
             return;
         };
-        let (who, runner) = (self.who.clone(), self.crypt.clone());
-        self.run("Locking the drive", cx, move |d, a| d.lock(&who, &p, &*runner, a));
+        let who = self.who.clone();
+        self.run("Locking the drive", cx, move |d, a| d.lock(&who, &p, a));
     }
 
     pub(super) fn do_allow_writing(&mut self, cx: &AppCx) {
@@ -809,8 +798,8 @@ impl DisksApp {
     }
 
     /// The assistant's approved format or resize: select the partition and show the dry run, nothing more.
-    fn show_op_for(&mut self, req: &iyakki_disksx::disksformattools::Req) {
-        match iyakki_disksx::disksformattools::to_op(&self.snap, req) {
+    fn show_op_for(&mut self, req: &iyakki_core_api::diskmodel::FormatRequest) {
+        match iyakki_core_api::diskmodel::request_op(&self.snap, req) {
             Ok((disk, op)) => {
                 let Some(i) = self.snap.disks.iter().position(|d| d.name == disk) else { return };
                 self.select(i);
@@ -1085,7 +1074,7 @@ impl DisksApp {
                 self.tick();
                 self.check_window(cx);
                 if self.ticks % 15 == 0 && self.want_op.is_none() {
-                    self.want_op = iyakki_disksx::disksformattools::take_request(cx.data_dir(), &cx.session.user);
+                    self.want_op = self.engine.take_format_request(cx.data_dir(), &cx.session.user);
                 }
                 if self.ticks % 15 == 0 && self.want_unlock.is_none() {
                     self.want_unlock = cx.agent.disksunlocktools_take_request(cx.data_dir(), &cx.session.user);

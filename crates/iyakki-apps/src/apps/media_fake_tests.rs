@@ -119,6 +119,10 @@ impl MediaPort for FakePort {
     fn audit(&self, action: &str, subject: &str) {
         self.log.lock().unwrap().push(format!("{action} {subject}"));
     }
+    fn request_audio_drivers(&self) -> String {
+        self.log.lock().unwrap().push("broker audio".into());
+        "loaded".into()
+    }
 }
 
 fn open(tag: &str) -> (MediaApp, FakePort, Arc<Launch>) {
@@ -149,6 +153,22 @@ fn the_library_is_what_the_port_scans_and_a_track_plays_with_one_audit_line_nami
     assert!(plays[0].ends_with(".mp3") && !plays[0].contains('/'), "the audit line names the file, not the path: {}", plays[0]);
     assert_eq!(a.player.queue_state().user, "ann");
     assert!(a.player.queue_state().active && a.player.queue_state().items.len() == 2);
+}
+
+#[test]
+fn the_first_track_asks_the_device_broker_for_the_sound_drivers_once_and_a_refused_file_asks_nothing() {
+    let (mut a, p, _) = open("broker");
+    let first = a.lib.tracks[0].path.clone();
+    p.refused.lock().unwrap().push(first.rsplit('/').next().unwrap().to_string());
+    a.start_queue(vec![first], 0, &p);
+    assert!(!p.log().contains(&"broker audio".to_string()), "a file that is never started loads no drivers: {:?}", p.log());
+    let (mut a, p, _) = open("broker2");
+    a.handle_with(&Event::Key(Key::Enter), &p);
+    a.handle_with(&Event::Key(Key::Down), &p);
+    a.handle_with(&Event::Key(Key::Enter), &p);
+    assert_eq!(p.log().iter().filter(|x| *x == "broker audio").count(), 1, "asked once per app: {:?}", p.log());
+    assert_eq!(crate::apps::media_port::MEDIA_APP_ID, "media");
+    assert!(iyakki_core_api::appcaps::builtin_holds(crate::apps::media_port::MEDIA_APP_ID, "speaker.play"), "the broker's gate lets the player ask");
 }
 
 #[test]

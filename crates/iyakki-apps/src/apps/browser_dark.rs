@@ -85,7 +85,7 @@ fn blocks(v: &mut [Block]) {
                     }
                 }
             }
-            Block::Pre(_) | Block::Rule => {}
+            Block::Pre(_) | Block::Rule | Block::Mark { .. } => {}
         }
     }
 }

@@ -1,6 +1,6 @@
 //! The sound of the whole computer into the Bluetooth A2DP stream (F-NET-28): the mixer's output (every mixed period that goes to the
 //! card) is also offered here by the mixer's tee ([`crate::mixer::tee::TeeSink::browser`]); while a route is attached the periods are queued
-//! and a worker thread writes them to the sender of [`iyakki_devctl::a2dp_send`] (which converts, encodes in SBC and paces to the speed of the
+//! and a worker thread writes them to the sender of [`iyakki_core_local::devctl::a2dp_send`] (which converts, encodes in SBC and paces to the speed of the
 //! sound), so the mixer's own clock is never held up by the headphones. The route can silence the machine's own speakers while it runs
 //! ("headphones only"); if the stream fails or the headphones go away the route removes itself and the speakers come back, with the reason
 //! kept for Settings and the assistant.
@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
-use iyakki_devctl::a2dp_send::SendControl;
+use iyakki_core_local::devctl::a2dp_send::SendControl;
 
 /// The most sound waiting for the headphones.
 pub const MAX_QUEUE_MS: u64 = 600;
@@ -212,7 +212,7 @@ pub fn global() -> Arc<BtRoute> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iyakki_devctl::a2dp_send::SendView;
+    use iyakki_core_local::devctl::a2dp_send::SendView;
     use std::time::{Duration, Instant};
 
     /// A sender that records what it was given; `slow` makes each write take that long, `fail_after` makes it fail.

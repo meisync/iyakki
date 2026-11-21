@@ -177,7 +177,7 @@ mod tests {
         let core = Arc::new(FakeCore::new());
         cx.core = core.clone();
         let user = cx.session.user.clone();
-        let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.settings().clone(), audit: Arc::new(|_, _| {}) };
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.settings(), audit: Arc::new(|_, _| {}) };
         let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env, Arc::new(NoTools)));
         let defs = t.defs();
         let risk = |n: &str| defs.iter().find(|d| d.spec.name == n).unwrap_or_else(|| panic!("{n}")).risk;
@@ -232,7 +232,7 @@ mod tests {
         let core = Arc::new(FakeCore::new());
         cx.core = core.clone();
         let user = cx.session.user.clone();
-        let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.settings().clone(), audit: Arc::new(|_, _| {}) };
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.settings(), audit: Arc::new(|_, _| {}) };
         let t = SettingsTools::new(Arc::new(One), true, entries(&cx, &env, Arc::new(One)));
         let defs = t.defs();
         let risk = |n: &str| defs.iter().find(|d| d.spec.name == n).unwrap_or_else(|| panic!("{n}")).risk;
@@ -263,7 +263,7 @@ mod tests {
         let core = Arc::new(FakeCore::new());
         cx.core = core.clone();
         let user = cx.session.user.clone();
-        let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.settings().clone(), audit: Arc::new(|_, _| {}) };
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.settings(), audit: Arc::new(|_, _| {}) };
         let t = SettingsTools::new(Arc::new(One), true, entries(&cx, &env, Arc::new(One)));
         assert!(t.call("app_permissions_status", &json!({})).unwrap().contains("No app has"));
         let f = core.app_events_fake();
@@ -281,7 +281,7 @@ mod tests {
         let core = Arc::new(FakeCore::new());
         cx.core = core.clone();
         let user = cx.session.user.clone();
-        let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.services.settings().clone(), audit: Arc::new(|_, _| {}) };
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.services.settings(), audit: Arc::new(|_, _| {}) };
         let t = SettingsTools::new(Arc::new(One), true, entries(&cx, &env, Arc::new(One)));
         let f = core.app_events_fake();
         f.grant("sample", "events.network");

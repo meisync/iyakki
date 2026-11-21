@@ -15,7 +15,7 @@ mod g_chatruns { use super::*;
     use serde::{Deserialize, Serialize};
     use iyakki_agent_api::facets_b4::ChatRun;
     pub(crate) trait Dummy {}
-    pub(crate) fn serve_ChatRuns(t: &dyn ChatRuns, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_ChatRuns(t: &Arc<dyn ChatRuns>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "start" => {
                 let (x0, ): (RunRequest, ) = de(a)?;
@@ -68,12 +68,12 @@ mod g_facets_b0 { use super::*;
     use iyakki_shared::quiet::Env as QuietEnv;
     use iyakki_shared::target::{ChangePlan, Target};
     pub(crate) trait Dummy {}
-    pub(crate) fn serve_ProvidersFacet(t: &dyn ProvidersFacet, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_ProvidersFacet(t: &Arc<dyn ProvidersFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             other => Err(format!("ProvidersFacet has no call {other}")),
         }
     }
-    pub(crate) fn serve_LinuxAppsFacet(t: &dyn LinuxAppsFacet, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_LinuxAppsFacet(t: &Arc<dyn LinuxAppsFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "set_workspace_sandbox" => {
                 let (x0, x1, x2, x3, x4, ): (std::path::PathBuf, String, std::path::PathBuf, std::path::PathBuf, Option<String>, ) = de(a)?;
@@ -82,7 +82,7 @@ mod g_facets_b0 { use super::*;
             other => Err(format!("LinuxAppsFacet has no call {other}")),
         }
     }
-    pub(crate) fn serve_MediaPlay(t: &dyn MediaPlay, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_MediaPlay(t: &Arc<dyn MediaPlay>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "plays_mp3_in_process" => {
                 ser(&t.plays_mp3_in_process())
@@ -120,7 +120,7 @@ mod g_facets_b0 { use super::*;
             other => Err(format!("MediaPlay has no call {other}")),
         }
     }
-    pub(crate) fn serve_GeminiFacet(t: &dyn GeminiFacet, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_GeminiFacet(t: &Arc<dyn GeminiFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "voice_enabled" => {
                 let (x0, ): (std::path::PathBuf, ) = de(a)?;
@@ -137,7 +137,7 @@ mod g_facets_b0 { use super::*;
             other => Err(format!("GeminiFacet has no call {other}")),
         }
     }
-    pub(crate) fn serve_MediaFacet(t: &dyn MediaFacet, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_MediaFacet(t: &Arc<dyn MediaFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "player" => {
                 { let h = t.player(); ser(&reg.add(Obj::MediaPlay(h))) }
@@ -145,9 +145,59 @@ mod g_facets_b0 { use super::*;
             other => Err(format!("MediaFacet has no call {other}")),
         }
     }
-    pub(crate) fn serve_B0Facets(t: &dyn B0Facets, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_B0Facets(t: &Arc<dyn B0Facets>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             other => Err(format!("B0Facets has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_B0Services(t: &Arc<dyn B0Services>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "qi_presence" => {
+                let (x0, ): (Item, ) = de(a)?;
+                ser(&t.qi_presence(x0))
+            }
+            "qi_install_jobs" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.qi_install_jobs(&x0))
+            }
+            "qi_start_firmware_pack" => {
+                let (x0, x1, x2, x3, ): (String, Item, Option<std::path::PathBuf>, Launch, ) = de(a)?;
+                ser(&t.qi_start_firmware_pack(&x0, x1, x2.as_deref(), &x3))
+            }
+            "qi_check_upgrades" => {
+                ser(&t.qi_check_upgrades())
+            }
+            "qi_gather_facts" => {
+                ser(&t.qi_gather_facts())
+            }
+            "qi_service_requests" => {
+                ser(&t.qi_service_requests())
+            }
+            "qi_uninstall_plan" => {
+                let (x0, x1, ): (Item, String, ) = de(a)?;
+                ser(&t.qi_uninstall_plan(x0, &x1))
+            }
+            "qi_uninstall" => {
+                let (x0, x1, x2, x3, ): (Item, String, Opts, Option<Arc<std::sync::Mutex<String>>>, ) = de(a)?;
+                ser(&t.qi_uninstall(x0, &x1, x2, x3))
+            }
+            "qi_start_camera_firmware" => {
+                let (x0, x1, ): (String, Launch, ) = de(a)?;
+                ser(&t.qi_start_camera_firmware(&x0, &x1))
+            }
+            "qi_start_mac_firmware" => {
+                let (x0, x1, x2, ): (String, iyakki_shared::macfw::Source, Launch, ) = de(a)?;
+                ser(&t.qi_start_mac_firmware(&x0, &x1, &x2))
+            }
+            "qi_start_gpu_test" => {
+                let (x0, x1, ): (String, Launch, ) = de(a)?;
+                ser(&t.qi_start_gpu_test(&x0, &x1))
+            }
+            "qi_start_hardware_firmware" => {
+                let (x0, x1, x2, ): (String, HwFirmwareOpts, Launch, ) = de(a)?;
+                ser(&t.qi_start_hardware_firmware(&x0, &x1, &x2))
+            }
+            other => Err(format!("B0Services has no call {other}")),
         }
     }
 }
@@ -157,7 +207,7 @@ mod g_facets_b1 { use super::*;
     use std::sync::{Arc, Mutex};
     use iyakki_shared::aiprofile::Vis;
     pub(crate) trait Dummy {}
-    pub(crate) fn serve_AvBuildFacet(t: &dyn AvBuildFacet, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_AvBuildFacet(t: &Arc<dyn AvBuildFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "consent" => {
                 let (x0, ): (String, ) = de(a)?;
@@ -170,7 +220,7 @@ mod g_facets_b1 { use super::*;
             other => Err(format!("AvBuildFacet has no call {other}")),
         }
     }
-    pub(crate) fn serve_HeaderValues(t: &dyn HeaderValues, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_HeaderValues(t: &Arc<dyn HeaderValues>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "get" => {
                 let (x0, ): (String, ) = de(a)?;
@@ -187,7 +237,7 @@ mod g_facets_b1 { use super::*;
             other => Err(format!("HeaderValues has no call {other}")),
         }
     }
-    pub(crate) fn serve_HeaderRuleStore(t: &dyn HeaderRuleStore, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_HeaderRuleStore(t: &Arc<dyn HeaderRuleStore>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "list" => {
                 ser(&t.list())
@@ -214,7 +264,46 @@ mod g_facets_b1 { use super::*;
             other => Err(format!("HeaderRuleStore has no call {other}")),
         }
     }
-    pub(crate) fn serve_SceneFacet(t: &dyn SceneFacet, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_SshHost(t: &Arc<dyn SshHost>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "connections" => {
+                ser(&t.connections())
+            }
+            "save_connection" => {
+                let (x0, x1, ): (iyakki_shared::ssh::Connection, Option<String>, ) = de(a)?;
+                ser(&t.save_connection(x0, x1.as_deref()))
+            }
+            "remove_connection" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.remove_connection(&x0))
+            }
+            "trusted_keys" => {
+                let (x0, x1, ): (String, u16, ) = de(a)?;
+                ser(&t.trusted_keys(&x0, x1))
+            }
+            "trust" => {
+                let (x0, x1, x2, ): (String, u16, Vec<iyakki_shared::ssh::HostKey>, ) = de(a)?;
+                ser(&t.trust(&x0, x1, &x2))
+            }
+            "forget" => {
+                let (x0, x1, ): (String, u16, ) = de(a)?;
+                ser(&t.forget(&x0, x1))
+            }
+            "has_client" => {
+                ser(&t.has_client())
+            }
+            "probe" => {
+                let (x0, x1, ): (String, u16, ) = de(a)?;
+                ser(&t.probe(&x0, x1))
+            }
+            "public_key" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.public_key(&x0))
+            }
+            other => Err(format!("SshHost has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_SceneFacet(t: &Arc<dyn SceneFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "asks_for_link" => {
                 let (x0, x1, ): (String, usize, ) = de(a)?;
@@ -227,9 +316,49 @@ mod g_facets_b1 { use super::*;
             other => Err(format!("SceneFacet has no call {other}")),
         }
     }
-    pub(crate) fn serve_KubeFeedFacet(t: &dyn KubeFeedFacet, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_KubeFeedFacet(t: &Arc<dyn KubeFeedFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             other => Err(format!("KubeFeedFacet has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_MatrixService(t: &Arc<dyn MatrixService>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "accounts" => {
+                ser(&t.accounts())
+            }
+            "rooms" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.rooms(&x0))
+            }
+            "mirror_on" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.mirror_on(&x0))
+            }
+            "set_mirror" => {
+                let (x0, x1, ): (String, bool, ) = de(a)?;
+                ser(&t.set_mirror(&x0, x1))
+            }
+            "set_room_mirror" => {
+                let (x0, x1, x2, ): (String, String, bool, ) = de(a)?;
+                ser(&t.set_room_mirror(&x0, &x1, x2))
+            }
+            "unread_by_room" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.unread_by_room(&x0))
+            }
+            "add" => {
+                let (x0, x1, x2, x3, ): (String, String, MatrixAuth, String, ) = de(a)?;
+                ser(&t.add(&x0, &x1, x2, &x3))
+            }
+            "test_send" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.test_send(&x0))
+            }
+            "remove" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.remove(&x0))
+            }
+            other => Err(format!("MatrixService has no call {other}")),
         }
     }
 }
@@ -248,7 +377,7 @@ mod g_facets_b2 { use super::*;
     use iyakki_shared::profilestore::Status as ProfileStatus;
     use iyakki_shared::webgraphics::{Mode as GraphicsMode, Pending as GraphicsPending, Status as GraphicsStatus};
     pub(crate) trait Dummy {}
-    pub(crate) fn serve_StartupDiskFacet(t: &dyn StartupDiskFacet, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_StartupDiskFacet(t: &Arc<dyn StartupDiskFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "register" => {
                 let (x0, ): (std::path::PathBuf, ) = de(a)?;
@@ -273,17 +402,17 @@ mod g_facets_b2 { use super::*;
             other => Err(format!("StartupDiskFacet has no call {other}")),
         }
     }
-    pub(crate) fn serve_DictFixFacet(t: &dyn DictFixFacet, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_DictFixFacet(t: &Arc<dyn DictFixFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             other => Err(format!("DictFixFacet has no call {other}")),
         }
     }
-    pub(crate) fn serve_ToolWrapFacet(t: &dyn ToolWrapFacet, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_ToolWrapFacet(t: &Arc<dyn ToolWrapFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             other => Err(format!("ToolWrapFacet has no call {other}")),
         }
     }
-    pub(crate) fn serve_ClusterFacet(t: &dyn ClusterFacet, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_ClusterFacet(t: &Arc<dyn ClusterFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "switch" => {
                 let (x0, x1, x2, x3, x4, ): (std::path::PathBuf, std::path::PathBuf, String, iyakki_sec::policy::Role, String, ) = de(a)?;
@@ -296,9 +425,139 @@ mod g_facets_b2 { use super::*;
             other => Err(format!("ClusterFacet has no call {other}")),
         }
     }
-    pub(crate) fn serve_AgentFacetsB2(t: &dyn AgentFacetsB2, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_AgentFacetsB2(t: &Arc<dyn AgentFacetsB2>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             other => Err(format!("AgentFacetsB2 has no call {other}")),
+        }
+    }
+}
+mod g_facets_b3 { use super::*;
+    use iyakki_agent_api::facets_b3::*;
+    use std::collections::BTreeSet;
+    use std::path::Path;
+    use std::sync::Arc;
+    use iyakki_shared::avaddon::Addon;
+    use iyakki_sec::policy::Policy;
+    use iyakki_shared::agent::Tools;
+    use iyakki_shared::clientmedia::{AudioRoutes, Indicator};
+    use iyakki_shared::hwprofile::Category;
+    use iyakki_shared::profilepolicy::Beat;
+    use iyakki_shared::startup::Registry;
+    use iyakki_shared::vpn_mgr::{Imported as VpnImported, Row as VpnRow, Status as VpnStatus, Summary as VpnSummary};
+    use iyakki_shared::wizardtools::Backend as WizardBackend;
+    use iyakki_vpn::profile::{Profile, Settings as VpnSettings};
+    pub(crate) trait Dummy {}
+    pub(crate) fn serve_ServicesFacetB3(t: &Arc<dyn ServicesFacetB3>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "startup_retry" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.startup_retry(&x0, &x1))
+            }
+            "kube_resolver" => {
+                let (x0, ): (Option<String>, ) = de(a)?;
+                ser(&t.kube_resolver(x0.as_deref()))
+            }
+            "computer_attach" => {
+                ser(&t.computer_attach())
+            }
+            "computer_announce" => {
+                let (x0, ): (Vec<String>, ) = de(a)?;
+                ser(&t.computer_announce(&x0))
+            }
+            "computer_page" => {
+                ser(&t.computer_page())
+            }
+            "computer_set_sharing" => {
+                let (x0, x1, ): (Category, bool, ) = de(a)?;
+                ser(&t.computer_set_sharing(x0, x1))
+            }
+            "computer_copy_from" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.computer_copy_from(&x0))
+            }
+            "computer_reset" => {
+                ser(&t.computer_reset())
+            }
+            "computer_forget" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.computer_forget(&x0))
+            }
+            "vpn_on_logout" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.vpn_on_logout(&x0))
+            }
+            other => Err(format!("ServicesFacetB3 has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_VpnManager(t: &Arc<dyn VpnManager>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "profiles" => {
+                ser(&t.profiles())
+            }
+            "get" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.get(&x0))
+            }
+            "is_enabled" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.is_enabled(&x0))
+            }
+            "rows" => {
+                ser(&t.rows())
+            }
+            "summary" => {
+                ser(&t.summary())
+            }
+            "guard_line" => {
+                ser(&t.guard_line())
+            }
+            "status" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.status(&x0))
+            }
+            "import" => {
+                let (x0, x1, ): (String, Vec<u8>, ) = de(a)?;
+                ser(&t.import(&x0, &x1))
+            }
+            "set_settings" => {
+                let (x0, x1, x2, ): (String, VpnSettings, u64, ) = de(a)?;
+                ser(&t.set_settings(&x0, x1, x2))
+            }
+            "set_enabled" => {
+                let (x0, x1, x2, ): (String, bool, u64, ) = de(a)?;
+                ser(&t.set_enabled(&x0, x1, x2))
+            }
+            "remove" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.remove(&x0))
+            }
+            "retry" => {
+                let (x0, x1, ): (String, u64, ) = de(a)?;
+                ser(&t.retry(&x0, x1))
+            }
+            "tick" => {
+                let (x0, ): (u64, ) = de(a)?;
+                ser(&t.tick(x0))
+            }
+            "ensure_supervised" => {
+                ser(&t.ensure_supervised())
+            }
+            "helper_on" => {
+                ser(&t.helper_on())
+            }
+            "set_credentials" => {
+                let (x0, x1, x2, ): (String, String, String, ) = de(a)?;
+                ser(&t.set_credentials(&x0, &x1, &x2))
+            }
+            "has_credentials" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.has_credentials(&x0))
+            }
+            "set_helper" => {
+                let (x0, ): (bool, ) = de(a)?;
+                ser(&t.set_helper(x0))
+            }
+            other => Err(format!("VpnManager has no call {other}")),
         }
     }
 }
@@ -314,9 +573,473 @@ mod g_facets_b4 { use super::*;
     use iyakki_shared::store_tile::TestReport;
     use iyakki_agent_api::UNAVAILABLE_STORE;
     pub(crate) trait Dummy {}
-    pub(crate) fn serve_AgentFacetsB4(t: &dyn AgentFacetsB4, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_ServicesFacetB4(t: &Arc<dyn ServicesFacetB4>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "ssh_tunnels_on_logout" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.ssh_tunnels_on_logout(&x0))
+            }
+            "store" => {
+                ser(&t.store().map(|h| reg.add(Obj::StoreApi(h))))
+            }
+            "voice_ready" => {
+                ser(&t.voice_ready())
+            }
+            other => Err(format!("ServicesFacetB4 has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_AgentFacetsB4(t: &Arc<dyn AgentFacetsB4>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             other => Err(format!("AgentFacetsB4 has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_SshTunnels(t: &Arc<dyn SshTunnels>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "tunnels" => {
+                ser(&t.tunnels())
+            }
+            "get" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.get(&x0))
+            }
+            "rows" => {
+                ser(&t.rows())
+            }
+            "save" => {
+                let (x0, x1, ): (iyakki_shared::sshtunnel::Tunnel, bool, ) = de(a)?;
+                ser(&t.save(x0, x1))
+            }
+            "set_enabled" => {
+                let (x0, x1, ): (String, bool, ) = de(a)?;
+                ser(&t.set_enabled(&x0, x1))
+            }
+            "retry" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.retry(&x0))
+            }
+            "remove" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.remove(&x0))
+            }
+            "trust" => {
+                let (x0, x1, x2, ): (String, u16, String, ) = de(a)?;
+                ser(&t.trust(&x0, x1, &x2))
+            }
+            "tick" => {
+                let (x0, ): (u64, ) = de(a)?;
+                ser(&t.tick(x0))
+            }
+            "ensure_supervised" => {
+                ser(&t.ensure_supervised())
+            }
+            "test" => {
+                let (x0, x1, ): (String, u64, ) = de(a)?;
+                ser(&t.test(&x0, x1))
+            }
+            "key_info" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.key_info(&x0))
+            }
+            "key_ids" => {
+                ser(&t.key_ids())
+            }
+            other => Err(format!("SshTunnels has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_MineWorker(t: &Arc<dyn MineWorker>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "send" => {
+                let (x0, ): (iyakki_shared::voiceassist_ports::Cmd, ) = de(a)?;
+                ser(&t.send(x0))
+            }
+            "status" => {
+                ser(&t.status())
+            }
+            "wake" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.wake(&x0))
+            }
+            other => Err(format!("MineWorker has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_ProjectKit(t: &Arc<dyn ProjectKit>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "cluster_line" => {
+                ser(&t.cluster_line())
+            }
+            "state" => {
+                let (x0, x1, x2, x3, ): (String, String, String, String, ) = de(a)?;
+                ser(&t.state(&x0, &x1, &x2, &x3))
+            }
+            other => Err(format!("ProjectKit has no call {other}")),
+        }
+    }
+}
+mod g_facets_b5 { use super::*;
+    use iyakki_agent_api::facets_b5::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    pub(crate) trait Dummy {}
+    pub(crate) fn serve_ServicesFacetB5(t: &Arc<dyn ServicesFacetB5>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "radio_stations" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.radio_stations(&x0).map(|h| reg.add(Obj::RadioStations(h))))
+            }
+            "radio_search" => crate::served_apps::s_ServicesFacetB5_radio_search(t, reg, a),
+            "edit_test_run" => {
+                let (x0, x1, x2, x3, ): (String, iyakki_shared::edittest::TestPlan, u64, std::sync::atomic::AtomicBool, ) = de(a)?;
+                ser(&t.edit_test_run(&x0, &x1, x2, &x3))
+            }
+            "study_pdf_export" => crate::served_apps::s_ServicesFacetB5_study_pdf_export(t, reg, a),
+            "story_pdf" => {
+                let (x0, x1, x2, x3, x4, ): (iyakki_shared::story::Story, iyakki_shared::story::StoryOptions, Vec<iyakki_shared::story::StoredPic>, bool, Option<String>, ) = de(a)?;
+                ser(&t.story_pdf(&x0, &x1, &x2, x3, x4))
+            }
+            "story_store" => crate::served_apps::s_ServicesFacetB5_story_store(t, reg, a),
+            "story_store_at" => crate::served_apps::s_ServicesFacetB5_story_store_at(t, reg, a),
+            "lab_catalogue" => {
+                ser(&t.lab_catalogue())
+            }
+            "lab_check_vision" => {
+                let (x0, x1, x2, ): (iyakki_shared::lab::Catalogue, String, String, ) = de(a)?;
+                ser(&t.lab_check_vision(&x0, &x1, &x2))
+            }
+            "lab_backends" => crate::served_apps::s_ServicesFacetB5_lab_backends(t, reg, a),
+            "lab_frames_for" => crate::served_apps::s_ServicesFacetB5_lab_frames_for(t, reg, a),
+            "media_queue" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.media_queue(&x0).map(|h| reg.add(Obj::DownloadQueueApi(h))))
+            }
+            "media_queue_reopen" => {
+                let (x0, x1, ): (std::path::PathBuf, String, ) = de(a)?;
+                ser(&t.media_queue_reopen(&x0, &x1).map(|h| reg.add(Obj::DownloadQueueApi(h))))
+            }
+            other => Err(format!("ServicesFacetB5 has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_DownloadQueueApi(t: &Arc<dyn DownloadQueueApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "set_max_active" => {
+                let (x0, ): (usize, ) = de(a)?;
+                ser(&t.set_max_active(x0))
+            }
+            "set_context" => crate::served_apps::s_DownloadQueueApi_set_context(t, reg, a),
+            "enqueue" => crate::served_apps::s_DownloadQueueApi_enqueue(t, reg, a),
+            "cancel" => {
+                let (x0, ): (u64, ) = de(a)?;
+                ser(&t.cancel(x0))
+            }
+            "retry" => {
+                let (x0, ): (u64, ) = de(a)?;
+                ser(&t.retry(x0))
+            }
+            "remove" => {
+                let (x0, ): (u64, ) = de(a)?;
+                ser(&t.remove(x0))
+            }
+            "clear_finished" => {
+                ser(&t.clear_finished())
+            }
+            "counts" => {
+                ser(&t.counts())
+            }
+            "last_finished" => {
+                ser(&t.last_finished())
+            }
+            "views" => {
+                ser(&t.views())
+            }
+            "view" => {
+                let (x0, ): (u64, ) = de(a)?;
+                ser(&t.view(x0))
+            }
+            "describe" => {
+                ser(&t.describe())
+            }
+            other => Err(format!("DownloadQueueApi has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_K8sKit(t: &Arc<dyn K8sKit>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "ns" => {
+                ser(&t.ns())
+            }
+            "cluster_label" => {
+                ser(&t.cluster_label())
+            }
+            "context" => {
+                ser(&t.context())
+            }
+            "starter_manifest" => {
+                let (x0, x1, x2, ): (String, String, u16, ) = de(a)?;
+                ser(&t.starter_manifest(&x0, &x1, x2))
+            }
+            "is_local" => {
+                ser(&t.is_local())
+            }
+            "saved_registry" => {
+                ser(&t.saved_registry())
+            }
+            "root" => {
+                ser(&t.root())
+            }
+            "preview" => {
+                let (x0, x1, ): (String, serde_json::Value, ) = de(a)?;
+                ser(&t.preview(&x0, &x1))
+            }
+            "set_live" => {
+                let (x0, ): (Option<iyakki_shared::wsexec::Sink>, ) = de(a)?;
+                ser(&t.set_live(x0))
+            }
+            "built_ref" => {
+                ser(&t.built_ref())
+            }
+            "cluster_ref" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.cluster_ref(&x0))
+            }
+            "call" => {
+                let (x0, x1, ): (String, serde_json::Value, ) = de(a)?;
+                ser(&t.call(&x0, &x1))
+            }
+            "describe" => {
+                let (x0, x1, ): (String, serde_json::Value, ) = de(a)?;
+                ser(&t.describe(&x0, &x1))
+            }
+            other => Err(format!("K8sKit has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_RadioStations(t: &Arc<dyn RadioStations>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "list" => {
+                ser(&t.list())
+            }
+            "add" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.add(&x0, &x1))
+            }
+            "remove" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.remove(&x0))
+            }
+            "trust" => {
+                let (x0, x1, ): (iyakki_tile_api::radio::Station, iyakki_tile_api::radio::CertProblem, ) = de(a)?;
+                ser(&t.trust(&x0, &x1))
+            }
+            "forget_trust" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.forget_trust(&x0))
+            }
+            other => Err(format!("RadioStations has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_DevCluster(t: &Arc<dyn DevCluster>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "layout" => {
+                ser(&t.layout())
+            }
+            "installed" => {
+                ser(&t.installed())
+            }
+            "state" => {
+                ser(&t.state())
+            }
+            "health" => {
+                ser(&t.health())
+            }
+            "uninstall" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.uninstall(&x0, &x1))
+            }
+            "stop" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.stop(&x0))
+            }
+            "start" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.clone().start(&x0))
+            }
+            "restart" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.clone().restart(&x0))
+            }
+            "reset" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.reset(&x0, &x1))
+            }
+            "refresh_health" => {
+                ser(&t.refresh_health())
+            }
+            "situation" => {
+                ser(&t.situation())
+            }
+            "describe" => {
+                let (x0, ): (iyakki_shared::k3sdev::Plan, ) = de(a)?;
+                ser(&t.describe(&x0))
+            }
+            "log_tail" => {
+                let (x0, ): (usize, ) = de(a)?;
+                ser(&t.log_tail(x0))
+            }
+            "take_alerts" => {
+                ser(&t.take_alerts())
+            }
+            "set_fixed_node_ip" => {
+                let (x0, x1, ): (bool, String, ) = de(a)?;
+                ser(&t.set_fixed_node_ip(x0, &x1))
+            }
+            "fixed_node_ip_enabled" => {
+                ser(&t.fixed_node_ip_enabled())
+            }
+            "set_autostart" => {
+                let (x0, x1, ): (bool, String, ) = de(a)?;
+                ser(&t.set_autostart(x0, &x1))
+            }
+            "set_offline_on_purpose" => {
+                let (x0, x1, ): (bool, String, ) = de(a)?;
+                ser(&t.set_offline_on_purpose(x0, &x1))
+            }
+            "offline_on_purpose" => {
+                ser(&t.offline_on_purpose())
+            }
+            "kubectl" => {
+                let (x0, ): (Vec<String>, ) = de(a)?;
+                ser(&t.kubectl(&x0.iter().map(String::as_str).collect::<Vec<_>>()))
+            }
+            "kubectl_cap" => {
+                let (x0, x1, ): (Vec<String>, usize, ) = de(a)?;
+                ser(&t.kubectl_cap(&x0.iter().map(String::as_str).collect::<Vec<_>>(), x1))
+            }
+            other => Err(format!("DevCluster has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_FleetApi(t: &Arc<dyn FleetApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "get" => {
+                let (x0, ): (iyakki_shared::clusters::ClusterEntry, ) = de(a)?;
+                ser(&t.get(&x0).map(|h| reg.add(Obj::DevCluster(h))))
+            }
+            "status" => {
+                let (x0, x1, ): (iyakki_shared::clusters::ClusterEntry, bool, ) = de(a)?;
+                ser(&t.status(&x0, x1))
+            }
+            "start" => {
+                let (x0, x1, x2, x3, ): (iyakki_shared::clusters::Registry, String, String, iyakki_sec::policy::Role, ) = de(a)?;
+                ser(&t.start(&x0, &x1, &x2, x3))
+            }
+            "stop" => {
+                let (x0, x1, x2, x3, ): (iyakki_shared::clusters::Registry, String, String, iyakki_sec::policy::Role, ) = de(a)?;
+                ser(&t.stop(&x0, &x1, &x2, x3))
+            }
+            "drop_instance" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.drop_instance(&x0))
+            }
+            "data_dir" => {
+                ser(&t.data_dir())
+            }
+            other => Err(format!("FleetApi has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_OllamaApi(t: &Arc<dyn OllamaApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "state" => {
+                ser(&t.state())
+            }
+            "url" => {
+                ser(&t.url())
+            }
+            "models_dir" => {
+                ser(&t.models_dir())
+            }
+            "start" => {
+                ser(&t.clone().start())
+            }
+            "stop" => {
+                ser(&t.stop())
+            }
+            "set_port" => {
+                let (x0, ): (u16, ) = de(a)?;
+                ser(&t.set_port(x0))
+            }
+            other => Err(format!("OllamaApi has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_SandboxCluster(t: &Arc<dyn SandboxCluster>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "state" => {
+                ser(&t.state())
+            }
+            "requirements" => {
+                ser(&t.requirements())
+            }
+            "start" => {
+                ser(&t.clone().start())
+            }
+            "stop" => {
+                ser(&t.stop())
+            }
+            "sandbox_run_io" => {
+                let (x0, x1, x2, x3, x4, x5, ): (String, String, String, u64, bool, std::sync::atomic::AtomicBool, ) = de(a)?;
+                ser(&t.sandbox_run_io(&x0, &x1, &x2, x3, x4, &x5))
+            }
+            other => Err(format!("SandboxCluster has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_CliApi(t: &Arc<dyn CliApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "export_path" => {
+                ser(&t.export_path())
+            }
+            "set_detect_present" => {
+                let (x0, ): (bool, ) = de(a)?;
+                ser(&t.set_detect_present(x0))
+            }
+            "installed" => {
+                ser(&t.installed())
+            }
+            "is_installed" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.is_installed(&x0))
+            }
+            "system_status" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.system_status(&x0))
+            }
+            "job" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.job(&x0))
+            }
+            "running" => {
+                ser(&t.running())
+            }
+            "install_plan" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.install_plan(&x0))
+            }
+            "manifest_dir" => {
+                ser(&t.manifest_dir())
+            }
+            "bin_dir" => {
+                ser(&t.bin_dir())
+            }
+            "search_path" => {
+                ser(&t.search_path())
+            }
+            "install" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.clone().install(&x0, &x1))
+            }
+            "rollback" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.rollback(&x0))
+            }
+            "remove" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.remove(&x0))
+            }
+            other => Err(format!("CliApi has no call {other}")),
         }
     }
 }
@@ -330,12 +1053,98 @@ mod g_facets_b6 { use super::*;
     use iyakki_shared::agent::Tools;
     use iyakki_shared::geminilive_host::{Board, RunState, Running};
     pub(crate) trait Dummy {}
-    pub(crate) fn serve_ContractLocal(t: &dyn ContractLocal, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_GeminiLive(t: &Arc<dyn GeminiLive>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            other => Err(format!("GeminiLive has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_SpeechKit(t: &Arc<dyn SpeechKit>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "revise_target" => {
+                let (x0, ): (iyakki_shared::revise::Context, ) = de(a)?;
+                ser(&t.revise_target(&x0))
+            }
+            "revise" => {
+                let (x0, x1, x2, ): (String, iyakki_shared::revise::Kind, iyakki_shared::revise::Context, ) = de(a)?;
+                ser(&t.revise(&x0, &x1, &x2))
+            }
+            other => Err(format!("SpeechKit has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_RouterPanel(t: &Arc<dyn RouterPanel>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "config" => {
+                ser(&t.config())
+            }
+            "profiles" => {
+                ser(&t.profiles())
+            }
+            "strategies" => {
+                ser(&t.strategies())
+            }
+            "progress" => {
+                ser(&t.progress())
+            }
+            "last_run" => {
+                ser(&t.last_run())
+            }
+            "set" => {
+                let (x0, ): (serde_json::Value, ) = de(a)?;
+                ser(&t.set(&x0))
+            }
+            "strategy_set" => {
+                let (x0, ): (serde_json::Value, ) = de(a)?;
+                ser(&t.strategy_set(&x0))
+            }
+            "strategy_remove" => {
+                let (x0, ): (serde_json::Value, ) = de(a)?;
+                ser(&t.strategy_remove(&x0))
+            }
+            "strategy_add" => {
+                let (x0, ): (serde_json::Value, ) = de(a)?;
+                ser(&t.strategy_add(&x0))
+            }
+            "cancel" => {
+                ser(&t.cancel())
+            }
+            other => Err(format!("RouterPanel has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_GitKit(t: &Arc<dyn GitKit>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "check_git" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.check_git(&x0))
+            }
+            "detect_tools" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.detect_tools(&x0))
+            }
+            "expand_instance" => {
+                let (x0, x1, x2, ): (std::path::PathBuf, String, String, ) = de(a)?;
+                ser(&t.expand_instance(&x0, &x1, &x2))
+            }
+            "removal_risks" => {
+                let (x0, x1, ): (std::path::PathBuf, std::path::PathBuf, ) = de(a)?;
+                ser(&t.removal_risks(&x0, &x1))
+            }
+            "remove_repo" => {
+                let (x0, x1, x2, ): (std::path::PathBuf, String, String, ) = de(a)?;
+                ser(&t.remove_repo(&x0, &x1, &x2))
+            }
+            "repo_status" => {
+                let (x0, x1, ): (std::path::PathBuf, std::path::PathBuf, ) = de(a)?;
+                ser(&t.repo_status(&x0, &x1))
+            }
+            other => Err(format!("GitKit has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_ContractLocal(t: &Arc<dyn ContractLocal>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             other => Err(format!("ContractLocal has no call {other}")),
         }
     }
-    pub(crate) fn serve_RagKit(t: &dyn RagKit, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_RagKit(t: &Arc<dyn RagKit>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "runs" => {
                 ser(&t.runs())
@@ -343,7 +1152,40 @@ mod g_facets_b6 { use super::*;
             other => Err(format!("RagKit has no call {other}")),
         }
     }
-    pub(crate) fn serve_AgentFacetsB6(t: &dyn AgentFacetsB6, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_SftpServer(t: &Arc<dyn SftpServer>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "dir" => {
+                ser(&t.dir())
+            }
+            "config" => {
+                ser(&t.config())
+            }
+            "status" => {
+                ser(&t.status())
+            }
+            "problem" => {
+                ser(&t.problem())
+            }
+            "enable" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.enable(&x0))
+            }
+            "disable" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.disable(&x0))
+            }
+            "add_key" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.add_key(&x0, &x1))
+            }
+            "remove_key" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.remove_key(&x0, &x1))
+            }
+            other => Err(format!("SftpServer has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_AgentFacetsB6(t: &Arc<dyn AgentFacetsB6>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             other => Err(format!("AgentFacetsB6 has no call {other}")),
         }
@@ -351,7 +1193,6 @@ mod g_facets_b6 { use super::*;
 }
 mod g_facets_b7 { use super::*;
     use iyakki_agent_api::facets_b7::*;
-    use std::path::Path;
     use std::sync::Arc;
     use iyakki_shared::chat::Message;
     use iyakki_shared::context::{ContextInfo, ContextOptions};
@@ -363,7 +1204,7 @@ mod g_facets_b7 { use super::*;
     use iyakki_shared::voice::{SpeakOpts, SpeechEngine, VoiceSettings};
     use iyakki_shared::voicedesk::{Players, Recorders};
     pub(crate) trait Dummy {}
-    pub(crate) fn serve_AgentFacetsB7(t: &dyn AgentFacetsB7, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_AgentFacetsB7(t: &Arc<dyn AgentFacetsB7>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             other => Err(format!("AgentFacetsB7 has no call {other}")),
         }
@@ -377,9 +1218,367 @@ mod g_facets_b8 { use super::*;
     use iyakki_shared::jobs::Job;
     use iyakki_shared::quickinstall::{Launch, RegistryArgs};
     pub(crate) trait Dummy {}
-    pub(crate) fn serve_AgentFacetsB8(t: &dyn AgentFacetsB8, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_AgentFacetsB8(t: &Arc<dyn AgentFacetsB8>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             other => Err(format!("AgentFacetsB8 has no call {other}")),
+        }
+    }
+}
+mod g_facets_dev { use super::*;
+    use iyakki_agent_api::facets_dev::*;
+    use std::path::Path;
+    use iyakki_sec::policy::Policy;
+    use iyakki_shared::devmode::grants::ShellRequest;
+    use iyakki_shared::devmode::scopes::Scope;
+    use iyakki_shared::devmode_types::grants::{AutoShell, ShellGrant};
+    use iyakki_shared::devmode_types::pairings::Pairing as PairedComputer;
+    use iyakki_shared::devmode_types::restartgrant::RestartView;
+    use iyakki_shared::devmode_types::trusted::{TrustFor, TrustLevel, TrustedView};
+    use iyakki_shared::devmode_types::{Activity, DevKey, FwWant, Pairing, State};
+    pub(crate) trait Dummy {}
+    pub(crate) fn serve_DevDeployFacet(t: &Arc<dyn DevDeployFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "paired_devices" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.paired_devices(&x0))
+            }
+            other => Err(format!("DevDeployFacet has no call {other}")),
+        }
+    }
+}
+mod g_facets_g { use super::*;
+    use iyakki_agent_api::facets_g::*;
+    use std::sync::Arc;
+    use iyakki_shared::hostengines::{Env, Report};
+    use iyakki_shared::hostvoice::HostVoice;
+    use iyakki_shared::providers::TestReport;
+    use iyakki_shared::storyillus::Cand;
+    use iyakki_shared::vault::VaultError;
+    use iyakki_shared::voice::SpeechEngine;
+    use iyakki_shared::voicehelper::HelperState;
+    pub(crate) trait Dummy {}
+    pub(crate) fn serve_HostTtsApi(t: &Arc<dyn HostTtsApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "is_enabled" => {
+                ser(&t.is_enabled())
+            }
+            "set_opener" => {
+                let (x0, ): (Option<Vec<String>>, ) = de(a)?;
+                ser(&t.set_opener(x0))
+            }
+            "ensure" => {
+                ser(&t.ensure())
+            }
+            "recheck" => {
+                ser(&t.recheck())
+            }
+            "report" => {
+                ser(&t.report())
+            }
+            "scanning" => {
+                ser(&t.scanning())
+            }
+            "scan_now" => {
+                ser(&t.scan_now())
+            }
+            "helper_state" => {
+                ser(&t.helper_state())
+            }
+            "helper_stop" => {
+                ser(&t.helper_stop())
+            }
+            "auto_engine" => {
+                let (x0, ): (Option<String>, ) = de(a)?;
+                ser(&t.auto_engine(x0.as_deref()))
+            }
+            other => Err(format!("HostTtsApi has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_AiRead(t: &Arc<dyn AiRead>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "host_tts" => {
+                { let h = t.host_tts(); ser(&reg.add(Obj::HostTtsApi(h))) }
+            }
+            "ext_session" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.ext_session(&x0, &x1))
+            }
+            "ext_session_set" => {
+                let (x0, x1, x2, ): (String, String, String, ) = de(a)?;
+                ser(&t.ext_session_set(&x0, &x1, &x2))
+            }
+            "usage_record" => {
+                let (x0, x1, x2, x3, x4, ): (String, String, String, u64, u64, ) = de(a)?;
+                ser(&t.usage_record(&x0, &x1, &x2, x3, x4))
+            }
+            "provider_check" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.provider_check(&x0))
+            }
+            "provider_test" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.provider_test(&x0))
+            }
+            "provider_chat" => {
+                let (x0, x1, x2, ): (String, String, Vec<iyakki_shared::chat::Message>, ) = de(a)?;
+                ser(&t.provider_chat(&x0, &x1, &x2))
+            }
+            "image_models" => {
+                ser(&t.image_models())
+            }
+            "picture_choices" => {
+                let (x0, ): (Vec<(String, String)>, ) = de(a)?;
+                ser(&t.picture_choices(&x0))
+            }
+            "unavailable_models" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.unavailable_models(&x0))
+            }
+            other => Err(format!("AiRead has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_VaultRead(t: &Arc<dyn VaultRead>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "system_names" => {
+                ser(&t.system_names())
+            }
+            "system_set" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.system_set(&x0, &x1))
+            }
+            "system_delete" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.system_delete(&x0))
+            }
+            "user_names" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.user_names(&x0))
+            }
+            "user_set" => {
+                let (x0, x1, x2, ): (String, String, String, ) = de(a)?;
+                ser(&t.user_set(&x0, &x1, &x2))
+            }
+            "user_delete" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.user_delete(&x0, &x1))
+            }
+            "user_vault_unlocked" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.user_vault_unlocked(&x0))
+            }
+            "reset_user_vault" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.reset_user_vault(&x0))
+            }
+            "answer_secret_request" => {
+                let (x0, x1, x2, x3, ): (String, String, String, String, ) = de(a)?;
+                ser(&t.answer_secret_request(&x0, &x1, &x2, &x3))
+            }
+            "cancel_secret_request" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.cancel_secret_request(&x0, &x1))
+            }
+            other => Err(format!("VaultRead has no call {other}")),
+        }
+    }
+}
+mod g_facets_h { use super::*;
+    use iyakki_agent_api::facets_h::*;
+    use std::any::Any;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use iyakki_agent_api::*;
+    use iyakki_core_api::fleet::Fleet;
+    use iyakki_shared::chat::{ChatBackend, Message};
+    use iyakki_shared::settings::ModelChoice;
+    use iyakki_shared::gitkeys::AuditFn;
+    use iyakki_proxy::Upstream;
+    use iyakki_shared::agent::Tools;
+    use iyakki_shared::authcodes::CodeVault;
+    use iyakki_shared::context::{ContextInfo, ContextOptions};
+    use iyakki_shared::gitkeys::{GitKeys, Session};
+    use iyakki_shared::kb::Hit;
+    use iyakki_shared::services::{LoginReport, PullStatus, SessionDeleted};
+    use iyakki_shared::story::Synth;
+    use iyakki_shared::jobs::Job;
+    use iyakki_shared::quickinstall::{Launch, RegistryArgs};
+    use iyakki_core_api::soundtypes::{Cue, CueOut};
+    use iyakki_shared::modelhost::{Host, NewHost, TestReport};
+    use iyakki_shared::visionmodel::Cand;
+    use iyakki_shared::syssounds::SystemSounds;
+    use iyakki_shared::story::StoryStore;
+    use iyakki_shared::voice::SpeechEngine;
+    use iyakki_shared::visionmodel::{Pick, VisionError};
+    use iyakki_shared::voice::{self, SpeakOpts, VoiceSettings};
+    use iyakki_shared::webtools::PageSnapshot;
+    pub(crate) trait Dummy {}
+    pub(crate) fn serve_ComputeBackend(t: &Arc<dyn ComputeBackend>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "current" => {
+                ser(&t.current())
+            }
+            "set" => {
+                let (x0, ): (iyakki_shared::gpu_steps::Compute, ) = de(a)?;
+                ser(&t.set(x0))
+            }
+            other => Err(format!("ComputeBackend has no call {other}")),
+        }
+    }
+}
+mod g_facets_platform { use super::*;
+    use iyakki_agent_api::facets_platform::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use iyakki_shared::devcluster::ClusterProfile;
+    use iyakki_shared::platform_types::*;
+    pub(crate) trait Dummy {}
+    pub(crate) fn serve_PlatformApi(t: &Arc<dyn PlatformApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "dir" => {
+                ser(&t.dir())
+            }
+            "user" => {
+                ser(&t.user())
+            }
+            "audit" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.audit(&x0, &x1))
+            }
+            "private_repair" => crate::served_apps::s_PlatformApi_private_repair(t, reg, a),
+            "private_prepare" => {
+                let (x0, x1, x2, x3, ): (iyakki_shared::privatemanage::Report, iyakki_shared::privatemanage::Action, String, bool, ) = de(a)?;
+                ser(&t.private_prepare(&x0, &x1, &x2, x3))
+            }
+            "private_store_state" => crate::served_apps::s_PlatformApi_private_store_state(t, reg, a),
+            "private_finish_local" => crate::served_apps::s_PlatformApi_private_finish_local(t, reg, a),
+            "private_start_job" => crate::served_apps::s_PlatformApi_private_start_job(t, reg, a),
+            "services" => {
+                ser(&t.services())
+            }
+            "service" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.service(&x0))
+            }
+            "how_to_use" => {
+                let (x0, x1, x2, ): (String, Vec<UrlInfo>, Options, ) = de(a)?;
+                ser(&t.how_to_use(&x0, &x1, &x2))
+            }
+            "upgrade_path" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.upgrade_path(&x0, &x1))
+            }
+            "list_profiles" => {
+                ser(&t.list_profiles())
+            }
+            "guard_write" => {
+                let (x0, ): (ClusterRef, ) = de(a)?;
+                ser(&t.guard_write(&x0))
+            }
+            "profile_by_id" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.profile_by_id(&x0))
+            }
+            "plan_waiting" => crate::served_apps::s_PlatformApi_plan_waiting(t, reg, a),
+            "plan" => {
+                let (x0, x1, x2, ): (String, ClusterProfile, Options, ) = de(a)?;
+                ser(&t.plan(&x0, &x1, &x2))
+            }
+            "apply" => crate::served_apps::s_PlatformApi_apply(t, reg, a),
+            "apply_with" => crate::served_apps::s_PlatformApi_apply_with(t, reg, a),
+            "status" => {
+                let (x0, x1, ): (Installed, bool, ) = de(a)?;
+                ser(&t.status(&x0, x1))
+            }
+            "power" => {
+                let (x0, x1, x2, ): (Installed, bool, bool, ) = de(a)?;
+                ser(&t.power(&x0, x1, x2))
+            }
+            "plan_upgrade" => {
+                let (x0, x1, x2, ): (Installed, Option<String>, bool, ) = de(a)?;
+                ser(&t.plan_upgrade(&x0, x1.as_deref(), x2))
+            }
+            "upgrade" => crate::served_apps::s_PlatformApi_upgrade(t, reg, a),
+            "backup" => {
+                let (x0, x1, x2, ): (Installed, bool, bool, ) = de(a)?;
+                ser(&t.backup(&x0, x1, x2))
+            }
+            "remove" => {
+                let (x0, x1, x2, ): (RemovePlan, String, bool, ) = de(a)?;
+                ser(&t.remove(&x0, &x1, x2))
+            }
+            "plan_connect" => {
+                let (x0, x1, x2, ): (Installed, WsInfo, ConnectOpts, ) = de(a)?;
+                ser(&t.plan_connect(&x0, &x1, &x2))
+            }
+            "connect" => {
+                let (x0, x1, ): (ConnectPlan, bool, ) = de(a)?;
+                ser(&t.connect(&x0, x1))
+            }
+            "plan_push" => {
+                let (x0, x1, ): (Installed, WsInfo, ) = de(a)?;
+                ser(&t.plan_push(&x0, &x1))
+            }
+            "push" => {
+                let (x0, x1, ): (PushPlan, bool, ) = de(a)?;
+                ser(&t.push(&x0, x1))
+            }
+            "plan_pull_request" => {
+                let (x0, x1, x2, x3, x4, ): (Installed, WsInfo, String, String, String, ) = de(a)?;
+                ser(&t.plan_pull_request(&x0, &x1, &x2, &x3, &x4))
+            }
+            "create_pull_request" => {
+                let (x0, x1, ): (PrPlan, bool, ) = de(a)?;
+                ser(&t.create_pull_request(&x0, x1))
+            }
+            "connect_existing" => {
+                let (x0, x1, x2, x3, x4, ): (String, String, Option<ClusterRef>, String, bool, ) = de(a)?;
+                ser(&t.connect_existing(&x0, &x1, x2.as_ref(), &x3, x4))
+            }
+            "preview" => {
+                let (x0, ): (Plan, ) = de(a)?;
+                ser(&t.preview(&x0))
+            }
+            "preview_power" => {
+                let (x0, x1, ): (Installed, bool, ) = de(a)?;
+                ser(&t.preview_power(&x0, x1))
+            }
+            "preview_upgrade" => {
+                let (x0, ): (UpgradePlan, ) = de(a)?;
+                ser(&t.preview_upgrade(&x0))
+            }
+            "preview_backup" => {
+                let (x0, x1, ): (Installed, bool, ) = de(a)?;
+                ser(&t.preview_backup(&x0, x1))
+            }
+            "plan_remove" => {
+                let (x0, x1, ): (Installed, bool, ) = de(a)?;
+                ser(&t.plan_remove(&x0, x1))
+            }
+            "preview_remove" => {
+                let (x0, ): (RemovePlan, ) = de(a)?;
+                ser(&t.preview_remove(&x0))
+            }
+            "preview_connect" => {
+                let (x0, ): (ConnectPlan, ) = de(a)?;
+                ser(&t.preview_connect(&x0))
+            }
+            "preview_push" => {
+                let (x0, ): (PushPlan, ) = de(a)?;
+                ser(&t.preview_push(&x0))
+            }
+            "preview_pull_request" => {
+                let (x0, ): (PrPlan, ) = de(a)?;
+                ser(&t.preview_pull_request(&x0))
+            }
+            "validate_options" => {
+                let (x0, x1, ): (String, Options, ) = de(a)?;
+                ser(&t.validate_options(&x0, &x1))
+            }
+            "common_options" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.common_options(&x0))
+            }
+            other => Err(format!("PlatformApi has no call {other}")),
         }
     }
 }
@@ -396,7 +1595,7 @@ mod g_facets_s6b { use super::*;
     use iyakki_shared::agent::Tools;
     use iyakki_shared::browserconsent::{Answer, ConsentRequest};
     pub(crate) trait Dummy {}
-    pub(crate) fn serve_FlowChatEnv(t: &dyn FlowChatEnv, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_FlowChatEnv(t: &Arc<dyn FlowChatEnv>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "draft_name" => {
                 let (x0, ): (String, ) = de(a)?;
@@ -416,7 +1615,120 @@ mod g_facets_s6b { use super::*;
             other => Err(format!("FlowChatEnv has no call {other}")),
         }
     }
-    pub(crate) fn serve_AgentFacetsS6B(t: &dyn AgentFacetsS6B, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_FlowsFacet(t: &Arc<dyn FlowsFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "open" => {
+                let (x0, x1, ): (String, Policy, ) = de(a)?;
+                ser(&t.open(&x0, &x1).map(|h| reg.add(Obj::FlowChatEnv(h))))
+            }
+            "answer_permission" => {
+                let (x0, x1, x2, x3, ): (String, Policy, ConsentRequest, Answer, ) = de(a)?;
+                ser(&t.answer_permission(&x0, &x1, &x2, x3))
+            }
+            "set_last_flow" => {
+                let (x0, x1, x2, ): (String, String, String, ) = de(a)?;
+                ser(&t.set_last_flow(&x0, &x1, &x2))
+            }
+            "start_for_login" => {
+                let (x0, x1, ): (String, Policy, ) = de(a)?;
+                ser(&t.start_for_login(&x0, &x1))
+            }
+            other => Err(format!("FlowsFacet has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_VoiceDeskFacet(t: &Arc<dyn VoiceDeskFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "read_voices" => {
+                ser(&t.read_voices())
+            }
+            "stt_engine" => {
+                ser(&t.stt_engine())
+            }
+            "where_text" => {
+                let (x0, x1, ): (iyakki_shared::voice::SpeechEngine, String, ) = de(a)?;
+                ser(&t.where_text(&x0, &x1))
+            }
+            "consent_text" => {
+                let (x0, x1, ): (iyakki_shared::voice::SpeechEngine, bool, ) = de(a)?;
+                ser(&t.consent_text(&x0, x1))
+            }
+            "transcribe" => {
+                let (x0, x1, ): (iyakki_shared::voice::SpeechEngine, Vec<i16>, ) = de(a)?;
+                ser(&t.transcribe(&x0, &x1))
+            }
+            "pieces" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.pieces(&x0))
+            }
+            other => Err(format!("VoiceDeskFacet has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_ExtAgentFacet(t: &Arc<dyn ExtAgentFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "entries" => {
+                ser(&t.entries())
+            }
+            other => Err(format!("ExtAgentFacet has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_DomainsMgr(t: &Arc<dyn DomainsMgr>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "settings" => {
+                ser(&t.settings())
+            }
+            "set_listener" => {
+                let (x0, ): (iyakki_shared::domains::ListenerChange, ) = de(a)?;
+                ser(&t.set_listener(x0))
+            }
+            "status" => {
+                ser(&t.status())
+            }
+            "routes" => {
+                ser(&t.routes())
+            }
+            "save_route" => {
+                let (x0, x1, x2, ): (Option<(String, String)>, iyakki_shared::cloudroute::Route, Option<String>, ) = de(a)?;
+                ser(&t.save_route(x0.as_ref().map(|(a, b)| (a.as_str(), b.as_str())), x1, x2.as_deref()))
+            }
+            "remove_route" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.remove_route(&x0, &x1))
+            }
+            "tick" => {
+                ser(&t.tick())
+            }
+            "namespace_of" => {
+                let (x0, ): (iyakki_shared::cloudroute::Route, ) = de(a)?;
+                ser(&t.namespace_of(&x0))
+            }
+            "make_trial_cert" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.make_trial_cert(&x0))
+            }
+            "certs" => {
+                ser(&t.certs())
+            }
+            "import_cert" => {
+                let (x0, x1, x2, x3, ): (String, String, String, String, ) = de(a)?;
+                ser(&t.import_cert(&x0, &x1, &x2, &x3))
+            }
+            "cert_state" => {
+                let (x0, ): (iyakki_shared::cloudroute::Route, ) = de(a)?;
+                ser(&t.cert_state(&x0))
+            }
+            "tunnel_choices" => {
+                ser(&t.tunnel_choices())
+            }
+            "own" => {
+                ser(&t.own())
+            }
+            "discover" => {
+                ser(&t.discover())
+            }
+            other => Err(format!("DomainsMgr has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_AgentFacetsS6B(t: &Arc<dyn AgentFacetsS6B>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             other => Err(format!("AgentFacetsS6B has no call {other}")),
         }
@@ -436,7 +1748,90 @@ mod g_facets_stores { use super::*;
     use iyakki_shared::sessions::*;
     use iyakki_shared::skills::*;
     pub(crate) trait Dummy {}
-    pub(crate) fn serve_McpApi(t: &dyn McpApi, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_SessionApi(t: &Arc<dyn SessionApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "create" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.create(&x0))
+            }
+            "list" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.list(&x0))
+            }
+            "load" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.load(&x0, &x1))
+            }
+            "save" => {
+                let (mut x0, ): (Session, ) = de(a)?;
+                let r = t.save(&mut x0);
+                ser(&(r, x0))
+            }
+            "remember_turn" => {
+                let (x0, x1, x2, ): (Session, String, String, ) = de(a)?;
+                ser(&t.remember_turn(&x0, &x1, &x2))
+            }
+            other => Err(format!("SessionApi has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_SkillApi(t: &Arc<dyn SkillApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "add" => {
+                let (x0, x1, x2, x3, ): (Scope, String, bool, bool, ) = de(a)?;
+                ser(&t.add(x0, &x1, x2, x3))
+            }
+            "get" => {
+                let (x0, x1, ): (Scope, String, ) = de(a)?;
+                ser(&t.get(&x0, &x1))
+            }
+            "list" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.list(&x0))
+            }
+            "list_scope" => {
+                let (x0, ): (Scope, ) = de(a)?;
+                ser(&t.list_scope(&x0))
+            }
+            "remove" => {
+                let (x0, x1, x2, x3, ): (Scope, String, bool, bool, ) = de(a)?;
+                ser(&t.remove(&x0, &x1, x2, x3))
+            }
+            other => Err(format!("SkillApi has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_RunApi(t: &Arc<dyn RunApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "delete" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.delete(&x0, &x1))
+            }
+            "list" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.list(&x0))
+            }
+            "live" => {
+                ser(&t.live())
+            }
+            "load" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.load(&x0, &x1))
+            }
+            "save" => {
+                let (x0, ): (RunLog, ) = de(a)?;
+                ser(&t.save(&x0))
+            }
+            "stop_all_live" => {
+                let (x0, ): (Option<String>, ) = de(a)?;
+                ser(&t.stop_all_live(x0.as_deref()))
+            }
+            "stop_live" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.stop_live(&x0))
+            }
+            other => Err(format!("RunApi has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_McpApi(t: &Arc<dyn McpApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "add" => {
                 let (x0, ): (StoredServer, ) = de(a)?;
@@ -452,6 +1847,134 @@ mod g_facets_stores { use super::*;
             other => Err(format!("McpApi has no call {other}")),
         }
     }
+    pub(crate) fn serve_PackageApi(t: &Arc<dyn PackageApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "install" => {
+                let (x0, x1, x2, x3, ): (Review, bool, bool, bool, ) = de(a)?;
+                ser(&t.install(&x0, x1, x2, x3))
+            }
+            "list" => {
+                let (x0, ): (Scope, ) = de(a)?;
+                ser(&t.list(&x0))
+            }
+            "remove" => {
+                let (x0, x1, x2, x3, ): (Scope, String, bool, bool, ) = de(a)?;
+                ser(&t.remove(&x0, &x1, x2, x3))
+            }
+            "review" => {
+                let (x0, x1, ): (String, Scope, ) = de(a)?;
+                ser(&t.review(&x0, &x1))
+            }
+            "trusted_keys" => {
+                ser(&t.trusted_keys())
+            }
+            "trust_key" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.trust_key(&x0, &x1))
+            }
+            other => Err(format!("PackageApi has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_JobApi(t: &Arc<dyn JobApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "dismiss" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.dismiss(&x0, &x1))
+            }
+            "get" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.get(&x0, &x1))
+            }
+            "list" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.list(&x0))
+            }
+            "log_len" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.log_len(&x0, &x1))
+            }
+            "tail" => {
+                let (x0, x1, x2, ): (String, String, usize, ) = de(a)?;
+                ser(&t.tail(&x0, &x1, x2))
+            }
+            "log_text" => {
+                let (x0, x1, x2, ): (String, String, usize, ) = de(a)?;
+                ser(&t.log_text(&x0, &x1, x2))
+            }
+            "running_count" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.running_count(&x0))
+            }
+            "stop" => {
+                let (x0, x1, x2, ): (String, String, Duration, ) = de(a)?;
+                ser(&t.stop(&x0, &x1, x2))
+            }
+            "take_finished" => {
+                let (x0, x1, x2, ): (String, String, Channel, ) = de(a)?;
+                ser(&t.take_finished(&x0, &x1, x2))
+            }
+            "take_finished_all" => {
+                let (x0, x1, ): (String, Channel, ) = de(a)?;
+                ser(&t.take_finished_all(&x0, x1))
+            }
+            "visible" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.visible(&x0, &x1))
+            }
+            "visible_all" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.visible_all(&x0))
+            }
+            "wait" => {
+                let (x0, x1, x2, ): (String, String, Duration, ) = de(a)?;
+                ser(&t.wait(&x0, &x1, x2))
+            }
+            other => Err(format!("JobApi has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_RadioApi(t: &Arc<dyn RadioApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "cert_problem" => {
+                ser(&t.cert_problem())
+            }
+            "is_active" => {
+                ser(&t.is_active())
+            }
+            "is_paused" => {
+                ser(&t.is_paused())
+            }
+            "levels" => {
+                ser(&t.levels())
+            }
+            "pause" => {
+                ser(&t.pause())
+            }
+            "notice" => {
+                ser(&t.notice())
+            }
+            "resume" => {
+                ser(&t.resume())
+            }
+            "set_retry_wait" => {
+                let (x0, ): (Duration, ) = de(a)?;
+                ser(&t.set_retry_wait(x0))
+            }
+            "set_volume" => {
+                let (x0, ): (u8, ) = de(a)?;
+                ser(&t.set_volume(x0))
+            }
+            "state" => {
+                ser(&t.state())
+            }
+            "stop" => {
+                ser(&t.stop())
+            }
+            "volume" => {
+                ser(&t.volume())
+            }
+            other => Err(format!("RadioApi has no call {other}")),
+        }
+    }
 }
 mod g_facets_tasks { use super::*;
     use iyakki_agent_api::facets_tasks::*;
@@ -461,7 +1984,7 @@ mod g_facets_tasks { use super::*;
     use iyakki_shared::assistrun::Assist;
     use iyakki_shared::tasks::{Approval, AutoAssign, ChatLine, MergeCheck, NewTask, RunRecord, RunSpec, Runner, Task};
     pub(crate) trait Dummy {}
-    pub(crate) fn serve_TaskCluster(t: &dyn TaskCluster, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_TaskCluster(t: &Arc<dyn TaskCluster>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "create_namespace" => {
                 let (x0, ): (String, ) = de(a)?;
@@ -478,11 +2001,493 @@ mod g_facets_tasks { use super::*;
             other => Err(format!("TaskCluster has no call {other}")),
         }
     }
+    pub(crate) fn serve_TaskMgr(t: &Arc<dyn TaskMgr>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "concurrency" => {
+                ser(&t.concurrency())
+            }
+            "set_concurrency" => {
+                let (x0, ): (usize, ) = de(a)?;
+                ser(&t.set_concurrency(x0))
+            }
+            "approvals" => {
+                ser(&t.approvals())
+            }
+            "log" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.log(&x0))
+            }
+            "stop" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.stop(&x0))
+            }
+            "shutdown" => {
+                ser(&t.shutdown())
+            }
+            "resume" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.resume(&x0, &x1))
+            }
+            "pause" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.pause(&x0))
+            }
+            "merge_check" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.merge_check(&x0))
+            }
+            "counts" => {
+                ser(&t.counts())
+            }
+            "chat" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.chat(&x0))
+            }
+            "spawn" => {
+                let (x0, ): (NewTask, ) = de(a)?;
+                ser(&t.spawn(x0))
+            }
+            "set_auto_assign" => {
+                let (x0, ): (AutoAssign, ) = de(a)?;
+                ser(&t.set_auto_assign(x0))
+            }
+            "run_tests" => {
+                let (x0, x1, x2, ): (String, String, Vec<String>, ) = de(a)?;
+                ser(&t.run_tests(&x0, &x1, &x2))
+            }
+            "retry" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.retry(&x0))
+            }
+            "rebase" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.rebase(&x0))
+            }
+            "poll" => {
+                ser(&t.poll())
+            }
+            "mode" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.mode(&x0))
+            }
+            "merge" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.merge(&x0))
+            }
+            "list" => {
+                ser(&t.list())
+            }
+            "keep" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.keep(&x0))
+            }
+            "guide" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.guide(&x0, &x1))
+            }
+            "discard" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.discard(&x0))
+            }
+            "auto_assign" => {
+                ser(&t.auto_assign())
+            }
+            "diff" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.diff(&x0))
+            }
+            "answer" => {
+                let (x0, x1, x2, ): (String, String, iyakki_shared::agent::Verdict, ) = de(a)?;
+                ser(&t.answer(&x0, &x1, x2))
+            }
+            "cycle_mode" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.cycle_mode(&x0, &x1))
+            }
+            "effective_concurrency" => {
+                ser(&t.effective_concurrency())
+            }
+            "get" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.get(&x0))
+            }
+            "bring_my_changes" => {
+                let (x0, ): (Task, ) = de(a)?;
+                ser(&t.bring_my_changes(&x0))
+            }
+            "owner_of" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.owner_of(&x0))
+            }
+            "waiting_on" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.waiting_on(&x0))
+            }
+            other => Err(format!("TaskMgr has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_TasksFacet(t: &Arc<dyn TasksFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "open" => {
+                let (x0, x1, ): (std::path::PathBuf, std::path::PathBuf, ) = de(a)?;
+                ser(&t.open(&x0, &x1).map(|h| reg.add(Obj::TaskMgr(h))))
+            }
+            "cluster" => {
+                ser(&t.cluster().map(|h| reg.add(Obj::TaskCluster(h))))
+            }
+            other => Err(format!("TasksFacet has no call {other}")),
+        }
+    }
+}
+mod g_flows_jobs { use super::*;
+    use iyakki_agent_api::flows_jobs::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use iyakki_flow::assist_store::{Book, Global, Status, Suggestion};
+    use iyakki_flow::engine::{ApplyReport, ApplyScope, CardDecision, Counts, NodeTest, NodeUpdateInfo, StartOutcome, StartRequest};
+    use iyakki_flow::host::BrowserSessionInfo;
+    use iyakki_flow::kinds::Issue;
+    use iyakki_flow::model::{Flow, Run, RunSummary};
+    use iyakki_flow::store::{FlowMeta, FlowSummary, VersionEntry};
+    use iyakki_flowsx::hookview::{Created, HookOpts, HookView};
+    use iyakki_sec::policy::Policy;
+    use iyakki_shared::flows_channel_policy::{Held, Policy as MsgPolicy, Watch as MsgWatch};
+    pub(crate) trait Dummy {}
+    pub(crate) fn serve_FlowsMeta(t: &Arc<dyn FlowsMeta>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "user" => {
+                ser(&t.user())
+            }
+            "policy" => {
+                ser(&t.policy())
+            }
+            "data" => {
+                ser(&t.data())
+            }
+            "dir" => {
+                ser(&t.dir())
+            }
+            "svc_dir" => {
+                ser(&t.svc_dir())
+            }
+            "who" => {
+                ser(&t.who())
+            }
+            "audit" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.audit(&x0, &x1))
+            }
+            "flow_names" => {
+                ser(&t.flow_names())
+            }
+            "set_last_flow" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.set_last_flow(&x0, &x1))
+            }
+            "chat_handle" => {
+                { let h = t.chat_handle(); ser(&reg.add(Obj::FlowChatEnv(h))) }
+            }
+            "vision_line" => {
+                ser(&t.vision_line())
+            }
+            "refresh_model_lists" => {
+                ser(&t.refresh_model_lists())
+            }
+            other => Err(format!("FlowsMeta has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_FlowsDrafts(t: &Arc<dyn FlowsDrafts>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "summaries" => {
+                ser(&t.summaries())
+            }
+            "issues" => {
+                let (x0, ): (Flow, ) = de(a)?;
+                ser(&t.issues(&x0))
+            }
+            "get_draft" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.get_draft(&x0))
+            }
+            "published" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.published(&x0))
+            }
+            "versions" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.versions(&x0))
+            }
+            "get_version" => {
+                let (x0, x1, ): (String, u32, ) = de(a)?;
+                ser(&t.get_version(&x0, x1))
+            }
+            "meta_of" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.meta_of(&x0))
+            }
+            "draft_stamp" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.draft_stamp(&x0))
+            }
+            "rollback" => {
+                let (x0, x1, x2, ): (String, u32, String, ) = de(a)?;
+                ser(&t.rollback(&x0, x1, &x2))
+            }
+            "publish" => {
+                let (x0, x1, x2, x3, x4, ): (String, String, String, String, Option<String>, ) = de(a)?;
+                ser(&t.publish(&x0, &x1, &x2, &x3, x4))
+            }
+            "save_edit" => {
+                let (x0, x1, x2, x3, ): (Flow, String, String, String, ) = de(a)?;
+                ser(&t.save_edit(&x0, &x1, &x2, &x3))
+            }
+            "create_draft" => {
+                let (x0, x1, ): (Flow, String, ) = de(a)?;
+                ser(&t.create_draft(x0, &x1))
+            }
+            "import_json" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.import_json(&x0, &x1))
+            }
+            "export_json" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.export_json(&x0))
+            }
+            "from_template" => {
+                let (x0, x1, x2, ): (String, String, String, ) = de(a)?;
+                ser(&t.from_template(&x0, &x1, &x2))
+            }
+            "allow_program" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.allow_program(&x0))
+            }
+            "drop_version" => {
+                let (x0, x1, ): (String, u32, ) = de(a)?;
+                ser(&t.drop_version(&x0, x1))
+            }
+            "delete_flow" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.delete_flow(&x0))
+            }
+            other => Err(format!("FlowsDrafts has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_FlowsRuns(t: &Arc<dyn FlowsRuns>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "start_run" => {
+                let (x0, ): (StartRequest, ) = de(a)?;
+                ser(&t.start_run(x0))
+            }
+            "get_run" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.get_run(&x0))
+            }
+            "run_summaries" => {
+                ser(&t.run_summaries())
+            }
+            "run_counts" => {
+                ser(&t.run_counts())
+            }
+            "revision" => {
+                ser(&t.revision())
+            }
+            "ticking" => {
+                ser(&t.ticking())
+            }
+            "next_runs" => {
+                let (x0, x1, ): (Flow, usize, ) = de(a)?;
+                ser(&t.next_runs(&x0, x1))
+            }
+            "decide" => {
+                let (x0, x1, x2, x3, x4, ): (String, String, bool, String, String, ) = de(a)?;
+                ser(&t.decide(&x0, &x1, x2, &x3, &x4))
+            }
+            "card_decide" => {
+                let (x0, x1, x2, ): (String, String, CardDecision, ) = de(a)?;
+                ser(&t.card_decide(&x0, &x1, x2))
+            }
+            "cancel" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.cancel(&x0))
+            }
+            "retry_node" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.retry_node(&x0, &x1))
+            }
+            "skip_node" => {
+                let (x0, x1, x2, ): (String, String, String, ) = de(a)?;
+                ser(&t.skip_node(&x0, &x1, &x2))
+            }
+            "rerun_from" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.rerun_from(&x0, &x1))
+            }
+            "node_updates" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.node_updates(&x0))
+            }
+            "apply_node_update" => {
+                let (x0, x1, x2, x3, x4, ): (String, String, ApplyScope, String, bool, ) = de(a)?;
+                ser(&t.apply_node_update(&x0, &x1, x2, &x3, x4))
+            }
+            "test_node" => {
+                let (x0, x1, x2, x3, ): (Flow, String, serde_json::Value, serde_json::Value, ) = de(a)?;
+                ser(&t.test_node(&x0, &x1, x2, x3))
+            }
+            "report_run" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.report_run(&x0, &x1))
+            }
+            "withdraw_permissions" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.withdraw_permissions(&x0))
+            }
+            "browser_session" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.browser_session(&x0))
+            }
+            other => Err(format!("FlowsRuns has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_FlowsAssist(t: &Arc<dyn FlowsAssist>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "assist_global" => {
+                ser(&t.assist_global())
+            }
+            "assist_set_enabled" => {
+                let (x0, ): (bool, ) = de(a)?;
+                ser(&t.assist_set_enabled(x0))
+            }
+            "assist_set_global_cap" => {
+                let (x0, ): (u32, ) = de(a)?;
+                ser(&t.assist_set_global_cap(x0))
+            }
+            "assist_set_matrix" => {
+                let (x0, x1, ): (bool, String, ) = de(a)?;
+                ser(&t.assist_set_matrix(x0, &x1))
+            }
+            "assist_set_profile" => {
+                let (x0, ): (iyakki_flow::assist_profile::AgentProfile, ) = de(a)?;
+                ser(&t.assist_set_profile(x0))
+            }
+            "assist_book" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.assist_book(&x0))
+            }
+            "assist_open_list" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.assist_open_list(&x0))
+            }
+            "assist_now" => {
+                ser(&t.assist_now())
+            }
+            "assist_watch" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.assist_watch(&x0))
+            }
+            "assist_set_watch" => {
+                let (x0, x1, ): (String, Option<iyakki_flow::assist_store::Watch>, ) = de(a)?;
+                ser(&t.assist_set_watch(&x0, x1))
+            }
+            "assist_set_status" => {
+                let (x0, x1, x2, ): (String, String, Status, ) = de(a)?;
+                ser(&t.assist_set_status(&x0, &x1, x2))
+            }
+            "assist_paused" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.assist_paused(&x0))
+            }
+            "assist_set_paused" => {
+                let (x0, x1, ): (String, bool, ) = de(a)?;
+                ser(&t.assist_set_paused(&x0, x1))
+            }
+            "assist_readout" => {
+                let (x0, x1, x2, ): (String, i64, usize, ) = de(a)?;
+                ser(&t.assist_readout(&x0, x1, x2))
+            }
+            "assist_adopt" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.assist_adopt(&x0, &x1))
+            }
+            "assist_reject" => {
+                let (x0, x1, x2, ): (String, String, String, ) = de(a)?;
+                ser(&t.assist_reject(&x0, &x1, &x2))
+            }
+            "trial_whole" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.trial_whole(&x0))
+            }
+            "assist_after_publish" => {
+                let (x0, x1, ): (String, u32, ) = de(a)?;
+                ser(&t.assist_after_publish(&x0, x1))
+            }
+            other => Err(format!("FlowsAssist has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_FlowsHooks(t: &Arc<dyn FlowsHooks>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "hook_views" => {
+                let (x0, ): (Option<String>, ) = de(a)?;
+                ser(&t.hook_views(x0.as_deref()))
+            }
+            "hook_create" => {
+                let (x0, x1, x2, ): (String, HookOpts, String, ) = de(a)?;
+                ser(&t.hook_create(&x0, &x1, &x2))
+            }
+            "hook_regenerate" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.hook_regenerate(&x0, &x1))
+            }
+            "hook_enable" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.hook_enable(&x0, &x1))
+            }
+            "hook_disable" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.hook_disable(&x0, &x1))
+            }
+            "hook_public" => {
+                let (x0, x1, x2, ): (String, u64, String, ) = de(a)?;
+                ser(&t.hook_public(&x0, x1, &x2))
+            }
+            other => Err(format!("FlowsHooks has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_FlowsChannel(t: &Arc<dyn FlowsChannel>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "chan_allowed" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.chan_allowed(&x0))
+            }
+            "chan_set" => {
+                let (x0, x1, ): (String, bool, ) = de(a)?;
+                ser(&t.chan_set(&x0, x1))
+            }
+            "msg_policy_get" => {
+                ser(&t.msg_policy_get())
+            }
+            "msg_policy_set" => {
+                let (x0, ): (MsgPolicy, ) = de(a)?;
+                ser(&t.msg_policy_set(x0))
+            }
+            "msg_held" => {
+                ser(&t.msg_held())
+            }
+            "msg_watching" => {
+                ser(&t.msg_watching())
+            }
+            "msg_ack" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.msg_ack(&x0))
+            }
+            other => Err(format!("FlowsChannel has no call {other}")),
+        }
+    }
 }
 mod g_generated { use super::*;
     use iyakki_agent_api::generated::*;
     pub(crate) trait Dummy {}
-    pub(crate) fn serve_AgentDisplay(t: &dyn AgentDisplay, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_AgentDisplay(t: &Arc<dyn AgentDisplay>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "cameras_release_screen_at" => {
                 let (x0, x1, ): (std::path::PathBuf, Vec<String>, ) = de(a)?;
@@ -503,7 +2508,7 @@ mod g_generated { use super::*;
             other => Err(format!("AgentDisplay has no call {other}")),
         }
     }
-    pub(crate) fn serve_AgentFiles(t: &dyn AgentFiles, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_AgentFiles(t: &Arc<dyn AgentFiles>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "disks_account_owner" => {
                 let (x0, x1, ): (String, String, ) = de(a)?;
@@ -564,7 +2569,7 @@ mod g_generated { use super::*;
             other => Err(format!("AgentFiles has no call {other}")),
         }
     }
-    pub(crate) fn serve_AgentStore(t: &dyn AgentStore, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_AgentStore(t: &Arc<dyn AgentStore>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "linuxapps_ide_context" => {
                 ser(&t.linuxapps_ide_context())
@@ -599,11 +2604,12 @@ mod g_member_stores { use super::*;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use serde_json::Value;
+    use iyakki_agent_api::ServicesHandle;
     use std::time::Duration;
     use zeroize::Zeroizing;
     use iyakki_shared::calendar::CalendarStore;
     pub(crate) trait Dummy {}
-    pub(crate) fn serve_InboxApi(t: &dyn InboxApi, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_InboxApi(t: &Arc<dyn InboxApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "add" => {
                 let (x0, x1, x2, x3, x4, x5, x6, ): (String, iyakki_shared::inbox::Kind, String, String, String, Option<iyakki_shared::inbox::Link>, i64, ) = de(a)?;
@@ -712,7 +2718,7 @@ mod g_member_stores { use super::*;
             other => Err(format!("InboxApi has no call {other}")),
         }
     }
-    pub(crate) fn serve_CalendarApi(t: &dyn CalendarApi, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_CalendarApi(t: &Arc<dyn CalendarApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "add_event" => {
                 let (x0, x1, x2, x3, x4, x5, x6, x7, x8, ): (String, String, i64, u32, bool, iyakki_shared::calendar::Repeat, String, String, Option<u32>, ) = de(a)?;
@@ -722,9 +2728,17 @@ mod g_member_stores { use super::*;
                 let (x0, x1, ): (String, String, ) = de(a)?;
                 ser(&t.remove_event(&x0, &x1))
             }
+            "add_alarm" => {
+                let (x0, x1, x2, x3, x4, x5, x6, x7, ): (String, String, u32, u32, u8, i64, iyakki_clock::Zone, String, ) = de(a)?;
+                ser(&t.add_alarm(&x0, &x1, x2, x3, x4, x5, &x6, &x7))
+            }
             "remove_alarm" => {
                 let (x0, x1, ): (String, String, ) = de(a)?;
                 ser(&t.remove_alarm(&x0, &x1))
+            }
+            "set_alarm_enabled" => {
+                let (x0, x1, x2, x3, x4, ): (String, String, bool, i64, iyakki_clock::Zone, ) = de(a)?;
+                ser(&t.set_alarm_enabled(&x0, &x1, x2, x3, &x4))
             }
             "alarms" => {
                 let (x0, ): (String, ) = de(a)?;
@@ -734,11 +2748,31 @@ mod g_member_stores { use super::*;
                 let (x0, ): (String, ) = de(a)?;
                 ser(&t.events(&x0))
             }
+            "events_in" => {
+                let (x0, x1, x2, x3, ): (String, i64, i64, iyakki_clock::Zone, ) = de(a)?;
+                ser(&t.events_in(&x0, x1, x2, &x3))
+            }
+            "alarms_in" => {
+                let (x0, x1, x2, x3, ): (String, i64, i64, iyakki_clock::Zone, ) = de(a)?;
+                ser(&t.alarms_in(&x0, x1, x2, &x3))
+            }
+            "next_alarm" => {
+                let (x0, x1, x2, ): (String, i64, iyakki_clock::Zone, ) = de(a)?;
+                ser(&t.next_alarm(&x0, x1, &x2))
+            }
+            "take_due" => {
+                let (x0, x1, x2, x3, ): (String, i64, i64, iyakki_clock::Zone, ) = de(a)?;
+                ser(&t.take_due(&x0, x1, x2, &x3))
+            }
             other => Err(format!("CalendarApi has no call {other}")),
         }
     }
-    pub(crate) fn serve_StudyApi(t: &dyn StudyApi, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_StudyApi(t: &Arc<dyn StudyApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
+            "create_plan" => {
+                let (x0, x1, x2, x3, ): (String, iyakki_shared::study::PlanSpec, i64, iyakki_clock::Zone, ) = de(a)?;
+                ser(&t.create_plan(&x0, &x1, x2, &x3))
+            }
             "plans" => {
                 let (x0, ): (String, ) = de(a)?;
                 ser(&t.plans(&x0))
@@ -787,10 +2821,34 @@ mod g_member_stores { use super::*;
                 let (x0, x1, x2, x3, ): (String, String, usize, bool, ) = de(a)?;
                 ser(&t.flag_question(&x0, &x1, x2, x3))
             }
+            "lesson" => {
+                let (x0, x1, x2, ): (String, String, usize, ) = de(a)?;
+                ser(&t.lesson(&x0, &x1, x2))
+            }
+            "lesson_image" => {
+                let (x0, x1, x2, x3, ): (String, String, usize, String, ) = de(a)?;
+                ser(&t.lesson_image(&x0, &x1, x2, &x3))
+            }
+            "save_lesson" => {
+                let (x0, x1, x2, x3, x4, ): (String, String, usize, iyakki_shared::studylesson::Lesson, Vec<(String, Vec<u8>)>, ) = de(a)?;
+                ser(&t.save_lesson(&x0, &x1, x2, &x3, &x4))
+            }
+            "add_qa" => {
+                let (x0, x1, x2, x3, x4, ): (String, String, usize, String, String, ) = de(a)?;
+                ser(&t.add_qa(&x0, &x1, x2, &x3, &x4))
+            }
+            "delete_lesson" => {
+                let (x0, x1, x2, ): (String, String, usize, ) = de(a)?;
+                ser(&t.delete_lesson(&x0, &x1, x2))
+            }
+            "delete_lessons_of" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.delete_lessons_of(&x0, &x1))
+            }
             other => Err(format!("StudyApi has no call {other}")),
         }
     }
-    pub(crate) fn serve_SecretsApi(t: &dyn SecretsApi, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_SecretsApi(t: &Arc<dyn SecretsApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "set_providers" => {
                 let (x0, ): (std::collections::HashMap<String, iyakki_shared::vault::ProviderConfig>, ) = de(a)?;
@@ -802,6 +2860,10 @@ mod g_member_stores { use super::*;
             "system_unlocked" => {
                 ser(&t.system_unlocked())
             }
+            "has_ref" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.has_ref(&x0))
+            }
             "test_provider" => {
                 let (x0, ): (String, ) = de(a)?;
                 ser(&t.test_provider(&x0))
@@ -809,7 +2871,7 @@ mod g_member_stores { use super::*;
             other => Err(format!("SecretsApi has no call {other}")),
         }
     }
-    pub(crate) fn serve_DevWatchApi(t: &dyn DevWatchApi, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_DevWatchApi(t: &Arc<dyn DevWatchApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "enabled" => {
                 ser(&t.enabled())
@@ -853,7 +2915,7 @@ mod g_member_stores { use super::*;
             other => Err(format!("DevWatchApi has no call {other}")),
         }
     }
-    pub(crate) fn serve_BrowserStateApi(t: &dyn BrowserStateApi, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_BrowserStateApi(t: &Arc<dyn BrowserStateApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "now" => {
                 ser(&t.now())
@@ -967,7 +3029,97 @@ mod g_member_stores { use super::*;
             other => Err(format!("BrowserStateApi has no call {other}")),
         }
     }
-    pub(crate) fn serve_ScreenCaptureApi(t: &dyn ScreenCaptureApi, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_ConsentApi(t: &Arc<dyn ConsentApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "create" => {
+                let (x0, x1, x2, x3, x4, x5, ): (String, iyakki_shared::browserconsent::ConsentKind, String, String, String, i64, ) = de(a)?;
+                ser(&t.create(&x0, x1, &x2, &x3, &x4, x5))
+            }
+            "create_device" => {
+                let (x0, x1, x2, x3, x4, ): (String, String, String, String, i64, ) = de(a)?;
+                ser(&t.create_device(&x0, &x1, &x2, &x3, x4))
+            }
+            "create_permission" => {
+                let (x0, x1, x2, x3, x4, x5, ): (String, String, String, String, String, i64, ) = de(a)?;
+                ser(&t.create_permission(&x0, &x1, &x2, &x3, &x4, x5))
+            }
+            "withdraw_permissions" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.withdraw_permissions(&x0, &x1))
+            }
+            "set_synthetic" => {
+                let (x0, ): (bool, ) = de(a)?;
+                ser(&t.set_synthetic(x0))
+            }
+            "pending" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.pending(&x0))
+            }
+            "get" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.get(&x0, &x1))
+            }
+            "resolve" => {
+                let (x0, x1, x2, ): (String, String, iyakki_shared::browserconsent::Answer, ) = de(a)?;
+                ser(&t.resolve(&x0, &x1, x2))
+            }
+            "deny_all" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.deny_all(&x0))
+            }
+            "wait" => {
+                let (x0, x1, ): (String, std::time::Duration, ) = de(a)?;
+                ser(&t.wait(&x0, x1))
+            }
+            other => Err(format!("ConsentApi has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_BrowserJobsApi(t: &Arc<dyn BrowserJobsApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "submit" => {
+                let (x0, x1, ): (String, iyakki_shared::browserjobs::Op, ) = de(a)?;
+                ser(&t.submit(&x0, x1))
+            }
+            "submit_detached" => {
+                let (x0, x1, ): (String, iyakki_shared::browserjobs::Op, ) = de(a)?;
+                ser(&t.submit_detached(&x0, x1))
+            }
+            "wait" => {
+                let (x0, x1, ): (u64, std::time::Duration, ) = de(a)?;
+                ser(&t.wait(x0, x1))
+            }
+            "call" => {
+                let (x0, x1, x2, ): (String, iyakki_shared::browserjobs::Op, std::time::Duration, ) = de(a)?;
+                ser(&t.call(&x0, x1, x2))
+            }
+            "take" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.take(&x0))
+            }
+            "complete" => {
+                let (x0, x1, ): (u64, iyakki_shared::browserjobs::Reply, ) = de(a)?;
+                ser(&t.complete(x0, x1))
+            }
+            "beat" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.beat(&x0))
+            }
+            "serviced" => {
+                let (x0, x1, ): (String, std::time::Duration, ) = de(a)?;
+                ser(&t.serviced(&x0, x1))
+            }
+            "pending_for" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.pending_for(&x0))
+            }
+            "fail_all" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.fail_all(&x0, &x1))
+            }
+            other => Err(format!("BrowserJobsApi has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_ScreenCaptureApi(t: &Arc<dyn ScreenCaptureApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "set_present" => {
                 let (x0, ): (bool, ) = de(a)?;
@@ -1000,10 +3152,52 @@ mod g_member_stores { use super::*;
                 let (x0, ): (String, ) = de(a)?;
                 ser(&t.wanted(&x0))
             }
+            "serve_frame" => {
+                let (x0, x1, ): (String, Option<iyakki_shared::screencap::Frame>, ) = de(a)?;
+                ser(&t.serve_frame(&x0, x1))
+            }
             other => Err(format!("ScreenCaptureApi has no call {other}")),
         }
     }
-    pub(crate) fn serve_DevToolsApi(t: &dyn DevToolsApi, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_CameraHubApi(t: &Arc<dyn CameraHubApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "present" => {
+                ser(&t.present())
+            }
+            "set_home_root" => {
+                let (x0, ): (std::path::PathBuf, ) = de(a)?;
+                ser(&t.set_home_root(&x0))
+            }
+            "home" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.home(&x0))
+            }
+            "grant" => {
+                let (x0, x1, ): (String, u64, ) = de(a)?;
+                ser(&t.grant(&x0, x1))
+            }
+            "granted" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.granted(&x0))
+            }
+            "revoke" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.revoke(&x0))
+            }
+            "busy_set" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.busy_set(&x0, &x1))
+            }
+            "busy_clear" => {
+                ser(&t.busy_clear())
+            }
+            "in_use" => {
+                ser(&t.in_use())
+            }
+            other => Err(format!("CameraHubApi has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_DevToolsApi(t: &Arc<dyn DevToolsApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "enabled" => {
                 let (x0, ): (String, ) = de(a)?;
@@ -1068,7 +3262,7 @@ mod g_member_stores { use super::*;
             other => Err(format!("DevToolsApi has no call {other}")),
         }
     }
-    pub(crate) fn serve_SecretRequestsApi(t: &dyn SecretRequestsApi, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_SecretRequestsApi(t: &Arc<dyn SecretRequestsApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "create" => {
                 let (x0, x1, x2, x3, x4, ): (String, String, String, String, i64, ) = de(a)?;
@@ -1093,7 +3287,7 @@ mod g_member_stores { use super::*;
             other => Err(format!("SecretRequestsApi has no call {other}")),
         }
     }
-    pub(crate) fn serve_UsageLogApi(t: &dyn UsageLogApi, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_UsageLogApi(t: &Arc<dyn UsageLogApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "record" => {
                 let (x0, x1, x2, x3, x4, ): (String, String, String, u64, u64, ) = de(a)?;
@@ -1111,6 +3305,10 @@ mod g_member_stores { use super::*;
                 let (x0, ): (Option<String>, ) = de(a)?;
                 ser(&t.entries(x0.as_deref()))
             }
+            "series" => {
+                let (x0, x1, x2, x3, ): (iyakki_shared::usagelog::Range, i64, iyakki_clock::Zone, Option<String>, ) = de(a)?;
+                ser(&t.series(x0, x1, &x2, x3.as_deref()))
+            }
             "by_source" => {
                 let (x0, x1, ): (Option<String>, i64, ) = de(a)?;
                 ser(&t.by_source(x0.as_deref(), x1))
@@ -1119,10 +3317,14 @@ mod g_member_stores { use super::*;
                 let (x0, x1, x2, x3, ): (Option<String>, String, Option<String>, i64, ) = de(a)?;
                 ser(&t.totals_of(x0.as_deref(), &x1, x2.as_deref(), x3))
             }
+            "days_of" => {
+                let (x0, x1, x2, x3, x4, x5, ): (Option<String>, String, Option<String>, usize, i64, iyakki_clock::Zone, ) = de(a)?;
+                ser(&t.days_of(x0.as_deref(), &x1, x2.as_deref(), x3, x4, &x5))
+            }
             other => Err(format!("UsageLogApi has no call {other}")),
         }
     }
-    pub(crate) fn serve_ExtStatusApi(t: &dyn ExtStatusApi, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_ExtStatusApi(t: &Arc<dyn ExtStatusApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "set_models" => {
                 let (x0, x1, ): (String, Vec<iyakki_extagentx::ModelInfo>, ) = de(a)?;
@@ -1150,10 +3352,30 @@ mod g_member_stores { use super::*;
             "invalidate" => {
                 ser(&t.invalidate())
             }
+            "refresh" => {
+                let (x0, ): (iyakki_shared::extagentcfg::AgentsCfg, ) = de(a)?;
+                ser(&t.refresh(x0))
+            }
+            "reset" => {
+                let (x0, ): (iyakki_shared::extagentcfg::AgentsCfg, ) = de(a)?;
+                ser(&t.reset(x0))
+            }
+            "recheck" => {
+                let (x0, x1, ): (iyakki_shared::extagentcfg::AgentsCfg, String, ) = de(a)?;
+                ser(&t.recheck(x0, &x1))
+            }
+            "recheck_after" => {
+                let (x0, x1, x2, ): (iyakki_shared::extagentcfg::AgentsCfg, String, Duration, ) = de(a)?;
+                ser(&t.recheck_after(x0, &x1, x2))
+            }
+            "refresh_one" => {
+                let (x0, x1, ): (iyakki_shared::extagentcfg::AgentsCfg, String, ) = de(a)?;
+                ser(&t.refresh_one(x0, &x1))
+            }
             other => Err(format!("ExtStatusApi has no call {other}")),
         }
     }
-    pub(crate) fn serve_KnowledgeBaseApi(t: &dyn KnowledgeBaseApi, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_KnowledgeBaseApi(t: &Arc<dyn KnowledgeBaseApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "embedder_id" => {
                 ser(&t.embedder_id())
@@ -1169,6 +3391,18 @@ mod g_member_stores { use super::*;
                 let (x0, ): (String, ) = de(a)?;
                 ser(&t.docs(&x0))
             }
+            "add_document" => {
+                let (x0, x1, x2, x3, x4, ): (String, String, String, String, std::collections::BTreeMap<String, String>, ) = de(a)?;
+                ser(&t.add_document(&x0, &x1, &x2, &x3, x4))
+            }
+            "add_documents" => {
+                let (x0, x1, ): (String, Vec<(String, String, String)>, ) = de(a)?;
+                ser(&t.add_documents(&x0, &x1))
+            }
+            "ingest_dir" => {
+                let (x0, x1, ): (String, std::path::PathBuf, ) = de(a)?;
+                ser(&t.ingest_dir(&x0, &x1))
+            }
             "embedder_of" => {
                 let (x0, ): (String, ) = de(a)?;
                 ser(&t.embedder_of(&x0))
@@ -1177,22 +3411,90 @@ mod g_member_stores { use super::*;
                 let (x0, x1, ): (String, String, ) = de(a)?;
                 ser(&t.doc_chunks(&x0, &x1))
             }
+            "remove_document" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.remove_document(&x0, &x1))
+            }
+            "drop_namespace" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.drop_namespace(&x0))
+            }
+            "reindex" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.reindex(&x0))
+            }
             "stale_namespaces" => {
                 ser(&t.stale_namespaces())
+            }
+            "reindex_stale" => {
+                ser(&t.reindex_stale())
+            }
+            "search_in" => {
+                let (x0, x1, x2, ): (Vec<String>, String, usize, ) = de(a)?;
+                ser(&t.search_in(&x0, &x1, x2))
+            }
+            "search_weighted_in" => {
+                let (x0, x1, x2, ): (Vec<(String, f32)>, String, usize, ) = de(a)?;
+                ser(&t.search_weighted_in(&x0, &x1, x2))
             }
             other => Err(format!("KnowledgeBaseApi has no call {other}")),
         }
     }
-    pub(crate) fn serve_AccountsApi(t: &dyn AccountsApi, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_AccountsApi(t: &Arc<dyn AccountsApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
+            "refresh" => {
+                ser(&t.refresh())
+            }
             "is_empty" => {
                 ser(&t.is_empty())
+            }
+            "list_public" => {
+                ser(&t.list_public())
+            }
+            "get_public" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.get_public(&x0))
+            }
+            "create_first_admin" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.create_first_admin(&x0, &x1))
+            }
+            "resume_session" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.resume_session(&x0))
+            }
+            "authenticate" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.authenticate(&x0, &x1))
+            }
+            "create_user" => {
+                let (x0, x1, x2, x3, ): (iyakki_accounts::Session, String, String, iyakki_sec::policy::Role, ) = de(a)?;
+                ser(&t.create_user(&x0, &x1, &x2, x3))
+            }
+            "delete_user" => {
+                let (x0, x1, ): (iyakki_accounts::Session, String, ) = de(a)?;
+                ser(&t.delete_user(&x0, &x1))
+            }
+            "set_role" => {
+                let (x0, x1, x2, ): (iyakki_accounts::Session, String, iyakki_sec::policy::Role, ) = de(a)?;
+                ser(&t.set_role(&x0, &x1, x2))
+            }
+            "set_overrides" => {
+                let (x0, x1, x2, ): (iyakki_accounts::Session, String, iyakki_sec::policy::PolicyOverride, ) = de(a)?;
+                ser(&t.set_overrides(&x0, &x1, x2))
+            }
+            "set_password" => {
+                let (x0, x1, x2, x3, ): (iyakki_accounts::Session, String, Option<String>, String, ) = de(a)?;
+                ser(&t.set_password(&x0, &x1, x2.as_deref(), &x3))
             }
             other => Err(format!("AccountsApi has no call {other}")),
         }
     }
-    pub(crate) fn serve_AuditApi(t: &dyn AuditApi, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve_AuditApi(t: &Arc<dyn AuditApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
+            "path_buf" => {
+                ser(&t.path_buf())
+            }
             "record" => {
                 let (x0, x1, x2, ): (String, String, String, ) = de(a)?;
                 ser(&t.record(&x0, &x1, &x2))
@@ -1203,11 +3505,489 @@ mod g_member_stores { use super::*;
             "start_new_log" => {
                 ser(&t.start_new_log())
             }
+            "verify" => {
+                ser(&t.verify())
+            }
             "recent" => {
                 let (x0, ): (usize, ) = de(a)?;
                 ser(&t.recent(x0))
             }
             other => Err(format!("AuditApi has no call {other}")),
+        }
+    }
+}
+mod g_pending { use super::*;
+    use iyakki_agent_api::pending::*;
+    use std::sync::Arc;
+    pub(crate) trait Dummy {}
+    pub(crate) fn serve_AgentPending(t: &Arc<dyn AgentPending>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "pending_settings" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.pending_settings(&x0))
+            }
+            "pending_set_settings" => {
+                let (x0, x1, ): (String, iyakki_shared::pending::Settings, ) = de(a)?;
+                ser(&t.pending_set_settings(&x0, x1))
+            }
+            "pending_wakes_left" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.pending_wakes_left(&x0))
+            }
+            "pending_strip_line" => {
+                let (x0, x1, x2, ): (String, String, u64, ) = de(a)?;
+                ser(&t.pending_strip_line(&x0, &x1, x2))
+            }
+            other => Err(format!("AgentPending has no call {other}")),
+        }
+    }
+}
+mod g_settings_api { use super::*;
+    use iyakki_agent_api::settings_api::*;
+    use std::sync::{Arc, Mutex};
+    use iyakki_shared::settings::{Settings, SettingsError, SettingsStore};
+    pub(crate) trait Dummy {}
+    pub(crate) fn serve_SettingsApi(t: &Arc<dyn SettingsApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "snapshot" => {
+                ser(&t.snapshot())
+            }
+            "replace_if" => {
+                let (x0, x1, ): (u64, Settings, ) = de(a)?;
+                ser(&t.replace_if(x0, x1))
+            }
+            other => Err(format!("SettingsApi has no call {other}")),
+        }
+    }
+}
+mod g_store { use super::*;
+    use iyakki_agent_api::store::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use iyakki_sec::policy::Policy;
+    use iyakki_shared::store_compapply::{ApplyResult, Review, StoreLine};
+    use iyakki_shared::store_private::StatusInfo;
+    use iyakki_shared::store_tilehub::TileEntry;
+    use iyakki_shared::store_updatecheck::{CheckSettings, Report};
+    use iyakki_shared::store_wizardhook::Pending;
+    pub(crate) trait Dummy {}
+    pub(crate) fn serve_StoreHub(t: &Arc<dyn StoreHub>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "tiles" => {
+                let (x0, x1, ): (Policy, String, ) = de(a)?;
+                ser(&t.tiles(&x0, &x1))
+            }
+            "preview_tile" => {
+                let (x0, x1, ): (String, std::path::PathBuf, ) = de(a)?;
+                ser(&t.preview_tile(&x0, &x1))
+            }
+            "add_dev_tile" => {
+                let (x0, x1, x2, ): (Policy, String, std::path::PathBuf, ) = de(a)?;
+                ser(&t.add_dev_tile(&x0, &x1, &x2))
+            }
+            "remove_dev_tile" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.remove_dev_tile(&x0, &x1))
+            }
+            "wasm_tiles_enabled" => {
+                ser(&t.wasm_tiles_enabled())
+            }
+            other => Err(format!("StoreHub has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_StoreUpdates(t: &Arc<dyn StoreUpdates>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "update_report" => {
+                ser(&t.update_report())
+            }
+            "update_check_due" => {
+                let (x0, ): (CheckSettings, ) = de(a)?;
+                ser(&t.update_check_due(&x0))
+            }
+            "update_check_run" => {
+                let (x0, x1, x2, x3, x4, ): (Policy, String, CheckSettings, String, String, ) = de(a)?;
+                ser(&t.update_check_run(&x0, &x1, &x2, &x3, &x4))
+            }
+            "update_announce_stores" => {
+                ser(&t.update_announce_stores())
+            }
+            "pending_wizards" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.pending_wizards(&x0))
+            }
+            other => Err(format!("StoreUpdates has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_StoreComponents(t: &Arc<dyn StoreComponents>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "components_channel" => {
+                ser(&t.components_channel())
+            }
+            "components_set_channel" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.components_set_channel(&x0))
+            }
+            "components_check_all" => {
+                ser(&t.components_check_all())
+            }
+            "components_check_lines" => {
+                ser(&t.components_check_lines())
+            }
+            "components_last_result" => {
+                ser(&t.components_last_result())
+            }
+            "components_review" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.components_review(&x0))
+            }
+            "components_apply" => {
+                let (x0, x1, ): (ComponentReview, String, ) = de(a)?;
+                ser(&t.components_apply(&x0, &x1))
+            }
+            other => Err(format!("StoreComponents has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_StoreDrivers(t: &Arc<dyn StoreDrivers>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "folder_package" => {
+                let (x0, x1, x2, ): (String, std::path::PathBuf, i64, ) = de(a)?;
+                ser(&t.folder_package(&x0, &x1, x2))
+            }
+            "facetime_package" => {
+                let (x0, x1, x2, ): (Vec<u8>, bool, i64, ) = de(a)?;
+                ser(&t.facetime_package(&x0, x1, x2))
+            }
+            other => Err(format!("StoreDrivers has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_StoreDriverSource(t: &Arc<dyn StoreDriverSource>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "drivers" => {
+                { let h = t.drivers(); ser(&reg.add(Obj::StoreDrivers(h))) }
+            }
+            other => Err(format!("StoreDriverSource has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_StoreCatalog(t: &Arc<dyn StoreCatalog>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "private_store_status" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.private_store_status(&x0))
+            }
+            "permission_words" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.permission_words(&x0, &x1))
+            }
+            "stick_stores" => {
+                ser(&t.stick_stores())
+            }
+            "scaffold_project" => {
+                let (x0, x1, x2, x3, ): (String, String, std::path::PathBuf, String, ) = de(a)?;
+                ser(&t.scaffold_project(&x0, &x1, &x2, &x3))
+            }
+            "project_version" => {
+                let (x0, ): (std::path::PathBuf, ) = de(a)?;
+                ser(&t.project_version(&x0))
+            }
+            other => Err(format!("StoreCatalog has no call {other}")),
+        }
+    }
+}
+mod g_store_api { use super::*;
+    use iyakki_agent_api::store_api::*;
+    use std::path::Path;
+    use iyakki_sec::policy::Policy;
+    use iyakki_shared::store_catalog::{Config, Fetch, Loaded, SourceCfg, SourceKind};
+    use iyakki_shared::store_core::{Item, Probe, Refresh};
+    use iyakki_core_api::appcaps::Approval;
+    use iyakki_shared::store_install::{Actor, Confirm, InstallError, Record, Review};
+    use iyakki_shared::store_installed::Entry;
+    use iyakki_shared::store_license::Token;
+    use iyakki_shared::store_manifest::Pricing;
+    use iyakki_shared::store_lifecycle::{Ctx, Life, LifeError, RemoveOpts, RemovePlan, Report, UpdatePlan};
+    use iyakki_shared::store_author::Published;
+    use iyakki_shared::store_keys::{KeyInfo, SigningKey};
+    use iyakki_shared::store_privatepub::{Deployed, Offer};
+    use iyakki_shared::store_publishflow::{Bump, Card, Stop, StoreChoice};
+    use iyakki_shared::store_revocation::Revocations;
+    use iyakki_shared::store_trust::Roots;
+    use iyakki_shared::skills::Scope;
+    pub(crate) trait Dummy {}
+    pub(crate) fn serve_StoreApi(t: &Arc<dyn StoreApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "approval" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.approval(&x0))
+            }
+            "installed_version" => {
+                let (x0, x1, x2, ): (String, String, Scope, ) = de(a)?;
+                ser(&t.installed_version(&x0, &x1, &x2))
+            }
+            "is_disabled" => {
+                let (x0, x1, x2, ): (String, String, Scope, ) = de(a)?;
+                ser(&t.is_disabled(&x0, &x1, &x2))
+            }
+            "install" => {
+                let (x0, x1, x2, ): (String, Review, Confirm, ) = de(a)?;
+                ser(&t.install(&reg.actor(&x0)?, &x1, x2))
+            }
+            "remove" => {
+                let (x0, x1, x2, x3, ): (String, String, String, Scope, ) = de(a)?;
+                ser(&t.remove(&reg.actor(&x0)?, &x1, &x2, &x3))
+            }
+            "disable" => {
+                let (x0, x1, x2, x3, ): (String, String, String, Scope, ) = de(a)?;
+                ser(&t.disable(&reg.actor(&x0)?, &x1, &x2, &x3))
+            }
+            "enable" => {
+                let (x0, x1, x2, x3, ): (String, String, String, Scope, ) = de(a)?;
+                ser(&t.enable(&reg.actor(&x0)?, &x1, &x2, &x3))
+            }
+            "enforce_revocations" => {
+                ser(&t.enforce_revocations())
+            }
+            "add_license" => crate::served_apps::s_StoreApi_add_license(t, reg, a),
+            "checkout_url" => {
+                let (x0, x1, ): (String, Pricing, ) = de(a)?;
+                ser(&t.checkout_url(&x0, &x1))
+            }
+            "installed" => {
+                let (x1, x2, ): (String, Vec<Item>, ) = de(a)?;
+                ser(&t.installed(&reg.policy_of(&x1)?, &x1, &x2))
+            }
+            "remove_installed" => {
+                let (x1, x2, ): (String, Entry, ) = de(a)?;
+                ser(&t.remove_installed(&reg.policy_of(&x1)?, &x1, &x2))
+            }
+            "toggle_installed" => {
+                let (x1, x2, ): (String, Entry, ) = de(a)?;
+                ser(&t.toggle_installed(&reg.policy_of(&x1)?, &x1, &x2))
+            }
+            "pin" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.pin(&x0, &x1))
+            }
+            "unpin" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.unpin(&x0))
+            }
+            "lifecycle" => {
+                let (x1, x2, x3, ): (String, Vec<Loaded>, Ctx, ) = de(a)?;
+                ser(&t.lifecycle(&reg.policy_of(&x1)?, &x1, &x2, &x3))
+            }
+            "find_life" => crate::served_apps::s_StoreApi_find_life(t, reg, a),
+            "check_cli_latest" => {
+                ser(&t.check_cli_latest())
+            }
+            "plan_update" => {
+                let (x0, x1, x2, ): (String, Life, Vec<Loaded>, ) = de(a)?;
+                ser(&t.plan_update(&reg.actor(&x0)?, &x1, &x2, &*reg.fetch()?))
+            }
+            "recover" => {
+                ser(&t.recover())
+            }
+            "apply_update" => {
+                let (x0, x1, x2, ): (String, UpdatePlan, Confirm, ) = de(a)?;
+                ser(&t.apply_update(&reg.actor(&x0)?, &x1, x2, &*reg.audit()))
+            }
+            "rollback" => {
+                let (x0, x1, ): (String, Life, ) = de(a)?;
+                ser(&t.rollback(&reg.actor(&x0)?, &x1, &*reg.audit()))
+            }
+            "plan_remove" => {
+                let (x0, x1, x2, ): (String, Vec<Life>, Life, ) = de(a)?;
+                ser(&t.plan_remove(&x0, &x1, &x2))
+            }
+            "remove_item" => {
+                let (x1, x2, x3, x4, ): (String, Vec<Life>, Life, RemoveOpts, ) = de(a)?;
+                ser(&t.remove_item(&reg.policy_of(&x1)?, &x1, &x2, &x3, &x4, &*reg.audit()))
+            }
+            "update_all_preview" => {
+                let (x0, ): (Vec<Life>, ) = de(a)?;
+                ser(&t.update_all_preview(&x0))
+            }
+            "update_all" => crate::served_apps::s_StoreApi_update_all(t, reg, a),
+            "dir" => {
+                ser(&t.dir())
+            }
+            "now" => {
+                ser(&t.now())
+            }
+            "roots" => {
+                ser(&t.roots())
+            }
+            "revocations" => {
+                ser(&t.revocations())
+            }
+            "config" => {
+                ser(&t.config())
+            }
+            "add_source" => {
+                let (x0, x1, x2, x3, ): (String, String, SourceKind, String, ) = de(a)?;
+                ser(&t.add_source(&reg.actor(&x0)?, &x1, x2, &x3))
+            }
+            "official_store_url" => crate::served_apps::s_StoreApi_official_store_url(t, reg, a),
+            "probe_private" => {
+                let (x1, ): (String, ) = de(a)?;
+                ser(&t.probe_private(&*reg.fetch()?, &x1))
+            }
+            "pin_probed" => {
+                let (x0, x1, x2, x3, ): (String, String, Probe, String, ) = de(a)?;
+                ser(&t.pin_probed(&reg.actor(&x0)?, &x1, &x2, &x3))
+            }
+            "set_publish_target" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.set_publish_target(&reg.actor(&x0)?, &x1))
+            }
+            "remove_source" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.remove_source(&reg.actor(&x0)?, &x1))
+            }
+            "toggle_source" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.toggle_source(&reg.actor(&x0)?, &x1))
+            }
+            "set_catalog_enabled" => {
+                let (x0, x1, ): (String, bool, ) = de(a)?;
+                ser(&t.set_catalog_enabled(&reg.actor(&x0)?, x1))
+            }
+            "catalog_visible" => {
+                ser(&t.catalog_visible())
+            }
+            "trust_key" => {
+                let (x0, x1, x2, ): (String, String, String, ) = de(a)?;
+                ser(&t.trust_key(&reg.actor(&x0)?, &x1, &x2))
+            }
+            "local_catalogs" => {
+                ser(&t.local_catalogs())
+            }
+            "refresh" => {
+                ser(&t.refresh(&*reg.fetch()?))
+            }
+            "items" => {
+                let (x0, x1, ): (String, Vec<Loaded>, ) = de(a)?;
+                ser(&t.items(&reg.actor(&x0)?, &x1))
+            }
+            "known_names" => {
+                let (x0, ): (Vec<Item>, ) = de(a)?;
+                ser(&t.known_names(&x0))
+            }
+            "review_item" => {
+                let (x0, x1, x2, x4, x5, ): (String, Item, Vec<Loaded>, Scope, Vec<(String, String)>, ) = de(a)?;
+                ser(&t.review_item(&reg.actor(&x0)?, &x1, &x2, &*reg.fetch()?, x4, &x5))
+            }
+            "review_sideload" => {
+                let (x0, x1, x2, x3, ): (String, Vec<u8>, Scope, Vec<(String, String)>, ) = de(a)?;
+                ser(&t.review_sideload(&reg.actor(&x0)?, x1, x2, &x3))
+            }
+            "update_check_run" => {
+                let (x1, x3, x4, x5, ): (String, iyakki_shared::store_updatecheck::CheckSettings, String, String, ) = de(a)?;
+                ser(&t.update_check_run(&reg.policy_of(&x1)?, &x1, &*reg.fetch()?, &x3, &x4, &x5))
+            }
+            "pf_stores" => {
+                ser(&t.pf_stores())
+            }
+            "pf_remote_version" => {
+                let (x1, x2, ): (String, String, ) = de(a)?;
+                ser(&t.pf_remote_version(&*reg.fetch()?, &x1, &x2))
+            }
+            "pf_bumped" => {
+                let (x0, x1, ): (String, Bump, ) = de(a)?;
+                ser(&t.pf_bumped(&x0, x1))
+            }
+            "pf_apply_bump" => {
+                let (x0, x1, x2, x3, ): (std::path::PathBuf, Bump, String, String, ) = de(a)?;
+                ser(&t.pf_apply_bump(&reg.project_dir(&x0, true)?, x1, &x2, &x3))
+            }
+            "pf_add_changelog" => {
+                let (x0, x1, x2, x3, ): (std::path::PathBuf, String, String, String, ) = de(a)?;
+                ser(&t.pf_add_changelog(&reg.project_dir(&x0, true)?, &x1, &x2, &x3))
+            }
+            "pf_token_present" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.pf_token_present(&x0, &x1))
+            }
+            "pf_save_token" => {
+                let (x0, x1, x2, ): (String, String, String, ) = de(a)?;
+                ser(&t.pf_save_token(&x0, &x1, &x2))
+            }
+            "pf_card" => crate::served_apps::s_StoreApi_pf_card(t, reg, a),
+            "pf_publish" => crate::served_apps::s_StoreApi_pf_publish(t, reg, a),
+            "pf_review_published" => {
+                let (x0, x2, x3, ): (String, String, Scope, ) = de(a)?;
+                ser(&t.pf_review_published(&reg.actor(&x0)?, &*reg.fetch()?, &x2, x3))
+            }
+            "pf_install_reviewed" => {
+                let (x0, x1, ): (String, Review, ) = de(a)?;
+                ser(&t.pf_install_reviewed(&reg.actor(&x0)?, &x1))
+            }
+            "pf_yank_note" => crate::served_apps::s_StoreApi_pf_yank_note(t, reg, a),
+            "pp_offer" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.pp_offer(&x0, &*reg.fetch()?))
+            }
+            "pp_deployed_all" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.pp_deployed_all(&x0))
+            }
+            "pp_option_label" => {
+                let (x0, ): (Offer, ) = de(a)?;
+                ser(&t.pp_option_label(&x0))
+            }
+            "pp_need_admin_text" => {
+                ser(&t.pp_need_admin_text())
+            }
+            "pp_add_and_target" => {
+                let (x0, x2, x3, ): (String, Probe, String, ) = de(a)?;
+                ser(&t.pp_add_and_target(&reg.actor(&x0)?, &*reg.fetch()?, &x2, &x3))
+            }
+            "keys_list" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.keys_list(&x0))
+            }
+            "keys_load" => crate::served_apps::s_StoreApi_keys_load(t, reg, a),
+            "keys_create" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.keys_create(&x0, &x1))
+            }
+            "author_pack_dir" => crate::served_apps::s_StoreApi_author_pack_dir(t, reg, a),
+            "tile_listed" => {
+                let (x1, x2, ): (String, String, ) = de(a)?;
+                ser(&t.tile_listed(&reg.policy_of(&x1)?, &x1, &x2))
+            }
+            "tile_open_wasm" => crate::served_apps::s_StoreApi_tile_open_wasm(t, reg, a),
+            "tile_pictures" => crate::served_apps::s_StoreApi_tile_pictures(t, reg, a),
+            "tile_open" => crate::served_apps::s_StoreApi_tile_open(t, reg, a),
+            other => Err(format!("StoreApi has no call {other}")),
+        }
+    }
+}
+mod g_study_calendar { use super::*;
+    use iyakki_agent_api::study_calendar::*;
+    use std::sync::Arc;
+    use iyakki_clock::Zone;
+    use iyakki_shared::calendar::CalendarStore;
+    use iyakki_shared::study::StudyStore;
+    pub(crate) trait Dummy {}
+    pub(crate) fn serve_StudyCalendarApi(t: &Arc<dyn StudyCalendarApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "delete_plan" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.delete_plan(&x0, &x1))
+            }
+            "to_calendar" => {
+                let (x0, x1, x2, ): (String, String, Zone, ) = de(a)?;
+                ser(&t.to_calendar(&x0, &x1, &x2))
+            }
+            "to_calendar_with" => {
+                let (x0, x1, x2, x3, ): (String, String, Zone, Option<u32>, ) = de(a)?;
+                ser(&t.to_calendar_with(&x0, &x1, &x2, x3))
+            }
+            "calendar_remove" => {
+                let (x0, x1, ): (String, String, ) = de(a)?;
+                ser(&t.calendar_remove(&x0, &x1))
+            }
+            other => Err(format!("StudyCalendarApi has no call {other}")),
         }
     }
 }
@@ -1221,26 +4001,73 @@ pub enum Obj {
     GeminiFacet(Arc<dyn iyakki_agent_api::facets_b0::GeminiFacet>),
     MediaFacet(Arc<dyn iyakki_agent_api::facets_b0::MediaFacet>),
     B0Facets(Arc<dyn iyakki_agent_api::facets_b0::B0Facets>),
+    B0Services(Arc<dyn iyakki_agent_api::facets_b0::B0Services>),
     AvBuildFacet(Arc<dyn iyakki_agent_api::facets_b1::AvBuildFacet>),
     HeaderValues(Arc<dyn iyakki_agent_api::facets_b1::HeaderValues>),
     HeaderRuleStore(Arc<dyn iyakki_agent_api::facets_b1::HeaderRuleStore>),
+    SshHost(Arc<dyn iyakki_agent_api::facets_b1::SshHost>),
     SceneFacet(Arc<dyn iyakki_agent_api::facets_b1::SceneFacet>),
     KubeFeedFacet(Arc<dyn iyakki_agent_api::facets_b1::KubeFeedFacet>),
+    MatrixService(Arc<dyn iyakki_agent_api::facets_b1::MatrixService>),
     StartupDiskFacet(Arc<dyn iyakki_agent_api::facets_b2::StartupDiskFacet>),
     DictFixFacet(Arc<dyn iyakki_agent_api::facets_b2::DictFixFacet>),
     ToolWrapFacet(Arc<dyn iyakki_agent_api::facets_b2::ToolWrapFacet>),
     ClusterFacet(Arc<dyn iyakki_agent_api::facets_b2::ClusterFacet>),
     AgentFacetsB2(Arc<dyn iyakki_agent_api::facets_b2::AgentFacetsB2>),
+    ServicesFacetB3(Arc<dyn iyakki_agent_api::facets_b3::ServicesFacetB3>),
+    VpnManager(Arc<dyn iyakki_agent_api::facets_b3::VpnManager>),
+    ServicesFacetB4(Arc<dyn iyakki_agent_api::facets_b4::ServicesFacetB4>),
     AgentFacetsB4(Arc<dyn iyakki_agent_api::facets_b4::AgentFacetsB4>),
+    SshTunnels(Arc<dyn iyakki_agent_api::facets_b4::SshTunnels>),
+    MineWorker(Arc<dyn iyakki_agent_api::facets_b4::MineWorker>),
+    ProjectKit(Arc<dyn iyakki_agent_api::facets_b4::ProjectKit>),
+    ServicesFacetB5(Arc<dyn iyakki_agent_api::facets_b5::ServicesFacetB5>),
+    DownloadQueueApi(Arc<dyn iyakki_agent_api::facets_b5::DownloadQueueApi>),
+    K8sKit(Arc<dyn iyakki_agent_api::facets_b5::K8sKit>),
+    RadioStations(Arc<dyn iyakki_agent_api::facets_b5::RadioStations>),
+    DevCluster(Arc<dyn iyakki_agent_api::facets_b5::DevCluster>),
+    FleetApi(Arc<dyn iyakki_agent_api::facets_b5::FleetApi>),
+    OllamaApi(Arc<dyn iyakki_agent_api::facets_b5::OllamaApi>),
+    SandboxCluster(Arc<dyn iyakki_agent_api::facets_b5::SandboxCluster>),
+    CliApi(Arc<dyn iyakki_agent_api::facets_b5::CliApi>),
+    GeminiLive(Arc<dyn iyakki_agent_api::facets_b6::GeminiLive>),
+    SpeechKit(Arc<dyn iyakki_agent_api::facets_b6::SpeechKit>),
+    RouterPanel(Arc<dyn iyakki_agent_api::facets_b6::RouterPanel>),
+    GitKit(Arc<dyn iyakki_agent_api::facets_b6::GitKit>),
     ContractLocal(Arc<dyn iyakki_agent_api::facets_b6::ContractLocal>),
     RagKit(Arc<dyn iyakki_agent_api::facets_b6::RagKit>),
+    SftpServer(Arc<dyn iyakki_agent_api::facets_b6::SftpServer>),
     AgentFacetsB6(Arc<dyn iyakki_agent_api::facets_b6::AgentFacetsB6>),
     AgentFacetsB7(Arc<dyn iyakki_agent_api::facets_b7::AgentFacetsB7>),
     AgentFacetsB8(Arc<dyn iyakki_agent_api::facets_b8::AgentFacetsB8>),
+    DevDeployFacet(Arc<dyn iyakki_agent_api::facets_dev::DevDeployFacet>),
+    HostTtsApi(Arc<dyn iyakki_agent_api::facets_g::HostTtsApi>),
+    AiRead(Arc<dyn iyakki_agent_api::facets_g::AiRead>),
+    VaultRead(Arc<dyn iyakki_agent_api::facets_g::VaultRead>),
+    ComputeBackend(Arc<dyn iyakki_agent_api::facets_h::ComputeBackend>),
+    PlatformApi(Arc<dyn iyakki_agent_api::facets_platform::PlatformApi>),
     FlowChatEnv(Arc<dyn iyakki_agent_api::facets_s6b::FlowChatEnv>),
+    FlowsFacet(Arc<dyn iyakki_agent_api::facets_s6b::FlowsFacet>),
+    VoiceDeskFacet(Arc<dyn iyakki_agent_api::facets_s6b::VoiceDeskFacet>),
+    ExtAgentFacet(Arc<dyn iyakki_agent_api::facets_s6b::ExtAgentFacet>),
+    DomainsMgr(Arc<dyn iyakki_agent_api::facets_s6b::DomainsMgr>),
     AgentFacetsS6B(Arc<dyn iyakki_agent_api::facets_s6b::AgentFacetsS6B>),
+    SessionApi(Arc<dyn iyakki_agent_api::facets_stores::SessionApi>),
+    SkillApi(Arc<dyn iyakki_agent_api::facets_stores::SkillApi>),
+    RunApi(Arc<dyn iyakki_agent_api::facets_stores::RunApi>),
     McpApi(Arc<dyn iyakki_agent_api::facets_stores::McpApi>),
+    PackageApi(Arc<dyn iyakki_agent_api::facets_stores::PackageApi>),
+    JobApi(Arc<dyn iyakki_agent_api::facets_stores::JobApi>),
+    RadioApi(Arc<dyn iyakki_agent_api::facets_stores::RadioApi>),
     TaskCluster(Arc<dyn iyakki_agent_api::facets_tasks::TaskCluster>),
+    TaskMgr(Arc<dyn iyakki_agent_api::facets_tasks::TaskMgr>),
+    TasksFacet(Arc<dyn iyakki_agent_api::facets_tasks::TasksFacet>),
+    FlowsMeta(Arc<dyn iyakki_agent_api::flows_jobs::FlowsMeta>),
+    FlowsDrafts(Arc<dyn iyakki_agent_api::flows_jobs::FlowsDrafts>),
+    FlowsRuns(Arc<dyn iyakki_agent_api::flows_jobs::FlowsRuns>),
+    FlowsAssist(Arc<dyn iyakki_agent_api::flows_jobs::FlowsAssist>),
+    FlowsHooks(Arc<dyn iyakki_agent_api::flows_jobs::FlowsHooks>),
+    FlowsChannel(Arc<dyn iyakki_agent_api::flows_jobs::FlowsChannel>),
     AgentDisplay(Arc<dyn iyakki_agent_api::generated::AgentDisplay>),
     AgentFiles(Arc<dyn iyakki_agent_api::generated::AgentFiles>),
     AgentStore(Arc<dyn iyakki_agent_api::generated::AgentStore>),
@@ -1250,7 +4077,10 @@ pub enum Obj {
     SecretsApi(Arc<dyn iyakki_agent_api::member_stores::SecretsApi>),
     DevWatchApi(Arc<dyn iyakki_agent_api::member_stores::DevWatchApi>),
     BrowserStateApi(Arc<dyn iyakki_agent_api::member_stores::BrowserStateApi>),
+    ConsentApi(Arc<dyn iyakki_agent_api::member_stores::ConsentApi>),
+    BrowserJobsApi(Arc<dyn iyakki_agent_api::member_stores::BrowserJobsApi>),
     ScreenCaptureApi(Arc<dyn iyakki_agent_api::member_stores::ScreenCaptureApi>),
+    CameraHubApi(Arc<dyn iyakki_agent_api::member_stores::CameraHubApi>),
     DevToolsApi(Arc<dyn iyakki_agent_api::member_stores::DevToolsApi>),
     SecretRequestsApi(Arc<dyn iyakki_agent_api::member_stores::SecretRequestsApi>),
     UsageLogApi(Arc<dyn iyakki_agent_api::member_stores::UsageLogApi>),
@@ -1258,6 +4088,20 @@ pub enum Obj {
     KnowledgeBaseApi(Arc<dyn iyakki_agent_api::member_stores::KnowledgeBaseApi>),
     AccountsApi(Arc<dyn iyakki_agent_api::member_stores::AccountsApi>),
     AuditApi(Arc<dyn iyakki_agent_api::member_stores::AuditApi>),
+    AgentPending(Arc<dyn iyakki_agent_api::pending::AgentPending>),
+    SettingsApi(Arc<dyn iyakki_agent_api::settings_api::SettingsApi>),
+    StoreHub(Arc<dyn iyakki_agent_api::store::StoreHub>),
+    StoreUpdates(Arc<dyn iyakki_agent_api::store::StoreUpdates>),
+    StoreComponents(Arc<dyn iyakki_agent_api::store::StoreComponents>),
+    StoreDrivers(Arc<dyn iyakki_agent_api::store::StoreDrivers>),
+    StoreDriverSource(Arc<dyn iyakki_agent_api::store::StoreDriverSource>),
+    StoreCatalog(Arc<dyn iyakki_agent_api::store::StoreCatalog>),
+    StoreApi(Arc<dyn iyakki_agent_api::store_api::StoreApi>),
+    StudyCalendarApi(Arc<dyn iyakki_agent_api::study_calendar::StudyCalendarApi>),
+    /// The whole `ServicesHandle` of the core (gen_services.py): its plain methods and the handles it hands out.
+    ServicesHandle(Arc<crate::ServicesRoot>),
+    /// A hand-written object (served.rs, D-SPLIT-03-SERVED): the traits that are not in iyakki-agent-api or cannot be generated.
+    Served(Arc<dyn crate::served::Served>),
 }
 impl Obj {
     pub fn iface(&self) -> &'static str {
@@ -1269,26 +4113,73 @@ impl Obj {
             Obj::GeminiFacet(_) => "GeminiFacet",
             Obj::MediaFacet(_) => "MediaFacet",
             Obj::B0Facets(_) => "B0Facets",
+            Obj::B0Services(_) => "B0Services",
             Obj::AvBuildFacet(_) => "AvBuildFacet",
             Obj::HeaderValues(_) => "HeaderValues",
             Obj::HeaderRuleStore(_) => "HeaderRuleStore",
+            Obj::SshHost(_) => "SshHost",
             Obj::SceneFacet(_) => "SceneFacet",
             Obj::KubeFeedFacet(_) => "KubeFeedFacet",
+            Obj::MatrixService(_) => "MatrixService",
             Obj::StartupDiskFacet(_) => "StartupDiskFacet",
             Obj::DictFixFacet(_) => "DictFixFacet",
             Obj::ToolWrapFacet(_) => "ToolWrapFacet",
             Obj::ClusterFacet(_) => "ClusterFacet",
             Obj::AgentFacetsB2(_) => "AgentFacetsB2",
+            Obj::ServicesFacetB3(_) => "ServicesFacetB3",
+            Obj::VpnManager(_) => "VpnManager",
+            Obj::ServicesFacetB4(_) => "ServicesFacetB4",
             Obj::AgentFacetsB4(_) => "AgentFacetsB4",
+            Obj::SshTunnels(_) => "SshTunnels",
+            Obj::MineWorker(_) => "MineWorker",
+            Obj::ProjectKit(_) => "ProjectKit",
+            Obj::ServicesFacetB5(_) => "ServicesFacetB5",
+            Obj::DownloadQueueApi(_) => "DownloadQueueApi",
+            Obj::K8sKit(_) => "K8sKit",
+            Obj::RadioStations(_) => "RadioStations",
+            Obj::DevCluster(_) => "DevCluster",
+            Obj::FleetApi(_) => "FleetApi",
+            Obj::OllamaApi(_) => "OllamaApi",
+            Obj::SandboxCluster(_) => "SandboxCluster",
+            Obj::CliApi(_) => "CliApi",
+            Obj::GeminiLive(_) => "GeminiLive",
+            Obj::SpeechKit(_) => "SpeechKit",
+            Obj::RouterPanel(_) => "RouterPanel",
+            Obj::GitKit(_) => "GitKit",
             Obj::ContractLocal(_) => "ContractLocal",
             Obj::RagKit(_) => "RagKit",
+            Obj::SftpServer(_) => "SftpServer",
             Obj::AgentFacetsB6(_) => "AgentFacetsB6",
             Obj::AgentFacetsB7(_) => "AgentFacetsB7",
             Obj::AgentFacetsB8(_) => "AgentFacetsB8",
+            Obj::DevDeployFacet(_) => "DevDeployFacet",
+            Obj::HostTtsApi(_) => "HostTtsApi",
+            Obj::AiRead(_) => "AiRead",
+            Obj::VaultRead(_) => "VaultRead",
+            Obj::ComputeBackend(_) => "ComputeBackend",
+            Obj::PlatformApi(_) => "PlatformApi",
             Obj::FlowChatEnv(_) => "FlowChatEnv",
+            Obj::FlowsFacet(_) => "FlowsFacet",
+            Obj::VoiceDeskFacet(_) => "VoiceDeskFacet",
+            Obj::ExtAgentFacet(_) => "ExtAgentFacet",
+            Obj::DomainsMgr(_) => "DomainsMgr",
             Obj::AgentFacetsS6B(_) => "AgentFacetsS6B",
+            Obj::SessionApi(_) => "SessionApi",
+            Obj::SkillApi(_) => "SkillApi",
+            Obj::RunApi(_) => "RunApi",
             Obj::McpApi(_) => "McpApi",
+            Obj::PackageApi(_) => "PackageApi",
+            Obj::JobApi(_) => "JobApi",
+            Obj::RadioApi(_) => "RadioApi",
             Obj::TaskCluster(_) => "TaskCluster",
+            Obj::TaskMgr(_) => "TaskMgr",
+            Obj::TasksFacet(_) => "TasksFacet",
+            Obj::FlowsMeta(_) => "FlowsMeta",
+            Obj::FlowsDrafts(_) => "FlowsDrafts",
+            Obj::FlowsRuns(_) => "FlowsRuns",
+            Obj::FlowsAssist(_) => "FlowsAssist",
+            Obj::FlowsHooks(_) => "FlowsHooks",
+            Obj::FlowsChannel(_) => "FlowsChannel",
             Obj::AgentDisplay(_) => "AgentDisplay",
             Obj::AgentFiles(_) => "AgentFiles",
             Obj::AgentStore(_) => "AgentStore",
@@ -1298,7 +4189,10 @@ impl Obj {
             Obj::SecretsApi(_) => "SecretsApi",
             Obj::DevWatchApi(_) => "DevWatchApi",
             Obj::BrowserStateApi(_) => "BrowserStateApi",
+            Obj::ConsentApi(_) => "ConsentApi",
+            Obj::BrowserJobsApi(_) => "BrowserJobsApi",
             Obj::ScreenCaptureApi(_) => "ScreenCaptureApi",
+            Obj::CameraHubApi(_) => "CameraHubApi",
             Obj::DevToolsApi(_) => "DevToolsApi",
             Obj::SecretRequestsApi(_) => "SecretRequestsApi",
             Obj::UsageLogApi(_) => "UsageLogApi",
@@ -1306,54 +4200,128 @@ impl Obj {
             Obj::KnowledgeBaseApi(_) => "KnowledgeBaseApi",
             Obj::AccountsApi(_) => "AccountsApi",
             Obj::AuditApi(_) => "AuditApi",
+            Obj::AgentPending(_) => "AgentPending",
+            Obj::SettingsApi(_) => "SettingsApi",
+            Obj::StoreHub(_) => "StoreHub",
+            Obj::StoreUpdates(_) => "StoreUpdates",
+            Obj::StoreComponents(_) => "StoreComponents",
+            Obj::StoreDrivers(_) => "StoreDrivers",
+            Obj::StoreDriverSource(_) => "StoreDriverSource",
+            Obj::StoreCatalog(_) => "StoreCatalog",
+            Obj::StoreApi(_) => "StoreApi",
+            Obj::StudyCalendarApi(_) => "StudyCalendarApi",
+            Obj::ServicesHandle(_) => "ServicesHandle",
+            Obj::Served(s) => s.iface(),
         }
     }
-    pub(crate) fn serve(&self, reg: &Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+    pub(crate) fn serve(&self, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match self {
-            Obj::ChatRuns(t) => g_chatruns::serve_ChatRuns(t.as_ref(), reg, method, a),
-            Obj::ProvidersFacet(t) => g_facets_b0::serve_ProvidersFacet(t.as_ref(), reg, method, a),
-            Obj::LinuxAppsFacet(t) => g_facets_b0::serve_LinuxAppsFacet(t.as_ref(), reg, method, a),
-            Obj::MediaPlay(t) => g_facets_b0::serve_MediaPlay(t.as_ref(), reg, method, a),
-            Obj::GeminiFacet(t) => g_facets_b0::serve_GeminiFacet(t.as_ref(), reg, method, a),
-            Obj::MediaFacet(t) => g_facets_b0::serve_MediaFacet(t.as_ref(), reg, method, a),
-            Obj::B0Facets(t) => g_facets_b0::serve_B0Facets(t.as_ref(), reg, method, a),
-            Obj::AvBuildFacet(t) => g_facets_b1::serve_AvBuildFacet(t.as_ref(), reg, method, a),
-            Obj::HeaderValues(t) => g_facets_b1::serve_HeaderValues(t.as_ref(), reg, method, a),
-            Obj::HeaderRuleStore(t) => g_facets_b1::serve_HeaderRuleStore(t.as_ref(), reg, method, a),
-            Obj::SceneFacet(t) => g_facets_b1::serve_SceneFacet(t.as_ref(), reg, method, a),
-            Obj::KubeFeedFacet(t) => g_facets_b1::serve_KubeFeedFacet(t.as_ref(), reg, method, a),
-            Obj::StartupDiskFacet(t) => g_facets_b2::serve_StartupDiskFacet(t.as_ref(), reg, method, a),
-            Obj::DictFixFacet(t) => g_facets_b2::serve_DictFixFacet(t.as_ref(), reg, method, a),
-            Obj::ToolWrapFacet(t) => g_facets_b2::serve_ToolWrapFacet(t.as_ref(), reg, method, a),
-            Obj::ClusterFacet(t) => g_facets_b2::serve_ClusterFacet(t.as_ref(), reg, method, a),
-            Obj::AgentFacetsB2(t) => g_facets_b2::serve_AgentFacetsB2(t.as_ref(), reg, method, a),
-            Obj::AgentFacetsB4(t) => g_facets_b4::serve_AgentFacetsB4(t.as_ref(), reg, method, a),
-            Obj::ContractLocal(t) => g_facets_b6::serve_ContractLocal(t.as_ref(), reg, method, a),
-            Obj::RagKit(t) => g_facets_b6::serve_RagKit(t.as_ref(), reg, method, a),
-            Obj::AgentFacetsB6(t) => g_facets_b6::serve_AgentFacetsB6(t.as_ref(), reg, method, a),
-            Obj::AgentFacetsB7(t) => g_facets_b7::serve_AgentFacetsB7(t.as_ref(), reg, method, a),
-            Obj::AgentFacetsB8(t) => g_facets_b8::serve_AgentFacetsB8(t.as_ref(), reg, method, a),
-            Obj::FlowChatEnv(t) => g_facets_s6b::serve_FlowChatEnv(t.as_ref(), reg, method, a),
-            Obj::AgentFacetsS6B(t) => g_facets_s6b::serve_AgentFacetsS6B(t.as_ref(), reg, method, a),
-            Obj::McpApi(t) => g_facets_stores::serve_McpApi(t.as_ref(), reg, method, a),
-            Obj::TaskCluster(t) => g_facets_tasks::serve_TaskCluster(t.as_ref(), reg, method, a),
-            Obj::AgentDisplay(t) => g_generated::serve_AgentDisplay(t.as_ref(), reg, method, a),
-            Obj::AgentFiles(t) => g_generated::serve_AgentFiles(t.as_ref(), reg, method, a),
-            Obj::AgentStore(t) => g_generated::serve_AgentStore(t.as_ref(), reg, method, a),
-            Obj::InboxApi(t) => g_member_stores::serve_InboxApi(t.as_ref(), reg, method, a),
-            Obj::CalendarApi(t) => g_member_stores::serve_CalendarApi(t.as_ref(), reg, method, a),
-            Obj::StudyApi(t) => g_member_stores::serve_StudyApi(t.as_ref(), reg, method, a),
-            Obj::SecretsApi(t) => g_member_stores::serve_SecretsApi(t.as_ref(), reg, method, a),
-            Obj::DevWatchApi(t) => g_member_stores::serve_DevWatchApi(t.as_ref(), reg, method, a),
-            Obj::BrowserStateApi(t) => g_member_stores::serve_BrowserStateApi(t.as_ref(), reg, method, a),
-            Obj::ScreenCaptureApi(t) => g_member_stores::serve_ScreenCaptureApi(t.as_ref(), reg, method, a),
-            Obj::DevToolsApi(t) => g_member_stores::serve_DevToolsApi(t.as_ref(), reg, method, a),
-            Obj::SecretRequestsApi(t) => g_member_stores::serve_SecretRequestsApi(t.as_ref(), reg, method, a),
-            Obj::UsageLogApi(t) => g_member_stores::serve_UsageLogApi(t.as_ref(), reg, method, a),
-            Obj::ExtStatusApi(t) => g_member_stores::serve_ExtStatusApi(t.as_ref(), reg, method, a),
-            Obj::KnowledgeBaseApi(t) => g_member_stores::serve_KnowledgeBaseApi(t.as_ref(), reg, method, a),
-            Obj::AccountsApi(t) => g_member_stores::serve_AccountsApi(t.as_ref(), reg, method, a),
-            Obj::AuditApi(t) => g_member_stores::serve_AuditApi(t.as_ref(), reg, method, a),
+            Obj::ChatRuns(t) => g_chatruns::serve_ChatRuns(t, reg, method, a),
+            Obj::ProvidersFacet(t) => g_facets_b0::serve_ProvidersFacet(t, reg, method, a),
+            Obj::LinuxAppsFacet(t) => g_facets_b0::serve_LinuxAppsFacet(t, reg, method, a),
+            Obj::MediaPlay(t) => g_facets_b0::serve_MediaPlay(t, reg, method, a),
+            Obj::GeminiFacet(t) => g_facets_b0::serve_GeminiFacet(t, reg, method, a),
+            Obj::MediaFacet(t) => g_facets_b0::serve_MediaFacet(t, reg, method, a),
+            Obj::B0Facets(t) => g_facets_b0::serve_B0Facets(t, reg, method, a),
+            Obj::B0Services(t) => g_facets_b0::serve_B0Services(t, reg, method, a),
+            Obj::AvBuildFacet(t) => g_facets_b1::serve_AvBuildFacet(t, reg, method, a),
+            Obj::HeaderValues(t) => g_facets_b1::serve_HeaderValues(t, reg, method, a),
+            Obj::HeaderRuleStore(t) => g_facets_b1::serve_HeaderRuleStore(t, reg, method, a),
+            Obj::SshHost(t) => g_facets_b1::serve_SshHost(t, reg, method, a),
+            Obj::SceneFacet(t) => g_facets_b1::serve_SceneFacet(t, reg, method, a),
+            Obj::KubeFeedFacet(t) => g_facets_b1::serve_KubeFeedFacet(t, reg, method, a),
+            Obj::MatrixService(t) => g_facets_b1::serve_MatrixService(t, reg, method, a),
+            Obj::StartupDiskFacet(t) => g_facets_b2::serve_StartupDiskFacet(t, reg, method, a),
+            Obj::DictFixFacet(t) => g_facets_b2::serve_DictFixFacet(t, reg, method, a),
+            Obj::ToolWrapFacet(t) => g_facets_b2::serve_ToolWrapFacet(t, reg, method, a),
+            Obj::ClusterFacet(t) => g_facets_b2::serve_ClusterFacet(t, reg, method, a),
+            Obj::AgentFacetsB2(t) => g_facets_b2::serve_AgentFacetsB2(t, reg, method, a),
+            Obj::ServicesFacetB3(t) => g_facets_b3::serve_ServicesFacetB3(t, reg, method, a),
+            Obj::VpnManager(t) => g_facets_b3::serve_VpnManager(t, reg, method, a),
+            Obj::ServicesFacetB4(t) => g_facets_b4::serve_ServicesFacetB4(t, reg, method, a),
+            Obj::AgentFacetsB4(t) => g_facets_b4::serve_AgentFacetsB4(t, reg, method, a),
+            Obj::SshTunnels(t) => g_facets_b4::serve_SshTunnels(t, reg, method, a),
+            Obj::MineWorker(t) => g_facets_b4::serve_MineWorker(t, reg, method, a),
+            Obj::ProjectKit(t) => g_facets_b4::serve_ProjectKit(t, reg, method, a),
+            Obj::ServicesFacetB5(t) => g_facets_b5::serve_ServicesFacetB5(t, reg, method, a),
+            Obj::DownloadQueueApi(t) => g_facets_b5::serve_DownloadQueueApi(t, reg, method, a),
+            Obj::K8sKit(t) => g_facets_b5::serve_K8sKit(t, reg, method, a),
+            Obj::RadioStations(t) => g_facets_b5::serve_RadioStations(t, reg, method, a),
+            Obj::DevCluster(t) => g_facets_b5::serve_DevCluster(t, reg, method, a),
+            Obj::FleetApi(t) => g_facets_b5::serve_FleetApi(t, reg, method, a),
+            Obj::OllamaApi(t) => g_facets_b5::serve_OllamaApi(t, reg, method, a),
+            Obj::SandboxCluster(t) => g_facets_b5::serve_SandboxCluster(t, reg, method, a),
+            Obj::CliApi(t) => g_facets_b5::serve_CliApi(t, reg, method, a),
+            Obj::GeminiLive(t) => g_facets_b6::serve_GeminiLive(t, reg, method, a),
+            Obj::SpeechKit(t) => g_facets_b6::serve_SpeechKit(t, reg, method, a),
+            Obj::RouterPanel(t) => g_facets_b6::serve_RouterPanel(t, reg, method, a),
+            Obj::GitKit(t) => g_facets_b6::serve_GitKit(t, reg, method, a),
+            Obj::ContractLocal(t) => g_facets_b6::serve_ContractLocal(t, reg, method, a),
+            Obj::RagKit(t) => g_facets_b6::serve_RagKit(t, reg, method, a),
+            Obj::SftpServer(t) => g_facets_b6::serve_SftpServer(t, reg, method, a),
+            Obj::AgentFacetsB6(t) => g_facets_b6::serve_AgentFacetsB6(t, reg, method, a),
+            Obj::AgentFacetsB7(t) => g_facets_b7::serve_AgentFacetsB7(t, reg, method, a),
+            Obj::AgentFacetsB8(t) => g_facets_b8::serve_AgentFacetsB8(t, reg, method, a),
+            Obj::DevDeployFacet(t) => g_facets_dev::serve_DevDeployFacet(t, reg, method, a),
+            Obj::HostTtsApi(t) => g_facets_g::serve_HostTtsApi(t, reg, method, a),
+            Obj::AiRead(t) => g_facets_g::serve_AiRead(t, reg, method, a),
+            Obj::VaultRead(t) => g_facets_g::serve_VaultRead(t, reg, method, a),
+            Obj::ComputeBackend(t) => g_facets_h::serve_ComputeBackend(t, reg, method, a),
+            Obj::PlatformApi(t) => g_facets_platform::serve_PlatformApi(t, reg, method, a),
+            Obj::FlowChatEnv(t) => g_facets_s6b::serve_FlowChatEnv(t, reg, method, a),
+            Obj::FlowsFacet(t) => g_facets_s6b::serve_FlowsFacet(t, reg, method, a),
+            Obj::VoiceDeskFacet(t) => g_facets_s6b::serve_VoiceDeskFacet(t, reg, method, a),
+            Obj::ExtAgentFacet(t) => g_facets_s6b::serve_ExtAgentFacet(t, reg, method, a),
+            Obj::DomainsMgr(t) => g_facets_s6b::serve_DomainsMgr(t, reg, method, a),
+            Obj::AgentFacetsS6B(t) => g_facets_s6b::serve_AgentFacetsS6B(t, reg, method, a),
+            Obj::SessionApi(t) => g_facets_stores::serve_SessionApi(t, reg, method, a),
+            Obj::SkillApi(t) => g_facets_stores::serve_SkillApi(t, reg, method, a),
+            Obj::RunApi(t) => g_facets_stores::serve_RunApi(t, reg, method, a),
+            Obj::McpApi(t) => g_facets_stores::serve_McpApi(t, reg, method, a),
+            Obj::PackageApi(t) => g_facets_stores::serve_PackageApi(t, reg, method, a),
+            Obj::JobApi(t) => g_facets_stores::serve_JobApi(t, reg, method, a),
+            Obj::RadioApi(t) => g_facets_stores::serve_RadioApi(t, reg, method, a),
+            Obj::TaskCluster(t) => g_facets_tasks::serve_TaskCluster(t, reg, method, a),
+            Obj::TaskMgr(t) => g_facets_tasks::serve_TaskMgr(t, reg, method, a),
+            Obj::TasksFacet(t) => g_facets_tasks::serve_TasksFacet(t, reg, method, a),
+            Obj::FlowsMeta(t) => g_flows_jobs::serve_FlowsMeta(t, reg, method, a),
+            Obj::FlowsDrafts(t) => g_flows_jobs::serve_FlowsDrafts(t, reg, method, a),
+            Obj::FlowsRuns(t) => g_flows_jobs::serve_FlowsRuns(t, reg, method, a),
+            Obj::FlowsAssist(t) => g_flows_jobs::serve_FlowsAssist(t, reg, method, a),
+            Obj::FlowsHooks(t) => g_flows_jobs::serve_FlowsHooks(t, reg, method, a),
+            Obj::FlowsChannel(t) => g_flows_jobs::serve_FlowsChannel(t, reg, method, a),
+            Obj::AgentDisplay(t) => g_generated::serve_AgentDisplay(t, reg, method, a),
+            Obj::AgentFiles(t) => g_generated::serve_AgentFiles(t, reg, method, a),
+            Obj::AgentStore(t) => g_generated::serve_AgentStore(t, reg, method, a),
+            Obj::InboxApi(t) => g_member_stores::serve_InboxApi(t, reg, method, a),
+            Obj::CalendarApi(t) => g_member_stores::serve_CalendarApi(t, reg, method, a),
+            Obj::StudyApi(t) => g_member_stores::serve_StudyApi(t, reg, method, a),
+            Obj::SecretsApi(t) => g_member_stores::serve_SecretsApi(t, reg, method, a),
+            Obj::DevWatchApi(t) => g_member_stores::serve_DevWatchApi(t, reg, method, a),
+            Obj::BrowserStateApi(t) => g_member_stores::serve_BrowserStateApi(t, reg, method, a),
+            Obj::ConsentApi(t) => g_member_stores::serve_ConsentApi(t, reg, method, a),
+            Obj::BrowserJobsApi(t) => g_member_stores::serve_BrowserJobsApi(t, reg, method, a),
+            Obj::ScreenCaptureApi(t) => g_member_stores::serve_ScreenCaptureApi(t, reg, method, a),
+            Obj::CameraHubApi(t) => g_member_stores::serve_CameraHubApi(t, reg, method, a),
+            Obj::DevToolsApi(t) => g_member_stores::serve_DevToolsApi(t, reg, method, a),
+            Obj::SecretRequestsApi(t) => g_member_stores::serve_SecretRequestsApi(t, reg, method, a),
+            Obj::UsageLogApi(t) => g_member_stores::serve_UsageLogApi(t, reg, method, a),
+            Obj::ExtStatusApi(t) => g_member_stores::serve_ExtStatusApi(t, reg, method, a),
+            Obj::KnowledgeBaseApi(t) => g_member_stores::serve_KnowledgeBaseApi(t, reg, method, a),
+            Obj::AccountsApi(t) => g_member_stores::serve_AccountsApi(t, reg, method, a),
+            Obj::AuditApi(t) => g_member_stores::serve_AuditApi(t, reg, method, a),
+            Obj::AgentPending(t) => g_pending::serve_AgentPending(t, reg, method, a),
+            Obj::SettingsApi(t) => g_settings_api::serve_SettingsApi(t, reg, method, a),
+            Obj::StoreHub(t) => g_store::serve_StoreHub(t, reg, method, a),
+            Obj::StoreUpdates(t) => g_store::serve_StoreUpdates(t, reg, method, a),
+            Obj::StoreComponents(t) => g_store::serve_StoreComponents(t, reg, method, a),
+            Obj::StoreDrivers(t) => g_store::serve_StoreDrivers(t, reg, method, a),
+            Obj::StoreDriverSource(t) => g_store::serve_StoreDriverSource(t, reg, method, a),
+            Obj::StoreCatalog(t) => g_store::serve_StoreCatalog(t, reg, method, a),
+            Obj::StoreApi(t) => g_store_api::serve_StoreApi(t, reg, method, a),
+            Obj::StudyCalendarApi(t) => g_study_calendar::serve_StudyCalendarApi(t, reg, method, a),
+            Obj::ServicesHandle(t) => crate::gen_services::serve_services(t, reg, method, a),
+            Obj::Served(s) => s.serve(reg, method, a),
         }
     }
 }

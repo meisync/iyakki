@@ -91,7 +91,7 @@ impl Rig {
         r
     }
     fn pending(&self) -> Vec<iyakki_shared::browserconsent::ConsentRequest> {
-        self.sh.env.services.browser().consent.pending(&self.user).into_iter().filter(|r| r.kind == ConsentKind::Permission).collect()
+        self.sh.env.services.browser_consent().pending(&self.user).into_iter().filter(|r| r.kind == ConsentKind::Permission).collect()
     }
     fn tick(&mut self) {
         for _ in 0..6 {
@@ -238,16 +238,16 @@ fn nothing_but_the_persons_own_answer_can_give_a_permission() {
     r.tick();
     let req = r.pending().remove(0);
     // developer-mode input (a paired computer) is refused, by the popup and by the INBOX alike
-    r.sh.env.services.browser().consent.set_synthetic(true);
+    r.sh.env.services.browser_consent().set_synthetic(true);
     r.sh.handle(&Event::Key(Key::Char('2')));
     let e = r.answer(Answer::AlwaysAllow).unwrap_err();
     assert!(e.contains("on the device itself"), "{e}");
-    r.sh.env.services.browser().consent.set_synthetic(false);
+    r.sh.env.services.browser_consent().set_synthetic(false);
     assert_eq!(r.pending().len(), 1, "still waiting");
     assert!(!r.env.store.get_draft(&flow).unwrap().defaults.camera.allowed);
     assert!(r.env.engine.get_run(&run).unwrap().grants.is_empty());
     // another account cannot answer it either
-    assert!(r.sh.env.services.browser().consent.resolve("someone-else", &req.id, Answer::AllowOnce).is_err());
+    assert!(r.sh.env.services.browser_consent().resolve("someone-else", &req.id, Answer::AllowOnce).is_err());
     // the assistant has no tool for it, cannot set the flow's camera switch, and the fixing agent's patch is refused
     let tools = iyakki_agent::flows::tools::defs(&iyakki_sec::policy::Role::Admin.template());
     assert!(tools.iter().all(|t| !t.spec.name.contains("permission") && !t.spec.name.contains("consent")), "no tool answers a permission request");
@@ -265,18 +265,18 @@ fn nothing_but_the_persons_own_answer_can_give_a_permission() {
 fn a_popup_older_than_ten_minutes_is_not_shown_but_the_entry_stays() {
     let mut r = rig("perm-expiry");
     let old = iyakki_clock::now_unix() - iyakki_agent::flows::permission::POPUP_SECS - 5;
-    r.sh.env.services.browser().consent.create_permission(&r.user, "some-flow", "Old / step needs your permission", "text", "r1|shot|camera|some-flow", old).unwrap();
+    r.sh.env.services.browser_consent().create_permission(&r.user, "some-flow", "Old / step needs your permission", "text", "r1|shot|camera|some-flow", old).unwrap();
     r.tick();
     assert!(r.sh.permpop.is_none(), "too old for a popup");
     assert_eq!(r.pending().len(), 1, "but still waiting in the INBOX");
     // a shown popup also goes when it turns old
     let fresh = iyakki_clock::now_unix();
-    r.sh.env.services.browser().consent.withdraw_permissions(&r.user, "r1");
-    r.sh.env.services.browser().consent.create_permission(&r.user, "some-flow", "New / step needs your permission", "text", "r2|shot|camera|some-flow", fresh).unwrap();
+    r.sh.env.services.browser_consent().withdraw_permissions(&r.user, "r1");
+    r.sh.env.services.browser_consent().create_permission(&r.user, "some-flow", "New / step needs your permission", "text", "r2|shot|camera|some-flow", fresh).unwrap();
     r.tick();
     assert!(r.sh.permpop.is_some());
     // withdrawing a dismissed run's requests removes them
-    assert_eq!(r.sh.env.services.browser().consent.withdraw_permissions(&r.user, "r2"), 1);
+    assert_eq!(r.sh.env.services.browser_consent().withdraw_permissions(&r.user, "r2"), 1);
     r.tick();
     assert!(r.sh.permpop.is_none() && r.pending().is_empty());
 }
@@ -329,7 +329,7 @@ fn a_client_devices_question_pops_up_with_two_answers_and_only_the_key_for_allow
         let (c, who) = (card.clone(), caller(&r.user));
         let t = std::thread::spawn(move || c.ask(&who, "client.camera.offer", "Maya's phone camera"));
         let end = std::time::Instant::now() + Duration::from_secs(10);
-        while r.sh.env.services.browser().consent.pending(&r.user).is_empty() {
+        while r.sh.env.services.browser_consent().pending(&r.user).is_empty() {
             assert!(std::time::Instant::now() < end, "the question never arrived");
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -356,14 +356,14 @@ fn a_client_devices_question_pops_up_with_two_answers_and_only_the_key_for_allow
     let (c, who) = (card.clone(), caller(&r.user));
     let t = std::thread::spawn(move || c.ask(&who, "client.camera.offer", "x"));
     let end = std::time::Instant::now() + Duration::from_secs(10);
-    while r.sh.env.services.browser().consent.pending(&r.user).is_empty() {
+    while r.sh.env.services.browser_consent().pending(&r.user).is_empty() {
         assert!(std::time::Instant::now() < end);
         std::thread::sleep(Duration::from_millis(10));
     }
-    let id = r.sh.env.services.browser().consent.pending(&r.user)[0].id.clone();
-    r.sh.env.services.browser().consent.set_synthetic(true);
-    assert!(r.sh.env.services.browser().consent.resolve(&r.user, &id, Answer::Allow).is_err());
-    r.sh.env.services.browser().consent.set_synthetic(false);
-    r.sh.env.services.browser().consent.resolve(&r.user, &id, Answer::Deny).unwrap();
+    let id = r.sh.env.services.browser_consent().pending(&r.user)[0].id.clone();
+    r.sh.env.services.browser_consent().set_synthetic(true);
+    assert!(r.sh.env.services.browser_consent().resolve(&r.user, &id, Answer::Allow).is_err());
+    r.sh.env.services.browser_consent().set_synthetic(false);
+    r.sh.env.services.browser_consent().resolve(&r.user, &id, Answer::Deny).unwrap();
     assert_eq!(t.join().unwrap(), CardAnswer::Deny);
 }

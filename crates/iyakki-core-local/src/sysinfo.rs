@@ -39,6 +39,22 @@ pub fn memory(r: &SysRoots) -> Memory {
     Memory { total, available: if text.contains("MemAvailable") { kb("MemAvailable") } else { kb("MemFree") + kb("Cached") }, swap_total: kb("SwapTotal"), swap_free: kb("SwapFree") }
 }
 
+/// The line the shell logs once, right after its first picture, so that `dist/buildroot/boot-time.py` can read the RAM in use at the
+/// sign-in screen from the serial log (F-PKG-05): `memory in use at the sign-in screen: N MiB of M MiB`. In use is `MemTotal` minus
+/// `MemAvailable`. `None` when `meminfo` is missing or has no `MemAvailable` (no guess from free memory).
+pub fn idle_ram_line(r: &SysRoots) -> Option<String> {
+    let text = read(&r.proc.join("meminfo"));
+    if !text.lines().any(|l| l.starts_with("MemAvailable:")) {
+        return None;
+    }
+    let m = memory(r);
+    if m.total == 0 {
+        return None;
+    }
+    let mib = |b: u64| b / (1024 * 1024);
+    Some(format!("memory in use at the sign-in screen: {} MiB of {} MiB", mib(m.total.saturating_sub(m.available)), mib(m.total)))
+}
+
 pub fn load_average(r: &SysRoots) -> (f32, f32, f32) {
     let t = read(&r.proc.join("loadavg"));
     let mut it = t.split_whitespace().filter_map(|x| x.parse::<f32>().ok());
@@ -223,6 +239,10 @@ fn socket_ends(r: &SysRoots) -> HashMap<u64, ((std::net::IpAddr, u16), (std::net
 pub struct Flow {
     pub orig_src: (std::net::IpAddr, u16),
     pub orig_dst: (std::net::IpAddr, u16),
+    /// The reply direction as the kernel saw it after NAT: where the answers come from and go to. Without NAT it is the original
+    /// tuple turned around; with a redirect or a published port the answering end is the host's own socket, not the original destination.
+    pub reply_src: (std::net::IpAddr, u16),
+    pub reply_dst: (std::net::IpAddr, u16),
     /// Bytes the originator sent and bytes the other side answered.
     pub orig_bytes: u64,
     pub reply_bytes: u64,
@@ -257,7 +277,7 @@ pub fn parse_conntrack(text: &str) -> Vec<Flow> {
             }
         }
         if sides.len() == 2 {
-            out.push(Flow { orig_src: sides[0].0, orig_dst: sides[0].1, orig_bytes: sides[0].2, reply_bytes: sides[1].2 });
+            out.push(Flow { orig_src: sides[0].0, orig_dst: sides[0].1, reply_src: sides[1].0, reply_dst: sides[1].1, orig_bytes: sides[0].2, reply_bytes: sides[1].2 });
         }
     }
     out
@@ -277,18 +297,27 @@ pub fn enable_conntrack_accounting(proc: &Path) -> Result<bool, String> {
 }
 
 /// Bytes received and sent by one process over its connections, from the conntrack accounting: the process's sockets are matched to
-/// flows by their two ends. A connection that the machine NATs, or a UDP socket without a peer, is not matched (its bytes are missing,
-/// not invented).
+/// flows by their two ends. A connection the machine NATs is matched by its reply tuple too (a redirect, a published port, a rewritten source); a UDP socket
+/// without a peer is not matched (its bytes are missing, not invented).
 pub fn flow_bytes(sockets: &[((std::net::IpAddr, u16), (std::net::IpAddr, u16))], flows: &[Flow]) -> (u64, u64) {
     let (mut rx, mut tx) = (0u64, 0u64);
     for (local, remote) in sockets {
         for f in flows {
+            // each flow counts once for a socket: the first way it fits wins
             if f.orig_src == *local && f.orig_dst == *remote {
                 tx = tx.saturating_add(f.orig_bytes);
                 rx = rx.saturating_add(f.reply_bytes);
             } else if f.orig_dst == *local && f.orig_src == *remote {
                 tx = tx.saturating_add(f.reply_bytes);
                 rx = rx.saturating_add(f.orig_bytes);
+            } else if f.reply_src == *local && f.reply_dst == *remote {
+                // NATed: a redirect or a published port made the host's own socket the answering end
+                tx = tx.saturating_add(f.reply_bytes);
+                rx = rx.saturating_add(f.orig_bytes);
+            } else if f.reply_dst == *local && f.reply_src == *remote {
+                // NATed: the host's socket is the one the answers are sent to (source address rewritten on the way out)
+                tx = tx.saturating_add(f.orig_bytes);
+                rx = rx.saturating_add(f.reply_bytes);
             }
         }
     }
@@ -454,6 +483,17 @@ pub mod tests {
     }
 
     #[test]
+    fn the_idle_ram_line_says_total_minus_available_and_is_never_guessed() {
+        let r = machine("idleram");
+        assert_eq!(idle_ram_line(&r).as_deref(), Some("memory in use at the sign-in screen: 1953 MiB of 7812 MiB"));
+        // no MemAvailable line (an old kernel): no line, not a number made from free memory
+        std::fs::write(r.proc.join("meminfo"), "MemTotal: 8000000 kB\nMemFree: 500000 kB\n").unwrap();
+        assert_eq!(idle_ram_line(&r), None);
+        std::fs::write(r.proc.join("meminfo"), "").unwrap();
+        assert_eq!(idle_ram_line(&r), None);
+    }
+
+    #[test]
     fn processor_memory_load_uptime_heat_and_network_are_read() {
         let r = machine("basic");
         let t = cpu_times(&r);
@@ -564,6 +604,23 @@ pub mod tests {
         assert!(parse_endpoint("zz:1").is_none() && parse_endpoint("0500000A").is_none());
         let v6 = parse_endpoint("00000000000000000000000001000000:0050").unwrap();
         assert_eq!(v6.0, "::1".parse::<std::net::IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn natted_flows_are_matched_through_their_reply_tuple() {
+        let ip = |a: &str, p: u16| (a.parse::<std::net::IpAddr>().unwrap(), p);
+        // a published port: the client asked 203.0.113.7:80, the kernel redirected it to the host's own server on 10.0.0.5:8080
+        let published = "ipv4 2 tcp 6 99 ESTABLISHED src=198.51.100.9 dst=203.0.113.7 sport=40000 dport=80 packets=3 bytes=300 src=10.0.0.5 dst=198.51.100.9 sport=8080 dport=40000 packets=4 bytes=9000 [ASSURED] mark=0 use=2\n";
+        // masquerade: the host's socket 10.0.0.5:5555 talks to 1.2.3.4:443 and goes out as 192.0.2.1:61000
+        let masq = "ipv4 2 tcp 6 99 ESTABLISHED src=10.0.0.5 dst=1.2.3.4 sport=5555 dport=443 packets=3 bytes=111 src=1.2.3.4 dst=192.0.2.1 sport=443 dport=61000 packets=4 bytes=222 [ASSURED] mark=0 use=2\n";
+        let flows = parse_conntrack(&format!("{published}{masq}"));
+        assert_eq!(flows.len(), 2);
+        // the server's socket: received 300, sent 9000; found only through the reply tuple
+        assert_eq!(flow_bytes(&[(ip("10.0.0.5", 8080), ip("198.51.100.9", 40000))], &flows), (300, 9000));
+        // the masqueraded connection still matches by its original tuple, and only once
+        assert_eq!(flow_bytes(&[(ip("10.0.0.5", 5555), ip("1.2.3.4", 443))], &flows), (222, 111));
+        // a socket that is in no flow stays at nothing
+        assert_eq!(flow_bytes(&[(ip("10.0.0.5", 1), ip("9.9.9.9", 9))], &flows), (0, 0));
     }
 
     #[test]

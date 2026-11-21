@@ -52,6 +52,74 @@ impl KeySet {
     }
 }
 
+/// The keys a person may use for their own step keys with Ctrl+Alt held: letters (not M, Q, L or S, which the shell's own chords use),
+/// the two square brackets, the comma and the point. Digits, arrows, Tab and the page keys already mean something.
+pub fn custom_key_ok(name: &str) -> bool {
+    match name {
+        "BracketLeft" | "BracketRight" | "Comma" | "Period" => true,
+        n => n.strip_prefix("Key").is_some_and(|l| l.len() == 1 && l.chars().all(|c| c.is_ascii_uppercase()) && !matches!(l, "M" | "Q" | "L" | "S")),
+    }
+}
+
+/// The person's own step keys (Ctrl+Alt plus the key).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomKeys {
+    pub prev: String,
+    pub next: String,
+}
+
+impl CustomKeys {
+    /// The two keys must be allowed and differ.
+    pub fn is_valid(&self) -> bool {
+        custom_key_ok(&self.prev) && custom_key_ok(&self.next) && self.prev != self.next
+    }
+
+    /// `j` or `KeyJ` or `[` as typed by a person, as the DOM key name.
+    pub fn name_of(typed: &str) -> Option<String> {
+        let t = typed.trim();
+        let n = match t {
+            "[" => "BracketLeft".to_string(),
+            "]" => "BracketRight".to_string(),
+            "," => "Comma".to_string(),
+            "." => "Period".to_string(),
+            l if l.len() == 1 && l.chars().all(|c| c.is_ascii_alphabetic()) => format!("Key{}", l.to_ascii_uppercase()),
+            other => other.to_string(),
+        };
+        custom_key_ok(&n).then_some(n)
+    }
+
+    /// The keys as typed by a person (the Settings page and the chat tool both use this): both empty turns the own keys off
+    /// (`Ok(None)`); two different allowed keys give `Ok(Some(..))`; anything else says why not.
+    pub fn from_typed(prev: &str, next: &str) -> Result<Option<CustomKeys>, String> {
+        let (p, n) = (prev.trim(), next.trim());
+        if p.is_empty() && n.is_empty() {
+            return Ok(None);
+        }
+        if p.is_empty() || n.is_empty() {
+            return Err("give both keys (or leave both empty to turn the own keys off)".into());
+        }
+        let pn = CustomKeys::name_of(p).ok_or("the previous key must be a letter other than M, Q, L and S, or one of [ ] , .")?;
+        let nn = CustomKeys::name_of(n).ok_or("the next key must be a letter other than M, Q, L and S, or one of [ ] , .")?;
+        let c = CustomKeys { prev: pn, next: nn };
+        if !c.is_valid() {
+            return Err("the previous and the next key must be two different keys".into());
+        }
+        Ok(Some(c))
+    }
+
+    /// For the page and the tool: `Ctrl+Alt+J / Ctrl+Alt+K`.
+    pub fn label(&self) -> String {
+        let show = |n: &str| match n {
+            "BracketLeft" => "[".to_string(),
+            "BracketRight" => "]".to_string(),
+            "Comma" => ",".to_string(),
+            "Period" => ".".to_string(),
+            n => n.trim_start_matches("Key").to_string(),
+        };
+        format!("Ctrl+Alt+{} (previous) / Ctrl+Alt+{} (next)", show(&self.prev), show(&self.next))
+    }
+}
+
 /// A ready-made starting point for a view: which apps open in it (by app id), in pane order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Template {
@@ -133,6 +201,9 @@ pub struct Views {
     pub remember_layout: bool,
     /// Apps that keep one window: opening one that is already open in a pane or another view goes to it instead of opening a second. App ids, or `*` for every app. Empty: every app may open more than once (as before).
     pub single_apps: Vec<String>,
+    /// Step keys of the person's own, beside the set: Ctrl+Alt plus one key for the previous view and one for the next (DOM key names
+    /// such as `KeyJ`, see [`custom_key_ok`]). `None`: only the set's keys.
+    pub custom_keys: Option<CustomKeys>,
     next_id: u32,
     /// Fields a newer release wrote: kept, and written back (charter rule 2).
     #[serde(flatten)]
@@ -141,7 +212,7 @@ pub struct Views {
 
 impl Default for Views {
     fn default() -> Views {
-        Views { views: vec![View { id: 1, name: DEFAULT_NAME.into(), locked: false, tiles: Vec::new(), layout: None, extra: Default::default() }], active: 1, key_set: KeySet::Both, reset_on_lock: false, remember_layout: true, single_apps: Vec::new(), next_id: 2, extra: Default::default() }
+        Views { views: vec![View { id: 1, name: DEFAULT_NAME.into(), locked: false, tiles: Vec::new(), layout: None, extra: Default::default() }], active: 1, key_set: KeySet::Both, reset_on_lock: false, remember_layout: true, single_apps: Vec::new(), custom_keys: None, next_id: 2, extra: Default::default() }
     }
 }
 
@@ -153,7 +224,7 @@ fn path(dir: &Path, user: &str) -> PathBuf {
     dir.join(format!("views-{who}.json"))
 }
 
-fn clean_name(name: &str) -> Result<String, String> {
+pub(crate) fn clean_name(name: &str) -> Result<String, String> {
     let n = name.trim();
     if n.is_empty() {
         return Err("Give the view a name".into());
@@ -204,13 +275,16 @@ impl Views {
             kept.push(v);
         }
         if kept.is_empty() {
-            return Views { key_set: self.key_set, reset_on_lock: self.reset_on_lock, remember_layout: self.remember_layout, single_apps: self.single_apps, extra: self.extra, ..Views::default() };
+            return Views { key_set: self.key_set, reset_on_lock: self.reset_on_lock, remember_layout: self.remember_layout, single_apps: self.single_apps, custom_keys: self.custom_keys, extra: self.extra, ..Views::default() };
         }
         self.next_id = self.next_id.max(kept.iter().map(|v| v.id).max().unwrap_or(0) + 1);
         if !kept.iter().any(|v| v.id == self.active) {
             self.active = kept[0].id;
         }
         self.views = kept;
+        if self.custom_keys.as_ref().is_some_and(|c| !c.is_valid()) {
+            self.custom_keys = None;
+        }
         self.single_apps.retain(|a| a == "*" || plain_id(a));
         self.single_apps.dedup();
         self.single_apps.truncate(MAX_SINGLE);
@@ -392,6 +466,24 @@ pub fn take_switch(dir: &Path, user: &str) -> Option<u32> {
     text.trim().parse().ok()
 }
 
+fn share_path(dir: &Path, user: &str) -> PathBuf {
+    let who: String = user.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
+    dir.join(format!("views-share-{who}"))
+}
+
+/// Ask the shell showing `user` to show the app that is open on screen now in view `id` as well (the assistant's `views_share`, F-VIEW-02).
+pub fn request_share(dir: &Path, user: &str, id: u32) {
+    let _ = std::fs::write(share_path(dir, user), format!("{id}\n"));
+}
+
+/// The shell of `user` takes its request: the id of the view that should also show the open app.
+pub fn take_share(dir: &Path, user: &str) -> Option<u32> {
+    let p = share_path(dir, user);
+    let text = std::fs::read_to_string(&p).ok()?;
+    let _ = std::fs::remove_file(&p);
+    text.trim().parse().ok()
+}
+
 // ---------------------------------------------------------------------------------------------------------- the person's own templates
 
 /// Most templates one person can keep.
@@ -420,7 +512,7 @@ fn tpl_path(dir: &Path, user: &str) -> PathBuf {
     dir.join(format!("view-templates-{who}.json"))
 }
 
-fn slug(name: &str) -> String {
+pub(crate) fn slug(name: &str) -> String {
     let s: String = name.trim().to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     s.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-")
 }
@@ -474,7 +566,7 @@ impl UserTemplates {
     }
 }
 
-fn check_tiles(tiles: &[String]) -> Result<(), String> {
+pub(crate) fn check_tiles(tiles: &[String]) -> Result<(), String> {
     if tiles.is_empty() || tiles.len() > MAX_TEMPLATE_TILES {
         return Err(format!("A template has 1 to {MAX_TEMPLATE_TILES} apps"));
     }
@@ -667,6 +759,35 @@ mod tests {
     }
 
     #[test]
+    fn typed_own_keys_give_keys_off_or_the_reason() {
+        assert_eq!(CustomKeys::from_typed("", " "), Ok(None));
+        assert_eq!(CustomKeys::from_typed("j", "]"), Ok(Some(CustomKeys { prev: "KeyJ".into(), next: "BracketRight".into() })));
+        for (p, n) in [("j", ""), ("", "k"), ("q", "k"), ("j", "J"), ("1", "k")] {
+            assert!(CustomKeys::from_typed(p, n).is_err(), "{p} {n}");
+        }
+    }
+
+    #[test]
+    fn own_step_keys_are_checked_kept_and_dropped_when_damaged() {
+        assert_eq!(CustomKeys::name_of("j"), Some("KeyJ".to_string()));
+        assert_eq!(CustomKeys::name_of("["), Some("BracketLeft".to_string()));
+        for bad in ["m", "q", "l", "s", "1", "Tab", "PageUp", "jj", ""] {
+            assert_eq!(CustomKeys::name_of(bad), None, "{bad}");
+        }
+        let c = CustomKeys { prev: "KeyJ".into(), next: "KeyK".into() };
+        assert!(c.is_valid() && c.label().contains("Ctrl+Alt+J (previous)") && c.label().contains("Ctrl+Alt+K (next)"));
+        assert!(!CustomKeys { prev: "KeyJ".into(), next: "KeyJ".into() }.is_valid());
+        // written, read back, and a hand-edited bad pair is dropped on load
+        let mut v = Views::default();
+        v.custom_keys = Some(c.clone());
+        let back: Views = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
+        assert_eq!(back.custom_keys, Some(c));
+        let mut bad = Views::default();
+        bad.custom_keys = Some(CustomKeys { prev: "KeyQ".into(), next: "Digit1".into() });
+        assert_eq!(bad.repaired().custom_keys, None);
+    }
+
+    #[test]
     fn key_sets() {
         assert!(KeySet::Both.browser() && KeySet::Both.mac());
         assert!(KeySet::Browser.browser() && !KeySet::Browser.mac());
@@ -743,5 +864,23 @@ mod layout_tests {
         assert!(v.set_single(&(0..41).map(|i| format!("a{i}")).collect::<Vec<_>>()).is_err());
         v.set_single(&[]).unwrap();
         assert!(!v.is_single("browser"));
+    }
+
+    #[test]
+    fn a_share_request_is_kept_per_person_taken_once_and_a_damaged_one_is_ignored() {
+        let dir = std::env::temp_dir().join(format!("iyakki-views-share-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(take_share(&dir, "ada"), None);
+        request_share(&dir, "ada", 3);
+        request_share(&dir, "bob", 5);
+        // a name with odd characters cannot reach another file
+        assert_eq!(take_share(&dir, "ada/../bob"), None);
+        assert_eq!(take_share(&dir, "ada"), Some(3));
+        assert_eq!(take_share(&dir, "ada"), None);
+        assert_eq!(take_share(&dir, "bob"), Some(5));
+        std::fs::write(dir.join("views-share-ada"), "not a number").unwrap();
+        assert_eq!(take_share(&dir, "ada"), None);
+        assert!(!dir.join("views-share-ada").exists(), "a damaged request is removed");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

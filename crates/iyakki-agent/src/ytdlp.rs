@@ -7,8 +7,12 @@
 
 use std::path::{Path, PathBuf};
 
+/// The SHA-256 of the release file the row in `legal/downloads.txt` pins (2026.10.26); a test keeps the two in step and the licence gate
+/// finds the pin in this source.
+pub const PINNED_SHA256: &str = "e51e69e89489f199530f13d32a4342da3ddb2cf34842f364603a066db05afbf3";
+
 /// The id of the row in `legal/downloads.txt`.
-pub const ROW_ID: &str = "yt-dlp";
+pub const ROW_ID: &str = "ytdlp";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pin {
@@ -44,7 +48,7 @@ fn hex64(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
 }
 
-/// Read the pin from the text of `legal/downloads.txt`: `yt-dlp | licence | download-only | digest | sha256:<hex> | yt-dlp <version> ... | date`.
+/// Read the pin from the text of `legal/downloads.txt`: `ytdlp | licence | download-only | digest | sha256:<hex> | yt-dlp <version> ... | date`.
 pub fn pin_from(downloads_txt: &str) -> Result<Pin, Refusal> {
     let row = downloads_txt.lines().map(str::trim).filter(|l| !l.starts_with('#')).map(|l| l.split('|').map(str::trim).collect::<Vec<_>>()).find(|f| f.first() == Some(&ROW_ID));
     let f = row.ok_or_else(|| Refusal::NoPin("legal/downloads.txt has no yt-dlp row".into()))?;
@@ -142,13 +146,74 @@ pub fn download(data: &Path, out: &Path, url: &str, approved: bool, runner: &dyn
     Ok(kept)
 }
 
+/// What the Store -> Setup card for the extractor shows (F-MEDIA-12): the licence in words, where it comes from, which version is pinned and
+/// whether it can be installed at all. A third-party program: nothing is shipped and nothing is fetched until the person presses Install.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Card {
+    pub title: &'static str,
+    pub licence: &'static str,
+    pub licence_text: &'static str,
+    pub vendor: String,
+    pub version: String,
+    /// First twelve hex digits of the pinned checksum (the whole one is checked at install).
+    pub checksum_short: String,
+    pub state: CardState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CardState {
+    /// No pin: a human has to add the vendor's checksum first; the card says so and offers no button.
+    Unavailable(String),
+    NotInstalled,
+    Installed,
+}
+
+pub const LICENCE: &str = "The Unlicense (public domain)";
+pub const LICENCE_TEXT: &str = "yt-dlp is free software released into the public domain under the Unlicense: anyone may copy, change and use it for any purpose, with no conditions and no warranty. It is not part of IYAKKI and is not shipped with it: it is fetched from its own developers' release page when you press Install, and checked against a fixed checksum first.";
+
+/// The card for the current state. `downloads_txt` is the text of `legal/downloads.txt`.
+pub fn card(data: &Path, downloads_txt: &str) -> Card {
+    let (version, sum, state) = match pin_from(downloads_txt) {
+        Ok(p) => (p.version.clone(), p.sha256.chars().take(12).collect(), if installed(data) { CardState::Installed } else { CardState::NotInstalled }),
+        Err(r) => (String::new(), String::new(), CardState::Unavailable(r.to_string())),
+    };
+    let vendor = if version.is_empty() { "https://github.com/yt-dlp/yt-dlp".to_string() } else { release_url(&Pin { version: version.clone(), sha256: String::new() }) };
+    Card { title: "Video-site downloader (yt-dlp)", licence: LICENCE, licence_text: LICENCE_TEXT, vendor, version, checksum_short: sum, state }
+}
+
+impl Card {
+    /// The card as the person reads it before pressing Install (and as `ytdlp_status` says it).
+    pub fn text(&self) -> String {
+        let state = match &self.state {
+            CardState::Unavailable(why) => format!("Not available yet: {why}"),
+            CardState::NotInstalled => "Not installed. Install downloads it from the address above and keeps it only after its checksum matches.".to_string(),
+            CardState::Installed => "Installed. Each download still asks you first.".to_string(),
+        };
+        let pin = if self.version.is_empty() { String::new() } else { format!("\nPinned version {} (checksum {}...)", self.version, self.checksum_short) };
+        format!("{}\nLicence: {}\n{}\nFrom: {}{pin}\nIt runs only when you approve a download, with no settings of its own, no plug-ins and no way to run other programs, one video at a time, into your own video folder.\n{state}", self.title, self.licence, self.licence_text, self.vendor)
+    }
+
+    /// Can the Install button be pressed?
+    pub fn can_install(&self) -> bool {
+        self.state == CardState::NotInstalled
+    }
+}
+
+/// Where finished downloads go and how they are entered in the person's media library (the real one is the services' index; a test passes a fake).
+pub trait Library: Send + Sync {
+    /// The folder for a video among the person's writable library folders (`None`: they have none).
+    fn video_folder(&self, user: &str) -> Option<PathBuf>;
+    /// Enter the finished file in the media index with its source address; `Err` is why it was not added.
+    fn register(&self, user: &str, file: &Path, source_url: &str) -> Result<(), String>;
+}
+
 /// The real runner: an empty environment (only a HOME inside the output folder), the output folder as the working directory.
 pub struct ProcessRunner;
 
 impl Runner for ProcessRunner {
     fn run(&self, exe: &Path, args: &[String], out: &Path) -> Result<Vec<PathBuf>, String> {
         let before: std::collections::BTreeSet<PathBuf> = list(out);
-        let o = std::process::Command::new(exe).args(args).env_clear().env("HOME", out).env("PATH", "/usr/bin:/bin").current_dir(out).output().map_err(|e| e.to_string())?;
+        let o = iyakki_core_local::starters::run_extractor(exe, args, out).map_err(|e| e.to_string())?;
         if !o.status.success() {
             return Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("it stopped without a message").chars().take(200).collect());
         }

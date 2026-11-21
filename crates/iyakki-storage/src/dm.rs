@@ -15,8 +15,10 @@ use std::io;
 use std::path::Path;
 
 pub mod fake;
+#[cfg(unix)]
 mod sys;
 
+#[cfg(unix)]
 pub use sys::SysKernel;
 
 /// Size of the kernel's `struct dm_ioctl` header.

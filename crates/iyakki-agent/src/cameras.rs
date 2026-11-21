@@ -16,7 +16,7 @@
 //!   (the person-clicked download); an [`H264Support`] with a decoder plugs in without changing anything else.
 //! * Nothing here records. A snapshot is a person's click or an approved tool call and writes one JPEG into their Pictures.
 
-pub use iyakki_shared::cameras::{FeedErr, NoUsb, Picture, Spec, UsbCam, UsbProvider, Who, Feed};
+pub use iyakki_shared::cameras::{Feed, FeedErr, NoUsb, Picture, Sound, Spec, UsbCam, UsbProvider, Who};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -29,6 +29,8 @@ use zeroize::Zeroizing;
 use iyakki_core_api::appcaps::MemoryBook;
 use iyakki_core_api::broker::{Broker, Call, Caller, CallerKind, NoCard, NullSink};
 use iyakki_rtsp as rtsp;
+
+use crate::camrec::RecSource as _;
 use iyakki_rtsp::rtp::AccessUnit;
 use iyakki_rtsp::url::scrub;
 
@@ -142,8 +144,26 @@ pub trait H264Decoder: Send {
 
 pub trait H264Support: Send + Sync {
     fn decoder(&self) -> Option<Box<dyn H264Decoder>>;
+    /// A decoder for another codec that needs the add-on (H.265, F-CAM-20). The default has none.
+    fn video_decoder(&self, kind: crate::camdecode::VideoKind) -> Option<Box<dyn H264Decoder>> {
+        match kind {
+            crate::camdecode::VideoKind::H264 => self.decoder(),
+            crate::camdecode::VideoKind::H265 => None,
+        }
+    }
+    /// An AAC decoder for the camera's sound (F-CAM-20). The default has none: the sound of such a camera is not played.
+    fn aac_decoder(&self) -> Option<Box<dyn crate::audiofmt::AacDecoder>> {
+        None
+    }
     /// What to tell the person when there is none.
     fn hint(&self) -> String;
+    /// [`H264Support::hint`] for a codec.
+    fn hint_for(&self, kind: crate::camdecode::VideoKind) -> String {
+        match kind {
+            crate::camdecode::VideoKind::H264 => self.hint(),
+            crate::camdecode::VideoKind::H265 => self.hint().replace("H.264", "H.265"),
+        }
+    }
 }
 
 /// No decoder: H.264 cameras are recognised and the person is pointed to the add-on.
@@ -188,6 +208,8 @@ pub struct Env {
 struct St {
     status: Status,
     seq: u64,
+    /// Pictures read from the camera so far (cap or not).
+    pictures: u64,
     small: Option<Frame>,
     big: Option<Frame>,
     latest: Option<Arc<Picture>>,
@@ -203,6 +225,9 @@ struct St {
     /// the assistant's camera tools). Leaving the screen drops only the first: a stream another holder still looks at goes on (KI-093).
     screen_at: Option<Instant>,
     other_at: Option<Instant>,
+    /// The camera's sound not yet taken by a listener, at most two seconds, and its rate.
+    sound: Vec<i16>,
+    sound_rate: u32,
 }
 
 struct Shared {
@@ -236,7 +261,11 @@ pub struct Hub {
     gate: Mutex<Gate>,
     gate_set: AtomicBool,
     share: Arc<crate::camshare::Share>,
+    /// The time source of the picture-rate cap and the dark watch: the real clock; a test gives its own with [`Hub::set_clock`].
+    now: Clock,
 }
+
+type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
 fn registry() -> &'static Mutex<HashMap<PathBuf, Arc<Hub>>> {
     static R: OnceLock<Mutex<HashMap<PathBuf, Arc<Hub>>>> = OnceLock::new();
@@ -306,7 +335,19 @@ impl Hub {
     pub fn new(env: Env) -> Hub {
         // until a real broker is set, the built-in table decides (the Cameras app holds camera.view) and nothing is logged
         let gate = Gate { broker: Arc::new(Broker::new(Arc::new(MemoryBook::default()), Arc::new(NoCard), Arc::new(NullSink), Arc::new(crate::clock::now_unix))), device: "this computer".into(), app: "cameras".into(), kind: CallerKind::Builtin };
-        Hub { env, streams: Mutex::new(HashMap::new()), last_view: Mutex::new(HashMap::new()), tap: Arc::new(Mutex::new(None)), gate: Mutex::new(gate), gate_set: AtomicBool::new(false), share: Arc::new(crate::camshare::Share::default()) }
+        Hub { env, streams: Mutex::new(HashMap::new()), last_view: Mutex::new(HashMap::new()), tap: Arc::new(Mutex::new(None)), gate: Mutex::new(gate), gate_set: AtomicBool::new(false), share: Arc::new(crate::camshare::Share::default()), now: Arc::new(Instant::now) }
+    }
+
+    /// Tests: the rate cap of the small and big pictures and the dark watch read `now` instead of the wall clock.
+    #[cfg(test)]
+    pub(crate) fn set_clock(&mut self, now: impl Fn() -> Instant + Send + Sync + 'static) {
+        self.now = Arc::new(now);
+    }
+
+    /// Tests: how many pictures the stream of `id` has read from its camera (the cap drops most of them).
+    #[cfg(test)]
+    pub(crate) fn pictures_read(&self, id: &str) -> u64 {
+        self.streams().get(id).map_or(0, |s| s.st().pictures)
     }
 
     /// Whether a broker was set (the shell sets the local one once, when it makes the hub).
@@ -356,7 +397,7 @@ impl Hub {
         std::fs::rename(&tmp, &f).map_err(|e| format!("could not save the cameras: {e}"))
     }
 
-    fn audit(&self, who: &str, ev: &str, detail: &str) {
+    pub(crate) fn audit(&self, who: &str, ev: &str, detail: &str) {
         (self.env.audit)(who, ev, &scrub(detail));
     }
 
@@ -514,6 +555,31 @@ impl Hub {
         Ok(Some((f.seq, jpeg)))
     }
 
+    /// The sound a camera with a microphone has sent since the last call (G.711 decoded: 16-bit mono samples and their rate): `None` while
+    /// there is none. The person must be allowed to watch the camera and the broker must say yes, as for a picture; asking keeps the stream
+    /// alive and counts as listening. One listener drains it. Nothing is kept beyond two seconds and nothing is written anywhere.
+    pub fn listen(&self, who: &Who, id: &str) -> Result<Option<Sound>, String> {
+        let spec = self.watchable(who, id).and_then(|spec| self.broker_allows(who, id).map(|_| spec))?;
+        let sh = self.stream_for(id, spec, false);
+        let mut st = sh.st();
+        st.touched = Instant::now();
+        st.other_at = Some(Instant::now());
+        if st.sound.is_empty() {
+            return Ok(None);
+        }
+        let rate = st.sound_rate;
+        let pcm = std::mem::take(&mut st.sound);
+        drop(st);
+        let mut lv = self.last_view.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (who.user.clone(), format!("listen:{id}"));
+        if lv.get(&key).is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
+            lv.insert(key, Instant::now());
+            let name = self.name_of(id);
+            self.audit(&who.user, "camera.listen", &name);
+        }
+        Ok(Some(Sound { rate, pcm }))
+    }
+
     fn stream_for(&self, id: &str, spec: Option<Spec>, big: bool) -> Arc<Shared> {
         let mut m = self.streams();
         m.retain(|_, s| !s.stop.load(Ordering::SeqCst));
@@ -521,7 +587,7 @@ impl Hub {
             Some(s) => s.clone(),
             None => {
                 let s = Arc::new(Shared {
-                    st: Mutex::new(St { status: Status::Connecting, seq: 0, small: None, big: None, latest: None, fps: 0.0, size: (0, 0), touched: Instant::now(), want_big: big, last_small: None, last_big: None, viewed: None, screen_at: None, other_at: None }),
+                    st: Mutex::new(St { status: Status::Connecting, seq: 0, small: None, big: None, latest: None, fps: 0.0, size: (0, 0), touched: Instant::now(), pictures: 0, want_big: big, last_small: None, last_big: None, viewed: None, screen_at: None, other_at: None, sound: Vec::new(), sound_rate: 0 }),
                     stop: AtomicBool::new(false),
                 });
                 m.insert(id.to_string(), s.clone());
@@ -581,7 +647,7 @@ impl Hub {
     }
 
     fn stream_env(&self) -> StreamEnv {
-        StreamEnv { share: self.share.clone(), secrets: self.env.secrets.clone(), usb: self.env.usb.clone(), h264: self.env.h264.clone(), backoff_ms: self.env.backoff_ms, idle: self.env.idle, tap: self.tap.clone(), data: self.env.data.clone() }
+        StreamEnv { share: self.share.clone(), secrets: self.env.secrets.clone(), usb: self.env.usb.clone(), h264: self.env.h264.clone(), backoff_ms: self.env.backoff_ms, idle: self.env.idle, tap: self.tap.clone(), data: self.env.data.clone(), now: self.now.clone() }
     }
 
     /// Stop every stream now (sign-out, shutdown, tests).
@@ -846,6 +912,7 @@ struct StreamEnv {
     idle: Duration,
     tap: TapSlot,
     data: PathBuf,
+    now: Clock,
 }
 
 pub(crate) fn tcp(host: &str, port: u16) -> Result<std::net::TcpStream, FeedErr> {
@@ -878,17 +945,76 @@ pub(crate) fn map_err(e: rtsp::Error) -> FeedErr {
 struct RtspFeed<T: std::io::Read + std::io::Write + Send> {
     client: rtsp::client::Client<T>,
     dec: Option<Box<dyn H264Decoder>>,
+    /// The camera's sound since the last [`Feed::take_sound`], at most [`SOUND_KEEP_SECS`] seconds (the oldest goes): G.711 decoded in-house,
+    /// AAC through the add-on.
+    sound: Vec<i16>,
+    /// The rate of `sound` (an AAC track is decoded at the rate of the program's output).
+    sound_rate: u32,
+    /// The AAC track's decoder, when the camera's sound is AAC and the add-on is installed.
+    aac: Option<crate::camdecode::AacTrack>,
 }
 
+/// The feed of an open RTSP client: the video decoder the camera's codec needs (the add-on's, or the person is told) and the AAC sound's
+/// decoder when there is one. A missing add-on stops a camera whose VIDEO needs it; its sound alone is only left unplayed.
+fn rtsp_feed<T: std::io::Read + std::io::Write + Send>(env: &StreamEnv, client: rtsp::client::Client<T>) -> Result<RtspFeed<T>, FeedErr> {
+    use crate::camdecode::VideoKind;
+    let kind = match &client.codec {
+        rtsp::sdp::Codec::H264 { .. } => Some(VideoKind::H264),
+        rtsp::sdp::Codec::H265 { .. } => Some(VideoKind::H265),
+        _ => None,
+    };
+    let dec = match kind {
+        Some(k) => Some(env.h264.video_decoder(k).ok_or_else(|| FeedErr::Addon(env.h264.hint_for(k)))?),
+        None => None,
+    };
+    let aac = match client.audio.as_ref().map(|a| &a.codec) {
+        Some(rtsp::sdp::AudioCodec::Aac { config, .. }) => env.h264.aac_decoder().and_then(|d| crate::camdecode::AacTrack::new(config, d).ok()),
+        _ => None,
+    };
+    Ok(RtspFeed { client, dec, sound: Vec::new(), sound_rate: 0, aac })
+}
+
+/// How much of a camera's sound waits for the listener.
+const SOUND_KEEP_SECS: usize = 2;
+
 impl<T: std::io::Read + std::io::Write + Send> Feed for RtspFeed<T> {
+    fn take_sound(&mut self) -> Option<Sound> {
+        let rate = if self.sound_rate > 0 { self.sound_rate } else { self.client.audio.as_ref()?.clock };
+        (!self.sound.is_empty()).then(|| Sound { rate, pcm: std::mem::take(&mut self.sound) })
+    }
+
     fn next(&mut self) -> Result<Picture, FeedErr> {
         loop {
             match self.client.next_media().map_err(map_err)? {
                 rtsp::client::Media::Jpeg(j) => return Ok(Picture::Jpeg(j)),
-                // sound is not played by the camera view; H.265 needs a decoder this image does not have
-                rtsp::client::Media::Audio(_) => {}
-                rtsp::client::Media::H265(_) => return Err(FeedErr::Addon(String::new())),
-                rtsp::client::Media::H264(au) => {
+                // G.711 sound is decoded and kept for a listener ([`Feed::take_sound`]); AAC is not decoded here; H.265 needs a decoder this image does not have
+                rtsp::client::Media::Audio(f) => {
+                    if let Some(a) = &self.client.audio {
+                        let (rate, pcm) = if let Some(t) = self.aac.as_mut() {
+                            // AAC through the add-on: a decoder that stops ends the camera's sound, not its picture
+                            match t.push(&f.data) {
+                                Ok(Some((r, p))) => (r as usize, Some(p)),
+                                Ok(None) => (0, None),
+                                Err(_) => {
+                                    self.aac = None;
+                                    (0, None)
+                                }
+                            }
+                        } else {
+                            ((a.clock as usize).max(1), rtsp::g711::decode(&a.codec, &f.data))
+                        };
+                        if let Some(pcm) = pcm {
+                            if self.sound_rate != 0 && self.sound_rate as usize != rate {
+                                self.sound.clear();
+                            }
+                            self.sound_rate = if matches!(a.codec, rtsp::sdp::AudioCodec::Aac { .. }) { rate as u32 } else { 0 };
+                            self.sound.extend(pcm);
+                            let over = self.sound.len().saturating_sub(rate.max(1) * SOUND_KEEP_SECS);
+                            self.sound.drain(..over);
+                        }
+                    }
+                }
+                rtsp::client::Media::H264(au) | rtsp::client::Media::H265(au) => {
                     let d = self.dec.as_mut().ok_or_else(|| FeedErr::Addon(String::new()))?;
                     if let Some((w, h, rgba)) = d.decode(&au).map_err(|e| FeedErr::Lost(scrub(&e)))? {
                         return Ok(Picture::Rgba { width: w, height: h, data: rgba });
@@ -922,7 +1048,7 @@ impl<T: std::io::Read + std::io::Write + Send> Feed for HttpFeed<T> {
 
 /// The live view reading the recorder's connection (F-CAM-19).
 struct SharedFeed {
-    v: crate::camshare::Viewer,
+    v: Box<dyn crate::camrec::RecFeed>,
     dec: Option<Box<dyn H264Decoder>>,
 }
 
@@ -951,7 +1077,17 @@ fn connect(env: &StreamEnv, id: &str, spec: Option<&Spec>) -> Result<Box<dyn Fee
     // the recorder already holds the connection: look through it (a camera that allows one connection cannot be opened twice)
     if let Some(v) = env.share.subscribe(id) {
         let dec = if v.kind == crate::camrec_format::RecKind::H264 { Some(env.h264.decoder().ok_or_else(|| FeedErr::Addon(env.h264.hint()))?) } else { None };
-        return Ok(Box::new(SharedFeed { v, dec }));
+        return Ok(Box::new(SharedFeed { v: Box::new(v), dec }));
+    }
+    // a recorder wants this camera and nobody holds it: open the connection through the recorder's own reader and keep it in the table, so
+    // the recorder looks through this live view's connection instead of opening a second one (the other direction of F-CAM-19)
+    if env.share.is_wanted(id) && rtsp::url::parse_any(&spec.address).is_ok() {
+        if let Ok(raw) = crate::camrec::NetSource(env.secrets.clone()).open_at(spec, &env.data) {
+            let kind = raw.kind();
+            let dec = if kind == crate::camrec_format::RecKind::H264 { Some(env.h264.decoder().ok_or_else(|| FeedErr::Addon(env.h264.hint()))?) } else { None };
+            let feed = env.share.tee(id, raw);
+            return Ok(Box::new(SharedFeed { v: Box::new(crate::camshare::ParamsFirst::new(feed)), dec }));
+        }
     }
     let url = rtsp::url::parse_any(&spec.address).map_err(|e| FeedErr::Lost(scrub(&e)))?;
     let creds = if spec.secret.is_empty() {
@@ -965,15 +1101,7 @@ fn connect(env: &StreamEnv, id: &str, spec: Option<&Spec>) -> Result<Box<dyn Fee
         rtsp::url::Scheme::Rtsps => {
             let t = crate::camtls::connect_for(&env.data, id, &url.host, url.port).map_err(FeedErr::Lost)?;
             let client = rtsp::client::Client::open_with(t, &url, creds, None).map_err(map_err)?;
-            let dec = match &client.codec {
-                rtsp::sdp::Codec::H264 { .. } => match env.h264.decoder() {
-                    Some(d) => Some(d),
-                    None => return Err(FeedErr::Addon(env.h264.hint())),
-                },
-                rtsp::sdp::Codec::H265 { .. } => return Err(FeedErr::Addon(env.h264.hint())),
-                _ => None,
-            };
-            Ok(Box::new(RtspFeed { client, dec }))
+            Ok(Box::new(rtsp_feed(env, client)?))
         }
         rtsp::url::Scheme::Https => {
             let (host, port, data, cid) = (url.host.clone(), url.port, env.data.clone(), id.to_string());
@@ -985,14 +1113,7 @@ fn connect(env: &StreamEnv, id: &str, spec: Option<&Spec>) -> Result<Box<dyn Fee
             // a camera that refuses video over the same connection is asked for UDP, from the address the connection runs to
             let peer = t.peer_addr().ok().map(|a| a.ip());
             let client = rtsp::client::Client::open_with(t, &url, creds, peer).map_err(map_err)?;
-            let dec = match &client.codec {
-                rtsp::sdp::Codec::H264 { .. } => match env.h264.decoder() {
-                    Some(d) => Some(d),
-                    None => return Err(FeedErr::Addon(env.h264.hint())),
-                },
-                _ => None,
-            };
-            Ok(Box::new(RtspFeed { client, dec }))
+            Ok(Box::new(rtsp_feed(env, client)?))
         }
         rtsp::url::Scheme::Http => {
             let (host, port) = (url.host.clone(), url.port);
@@ -1117,8 +1238,16 @@ fn run_stream(sh: Arc<Shared>, env: StreamEnv, id: String, spec: Option<Spec>) {
             }
             match feed.next() {
                 Ok(pic) => {
+                    if let Some(s) = feed.take_sound() {
+                        let mut st = sh.st();
+                        st.sound_rate = s.rate;
+                        st.sound.extend(s.pcm);
+                        let over = st.sound.len().saturating_sub(s.rate.max(1) as usize * 2);
+                        st.sound.drain(..over);
+                    }
                     pause = base;
                     count += 1;
+                    sh.st().pictures += 1;
                     let pic = Arc::new(pic);
                     let (small_due, big_due) = {
                         let mut st = sh.st();
@@ -1129,7 +1258,8 @@ fn run_stream(sh: Arc<Shared>, env: StreamEnv, id: String, spec: Option<Spec>) {
                             count = 0;
                             window = Instant::now();
                         }
-                        let due = |last: Option<Instant>, fps: u32| last.is_none_or(|t| t.elapsed() >= Duration::from_millis(1000 / fps as u64));
+                        let now = (env.now)();
+                        let due = |last: Option<Instant>, fps: u32| last.is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_millis(1000 / fps as u64));
                         (due(st.last_small, SMALL_FPS), st.want_big && due(st.last_big, BIG_FPS))
                     };
                     let mut tap_frame: Option<Frame> = None;
@@ -1145,7 +1275,7 @@ fn run_stream(sh: Arc<Shared>, env: StreamEnv, id: String, spec: Option<Spec>) {
                             if let Some(b) = b {
                                 st.size = (b.0, b.1);
                                 st.big = Some(mk(b));
-                                st.last_big = Some(Instant::now());
+                                st.last_big = Some((env.now)());
                             }
                         }
                         if small_due {
@@ -1153,11 +1283,11 @@ fn run_stream(sh: Arc<Shared>, env: StreamEnv, id: String, spec: Option<Spec>) {
                                 if !big_due {
                                     st.size = (s.0, s.1);
                                 }
-                                st.status = if dark.observe(Instant::now(), &s.2) { Status::Dark(DARK_MESSAGE.into()) } else { Status::Live };
+                                st.status = if dark.observe((env.now)(), &s.2) { Status::Dark(DARK_MESSAGE.into()) } else { Status::Live };
                                 let f = mk(s);
                                 tap_frame = Some(f.clone());
                                 st.small = Some(f);
-                                st.last_small = Some(Instant::now());
+                                st.last_small = Some((env.now)());
                             }
                         }
                     }
@@ -1196,4 +1326,4 @@ fn run_stream(sh: Arc<Shared>, env: StreamEnv, id: String, spec: Option<Spec>) {
 
 #[cfg(test)]
 #[path = "cameras_tests.rs"]
-mod tests;
+pub(crate) mod tests;

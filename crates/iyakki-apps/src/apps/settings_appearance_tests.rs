@@ -202,3 +202,24 @@ fn the_type_keys_set_line_height_letter_spacing_and_tabular_figures_per_person_a
     assert_eq!(typeset::load(&dir, "root").line, LineHeight::Normal, "the capital goes back");
     typeset::set_current(Prefs::default());
 }
+
+#[test]
+fn t_and_capital_t_switch_edit_and_cli_to_their_sdk_versions_and_back_audited_and_the_rows_say_which() {
+    let cx = admin("ap-sdk");
+    let mut a = SettingsApp::new(&cx).on(Tab::Appearance);
+    assert!(!crate::apps::sdk_apps::chosen(&cx, "edit") && !crate::apps::sdk_apps::chosen(&cx, "cli"), "the usual screens are the default");
+    press(&mut a, &cx, 't');
+    assert!(crate::apps::sdk_apps::chosen(&cx, "edit") && !crate::apps::sdk_apps::chosen(&cx, "cli"));
+    press(&mut a, &cx, 'T');
+    assert!(crate::apps::sdk_apps::chosen(&cx, "cli"));
+    let log = cx.audit.recent(20).join("\n");
+    assert!(log.contains("settings.display.sdk_apps edit on") && log.contains("settings.display.sdk_apps cli on"), "{log}");
+    press(&mut a, &cx, 't');
+    assert!(!crate::apps::sdk_apps::chosen(&cx, "edit") && crate::apps::sdk_apps::chosen(&cx, "cli"), "t again takes EDIT back to the usual screen");
+    assert!(cx.audit.recent(20).join("\n").contains("settings.display.sdk_apps edit off"));
+    // the page draws with both rows at the sizes the other pages are held to
+    for (w, h) in [(1280, 720), (360, 740)] {
+        let g = draw(&mut a, &cx, w, h);
+        assert!(g.ink_bottom > 0.0);
+    }
+}

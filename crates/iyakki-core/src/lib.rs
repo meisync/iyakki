@@ -1,6 +1,7 @@
 //! IYAKKI supervisor core: host detection, logging, signals, agent task running.
 
 pub mod boot;
+pub mod sideimage;
 pub mod broker;
 pub use iyakki_core_local::bootconfirm;
 pub mod bootlog;
@@ -13,6 +14,7 @@ pub mod display;
 pub mod camera;
 pub mod hotplug;
 pub mod storageloss;
+pub mod ukidefault;
 pub mod web;
 pub mod console;
 pub mod keepalive;
@@ -25,6 +27,8 @@ pub mod host;
 pub mod browsertest;
 #[cfg(feature = "headless")]
 pub mod svc;
+#[cfg(feature = "headless")]
+pub mod headlessboot;
 pub use iyakki_core_local::net;
 pub mod cloudnode;
 

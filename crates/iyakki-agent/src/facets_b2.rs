@@ -52,6 +52,18 @@ impl ProfileStoreFacet for RealProfileStore {
     fn is_protected(&self, data: &Path, user: &str) -> bool {
         crate::profilestore::ProfileStore::new(data, user).is_protected()
     }
+    fn set_tenant_carrier(&self, tenant: &str, c: Option<std::sync::Arc<dyn iyakki_agent_api::ProfileCarrier>>) {
+        crate::profilecarrier::set(tenant, c)
+    }
+    fn tenant_carriers(&self) -> Vec<String> {
+        crate::profilecarrier::names()
+    }
+    fn send_to_tenant(&self, data: &Path, user: &str, tenant: &str, now: u64) -> Result<u64, String> {
+        crate::profilecarrier::send(data, user, tenant, now)
+    }
+    fn fetch_from_tenant(&self, data: &Path, user: &str, tenant: &str, key_hex: &str, now: u64) -> Result<(), String> {
+        crate::profilecarrier::fetch(data, user, tenant, key_hex, now)
+    }
     fn export_sealed(&self, data: &Path, user: &str, to: &Path, now: u64) -> Result<u64, String> {
         crate::profilestore::ProfileStore::new(data, user).export_sealed(to, &crate::profilestore::holder_id(data), now).map_err(|e| e.to_string())
     }
@@ -87,27 +99,23 @@ impl NtpFacet for RealNtp {
 
 pub struct RealStartupDisk;
 
-fn sd_env(backup: &Path) -> crate::startupdisk::Env {
-    let mut e = crate::startupdisk::Env::real();
-    e.backup = backup.to_path_buf();
-    e
-}
+use iyakki_core_api::startupdisk::{StartupAction, StartupDisk};
 
 impl StartupDiskFacet for RealStartupDisk {
     fn register(&self, backup: &Path) -> Result<String, String> {
-        crate::startupdisk::register(&sd_env(backup))
+        crate::startupdisk::local(Some(backup.to_path_buf())).apply(StartupAction::Register, true)
     }
     fn first(&self, backup: &Path) -> Result<String, String> {
-        crate::startupdisk::first(&sd_env(backup))
+        crate::startupdisk::local(Some(backup.to_path_buf())).apply(StartupAction::First, true)
     }
     fn next(&self, backup: &Path) -> Result<String, String> {
-        crate::startupdisk::next(&sd_env(backup))
+        crate::startupdisk::local(Some(backup.to_path_buf())).apply(StartupAction::Next, true)
     }
     fn revert(&self, backup: &Path) -> Result<String, String> {
-        crate::startupdisk::revert(&sd_env(backup))
+        crate::startupdisk::local(Some(backup.to_path_buf())).apply(StartupAction::Revert, true)
     }
     fn status_line(&self, backup: &Path, reboot_setting: bool) -> String {
-        crate::startupdisk::status_line(&sd_env(backup), reboot_setting)
+        crate::startupdisk::local(Some(backup.to_path_buf())).status_line(reboot_setting)
     }
 }
 

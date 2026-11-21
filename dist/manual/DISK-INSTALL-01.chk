@@ -1,0 +1,16 @@
+scenario: DISK-INSTALL-01
+title: Install to the internal disk
+area: Install
+rows: F-STORE-04, F-INST-06
+machines: any
+needs: person
+prereq: A computer whose disk may be erased, started from the stick, with the power connected.
+step: Start the install and choose whole-disk mode.
+expect: The plan names the disk, its size and what will be erased, and asks you to confirm.
+clause: F-INST-06.plan
+step: Confirm and wait for the install to finish.
+expect: A message says the install is done and asks you to remove the stick.
+clause: F-STORE-04.done
+step: Remove the stick and restart.
+expect: IYAKKI starts from the internal disk and shows the first-start or sign-in screen.
+clause: F-STORE-04.boot

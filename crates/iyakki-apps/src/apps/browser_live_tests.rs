@@ -364,3 +364,106 @@ fn a_page_in_the_engine_that_asks_for_widevine_gets_the_plain_message_and_nothin
     // ClearKey alone (asked second) did not make a second message
     assert!(a.av.shown_drm_count() <= 1);
 }
+
+/// A frame with the pointer at `at` (screen pixels): what the drawn page puts under it is what the page's scripts are told about.
+fn hover_frame(a: &mut BrowserApp, cx: &AppCx, at: (i32, i32)) -> Vec<R> {
+    let mut g = Gfx::new(1280, 720);
+    g.clear(rgb(9, 11, 20));
+    g.mouse = at;
+    a.mouse = at;
+    a.render(&mut g, R::new(0.0, 72.0, 1280.0, 648.0), 1.0, cx, 0);
+    g.probes()
+}
+
+#[test]
+fn the_pointer_over_a_link_or_a_control_of_the_drawn_page_reaches_its_scripts_as_over_and_out() {
+    let page = "<p id=t>idle</p><a id=l href=\"/x\">Hover me</a> <button id=b type=button>Press</button>\
+        <script>var t = document.getElementById('t'); var l = document.getElementById('l'); var b = document.getElementById('b');\
+        l.addEventListener('mouseover', () => { t.textContent = 'over link'; }); l.addEventListener('pointerout', () => { t.textContent = 'out of link'; });\
+        b.addEventListener('mouseenter', () => { t.textContent = 'over button'; });</script>";
+    let web = site(vec![("https://a.org/", html(page))]);
+    let cx = cx_with("live_hover", web);
+    browser_config::save(&cx, &BrowserConfig { js_all: true, ..BrowserConfig::default() });
+    let mut a = BrowserApp::new(&cx);
+    a.open_url("a.org", &cx);
+    settle(&mut a, &cx);
+    assert_eq!(live_texts(&a)[0], "idle");
+    // every region the frame probed is a place the pointer could be: the one that makes a link the hovered one is the link
+    let probes = hover_frame(&mut a, &cx, (0, 0));
+    assert!(a.hover_node.is_none(), "the pointer is off the page");
+    let mut over_link = None;
+    for r in &probes {
+        hover_frame(&mut a, &cx, ((r.x + r.w / 2.0) as i32, (r.y + r.h / 2.0) as i32));
+        if a.hovered_link.is_some() {
+            over_link = Some(((r.x + r.w / 2.0) as i32, (r.y + r.h / 2.0) as i32));
+            break;
+        }
+    }
+    let at = over_link.expect("a probed region of the page is the link");
+    assert!(a.hover_node.is_some(), "the drawn link knows its page element");
+    live_wait(&mut a, &cx, "the page heard mouseover", |a| live_texts(a)[0] == "over link");
+    // it is told once: more frames at the same place send nothing more
+    let n = a.live_active().map(|s| s.pending());
+    hover_frame(&mut a, &cx, at);
+    assert_eq!(a.live_active().map(|s| s.pending()), n);
+    // the pointer leaves: pointerout follows
+    hover_frame(&mut a, &cx, (0, 0));
+    live_wait(&mut a, &cx, "the page heard pointerout", |a| live_texts(a)[0] == "out of link");
+    // without scripts nothing is sent and nothing breaks
+    browser_config::save(&cx, &BrowserConfig { js_all: false, ..BrowserConfig::default() });
+    let mut b = BrowserApp::new(&cx);
+    b.open_url("a.org", &cx);
+    settle(&mut b, &cx);
+    hover_frame(&mut b, &cx, at);
+    b.handle(&Event::Tick, &cx);
+    assert!(b.live_hover.is_none());
+}
+
+#[test]
+fn the_engines_page_lists_its_headings_links_buttons_pictures_and_landmarks_for_the_screen_reader_and_a_press_clicks_the_page() {
+    use crate::access::{self, Prefs, Role};
+    let (_fake, cx, mut a, _g) = in_full("fullacc1", "--static");
+    a.full.as_mut().unwrap().navigate("fake://access");
+    pump(&mut a, &cx, "the page's list", |a| !a.full_access.is_empty());
+    assert_eq!(a.full_access.len(), 5);
+    // the screen reader off: nothing is described
+    let g = frame(&mut a, &cx, 1280, 720);
+    assert!(!g.hits.iter().any(|h| matches!(h.ev, Event::Tab(n) if (8600..8760).contains(&n))));
+    // on: each thing has a region over the picture with the words of the page reader
+    access::set_prefs(Prefs { screen_reader: true, ..Prefs::OFF });
+    let g = frame(&mut a, &cx, 1280, 720);
+    access::set_prefs(Prefs::OFF);
+    let named: Vec<(String, Event)> = g.hits.iter().filter(|h| matches!(h.ev, Event::Tab(n) if (8600..8760).contains(&n))).map(|h| (access::node_of(h).map(|n| n.name).unwrap_or_default(), h.ev.clone())).collect();
+    let names: Vec<&str> = named.iter().map(|(n, _)| n.as_str()).collect();
+    for want in ["Main landmark", "Heading level 2, Pricing", "Link, Read more", "Button, Buy", "Image, A red fox"] {
+        assert!(names.contains(&want), "{want} in {names:?}");
+    }
+    assert!(access::node_of(g.hits.iter().find(|h| matches!(h.ev, Event::Tab(n) if (8600..8760).contains(&n))).unwrap()).is_some_and(|n| n.role == Role::Spoken));
+    // the regions are in front of the page area, so a mouse click still reaches the page
+    let first_region = g.hits.iter().position(|h| matches!(h.ev, Event::Tab(n) if (8600..8760).contains(&n))).unwrap();
+    let page = g.hits.iter().position(|h| h.ev == Event::Area(AREA_FULL)).unwrap();
+    assert!(first_region < page);
+    // a press on the button clicks the middle of its box in the page; one on the heading clicks nothing
+    let before = a.full.as_ref().unwrap().log.len();
+    let Some((_, ev)) = named.iter().find(|(n, _)| n == "Heading level 2, Pricing") else { panic!("{names:?}") };
+    a.handle(ev, &cx);
+    assert_eq!(a.full.as_ref().unwrap().log.len(), before, "a heading is not clicked");
+    let Some((_, ev)) = named.iter().find(|(n, _)| n == "Button, Buy") else { panic!("{names:?}") };
+    a.handle(ev, &cx);
+    pump(&mut a, &cx, "the click reached the helper", |a| a.full.as_ref().is_some_and(|f| f.log.iter().any(|l| l.contains("Mouse"))));
+}
+
+#[test]
+fn the_list_of_the_page_is_cleaned_known_kinds_only_names_cut_boxes_checked_and_a_password_box_carries_no_text() {
+    use super::full_access::parse;
+    let list = parse(r#"[{"r":"heading","n":"Hello","l":9,"x":1,"y":2,"w":10,"h":10},{"r":"script","n":"x","x":0,"y":0,"w":5,"h":5},{"r":"link","n":"a\u0007b","x":0,"y":0,"w":0,"h":5},{"r":"password","n":"Password","x":1,"y":1,"w":50,"h":20},{"r":"link","x":"bad","y":0,"w":5,"h":5}]"#);
+    assert_eq!(list.len(), 2, "{list:?}");
+    assert_eq!(list[0].words(), "Heading level 6, Hello", "a level above 6 is 6");
+    assert_eq!(list[1].words(), "Password field, Password");
+    let long = format!(r#"[{{"r":"button","n":"{}","x":0,"y":0,"w":5,"h":5}}]"#, "x".repeat(500));
+    assert_eq!(parse(&long)[0].name.chars().count(), 120);
+    assert!(parse("not json").is_empty() && parse("{}").is_empty());
+    let many = format!("[{}]", (0..400).map(|_| r#"{"r":"link","n":"l","x":0,"y":0,"w":5,"h":5}"#).collect::<Vec<_>>().join(","));
+    assert_eq!(parse(&many).len(), 160);
+    assert_eq!(parse(r#"[{"r":"main","x":0,"y":0,"w":5,"h":5}]"#)[0].words(), "Main landmark");
+}

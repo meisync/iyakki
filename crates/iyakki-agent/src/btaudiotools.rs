@@ -6,18 +6,21 @@
 //! * `bluetooth_audio_pairing` (asks): lets a new phone find and pair with this computer for two minutes. The number to compare is
 //!   answered by the person on Settings -> Bluetooth, never by the assistant.
 //!
-//! The work is [`iyakki_devctl::a2dp::AudioControl`]; this file finds the device, writes the card and waits for the result.
+//! The work is [`iyakki_core_local::devctl::a2dp::AudioControl`]; this file finds the device, writes the card and waits for the result.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use crate::agent::{Risk, ToolDef, Tools};
 use crate::chat::ToolSpec;
-use iyakki_devctl::a2dp::{AudioControl, AudioState};
-use iyakki_devctl::a2dp_send::{SendControl, SendView};
-use iyakki_devctl::bthid::{find_device, DeviceView, Devices};
+use iyakki_core_api::btaudio::{BtAudio, BtAudioAction};
+use iyakki_core_local::btaudio::{LocalBtAudio, SendRoute};
+use iyakki_core_local::devctl::a2dp::AudioControl;
+use iyakki_core_local::devctl::a2dp_send::SendControl;
+use iyakki_core_local::devctl::bthid::Devices;
+pub use iyakki_core_local::btaudio::test_tone;
 pub use iyakki_shared::btaudiotools::{PROMPT_RULE};
 
 
@@ -44,133 +47,104 @@ pub fn is_audio_tool(n: &str) -> bool {
     n == STATUS_TOOL || n == SEND_STATUS_TOOL || WRITE_TOOLS.contains(&n) || SEND_TOOLS.contains(&n)
 }
 
-/// A sending side that is not there (tests of the receiving tools, systems without Bluetooth).
-struct NoSend;
-impl SendControl for NoSend {
-    fn view(&self) -> SendView {
-        SendView { why: "sending sound to headphones is not available here".into(), ..Default::default() }
+/// The mixer tap of this computer as the route the core's handle attaches the sound to.
+struct RouteHandle(Arc<crate::btroute::BtRoute>);
+
+impl SendRoute for RouteHandle {
+    fn attach(&self, sender: Arc<dyn SendControl>, mute_local: bool) {
+        self.0.attach(sender, mute_local)
     }
-    fn start(&self, _: &str, _: &str) -> Result<(), String> {
-        Err("sending sound to headphones is not available here".into())
+    fn detach(&self) {
+        self.0.detach()
     }
-    fn stop(&self) -> Result<(), String> {
-        Err("no sound is being sent to a device".into())
+    fn listening(&self) -> bool {
+        self.0.listening()
     }
-    fn write(&self, _: &[i16], _: u32, _: usize) -> Result<(), String> {
-        Err("no sound is being sent to a device".into())
+    fn muted(&self) -> bool {
+        self.0.muted()
+    }
+    fn status(&self) -> String {
+        self.0.status()
     }
 }
 
-/// Two seconds of 440 Hz at a quiet level, as stereo PCM of 48 kHz.
-pub fn test_tone() -> Vec<i16> {
-    (0..96_000).flat_map(|i| {
-        let t = i as f64 / 48_000.0;
-        let fade = (t.min(2.0 - t) * 20.0).clamp(0.0, 1.0);
-        let v = ((t * 440.0 * std::f64::consts::TAU).sin() * 6000.0 * fade) as i16;
-        [v, v]
-    }).collect()
-}
-
+/// The chat tools of Bluetooth audio over the core's handle ([`LocalBtAudio`]): this file words the tools, the handle does the work.
 pub struct BtAudioTools {
     inner: Arc<dyn Tools>,
-    devs: Arc<dyn Devices>,
-    audio: Arc<dyn AudioControl>,
-    send: Arc<dyn SendControl>,
-    /// Where the whole computer's sound goes while sending (the machine's route; a private one in tests).
-    route: Arc<crate::btroute::BtRoute>,
-    wait: Duration,
-    poll: Duration,
+    core: LocalBtAudio,
 }
 
 impl BtAudioTools {
     pub fn new(inner: Arc<dyn Tools>, devs: Arc<dyn Devices>, audio: Arc<dyn AudioControl>) -> BtAudioTools {
-        BtAudioTools { inner, devs, audio, send: Arc::new(NoSend), route: Arc::new(crate::btroute::BtRoute::new()), wait: Duration::from_secs(20), poll: Duration::from_millis(500) }
+        BtAudioTools { inner, core: LocalBtAudio::new(devs, audio).with_route(Arc::new(RouteHandle(Arc::new(crate::btroute::BtRoute::new())))) }
     }
 
     /// The tools over this computer's real Bluetooth.
     pub fn real(inner: Arc<dyn Tools>) -> BtAudioTools {
-        BtAudioTools::new(inner, Arc::new(iyakki_devctl::bthid_sys::RealDevices), Arc::new(iyakki_devctl::a2dp_sys::RealAudio)).with_send(iyakki_devctl::a2dp_send_sys::real_sender()).with_route(crate::btroute::global())
+        BtAudioTools { inner, core: LocalBtAudio::real().with_route(Arc::new(RouteHandle(crate::btroute::global()))) }
     }
 
     /// The route the whole computer's sound takes while it is sent (the machine's own, [`crate::btroute::global`]).
     pub fn with_route(mut self, route: Arc<crate::btroute::BtRoute>) -> BtAudioTools {
-        self.route = route;
+        self.core = self.core.with_route(Arc::new(RouteHandle(route)));
+        self
+    }
+
+    /// Remember the last headphones in this file.
+    pub fn with_memory(mut self, file: std::path::PathBuf) -> BtAudioTools {
+        self.core = self.core.with_memory(file);
         self
     }
 
     /// The sending side (sound to headphones).
     pub fn with_send(mut self, send: Arc<dyn SendControl>) -> BtAudioTools {
-        self.send = send;
+        self.core = self.core.with_send(send);
         self
-    }
-
-    /// The paired headphones or speaker a sending tool means: the one named, else the only one paired.
-    fn sink(&self, args: &Value) -> Result<DeviceView, String> {
-        let list: Vec<DeviceView> = self.devs.list().into_iter().filter(|d| d.kind == "headphones" || d.kind == "speaker").collect();
-        let who = args.get("device").and_then(Value::as_str).unwrap_or("").trim();
-        if !who.is_empty() {
-            return find_device(&list, who).map_err(|e| e.replace("device", "pair of headphones or speaker"));
-        }
-        match list.len() {
-            0 => Err("no headphones or speaker are paired: put them in pairing mode and pair them in Settings -> Bluetooth first".into()),
-            1 => Ok(list[0].clone()),
-            _ => Err("more than one pair of headphones or speaker is paired: name the one to use (bluetooth_list shows them)".into()),
-        }
     }
 
     pub fn with_wait(mut self, wait: Duration, poll: Duration) -> BtAudioTools {
-        self.wait = wait;
-        self.poll = poll;
+        self.core = self.core.with_wait(wait, poll);
         self
     }
 
-    /// The paired device an audio tool means: the one named, else the only paired phone or laptop.
-    fn source(&self, args: &Value) -> Result<DeviceView, String> {
-        let list: Vec<DeviceView> = self.devs.list().into_iter().filter(|d| d.kind == "phone" || d.kind == "computer").collect();
-        let who = args.get("device").and_then(Value::as_str).unwrap_or("").trim();
-        if !who.is_empty() {
-            return find_device(&list, who).map_err(|e| e.replace("device", "phone or laptop"));
-        }
-        match list.len() {
-            0 => Err("no phone or laptop is paired: let a phone pair (bluetooth_audio_pairing) or pair one in Settings -> Bluetooth first".into()),
-            1 => Ok(list[0].clone()),
-            _ => Err("more than one phone or laptop is paired: name the one to use (bluetooth_list shows them)".into()),
-        }
+    /// Is the whole computer's sound being sent to a pair right now?
+    pub fn sending(&self) -> bool {
+        self.core.sending()
+    }
+
+    /// The paired headphones and speakers as (address, name), for the Sound page's choice.
+    pub fn sinks(&self) -> Vec<(String, String)> {
+        self.core.sinks()
+    }
+
+    /// One line for the Sound page: where the whole computer's sound goes (or why not), from the sender and the route.
+    pub fn sound_line(&self) -> String {
+        self.core.sound_line()
+    }
+
+    /// The remembered headphones as (address, mute speakers).
+    pub fn remembered(&self) -> Option<(String, bool)> {
+        self.core.remembered()
+    }
+
+    /// The change a tool name and its arguments mean.
+    fn action(name: &str, args: &Value) -> Option<BtAudioAction> {
+        let device = || args.get("device").and_then(Value::as_str).unwrap_or("").to_string();
+        Some(match name {
+            "bluetooth_audio_connect" => BtAudioAction::Connect { device: device() },
+            "bluetooth_audio_disconnect" => BtAudioAction::Disconnect,
+            "bluetooth_audio_pairing" => BtAudioAction::Pairing { on: args.get("on").and_then(Value::as_bool).unwrap_or(true) },
+            "bluetooth_audio_send_start" => BtAudioAction::SendStart { device: device(), whole_computer: whole_computer(args), mute_speakers: mute_speakers(args) },
+            "bluetooth_audio_send_stop" => BtAudioAction::SendStop,
+            "bluetooth_audio_send_tone" => BtAudioAction::SendTone,
+            _ => return None,
+        })
     }
 
     fn card(&self, name: &str, args: &Value) -> Result<String, String> {
-        match name {
-            "bluetooth_audio_connect" => {
-                let d = self.source(args)?;
-                Ok(format!("Connect “{}” ({}) for Bluetooth audio: when it plays music or video, the sound comes out of this computer's speakers until it is disconnected.", d.title(), d.address))
-            }
-            "bluetooth_audio_disconnect" => {
-                let v = self.audio.view();
-                match v.device {
-                    Some(d) => Ok(format!("Disconnect “{}” from Bluetooth audio: its sound stops. It stays paired.", d.title())),
-                    None => Err("no phone or laptop is connected for audio".into()),
-                }
-            }
-            "bluetooth_audio_pairing" => {
-                if args.get("on").and_then(Value::as_bool).unwrap_or(true) {
-                    Ok("Make this computer visible to phones for two minutes so a phone can pair with it for audio. The person must be at the phone and answer the number comparison on this screen. Nobody else can pair afterwards.".into())
-                } else {
-                    Ok("Close pairing for phones now.".into())
-                }
-            }
-            "bluetooth_audio_send_start" => {
-                let d = self.sink(args)?;
-                Ok(format!("Send sound to “{}” ({}): this computer connects to it and plays through it until you stop it. Only SBC is sent. {}", d.title(), d.address, if whole_computer(args) { if mute_speakers(args) { "All of this computer's sound goes to them and its own speakers are silent until you stop it." } else { "All of this computer's sound goes to them and its own speakers play too." } } else { "Only the test tone goes to them; the sound of this computer stays on its speakers." }))
-            }
-            "bluetooth_audio_send_stop" => {
-                let v = self.send.view();
-                if v.active { Ok(format!("Stop sending sound to “{}”. It stays paired.", v.device)) } else { Err("no sound is being sent to a device".into()) }
-            }
-            "bluetooth_audio_send_tone" => {
-                let v = self.send.view();
-                if v.active { Ok(format!("Play a two second test tone through “{}” at a quiet level.", v.device)) } else { Err("start sending to the headphones first (bluetooth_audio_send_start)".into()) }
-            }
-            _ => Err("not a Bluetooth audio tool".into()),
+        match Self::action(name, args) {
+            Some(a) => self.core.plan(&a),
+            None => Err("not a Bluetooth audio tool".into()),
         }
     }
 }
@@ -200,75 +174,12 @@ impl Tools for BtAudioTools {
 
     fn call(&self, name: &str, args: &Value) -> Result<String, String> {
         match name {
-            STATUS_TOOL => {
-                let v = self.audio.view();
-                let mut s = format!("Bluetooth audio: {}.", v.line());
-                if let Some(d) = &v.device {
-                    s.push_str(&format!(" Packets received {}, lost {}.", d.packets, d.lost));
-                }
-                Ok(s)
-            }
-            "bluetooth_audio_connect" => {
-                let d = self.source(args)?;
-                self.audio.connect(&d.address)?;
-                let until = Instant::now() + self.wait;
-                loop {
-                    let v = self.audio.view();
-                    if let Some(x) = v.device.filter(|x| x.address.eq_ignore_ascii_case(&d.address)) {
-                        return Ok(match x.state {
-                            AudioState::Playing => format!("Connected: {} is playing through this computer.", d.title()),
-                            AudioState::Connected => format!("Connected to {}. Start playing on it and the sound comes out here.", d.title()),
-                        });
-                    }
-                    if !v.ready {
-                        return Err(format!("{} did not connect: {}", d.title(), v.why_not));
-                    }
-                    if Instant::now() >= until {
-                        return Ok(format!("Still connecting to {}; look again with bluetooth_audio_status in a few seconds. A phone usually needs its Bluetooth audio switched on and the music started.", d.title()));
-                    }
-                    std::thread::sleep(self.poll);
-                }
-            }
-            SEND_STATUS_TOOL => Ok(format!("Sending sound to headphones: {}. Whole computer: {}.", self.send.view().line(), self.route.status())),
-            "bluetooth_audio_send_start" => {
-                let d = self.sink(args)?;
-                self.send.start(&d.address, &d.title())?;
-                if whole_computer(args) {
-                    self.route.attach(self.send.clone(), mute_speakers(args));
-                    Ok(format!("Sending this computer's sound to {} ({}){}. If the headphones stop taking sound the speakers play again by themselves.", d.title(), self.send.view().codec, if mute_speakers(args) { "; its own speakers are silent" } else { "" }))
-                } else {
-                    Ok(format!("Connected to {} ({}). Only a test tone goes to it; use bluetooth_audio_send_tone to hear it.", d.title(), self.send.view().codec))
-                }
-            }
-            "bluetooth_audio_send_stop" => {
-                self.route.detach(); // the speakers are back before the stream closes
-                self.send.stop()?;
-                Ok("Stopped sending sound; the headphones stay paired and this computer's speakers play again.".into())
-            }
-            "bluetooth_audio_send_tone" => {
-                let pcm = test_tone();
-                // while the whole computer is routed the tone takes the stream by itself for two seconds, then the route goes on
-                let (routed, muted) = (self.route.listening(), self.route.muted());
-                if routed {
-                    self.route.detach();
-                }
-                let r = pcm.chunks(2 * 4800).try_for_each(|c| self.send.write(c, 48_000, 2));
-                if routed {
-                    self.route.attach(self.send.clone(), muted);
-                }
-                r?;
-                Ok("Played a two second test tone through the headphones.".into())
-            }
-            "bluetooth_audio_disconnect" => {
-                self.audio.disconnect()?;
-                Ok("Disconnected the Bluetooth audio; the phone is still paired.".into())
-            }
-            "bluetooth_audio_pairing" => {
-                let on = args.get("on").and_then(Value::as_bool).unwrap_or(true);
-                self.audio.pairing_open(on)?;
-                Ok(if on { "This computer is visible to phones for two minutes. On the phone, open Bluetooth settings and choose this computer; the number to compare appears on this screen and the person confirms it there.".into() } else { "Pairing for phones is closed.".into() })
-            }
-            _ => self.inner.call(name, args),
+            STATUS_TOOL => Ok(self.core.receive_status()),
+            SEND_STATUS_TOOL => Ok(self.core.send_status()),
+            _ => match Self::action(name, args) {
+                Some(a) => self.core.apply(&a),
+                None => self.inner.call(name, args),
+            },
         }
     }
 
@@ -317,14 +228,14 @@ struct SpeakerFactory {
 
 struct SpeakerOutput(crate::audiosink::Output);
 
-impl iyakki_devctl::a2dp::Output for SpeakerOutput {
+impl iyakki_core_local::devctl::a2dp::Output for SpeakerOutput {
     fn write(&mut self, pcm: &[i16]) -> Result<(), String> {
         self.0.write(pcm)
     }
 }
 
-impl iyakki_devctl::a2dp::OutputFactory for SpeakerFactory {
-    fn open(&mut self, rate: u32, channels: usize, label: &str) -> Result<Box<dyn iyakki_devctl::a2dp::Output>, String> {
+impl iyakki_core_local::devctl::a2dp::OutputFactory for SpeakerFactory {
+    fn open(&mut self, rate: u32, channels: usize, label: &str) -> Result<Box<dyn iyakki_core_local::devctl::a2dp::Output>, String> {
         let out = crate::audiosink::open_output(crate::mixer::SourceKind::Media, rate, channels as u16, label, &self.play_cmd)?;
         Ok(Box::new(SpeakerOutput(out)))
     }
@@ -332,20 +243,24 @@ impl iyakki_devctl::a2dp::OutputFactory for SpeakerFactory {
 
 /// Registers the speaker for Bluetooth audio (the program calls this once, with the play command of Settings -> Voice).
 pub fn install(play_cmd: impl Fn() -> String + Send + Sync + 'static) {
-    iyakki_devctl::a2dp_sys::set_output_factory(move || Box::new(SpeakerFactory { play_cmd: play_cmd() }));
+    // the core's own handle (`Os::bt_audio`) sends the whole computer's sound through the same tap
+    iyakki_core_local::btaudio::set_global_route(Arc::new(RouteHandle(crate::btroute::global())));
+    iyakki_core_local::devctl::a2dp_sys::set_output_factory(move || Box::new(SpeakerFactory { play_cmd: play_cmd() }));
+    // AAC for Bluetooth goes through the person's ffmpeg (the audio and video add-on); nothing starts until a stream does
+    crate::btaac::install();
 }
 
 // ------------------------------------------------------------------------------------------------ the phone's remote control
 
 /// What a volume or play key of a phone or headset does here: the master volume, or IYAKKI's own player (the radio and the music it plays).
 /// Returns a short note for the audit line, empty when nothing was taken.
-pub fn do_remote(svc: &crate::services::Services, act: iyakki_devctl::avrcp::Act) -> String {
+pub fn do_remote(svc: &crate::services::Services, act: iyakki_core_local::devctl::avrcp::Act) -> String {
     do_remote_with(svc, &crate::media::shared(), act)
 }
 
 /// [`do_remote`] with the music player named (the shell's shared one, or a fake in a test).
-pub fn do_remote_with(svc: &crate::services::Services, player: &crate::media::MediaPlayer, act: iyakki_devctl::avrcp::Act) -> String {
-    use iyakki_devctl::avrcp::{Act, MediaKey};
+pub fn do_remote_with(svc: &crate::services::Services, player: &crate::media::MediaPlayer, act: iyakki_core_local::devctl::avrcp::Act) -> String {
+    use iyakki_core_local::devctl::avrcp::{Act, MediaKey};
     match act {
         Act::SetPercent(p) => svc.master_set(u32::from(p)).map(|m| format!("volume {}", m.percent)).unwrap_or_default(),
         Act::Step(d) => svc.master_nudge(i32::from(d)).map(|m| format!("volume {}", m.percent)).unwrap_or_default(),
@@ -369,7 +284,7 @@ pub fn do_remote_with(svc: &crate::services::Services, player: &crate::media::Me
 /// answered at all times; without a session nothing is changed). `audit` gets one line per key that did something.
 pub fn install_remote(svc: &std::sync::Arc<crate::services::Services>, user: &str, audit: impl Fn(&str, &str) + Send + Sync + 'static) {
     let (weak, user) = (std::sync::Arc::downgrade(svc), user.to_string());
-    iyakki_devctl::a2dp_sys::set_remote_handler(move |act| {
+    iyakki_core_local::devctl::a2dp_sys::set_remote_handler(move |act| {
         if let Some(s) = weak.upgrade() {
             let did = do_remote(&s, act);
             if !did.is_empty() {
@@ -381,7 +296,7 @@ pub fn install_remote(svc: &std::sync::Arc<crate::services::Services>, user: &st
 
 /// Sign-out: the keys change nothing until somebody signs in again.
 pub fn clear_remote() {
-    iyakki_devctl::a2dp_sys::clear_remote_handler();
+    iyakki_core_local::devctl::a2dp_sys::clear_remote_handler();
 }
 
 #[cfg(test)]

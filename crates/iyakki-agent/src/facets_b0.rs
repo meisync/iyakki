@@ -67,6 +67,9 @@ impl QuickInstallFacet for RealB0 {
     fn ollama_host_info(&self, data: &Path) -> HostInfo {
         crate::quickinstall::ollama_cluster::real_host_info(data)
     }
+    fn browser_package_card(&self, data: &Path, upstream: Arc<dyn iyakki_proxy::Upstream>) -> Result<Vec<String>, String> {
+        crate::browserpkg_tools::card_lines(data, upstream)
+    }
 }
 
 impl CheckupFacet for RealB0 {
@@ -244,9 +247,10 @@ impl B0Services for ServicesB0 {
         let dir = self.svc.dir();
         let allow = crate::sharedfolder::allow_fn_for(admin, policy, user, dir);
         let scope = crate::sharedfolder::scope_for(admin, user, dir);
-        let a2 = audit;
+        let a2 = audit.clone();
         let shares = crate::sharedfolder::for_user(dir, user, a2, allow, scope);
-        Arc::new(crate::sharetools::ShareTools::new(inner, Arc::new(crate::sharetools::RealApi { shares, svc: self.svc.clone(), user: user.to_string() })))
+        let domains = admin.then(|| crate::domains::Manager::shared(&self.svc, user, audit));
+        Arc::new(crate::sharetools::ShareTools::new(inner, Arc::new(crate::sharetools::RealApi { shares, svc: self.svc.clone(), user: user.to_string(), domains })))
     }
     fn shares_restore(&self, admin: bool, policy: Policy, user: &str, audit: Arc<dyn Fn(&str, &str) + Send + Sync>) {
         let dir = self.svc.dir();

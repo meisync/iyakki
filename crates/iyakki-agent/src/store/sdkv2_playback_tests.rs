@@ -125,3 +125,19 @@ fn an_mp3_inside_the_app_is_decoded_to_a_wav_for_the_sound_path_and_a_text_that_
     let files = files_of_bundle("player", &bundle);
     assert!(files("player", "a/tune.MP3").is_some());
 }
+
+#[test]
+fn a_second_reader_of_the_state_finds_no_events_and_still_gets_the_true_state_and_a_new_playback_forgets_it() {
+    // the playback viewer inside an app's page reads the state beside the app's own reads: the events go to whoever looks first
+    let (_m, _s, b) = rig();
+    let id = ok(&b, "media.play", json!({"id": "music/a.mp3"}))["id"].as_u64().unwrap();
+    let first = ok(&b, "media.state", json!({"id": id}));
+    assert_eq!(first["state"], "playing");
+    let second = ok(&b, "media.state", json!({"id": id}));
+    assert_eq!(second["state"], "playing", "no new event is not 'ready': {second}");
+    assert_eq!(ok(&b, "media.pause", json!({"id": id}))["state"], "paused");
+    assert_eq!(ok(&b, "media.state", json!({"id": id}))["state"], "paused");
+    assert_eq!(ok(&b, "media.state", json!({"id": id}))["state"], "paused", "and again");
+    let again = ok(&b, "media.play", json!({"id": "music/b.mp3"}))["id"].as_u64().unwrap();
+    assert_ne!(again, id);
+}

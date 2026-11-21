@@ -559,6 +559,59 @@ fn form_bytes() -> Vec<u8> {
     out
 }
 
+/// A form with a text field that has a default, a reset button, a sending button and a signed field.
+fn buttons_form_bytes() -> Vec<u8> {
+    let objs: [(u32, &str); 7] = [
+        (1, "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R 5 0 R 6 0 R 7 0 R] /DA (/Helv 0 Tf 0 g) >> >>"),
+        (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 100] >>"),
+        (3, "<< /Type /Page /Parent 2 0 R /Annots [4 0 R 5 0 R 6 0 R 7 0 R] >>"),
+        (4, "<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /V (Ada) /DV (Anon) /Rect [10 70 110 90] >>"),
+        (5, "<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 65536 /T (clear) /Rect [10 40 60 60] /MK << /CA (Clear) >> /A << /S /ResetForm >> >>"),
+        (6, "<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 65536 /T (send) /Rect [70 40 120 60] /MK << /CA (Send) >> /A << /S /SubmitForm /F (https://example.org/in) >> >>"),
+        (7, "<< /Type /Annot /Subtype /Widget /FT /Sig /T (sig1) /Rect [10 5 90 30] /V << /Type /Sig /Name (Grace Hopper) /ByteRange [0 10 20 5] /Contents <00> >> >>"),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offs = vec![0usize; 8];
+    for (n, b) in &objs {
+        offs[*n as usize] = out.len();
+        out.extend_from_slice(format!("{n} 0 obj\n{b}\nendobj\n").as_bytes());
+    }
+    let x = out.len();
+    out.extend_from_slice(b"xref\n0 8\n0000000000 65535 f \n");
+    for n in 1..8 {
+        out.extend_from_slice(format!("{:010} 00000 n \n", offs[n]).as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n").as_bytes());
+    out
+}
+
+#[test]
+fn a_reset_button_in_the_form_list_puts_its_fields_back_and_the_other_rows_say_what_they_are() {
+    let d0 = dir("pvform2");
+    let _ = std::fs::remove_dir_all(&d0);
+    let files = Files::new(Some(d0.clone()));
+    let d = dir("pvform2");
+    let f = d.join("b.pdf");
+    std::fs::write(&f, buttons_form_bytes()).unwrap();
+    let mut app = PdfApp::new(files);
+    app.open_path(&f);
+    let mut t = H::new(app);
+    until(&mut t, "opened with fields", |v| v.pages > 0 && !v.fields.is_empty());
+    t.click_label("Form (4)");
+    // a signature and a sending button are told, not run
+    t.click_label("Fill in send");
+    assert!(t.app.view.status.as_deref().unwrap().contains("https://example.org/in"), "{:?}", t.app.view.status);
+    t.click_label("Fill in sig1");
+    let s = t.app.view.status.clone().unwrap();
+    assert!(s.contains("signed by Grace Hopper") && s.contains("not verified here") && s.contains("changed after signing"), "{s}");
+    assert!(t.app.view.pending().is_empty());
+    // the reset button makes the change that waits to be saved
+    t.click_label("Fill in clear");
+    assert_eq!(t.app.view.pending(), &[("name".to_string(), "Anon".to_string())]);
+    assert!(t.has_button("Save copy (1)"));
+    let _ = std::fs::remove_dir_all(d);
+}
+
 fn form_harness(tag: &str, files: Arc<Files>) -> (H, PathBuf) {
     let d = dir(tag);
     let f = d.join("tax.pdf");
@@ -626,10 +679,10 @@ fn a_form_is_filled_in_the_viewer_and_saved_as_a_new_file_next_to_the_original()
 
 #[test]
 fn saving_follows_the_file_rules_and_a_file_that_cannot_be_filled_says_so() {
-    let d0 = dir("pvform2");
+    let d0 = dir("pvform2save");
     let _ = std::fs::remove_dir_all(&d0);
     let files = Arc::new(Files { downloads: Some(d0.clone()), denied: None, denied_write: Some(d0.clone()), audit: Mutex::new(Vec::new()) });
-    let (mut t, d) = form_harness("pvform2", files);
+    let (mut t, d) = form_harness("pvform2save", files);
     until(&mut t, "opened", |v| v.pages > 0 && !v.fields.is_empty());
     t.click_label("Form (4)");
     t.click_label("Fill in agree");

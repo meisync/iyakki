@@ -2,7 +2,7 @@
 
 
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum State {
     #[default]
     Stopped,
@@ -13,7 +13,7 @@ pub enum State {
 
 use iyakki_vpn::profile::{Mode, Profile};
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Status {
     pub state: State,
     pub error: Option<String>,
@@ -44,7 +44,7 @@ impl Status {
 }
 
 /// How the top bar's lock and the Devices line show the VPN. `None` of it when no profile is enabled (nothing to show).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Light {
     /// Connected and the handshake is fresh.
     Secure,
@@ -56,7 +56,7 @@ pub enum Light {
     Open,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Summary {
     pub light: Light,
     /// One short line, no key and no address of the server: "VPN connected: Office (FULL)".
@@ -91,7 +91,7 @@ pub fn ago(s: u64) -> String {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Row {
     pub profile: Profile,
     pub enabled: bool,
@@ -99,7 +99,7 @@ pub struct Row {
 }
 
 /// What an import found, for the person.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Imported {
     pub profile: Profile,
     pub warnings: Vec<String>,

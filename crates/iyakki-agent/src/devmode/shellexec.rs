@@ -17,7 +17,8 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use iyakki_core_local::starters_launch::Launch;
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -381,8 +382,7 @@ pub fn exec(dm: &DevMode, sid: u64, computer: &str, line: &str) -> Result<(u64, 
         return Err("could not make a pipe".into());
     }
     let (r_fd, w_fd) = (fds[0], fds[1]);
-    let mut cmd = Command::new("/bin/sh");
-    cmd.arg("-c").arg(cwd_file_wrapper()).arg("iyakki-dev").arg(&cwd).arg(line);
+    let mut cmd = Launch::new("/bin/sh").arg("-c").arg(cwd_file_wrapper()).arg("iyakki-dev").arg(&cwd).arg(line).into_command();
     // the device nodes a redirect needs, when this process may make them right (it runs the commands as another user)
     // SAFETY: geteuid(2) takes no arguments and cannot fail.
     if unsafe { libc::geteuid() } == 0 {
@@ -538,8 +538,7 @@ pub fn exec_tty(dm: &DevMode, sid: u64, computer: &str, line: &str, rows: u64, c
     }
     // SAFETY: both descriptors were just made by openpty and are owned here from now on.
     let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-    let mut cmd = Command::new("/bin/sh");
-    cmd.args(tty_argv(line));
+    let mut cmd = Launch::new("/bin/sh").args(tty_argv(line)).into_command();
     // SAFETY: geteuid(2) takes no arguments and cannot fail.
     if unsafe { libc::geteuid() } == 0 {
         for n in ensure_std_nodes(Path::new("/dev")) {

@@ -18,6 +18,8 @@ pub const TTL_AFTER_FINISHED_SECS: u64 = 600;
 /// Memory kept for the pod's `/tmp` (disk, not memory).
 pub const TMP_MIB: u32 = 64;
 pub const RUN_LABEL: &str = "iyakki.dev/sandbox-run";
+/// Where the image of a namespace-tier pod keeps the folder that the sandbox pivots into.
+pub const NS_ROOTFS_IN_POD: &str = "/opt/iyakki/rootfs";
 pub const SECRETS_DIR: &str = "/run/secrets/iyakki";
 
 fn labels(adm: &Admitted) -> Map<String, Value> {
@@ -126,7 +128,7 @@ pub fn browser_spec(adm: &Admitted, policy: &SandboxPolicy) -> Value {
     })
 }
 
-/// The hardened Job of one run (tiers `job` and `browser`).
+/// The hardened Job of one run (tiers `job` and `browser`; the namespace tier when the pod carries it).
 pub fn job_for(adm: &Admitted, policy: &SandboxPolicy, ns: &str) -> Value {
     let spec = adm.spec();
     let browser = adm.tier() == Tier::Browser;
@@ -134,7 +136,14 @@ pub fn job_for(adm: &Admitted, policy: &SandboxPolicy, ns: &str) -> Value {
     let image = if spec.image.is_empty() { policy.browser_image.clone() } else { spec.image.clone() };
     let seconds = if browser { spec.limits.seconds.min(policy.browser_session_secs) } else { spec.limits.seconds };
     let workdir = spec.workdir_or_default().to_string();
-    let command: Vec<String> = if browser {
+    let ns_tier = adm.tier() == Tier::Namespace;
+    let command: Vec<String> = if ns_tier {
+        // the pod itself builds the sandbox: `iyakki linuxapp-init ...` (user, mount, pid, uts, ipc, net namespaces, limits, seccomp)
+        let inputs = inputs_configmap(adm, ns, policy).map(|_| "/inputs".to_string());
+        let mut c = vec!["iyakki".to_string()];
+        c.extend(super::exec::ns_spec(adm, NS_ROOTFS_IN_POD, "/workspace", inputs).to_args());
+        c
+    } else if browser {
         ["iyakki", "browser-test", "/inputs/spec.json", "--out", "/workspace/out", "--json", "--profile", "/profile"].iter().map(|s| s.to_string()).collect()
     } else {
         // files the request named are printed on the log by a wrapper, because the pod is gone when the Job has ended (`frames`)
@@ -230,6 +239,15 @@ pub fn job_for(adm: &Admitted, policy: &SandboxPolicy, ns: &str) -> Value {
     if let Some(rc) = &policy.runtime_class {
         pod["runtimeClassName"] = json!(rc);
     }
+    if ns_tier {
+        // the one place the pod is relaxed, and only because the tenant admin said so (`userns_ack`): creating user namespaces and
+        // mounting in them needs no seccomp or AppArmor profile in the way. The user ids of the pod stay its own (`hostUsers: false`),
+        // no capability is added, privilege escalation stays off, the root file system stays read-only.
+        pod["hostUsers"] = json!(false);
+        pod["securityContext"]["seccompProfile"] = json!({"type": "Unconfined"});
+        pod["containers"][0]["securityContext"]["seccompProfile"] = json!({"type": "Unconfined"});
+        pod["containers"][0]["securityContext"]["appArmorProfile"] = json!({"type": "Unconfined"});
+    }
     json!({
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -248,7 +266,7 @@ pub fn job_for(adm: &Admitted, policy: &SandboxPolicy, ns: &str) -> Value {
 /// Everything to apply for a run, in order: NetworkPolicy, inputs, Job. (The Secret of file-delivered secrets is made by the executor
 /// from the resolver's values, after the NetworkPolicy and before the Job.)
 pub fn bundle(adm: &Admitted, policy: &SandboxPolicy, ns: &str) -> Vec<Value> {
-    debug_assert!(matches!(adm.tier(), Tier::Job | Tier::Browser) && adm.spec().work != Work::WasmModule);
+    debug_assert!(matches!(adm.tier(), Tier::Job | Tier::Browser | Tier::Namespace) && adm.spec().work != Work::WasmModule);
     let mut v = vec![network_policy(adm, policy, ns)];
     if let Some(c) = inputs_configmap(adm, ns, policy) {
         v.push(c);

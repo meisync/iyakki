@@ -49,7 +49,7 @@ fn switch_hits(g: &Gfx) -> Vec<(String, R)> {
 }
 
 fn audit(cx: &AppCx) -> String {
-    std::fs::read_to_string(cx.audit.path()).unwrap_or_default().replace("\\\"", "\"")
+    std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default().replace("\\\"", "\"")
 }
 
 const CLUSTER_ITEMS: [Item; 4] = [Item::Registry, Item::Lemonade, Item::DuckDb, Item::Elasticsearch];

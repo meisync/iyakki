@@ -10,7 +10,7 @@ pub use iyakki_shared::settingstools_views::{PROMPT_RULE};
 
 const TAB: &str = "Views";
 
-pub const TOOLS: [&str; 10] = ["views_list", "views_templates_list", "views_make", "views_rename", "views_delete", "views_lock", "views_keys", "views_switch", "views_template_save", "views_template_delete"];
+pub const TOOLS: [&str; 11] = ["views_list", "views_templates_list", "views_make", "views_rename", "views_delete", "views_lock", "views_keys", "views_switch", "views_share", "views_template_save", "views_template_delete"];
 
 
 fn describe_list(v: &Views, own: &UserTemplates) -> String {
@@ -125,7 +125,7 @@ pub fn entries(env: &Env) -> Vec<Entry> {
     }
     {
         let e = env.clone();
-        let schema = json!({"type": "object", "properties": {"key_set": {"type": "string", "enum": ["browser", "mac", "both"]}, "reset_on_lock": {"type": "boolean"}, "remember_layout": {"type": "boolean", "description": "Keep each view's window arrangement across switching and sign-out (off forgets the saved ones)."}, "single_apps": {"type": "array", "items": {"type": "string"}, "description": "App ids that keep one window: opening one that is already open goes to it. [\"*\"] is every app, [] turns the rule off."}}});
+        let schema = json!({"type": "object", "properties": {"key_set": {"type": "string", "enum": ["browser", "mac", "both"]}, "reset_on_lock": {"type": "boolean"}, "remember_layout": {"type": "boolean", "description": "Keep each view's window arrangement across switching and sign-out (off forgets the saved ones)."}, "custom_prev": {"type": "string", "description": "A key of your own for the previous view, used with Ctrl+Alt: a letter other than M, Q, L and S, or [ ] , . (empty text with custom_next empty turns the own keys off)."}, "custom_next": {"type": "string", "description": "The key for the next view, used with Ctrl+Alt; it must differ from custom_prev."}, "single_apps": {"type": "array", "items": {"type": "string"}, "description": "App ids that keep one window: opening one that is already open goes to it. [\"*\"] is every app, [] turns the rule off."}}});
         v.push(Entry::change(TAB, "views_keys", "Choose the step keys (browser-style Ctrl+Alt+PageUp/PageDown, Mac-style Control+Command+Left/Right, or both) and whether the lock returns to the first view. The person approves a card first.", schema, |_| "Change the desktop view keys".into(), move |a| {
             let mut views = Views::load(&e.dir, &e.user);
             if let Some(k) = a.get("key_set").and_then(Value::as_str) {
@@ -146,12 +146,19 @@ pub fn entries(env: &Env) -> Vec<Entry> {
                 let apps: Vec<String> = list.as_array().ok_or("`single_apps` is a list of app ids")?.iter().map(|x| x.as_str().map(str::to_string).ok_or("`single_apps` holds app ids as text")).collect::<Result<_, _>>()?;
                 views.set_single(&apps)?;
             }
-            if ["key_set", "reset_on_lock", "remember_layout", "single_apps"].iter().all(|k| a.get(*k).is_none()) {
-                return Err("say `key_set`, `reset_on_lock`, `remember_layout` or `single_apps`".into());
+            if a.get("custom_prev").is_some() || a.get("custom_next").is_some() {
+                let given = |k: &str| a.get(k).and_then(Value::as_str).map(str::trim);
+                match (given("custom_prev"), given("custom_next")) {
+                    (Some(p), Some(n)) => views.custom_keys = crate::views::CustomKeys::from_typed(p, n).map_err(|e| format!("`custom_prev` and `custom_next`: {e}"))?,
+                    _ => return Err("give both `custom_prev` and `custom_next` (or both empty to turn the own keys off)".into()),
+                }
+            }
+            if ["key_set", "reset_on_lock", "remember_layout", "single_apps", "custom_prev", "custom_next"].iter().all(|k| a.get(*k).is_none()) {
+                return Err("say `key_set`, `reset_on_lock`, `remember_layout`, `single_apps` or `custom_prev` with `custom_next`".into());
             }
             views.save(&e.dir, &e.user);
             e.audit("view.keys", views.key_set.label());
-            Ok(format!("Step keys: {}. After the lock or the screen saver: {}. Window layouts: {}. One window per app: {}.", views.key_set.label(), if views.reset_on_lock { "return to the first view" } else { "stay where you were" }, if views.remember_layout { "remembered" } else { "not remembered" }, if views.single_apps.is_empty() { "off".to_string() } else { views.single_apps.join(", ") }))
+            Ok(format!("Step keys: {}{}. After the lock or the screen saver: {}. Window layouts: {}. One window per app: {}.", views.key_set.label(), views.custom_keys.as_ref().map(|c| format!(", and your own {}", c.label())).unwrap_or_default(), if views.reset_on_lock { "return to the first view" } else { "stay where you were" }, if views.remember_layout { "remembered" } else { "not remembered" }, if views.single_apps.is_empty() { "off".to_string() } else { views.single_apps.join(", ") }))
         }));
     }
     {
@@ -163,6 +170,18 @@ pub fn entries(env: &Env) -> Vec<Entry> {
             let w = views.get(id).map(|w| (w.name.clone(), w.locked)).unwrap_or_default();
             e.audit("view.switch.request", &w.0);
             Ok(if w.1 { format!("{} is locked: the lock screen asks the person for the password first.", w.0) } else { format!("Switching to {}.", w.0) })
+        }));
+    }
+    {
+        let e = env.clone();
+        let schema = json!({"type": "object", "properties": {"view": {"type": ["string", "integer"], "description": "The view that should show the open app as well: its number or name."}}, "required": ["view"]});
+        v.push(Entry::change(TAB, "views_share", "Show the app that is open on screen now in another desktop view as well. It is the same instance (not a copy): what is typed in one view is there in the other. The other view must have no app open. The person approves a card first.", schema, |a| format!("Show the open app in the desktop view {} as well", which(a)), move |a| {
+            let views = Views::load(&e.dir, &e.user);
+            let id = views.find(&arg_str(a, "view")?)?;
+            let name = views.get(id).map(|w| w.name.clone()).unwrap_or_default();
+            crate::views::request_share(&e.dir, &e.user, id);
+            e.audit("view.share.request", &name);
+            Ok(format!("The app that is open will be shown in {name} as well (if it has no app open and one is showing now)."))
         }));
     }
     {

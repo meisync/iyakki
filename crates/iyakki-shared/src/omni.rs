@@ -2,7 +2,7 @@ use crate::lemonade::Model;
 use crate::lemonade::UsePlan;
 
 /// Where a collection stands before it can be used.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Review {
     pub collection: Model,
     pub plan: UsePlan,

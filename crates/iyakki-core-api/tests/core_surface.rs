@@ -4,7 +4,7 @@
 //! `src/lib.rs`, and lists the public items one per line: modules, structs and their public fields, enums and their variants, traits
 //! and their methods, public functions and methods of inherent impls, constants, type aliases, re-exports and the names of trait
 //! impls. `#[serde(..)]`, `#[cfg(..)]`, `#[non_exhaustive]` and `#[deprecated]` attributes are part of the line they belong to (they are
-//! the wire shape). Doc comments, derives, bodies, private items and test code are not.
+//! the wire shape). Doc comments, bodies, private items and test code are not.
 //!
 //! `docs/development/core-surface.txt` holds that list. The gate is a ratchet:
 //!   * an item that is in the code and not in the file: ADDITION, the file must be updated (append);
@@ -16,8 +16,11 @@
 //! Update the file with `IYAKKI_CORE_SURFACE_WRITE=1 cargo test -p iyakki-core-api --test core_surface -- --nocapture`. Additions are
 //! appended. A removal or change needs `IYAKKI_CORE_SURFACE_NOTE="why"`; the gone lines are then kept as `removed` lines with the note.
 //!
-//! Limits (honest): items behind a non-`pub mod` are not listed (a `pub use` of them is); derives and `impl Trait for Type` bodies are not
-//! compared; macros that generate items are not seen.
+//! Derives of a public struct or enum are listed as `derive Type: A, B` lines (sorted; added 2026-11-19, F-10), so taking a trait away is a
+//! visible change.
+//!
+//! Limits (honest): items behind a non-`pub mod` are not listed (a `pub use` of them is); `impl Trait for Type` bodies are not compared (the
+//! trait fixes their shape); macros that generate items are not seen.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -275,6 +278,7 @@ fn block(s: &mut Scan, ctx: &mut Ctx, kind: Kind, path: &str, owner: &str, publi
         }
         let at = attr_text(&attrs);
         let test_only = attrs.iter().any(|a| a.starts_with("cfg(test)"));
+        let derives = derive_list(&attrs);
         attrs.clear();
         match kind {
             Kind::Struct | Kind::Enum => {
@@ -342,17 +346,24 @@ fn block(s: &mut Scan, ctx: &mut Ctx, kind: Kind, path: &str, owner: &str, publi
                 let pubn = is_pub && !test_only;
                 if pubn {
                     ctx.out.push(format!("{path} | {at}pub {h2}"));
+                    derive_line(ctx.out, path, strip_gen(&name), &derives);
                     block(s, ctx, Kind::Struct, path, strip_gen(&name), true, depth_file);
                 } else {
                     skip_block(s);
                 }
             }
-            ("struct", _) => line(format!("pub {h2}"), ctx.out),
+            ("struct", _) => {
+                line(format!("pub {h2}"), ctx.out);
+                if shown && public_owner && !test_only {
+                    derive_line(ctx.out, path, strip_gen(h2.split_whitespace().nth(1).unwrap_or("")), &derives);
+                }
+            }
             ("enum", Some('{')) => {
                 s.i += 1;
                 let name = h2.split_whitespace().nth(1).unwrap_or("").to_string();
                 if is_pub && !test_only {
                     ctx.out.push(format!("{path} | {at}pub {h2}"));
+                    derive_line(ctx.out, path, strip_gen(&name), &derives);
                     block(s, ctx, Kind::Enum, path, strip_gen(&name), true, depth_file);
                 } else {
                     skip_block(s);
@@ -424,6 +435,26 @@ fn block(s: &mut Scan, ctx: &mut Ctx, kind: Kind, path: &str, owner: &str, publi
                 s.i += 1;
             }
         }
+    }
+}
+
+/// The traits a type derives, sorted (all `#[derive(..)]` attributes of the item together). Taking `Clone` or `Serialize` away from a public type
+/// is a break for the code that used it, so it is part of the surface (F-10: derives were not compared before 2026-11-19).
+fn derive_list(attrs: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = attrs
+        .iter()
+        .filter_map(|a| a.strip_prefix("derive(").and_then(|r| r.strip_suffix(')')))
+        .flat_map(|r| r.split(',').map(|t| t.trim().to_string()).collect::<Vec<_>>())
+        .filter(|t| !t.is_empty())
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+fn derive_line(out: &mut Vec<String>, path: &str, name: &str, derives: &[String]) {
+    if !derives.is_empty() {
+        out.push(format!("{path} | derive {name}: {}", derives.join(", ")));
     }
 }
 
@@ -600,6 +631,13 @@ fn the_scanner_reads_the_shapes_it_is_meant_to() {
         #[derive(Clone)]
         #[serde(tag = \"t\", rename_all = \"snake_case\")]
         pub enum Msg { A, B { x: u32, y: Vec<String> }, #[serde(rename = \"c\")] C(u8) }
+        #[derive(Debug, Clone)]
+        #[derive(Copy, PartialEq, Eq, Clone)]
+        pub struct Unit;
+        #[derive(Default)]
+        pub struct Wrap<T>(pub T);
+        #[derive(Clone)]
+        struct Private;
         pub struct S { pub a: BTreeMap<String, u32>, b: u8, #[serde(default)] pub c: Option<String> }
         pub trait T { fn one(&self) -> u32; fn two(&mut self, x: &str) -> Result<(), E> { Ok(()) } }
         impl S { pub fn new(a: u32) -> S { S { a: 1 } } fn private(&self) {} pub const K: u8 = 3; }
@@ -624,6 +662,9 @@ fn the_scanner_reads_the_shapes_it_is_meant_to() {
         "m | Msg::A",
         "m | Msg::B { x: u32, y: Vec<String> }",
         "m | [serde(rename = \"c\")] Msg::C(u8)",
+        "m | derive Msg: Clone",
+        "m | derive Unit: Clone, Copy, Debug, Eq, PartialEq",
+        "m | derive Wrap: Default",
         "m | pub struct S",
         "m | S.a: BTreeMap<String, u32>",
         "m | [serde(default)] S.c: Option<String>",
@@ -638,7 +679,7 @@ fn the_scanner_reads_the_shapes_it_is_meant_to() {
     ] {
         assert!(text.contains(want), "scanner lost {want:?}; got:\n{text}");
     }
-    for no in ["HIDDEN", "S.b", "private", "hidden", "tests"] {
+    for no in ["HIDDEN", "S.b", "private", "hidden", "tests", "derive Private", "derive S:"] {
         assert!(!text.contains(no), "scanner showed {no:?}:\n{text}");
     }
 }

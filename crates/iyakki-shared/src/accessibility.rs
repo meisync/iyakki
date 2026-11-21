@@ -39,11 +39,13 @@ pub struct Access {
     pub typing_echo: bool,
     /// Also send what the reader says to a connected braille display (off by default; F-A11Y-07).
     pub braille: bool,
+    /// Contracted (grade 2) braille instead of one cell a letter (off by default; only used while `braille` is on).
+    pub braille_contracted: bool,
 }
 
 impl Default for Access {
     fn default() -> Access {
-        Access { screen_reader: false, speak_notices: true, large_pointer: false, big_ring: false, reduce_motion: false, sticky_keys: false, slow_keys_ms: 0, typing_echo: true, braille: false }
+        Access { screen_reader: false, speak_notices: true, large_pointer: false, big_ring: false, reduce_motion: false, sticky_keys: false, slow_keys_ms: 0, typing_echo: true, braille: false, braille_contracted: false }
     }
 }
 
@@ -60,7 +62,7 @@ impl Access {
     pub fn describe(&self) -> String {
         let on = |b: bool| if b { "on" } else { "off" };
         format!(
-            "screen reader {}; speak notices {}; large pointer {}; big focus ring {}; reduce motion {}; sticky keys {}; slow keys {}; typing echo {}; braille display {}",
+            "screen reader {}; speak notices {}; large pointer {}; big focus ring {}; reduce motion {}; sticky keys {}; slow keys {}; typing echo {}; braille display {}; braille grade {}",
             on(self.screen_reader),
             on(self.speak_notices),
             on(self.large_pointer),
@@ -69,7 +71,8 @@ impl Access {
             on(self.sticky_keys),
             if self.slow_keys_ms == 0 { "off".to_string() } else { format!("{} ms", self.slow_keys_ms) },
             on(self.typing_echo),
-            on(self.braille)
+            on(self.braille),
+            if self.braille_contracted { "contracted (grade 2)" } else { "uncontracted (grade 1)" }
         )
     }
 }

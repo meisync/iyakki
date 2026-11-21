@@ -186,7 +186,7 @@ fn work_dir(tag: &str) -> PathBuf {
 
 fn run_node(dir: &Path, driver: &str) -> String {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/webservice/ui");
-    for f in ["tilerender.js", "tiles.js"] {
+    for f in ["displaylist.js", "tilerender.js", "tiles.js"] {
         std::fs::copy(src.join(f), dir.join(f)).unwrap();
     }
     std::fs::write(dir.join("driver.js"), driver).unwrap();
@@ -468,7 +468,20 @@ const tick = () => new Promise((r) => setImmediate(r));
   const baseCtx = (apiObj) => ({ api: apiObj, el, say: (m) => said.push(m), poll: () => () => {}, onLeave: (f) => leaves.push(f), me: { user: "ann" }, doc, messageFor: App.messageFor });
   // the renderer the page uses is the real one, with a canvas stand-in
   global.ImageData = class { constructor(d, w, h) { this.data = d; this.width = w; this.height = h; } };
-  global.IyakkiTileRender = require(path.join(dir, "tilerender.js"));
+  // the renderer files are loaded by the page when it opens (KI-993): a script element in the stand-in document "loads" them and says so
+  const loaded = [];
+  const lazyDoc = Object.assign({}, doc, { head: { appendChild(s) {
+    loaded.push(s.src);
+    if (s.src === "/ui/displaylist.js") global.IyakkiDisplayList = require(path.join(dir, "displaylist.js"));
+    if (s.src === "/ui/tilerender.js") global.IyakkiTileRender = require(path.join(dir, "tilerender.js"));
+    s.listeners.load();
+  } } });
+  const lazyHost = node("div");
+  await T.page().render(Object.assign(baseCtx({ get: async () => ({ ok: true, status: 200, data: { tiles: [{ id: "counter", title: "Counter", abi: 1, width: 320, height: 200 }] } }), post: async () => ({ ok: true, status: 200, data: { frame: { ops: [] } } }) }), { doc: lazyDoc }), lazyHost);
+  ok(JSON.stringify(loaded) === '["/ui/displaylist.js","/ui/tilerender.js"]', "the page loads the two renderer files when it opens: " + JSON.stringify(loaded));
+  await T.page().render(baseCtx({ get: async () => ({ ok: true, status: 200, data: { tiles: [{ id: "counter", title: "Counter", abi: 1, width: 320, height: 200 }] } }), post: async () => ({ ok: true, status: 200, data: { frame: { ops: [] } } }) }), node("div"));
+  ok(loaded.length === 2, "and not again once they are there");
+  while (timers.filter(Boolean).length) await fire();
   const pagePosts = [];
   const counter = JSON.parse(fs.readFileSync(path.join(dir, "counter-0.json"), "utf8"));
   const pageApi = { get: async () => ({ ok: true, status: 200, data: { tiles: [{ id: "counter", title: "Counter (example tile)", abi: 1, width: 320, height: 200 }] } }),

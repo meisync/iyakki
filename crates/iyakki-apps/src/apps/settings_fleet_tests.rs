@@ -46,7 +46,7 @@ fn audit(cx: &AppCx) -> Vec<String> {
 }
 
 fn hb(n: u64) -> Heartbeat {
-    Heartbeat { disk_free_mb: 1000 * n, disk_total_mb: 9000, cpu_load_pct: 10 * n as u32, cpus: 4, mem_used_pct: 20, mem_total_mb: 8000, tasks_running: 1, models: vec!["m".into()] }
+    Heartbeat { disk_free_mb: 1000 * n, disk_total_mb: 9000, cpu_load_pct: 10 * n as u32, cpus: 4, mem_used_pct: 20, mem_total_mb: 8000, tasks_running: 1, models: vec!["m".into()], battery_pct: None }
 }
 
 fn remote(tag: &str) -> (Arc<Hub>, String) {

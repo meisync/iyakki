@@ -28,6 +28,7 @@ members = [
     "crates/iyakki-audiodec",
     "crates/iyakki-wordtime",
     "crates/iyakki-clock",
+    "crates/iyakki-board-model",
     "crates/iyakki-testkit",
     "crates/iyakki-cloudmode",
     "crates/iyakki-shared",
@@ -44,7 +45,9 @@ members = [
     "crates/iyakki-core-local",
     "crates/iyakki-uikit",
     "crates/iyakki-ui-sdk",
+    "crates/iyakki-app-edit",
     "crates/iyakki-app-sample",
+    "crates/iyakki-app-terminal",
     "crates/iyakki-app-markdown",
     "crates/iyakki-ui-preview",
     "crates/iyakki-ui-client",
@@ -52,11 +55,17 @@ members = [
     "crates/iyakki-ui-bin",
     "crates/iyakki-tile-api",
     "crates/iyakki-tile-usage",
+    "crates/iyakki-tile-board",
     "crates/iyakki-tile-radio",
     "crates/iyakki-tile-pdf",
     "crates/iyakki-tile-calendar",
     "crates/iyakki-tile-remotefiles",
     "crates/iyakki-tile-cameras",
+    "crates/iyakki-tile-firewall",
+    "crates/iyakki-site-apps",
+    "crates/iyakki-hostfiles",
+    "crates/iyakki-tile-hostfiles",
+    "crates/iyakki-devtools-engine",
     "crates/iyakki-proxy",
     "crates/iyakki-swarm",
     "crates/iyakki-storage",
@@ -79,14 +88,17 @@ members = [
     "crates/iyakki-extagentx",
     "crates/iyakki-zram",
     "crates/iyakki-fw",
+    "crates/iyakki-linuxinit",
     "crates/iyakki-vpn",
     "crates/iyakki-filter",
     "crates/iyakki-relcheck",
     "crates/iyakki-store-server",
+    "crates/iyakki-relay",
     "crates/iyakki-stage1",
     "crates/iyakki-rfb",
     "crates/iyakki-schema",
     "crates/iyakki-link",
+    "crates/iyakki-audiolink",
     "crates/iyakki-tile-abi",
     "crates/iyakki-tile-host",
     "crates/iyakki-sdk-tile",
@@ -130,6 +142,7 @@ iyakki-webcrypto = { path = "crates/iyakki-webcrypto" }
 iyakki-audiodec = { path = "crates/iyakki-audiodec" }
 iyakki-wordtime = { path = "crates/iyakki-wordtime" }
 iyakki-clock = { path = "crates/iyakki-clock" }
+iyakki-board-model = { path = "crates/iyakki-board-model" }
 iyakki-cloudmode = { path = "crates/iyakki-cloudmode" }
 iyakki-shared = { path = "crates/iyakki-shared" }
 iyakki-dash = { path = "crates/iyakki-dash" }
@@ -165,8 +178,11 @@ iyakki-memx = { path = "crates/iyakki-memx" }
 iyakki-extagentx = { path = "crates/iyakki-extagentx" }
 iyakki-zram = { path = "crates/iyakki-zram" }
 iyakki-fw = { path = "crates/iyakki-fw" }
+iyakki-linuxinit = { path = "crates/iyakki-linuxinit" }
+iyakki-hostfiles = { path = "crates/iyakki-hostfiles" }
 iyakki-schema = { path = "crates/iyakki-schema" }
 iyakki-link = { path = "crates/iyakki-link" }
+iyakki-audiolink = { path = "crates/iyakki-audiolink" }
 iyakki-core-api = { path = "crates/iyakki-core-api" }
 iyakki-core-fake = { path = "crates/iyakki-core-fake" }
 iyakki-core-local = { path = "crates/iyakki-core-local" }

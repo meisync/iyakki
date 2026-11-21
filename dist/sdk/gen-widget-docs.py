@@ -29,7 +29,7 @@ SNIP = os.path.join(GUIDE, "recipes")
 # page file, title, one line of what it is, modules
 PAGES = [
     ("app-and-host", "The app, its context and the host", "What an app implements (`UiApp`), what it is handed on every call (`UiCx`), the driver (`Host`), input events and the storage port.",
-     ["app.rs", "cx.rs", "host.rs", "event.rs", "gesture.rs", "ports.rs"]),
+     ["app.rs", "cx.rs", "host.rs", "event.rs", "gesture.rs", "ports.rs", "zoom.rs"]),
     ("drawing", "Drawing: Canvas, geometry and the display list", "The one drawing trait, the shapes it uses, the recording canvas and the wire format.",
      ["canvas.rs", "geom.rs", "list.rs", "path.rs", "raster.rs", "wire.rs"]),
     ("widgets-and-style", "Widgets, size classes, tokens and fonts", "The small widgets, the size classes and metrics, the design tokens, the font roles and the style-literal lint.",

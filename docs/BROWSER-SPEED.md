@@ -506,3 +506,11 @@ script fonts used for Devanagari, Arabic, Hebrew and the others, a couple of MB,
 program and shared: **making a frame buffer went from 27.3 ms to 0.06 ms** on the M4 Pro. A drawing of a page that is already laid out
 costs about 1 ms, so layout and paint are not what makes a slow machine feel slow; parse and style grow with the page and are the cost to
 look at on the MacBookPro14,1 (style 20 ms for 4000 blocks here).
+
+### alpha.7 lane W3: the accessibility tree and the document builder (F-BROX-15, KI-840)
+
+`iyakki-web/tests/style_speed.rs` now times with the thread's CPU clock (a loaded host no longer moves the numbers) and takes `IYAKKI_SPEED_REPS` for
+longer runs under a sampler (gdb stack samples; `perf` is not allowed on the build host). Same host, same load, old and new binaries run alternately,
+4000-block page, best of 25, ms: `a11y::build` 7.2 to 4.5, `build_styled` 24.0 to 21.9 (the parts: matching and style 6.0 unchanged, document walk about
+11 unchanged). Samples of the walk show memory traffic: about a fifth of the time is `memcpy` and a tenth allocation, and `Computed` is about 600 bytes per
+element. Not done: sharing `Computed` between look-alike elements by reference (it changes the layout API of `iyakki-js`), a Mac run of this test.

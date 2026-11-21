@@ -2,7 +2,7 @@
 
 use std::path::{PathBuf};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GitCheck {
     Ready { path: PathBuf, version: String },
     Missing { message: String },
@@ -10,7 +10,7 @@ pub enum GitCheck {
 
 /// `@gitea-iyakki-gitea/team/app` (or `gitea:gitea-iyakki-gitea/team/app`): a repository of a git service of the platform services
 /// (`docs/PLATFORM-SERVICES.md`) named by its instance, resolved to its clone address.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InstanceRef {
     pub instance: String,
     /// The clone address (`https://host/team/app.git`; the service's own web address with the path added).
@@ -69,7 +69,7 @@ pub enum Phase {
     Done,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RepoStatus {
     pub branch: String,
     pub detached: bool,
@@ -149,7 +149,7 @@ use crate::gitkeys::{Auth, GitKeys, Who};
 use crate::gitsite::RepoUrl;
 use crate::ssh::HostKey;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Tools {
     pub git: PathBuf,
     /// Needed only for SSH addresses; the reason it is missing is kept for the message.

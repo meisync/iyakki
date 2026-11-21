@@ -12,6 +12,10 @@
 #                                              certificate in ESPDIR/EFI/IYAKKI/
 #   secureboot.sh make-fat IMG ESPDIR          a FAT image holding ESPDIR (the ISO's EFI partition)
 #   secureboot.sh image TREE ROOT              all of the above for an ISO tree and an install template (post-image.sh)
+#   secureboot.sh uki STUB KERNEL INITRD CMDLINE OUT [OSREL]
+#                                              a signed unified kernel image: STUB (an unsigned EFI stub that starts the sections), the kernel,
+#                                              the initial RAM disk and the command line (text or a file) as PE sections, signed once with the key
+#                                              (the sections are added by `iyakki-usb --uki`, in-house; set IYAKKI_USB to its path)
 #   secureboot.sh verify ESPDIR [KERNEL]       check the signatures of what stage-esp wrote (and of KERNEL)
 #
 # The key never lives in the repository. The build reads it from two files:
@@ -141,6 +145,23 @@ cmd_loader_image() {
   echo "loader-image: $out (SBAT iyakki.loader,1; signed with the image key)"
 }
 
+# A unified kernel image (F-BOOT-02, docs/SECURE-BOOT.md section "Unified kernel image"): kernel, initial RAM disk and command line in ONE
+# signed file, so the initial RAM disk and the command line that GRUB reads unsigned are covered by the signature too. The stub is an
+# input (our own loader or a distribution's stub); nothing here picks one by itself and `image` builds a UKI only when IYAKKI_UKI_STUB is set.
+cmd_uki() {
+  stub="${1:?usage: uki STUB KERNEL INITRD CMDLINE OUT [OSREL]}"; kernel="${2:?usage: uki STUB KERNEL INITRD CMDLINE OUT [OSREL]}"
+  initrd="${3:?usage: uki STUB KERNEL INITRD CMDLINE OUT [OSREL]}"; cmdline="${4:?usage: uki STUB KERNEL INITRD CMDLINE OUT [OSREL]}"
+  out="${5:?usage: uki STUB KERNEL INITRD CMDLINE OUT [OSREL]}"; osrel="${6:-}"
+  need_key
+  for f in "$stub" "$kernel" "$initrd"; do [ -s "$f" ] || die "$f not found (or empty)"; done
+  tool="${IYAKKI_USB:-$(command -v iyakki-usb || true)}"; [ -n "$tool" ] && [ -x "$tool" ] || die "iyakki-usb is needed to add the sections (build it, or set IYAKKI_USB to its path)"
+  w="$(mktemp -d)"
+  if [ -z "$osrel" ]; then printf 'ID=iyakki\nNAME=IYAKKI\nPRETTY_NAME=IYAKKI\n' > "$w/os-release"; osrel="$w/os-release"; fi
+  "$tool" --uki "$stub" --linux "$kernel" --initrd "$initrd" --cmdline "$cmdline" --osrel "$osrel" --out "$w/unsigned.efi" || { rm -rf "$w"; die "building the unified kernel image failed"; }
+  cmd_sign_pe "$w/unsigned.efi" "$out"; rm -rf "$w"
+  echo "uki: $out (stub + .osrel + .cmdline + .initrd + .linux, signed with the image key)"
+}
+
 cmd_sign_modules() {
   dir="${1:?usage: sign-modules DIR [SIGN-FILE]}"; sf="${2:-${IYAKKI_SIGN_FILE:-}}"
   need_key
@@ -252,6 +273,12 @@ cmd_image() {
     cmd_sign_pe "$root/boot/bzImage" "$w/bzImage2"; cat "$w/bzImage2" > "$root/boot/bzImage"
     cmd_stage_esp "$root" "$w/grub.efi"
     cmd_verify "$root" "$root/boot/bzImage"
+    # opt-in: a signed unified kernel image beside GRUB's files (needs the stub; GRUB stays the default way in)
+    if [ -n "${IYAKKI_UKI_STUB:-}" ]; then
+      [ -s "$root/boot/initrd" ] || die "IYAKKI_UKI_STUB is set but $root/boot/initrd is missing"
+      cmd_uki "$IYAKKI_UKI_STUB" "$w/bzImage2" "$root/boot/initrd" "${IYAKKI_UKI_CMDLINE:-console=tty0 quiet}" "$root/EFI/IYAKKI/iyakki-uki.efi"
+      sbverify --cert "$IYAKKI_SB_CERT" "$root/EFI/IYAKKI/iyakki-uki.efi" >/dev/null || die "the unified kernel image is not signed by the image key"
+    fi
   fi
   echo "image: signed boot files written (key: $IYAKKI_SB_CERT)"
 }
@@ -294,6 +321,7 @@ case "$c" in
   fetch-shim) cmd_fetch_shim "$@" ;;
   sign-pe) cmd_sign_pe "$@" ;;
   loader-image) cmd_loader_image "$@" ;;
+  uki) cmd_uki "$@" ;;
   sign-modules) cmd_sign_modules "$@" ;;
   grub-image) cmd_grub_image "$@" ;;
   stage-esp) cmd_stage_esp "$@" ;;

@@ -22,5 +22,7 @@ iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }
 iyakki-app-sample = { path = "../iyakki-app-sample" }
 
 [features]
+# The guest speaks tile ABI 3 (the shell then sends it pinches and app events): turned on by an app crate that handles them.
+app-events = ["iyakki-tile-kit/app-events"]
 # The wasm32 export of the SAMPLE app as the reference tile (src/guest.rs); off for a crate that depends on this one to export its own app.
 sample-guest = ["dep:iyakki-app-sample"]

@@ -63,7 +63,7 @@ pub struct CertPin {
 }
 
 /// Why a station's secure connection was stopped, with what the person needs to decide about trusting the certificate.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CertProblem {
     pub station: String,
     pub url: String,
@@ -143,7 +143,7 @@ pub trait SoundGate {
     fn stop(&self, holder: &Holder, wait_secs: u64) -> std::sync::mpsc::Receiver<Result<String, String>>;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RadioState {
     Idle,
     Connecting(String),
@@ -153,6 +153,14 @@ pub enum RadioState {
 
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
+
+/// What the player may use to carry on when a live station drops (F-RADIO-17): the person's current list (the stations the radio may
+/// move on to, in order) and where to write the audit line of a switch (`action`, `subject`). An empty list means no switching.
+#[derive(Clone, Default)]
+pub struct Around {
+    pub list: Vec<Station>,
+    pub audit: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
+}
 
 /// What a search answers: the stations found as `(name, address)`, and a note when the directory was partly out of reach.
 pub type SearchAnswer = (Vec<(String, String)>, Option<String>);
@@ -173,6 +181,10 @@ pub trait RadioPort {
     fn stop(&self);
     /// Start a station (the address was checked with [`RadioPort::allows_host`] first).
     fn play(&self, station: &Station);
+    /// What the status line adds while the radio recovers ("Reconnecting 1 of 2", "Switched to NAME"), if anything.
+    fn notice(&self) -> Option<String> {
+        None
+    }
     /// May this account reach the host of a station?
     fn allows_host(&self, host: &str) -> bool;
     // the person's own list

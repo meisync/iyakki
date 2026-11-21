@@ -31,6 +31,9 @@ pub struct PolicyInput<'a> {
     pub exclude: &'a [Cidr],
     /// User accounts whose every connection goes through the tunnel (`meta skuid`).
     pub uids: &'a [u32],
+    /// The application layer marks its own sockets (the reader browser and HTTP client, F-VPN-08): the rule and the table are put in
+    /// place even when no range or account is chosen.
+    pub app_sockets: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +49,7 @@ pub struct PolicyPlan {
     include: Vec<Cidr>,
     exclude: Vec<Cidr>,
     uids: Vec<u32>,
+    app_sockets: bool,
 }
 
 fn v(parts: &[&str]) -> Vec<String> {
@@ -68,7 +72,7 @@ pub fn plan_policy_routes(i: &PolicyInput) -> Result<PolicyPlan, VpnError> {
     if i.include.len() > MAX_NETS || i.exclude.len() > MAX_NETS || i.uids.len() > MAX_UIDS {
         return Err(VpnError::TooLarge("too many ranges or accounts in the tunnel routing".into()));
     }
-    if i.include.is_empty() && i.uids.is_empty() {
+    if i.include.is_empty() && i.uids.is_empty() && !i.app_sockets {
         return Err(VpnError::Missing("nothing is chosen to go through the tunnel".into()));
     }
     if i.uids.iter().any(|u| *u == 0) {
@@ -103,12 +107,16 @@ pub fn plan_policy_routes(i: &PolicyInput) -> Result<PolicyPlan, VpnError> {
         nft.push_str(&format!("    meta skuid {{ {u} }} meta mark set {mark} comment \"chosen accounts\"\n"));
     }
     nft.push_str("  }\n}\n");
-    Ok(PolicyPlan { add, remove, nft, mark: i.mark, table: i.table, priority: i.priority, include, exclude, uids: i.uids.to_vec() })
+    Ok(PolicyPlan { add, remove, nft, mark: i.mark, table: i.table, priority: i.priority, include, exclude, uids: i.uids.to_vec(), app_sockets: i.app_sockets })
 }
 
 impl PolicyPlan {
     pub fn mark(&self) -> u32 {
         self.mark
+    }
+    /// Does the application layer mark its own sockets for this plan?
+    pub fn app_sockets(&self) -> bool {
+        self.app_sockets
     }
     pub fn table(&self) -> u32 {
         self.table
@@ -146,7 +154,7 @@ mod tests {
         Cidr::parse(s).unwrap()
     }
     fn input<'a>(inc: &'a [Cidr], exc: &'a [Cidr], uids: &'a [u32]) -> PolicyInput<'a> {
-        PolicyInput { ifname: "wg0", table: DEFAULT_TABLE, mark: DEFAULT_MARK, priority: DEFAULT_PRIORITY, include: inc, exclude: exc, uids }
+        PolicyInput { ifname: "wg0", table: DEFAULT_TABLE, mark: DEFAULT_MARK, priority: DEFAULT_PRIORITY, include: inc, exclude: exc, uids, app_sockets: false }
     }
 
     #[test]

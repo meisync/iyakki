@@ -73,7 +73,7 @@ fn fx(tag: &str) -> Fx {
     store.add_local("bob", "bobpass1234", Role::User).unwrap();
     let up: Arc<dyn Upstream> = Arc::new(Offline);
     let env = ShellEnv {
-        store: Arc::new(Mutex::new(store)),
+        store: iyakki_shell::accounts::UsersRef::of_store(&Arc::new(Mutex::new(store))),
         audit: Arc::new(AuditLog::new(&d.join("audit.log"))),
         host: Arc::new(Host),
         cfg: iyakki_agent::config::AiConfig::parse("").unwrap(),

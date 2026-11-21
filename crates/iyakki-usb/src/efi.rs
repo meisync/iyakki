@@ -277,21 +277,57 @@ pub fn set_boot_next_to_own(dir: &Path) -> Result<Option<String>, String> {
     Ok(Some(format!("Boot{mine:04X}")))
 }
 
+/// Where the firmware variables live: the `efivarfs` folder on Linux, the firmware-variable calls on Windows, a map in tests. Values are
+/// the variable's data without its attribute word; the store writes them non-volatile, boot-service and runtime accessible.
+pub trait VarStore {
+    fn read(&self, base: &str) -> Option<Vec<u8>>;
+    fn write(&mut self, base: &str, data: &[u8]) -> Result<(), String>;
+    /// Numbers of the `Boot####` entries that may exist (a store that cannot list gives the ones it can find).
+    fn boot_numbers(&self) -> Vec<u16>;
+}
+
+/// The `efivarfs` folder as a store.
+pub struct DirStore<'a>(pub &'a Path);
+
+impl VarStore for DirStore<'_> {
+    fn read(&self, base: &str) -> Option<Vec<u8>> {
+        read_var(self.0, base)
+    }
+    fn write(&mut self, base: &str, data: &[u8]) -> Result<(), String> {
+        write_var(self.0, base, data)
+    }
+    fn boot_numbers(&self) -> Vec<u16> {
+        list_entries(self.0).into_iter().map(|(n, _, _)| n).collect()
+    }
+}
+
+fn description_of(v: &[u8]) -> Option<String> {
+    (v.len() >= 6).then(|| String::from_utf16_lossy(&v[6..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|u| *u != 0).collect::<Vec<u16>>()))
+}
+
 /// Create (or, when an entry described "IYAKKI" is already there, replace) our boot entry and append it to `BootOrder`.
 /// Returns the entry's name, for example `Boot0007`.
 pub fn add_boot_entry(dir: &Path, e: &BootEntry) -> Result<String, String> {
-    let existing = list_entries(dir);
-    let number = match existing.iter().find(|(_, d, _)| d == DESCRIPTION) {
-        Some((n, _, _)) => *n,
-        None => (0..=0xFFFFu32).map(|n| n as u16).find(|n| !existing.iter().any(|(x, _, _)| x == n)).ok_or("the firmware has no free boot entry number")?,
+    add_boot_entry_with(&mut DirStore(dir), e)
+}
+
+/// [`add_boot_entry`] over any [`VarStore`] (the Windows firmware calls use it).
+pub fn add_boot_entry_with(store: &mut dyn VarStore, e: &BootEntry) -> Result<String, String> {
+    let mut numbers = store.boot_numbers();
+    numbers.sort_unstable();
+    numbers.dedup();
+    let ours = numbers.iter().copied().find(|n| store.read(&format!("Boot{n:04X}")).and_then(|v| description_of(&v)).as_deref() == Some(DESCRIPTION));
+    let number = match ours {
+        Some(n) => n,
+        None => (0..=0xFFFFu32).map(|n| n as u16).find(|n| store.read(&format!("Boot{n:04X}")).is_none()).ok_or("the firmware has no free boot entry number")?,
     };
     let name = format!("Boot{number:04X}");
-    write_var(dir, &name, &load_option(e))?;
-    let mut order = read_var(dir, "BootOrder").unwrap_or_default();
+    store.write(&name, &load_option(e))?;
+    let mut order = store.read("BootOrder").unwrap_or_default();
     let already = order.chunks_exact(2).any(|c| u16::from_le_bytes([c[0], c[1]]) == number);
     if !already {
         order.extend_from_slice(&number.to_le_bytes());
-        write_var(dir, "BootOrder", &order)?;
+        store.write("BootOrder", &order)?;
     }
     Ok(name)
 }
@@ -474,5 +510,43 @@ mod tests {
         assert_eq!(listed.iter().filter(|(_, d, _)| d == "IYAKKI").count(), 1);
         assert_eq!(backslashed("/EFI/IYAKKI/KERNEL.EFI"), "\\EFI\\IYAKKI\\KERNEL.EFI");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A store in memory, to show that the entry logic does not depend on `efivarfs`.
+    #[derive(Default)]
+    struct Mem(std::collections::BTreeMap<String, Vec<u8>>, Vec<u16>);
+    impl VarStore for Mem {
+        fn read(&self, base: &str) -> Option<Vec<u8>> {
+            self.0.get(base).cloned()
+        }
+        fn write(&mut self, base: &str, data: &[u8]) -> Result<(), String> {
+            self.0.insert(base.to_string(), data.to_vec());
+            Ok(())
+        }
+        fn boot_numbers(&self) -> Vec<u16> {
+            self.1.clone()
+        }
+    }
+
+    #[test]
+    fn the_entry_is_added_to_any_store_never_over_a_foreign_entry_and_found_again_when_the_store_lists_only_some_numbers() {
+        let e = BootEntry { number: 2, start_lba: 2048, sectors: 1 << 20, signature: Signature::Mbr([1, 2, 3, 4]), file: backslashed("/EFI/BOOT/BOOTX64.EFI"), args: String::new() };
+        let mut m = Mem::default();
+        m.0.insert("Boot0000".into(), vec![1, 0, 0, 0, 0, 0, b'W', 0, 0, 0]);
+        m.0.insert("Boot0001".into(), vec![1, 0, 0, 0, 0, 0, b'U', 0, 0, 0]);
+        m.0.insert("BootOrder".into(), vec![0, 0, 1, 0]);
+        // the store can name only the numbers in BootOrder, as the Windows calls can
+        m.1 = vec![0, 1];
+        assert_eq!(add_boot_entry_with(&mut m, &e).unwrap(), "Boot0002");
+        assert_eq!(m.0["BootOrder"], vec![0, 0, 1, 0, 2, 0], "appended");
+        assert_eq!(m.0["Boot0000"], vec![1, 0, 0, 0, 0, 0, b'W', 0, 0, 0], "foreign entries untouched");
+        m.1 = vec![0, 1, 2];
+        assert_eq!(add_boot_entry_with(&mut m, &BootEntry { start_lba: 4096, ..e.clone() }).unwrap(), "Boot0002", "our own entry is replaced, not added twice");
+        assert_eq!(m.0["BootOrder"], vec![0, 0, 1, 0, 2, 0]);
+        // a store that does not list our number still never reuses a number that exists
+        m.1 = vec![];
+        m.0.remove("Boot0002");
+        m.0.insert("BootOrder".into(), vec![0, 0, 1, 0]);
+        assert_eq!(add_boot_entry_with(&mut m, &e).unwrap(), "Boot0002");
     }
 }

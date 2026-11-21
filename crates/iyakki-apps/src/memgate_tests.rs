@@ -210,7 +210,7 @@ fn what_each_extra_display_and_pane_costs_matches_the_formula() {
 
 #[test]
 fn compressed_memory_counts_only_when_the_experiment_is_on() {
-    use iyakki_zram::compressed::Experiment;
+    use iyakki_core_api::device_types::zram::compressed::Experiment;
     let m = mem(8.0, 2.0);
     assert_eq!(m.with_compressed_credit(Experiment::Off, gib(3.0), gib(1.0)), m);
     let on = m.with_compressed_credit(Experiment::On, gib(3.0), gib(1.0));

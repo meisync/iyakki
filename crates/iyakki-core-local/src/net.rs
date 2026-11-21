@@ -35,6 +35,36 @@ pub struct Iface {
 /// (no DHCP server), so IYAKKI neither brings it up nor runs a DHCP client on it.
 pub const T2_INTERNAL_MAC: &str = "ac:de:48:00:11:22";
 
+/// The kernel's IPv4 routing table as text (`/proc/net/route`), empty when it cannot be read. The one reader of this file for callers
+/// that only need to know which interface and gateway carry the default route (the unlock places of F-SDK-205).
+pub fn ipv4_routes_text() -> String {
+    std::fs::read_to_string("/proc/net/route").unwrap_or_default()
+}
+
+/// The kernel's neighbour table file (who answered ARP on this network), read by the device watcher.
+pub const ARP_TABLE: &str = "/proc/net/arp";
+
+/// Whether the kernel forwards IPv4 packets now (`1`), as the text the kernel holds, `0` when it cannot be read. Internet sharing
+/// puts this back to what it was.
+pub fn ip_forward_text() -> String {
+    std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward").map(|s| s.trim().to_string()).unwrap_or_else(|_| "0".into())
+}
+
+/// Switch packet forwarding off on one interface, for IPv4 and IPv6 (a direct link must never route). The name is checked: letters,
+/// digits, dot, dash and underscore, at most 15 characters.
+pub fn forwarding_off(iface: &str) -> Result<(), String> {
+    forwarding_off_under(Path::new("/proc/sys/net"), iface)
+}
+
+fn forwarding_off_under(root: &Path, iface: &str) -> Result<(), String> {
+    if iface.is_empty() || iface.len() > 15 || !iface.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'_')) {
+        return Err("not an interface name".into());
+    }
+    let a = std::fs::write(root.join("ipv4/conf").join(iface).join("forwarding"), "0");
+    let b = std::fs::write(root.join("ipv6/conf").join(iface).join("forwarding"), "0");
+    a.and(b).map_err(|e| format!("{iface}: {e}"))
+}
+
 pub fn is_t2_internal_link(address: &str) -> bool {
     address.trim().eq_ignore_ascii_case(T2_INTERNAL_MAC)
 }
@@ -431,6 +461,37 @@ pub fn bring_up_new(conf_path: &Path, sys_class_net: &Path, known: &Path, only: 
     Ok(NewIfaces { started: todo.into_iter().map(|i| i.name).collect() })
 }
 
+/// An interface name as a path part: letters, digits, `-`, `_`, `.`, at most 15 characters (the kernel's limit); anything else is not one.
+fn iface_name_ok(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 15 && name != "." && name != ".." && name.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+}
+
+/// One attribute of an interface under `root` (`/sys/class/net` on the machine), trimmed: `ifindex`, `address`, `phy80211/name`,
+/// `phy80211/index`. `None` for a bad name, a bad attribute path or a file that cannot be read. The one reader of those files (F-ARCH-07).
+pub fn iface_attr_in(root: &Path, name: &str, attr: &str) -> Option<String> {
+    let attr_ok = !attr.is_empty() && attr.split('/').all(|p| !p.is_empty() && p != "." && p != ".." && p.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.')));
+    if !iface_name_ok(name) || !attr_ok {
+        return None;
+    }
+    std::fs::read_to_string(root.join(name).join(attr)).ok().map(|s| s.trim().to_string())
+}
+
+/// [`iface_attr_in`] on this machine.
+pub fn iface_attr(name: &str, attr: &str) -> Option<String> {
+    iface_attr_in(Path::new("/sys/class/net"), name, attr)
+}
+
+/// Whether the interface exists under `root`.
+pub fn iface_exists_in(root: &Path, name: &str) -> bool {
+    iface_name_ok(name) && root.join(name).exists()
+}
+
+/// [`iface_exists_in`] on this machine.
+pub fn iface_exists(name: &str) -> bool {
+    iface_exists_in(Path::new("/sys/class/net"), name)
+}
+
+
 /// An interface is gone (the adapter was unplugged): forget it and stop the clients that were started for it, so the same
 /// name is set up afresh when an adapter comes back.
 pub fn interface_gone(name: &str) {
@@ -453,6 +514,43 @@ pub fn interface_gone(name: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn forwarding_is_switched_off_for_both_families_under_the_given_root_and_a_bad_name_writes_nothing() {
+        let d = std::env::temp_dir().join(format!("iyakki-fwd-{}", std::process::id()));
+        for fam in ["ipv4", "ipv6"] {
+            std::fs::create_dir_all(d.join(fam).join("conf/dl0")).unwrap();
+            std::fs::write(d.join(fam).join("conf/dl0/forwarding"), "1").unwrap();
+        }
+        super::forwarding_off_under(&d, "dl0").unwrap();
+        for fam in ["ipv4", "ipv6"] {
+            assert_eq!(std::fs::read_to_string(d.join(fam).join("conf/dl0/forwarding")).unwrap(), "0");
+        }
+        for bad in ["", "../x", "a/b", "abcdefghijklmnop"] {
+            assert!(super::forwarding_off_under(&d, bad).is_err(), "{bad}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn interface_attributes_are_read_trimmed_under_the_given_root_and_bad_names_read_nothing() {
+        let d = std::env::temp_dir().join(format!("iyakki-ifattr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("wlan0/phy80211")).unwrap();
+        std::fs::write(d.join("wlan0/ifindex"), "3\n").unwrap();
+        std::fs::write(d.join("wlan0/phy80211/name"), "phy0\n").unwrap();
+        assert_eq!(iface_attr_in(&d, "wlan0", "ifindex").as_deref(), Some("3"));
+        assert_eq!(iface_attr_in(&d, "wlan0", "phy80211/name").as_deref(), Some("phy0"));
+        assert_eq!(iface_attr_in(&d, "wlan0", "address"), None);
+        for bad in ["", "..", "a/b", "wlan0/..", "averyveryverylongname"] {
+            assert_eq!(iface_attr_in(&d, bad, "ifindex"), None, "{bad}");
+            assert!(!iface_exists_in(&d, bad), "{bad}");
+        }
+        assert_eq!(iface_attr_in(&d, "wlan0", "../wlan0/ifindex"), None);
+        assert_eq!(iface_attr_in(&d, "wlan0", "/etc/passwd"), None);
+        assert!(iface_exists_in(&d, "wlan0") && !iface_exists_in(&d, "eth9"));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
     use super::*;
 
     fn eth(n: &str) -> Iface {

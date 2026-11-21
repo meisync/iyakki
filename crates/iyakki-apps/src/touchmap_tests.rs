@@ -261,3 +261,35 @@ fn the_plan_of_the_two_displays_gives_the_rectangles() {
     assert_eq!(outs, vec![edp(), dp4()]);
     assert_eq!(resolve(&usb_dev(), &outs, &[]).display, Some(1));
 }
+
+/// F-CORE-23: the kept choices of alpha.7 (`tests/compat/alpha7/touch-map-v0.json`, written by hand from the documented shape) are read, a
+/// later field is ignored, and a damaged file keeps nothing.
+#[test]
+fn the_kept_touch_choices_of_alpha7_are_read_and_a_later_field_or_a_damaged_file_is_handled() {
+    let d = std::env::temp_dir().join(format!("iyakki-compat-touch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let golden = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/compat/alpha7/touch-map-v0.json")).unwrap();
+    std::fs::write(d.join("touch-map.json"), golden).unwrap();
+    let mut m = TouchMap::default();
+    m.load(&d);
+    assert_eq!(m.saved(), [("27c0:0859".to_string(), "DP-4".to_string()), ("04f3:2a1b".to_string(), "eDP-1".to_string())]);
+    // a choice added now goes on top of the old ones
+    m.set_choice("1111:2222", Some("HDMI-1"));
+    let mut again = TouchMap::default();
+    again.load(&d);
+    assert_eq!(again.saved().len(), 3);
+    // a field a later release adds is ignored (and dropped by the next save: pattern A, finding F-9)
+    std::fs::write(d.join("touch-map.json"), r#"{"saved":[["27c0:0859","DP-4"]],"future":{"a":1}}"#).unwrap();
+    again.load(&d);
+    assert_eq!(again.saved().len(), 1);
+    again.set_choice("27c0:0859", None);
+    assert!(!std::fs::read_to_string(d.join("touch-map.json")).unwrap().contains("future"));
+    // damaged: nothing is kept, no panic
+    for bad in ["{ cut", "[1]", "", r#"{"saved":[["only-one"]]}"#] {
+        std::fs::write(d.join("touch-map.json"), bad).unwrap();
+        again.load(&d);
+        assert!(again.saved().is_empty(), "{bad:?}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

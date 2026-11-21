@@ -85,6 +85,7 @@ fn word(e: &Expr) -> String {
         Expr::Saddr(ip, p) => format!("saddr {ip}/{p}"),
         Expr::Daddr(ip, p) => format!("daddr {ip}/{p}"),
         Expr::DaddrSet(s) => format!("daddr @{s}"),
+        Expr::DaddrDportSet(s) => format!("daddr . dport @{s}"),
         Expr::L4(6) => "tcp".into(),
         Expr::L4(17) => "udp".into(),
         Expr::L4(n) => format!("proto {n}"),

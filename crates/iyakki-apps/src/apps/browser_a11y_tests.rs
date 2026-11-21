@@ -676,3 +676,27 @@ fn a_links_node_carries_its_accessible_name() {
     }
     assert!(tree.nodes.iter().any(|n| n.link.is_some() && links.iter().any(|l| l.name == n.name.trim())));
 }
+
+#[test]
+fn the_pages_headings_pictures_and_landmarks_are_nodes_of_the_toolkits_access_tree_and_a_press_puts_the_cursor_there() {
+    use crate::access::{self, Prefs, Role};
+    access::set_prefs(Prefs { screen_reader: true, ..Prefs::OFF });
+    let (mut a, cx, _rec) = open("a11y-common-shape", ARTICLE, eff());
+    let g = frame(&mut a, &cx, 1280, 1400);
+    access::set_prefs(Prefs::OFF);
+    let nodes: Vec<(access::Node, usize)> = g.hits.iter().enumerate().filter_map(|(i, h)| access::node_of(h).map(|n| (n, i))).collect();
+    let heading = nodes.iter().find(|(n, _)| n.name.starts_with("Heading level 1")).unwrap_or_else(|| panic!("no heading node: {:?}", nodes.iter().map(|(n, _)| &n.name).collect::<Vec<_>>()));
+    assert_eq!(heading.0.role, Role::Spoken, "the words are said as they are");
+    assert!(heading.0.speak().starts_with("Heading level 1"), "{}", heading.0.speak());
+    // the regions are in front of the controls, so a link on top of one still gets its click
+    let first_link = g.hits.iter().position(|h| h.ev == Event::Row(0)).expect("a link hit");
+    assert!(heading.1 < first_link);
+    // a press puts the cursor on the heading
+    let Event::Tab(n) = g.hits[heading.1].ev else { panic!("a tab event") };
+    a.handle(&Event::Tab(n), &cx);
+    let node = a.a11y.cursor.expect("the cursor moved");
+    assert_eq!(a.a11y_tree().unwrap().nodes[node].role, iyakki_web::a11y::Role::Heading);
+    // with the screen reader off nothing is added
+    let g = frame(&mut a, &cx, 1280, 1400);
+    assert!(!g.hits.iter().any(|h| matches!(h.ev, Event::Tab(n) if (8400..8560).contains(&n))));
+}

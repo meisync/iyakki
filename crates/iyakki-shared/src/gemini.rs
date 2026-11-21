@@ -76,7 +76,7 @@ use iyakki_proxy::Upstream;
 use serde_json::{json, Value};
 
 use crate::providers::{valid_model_name, Kind, ProviderCfg};
-use crate::settings::{ModelChoice, SettingsStore};
+use crate::settings::ModelChoice;
 use crate::vault::{LocalVault, Secrets};
 use crate::voice::SpeechEngine;
 
@@ -529,14 +529,14 @@ fn names_gemini_stt(e: &Option<SpeechEngine>) -> bool {
 
 /// Applies `ch` to the file and to the machine settings in one step; returns the new state. Turning it off puts back what the
 /// chat model and the speech engine were. Nothing here sends anything.
-pub fn apply(dir: &Path, settings: &Mutex<SettingsStore>, ch: &Change) -> Result<Config, String> {
+pub fn apply(dir: &Path, settings: &crate::settings_ref::SettingsRef, ch: &Change) -> Result<Config, String> {
     for m in [&ch.chat_model, &ch.stt_model].into_iter().flatten() {
         let t = m.trim().trim_start_matches("models/");
         if !valid_model_name(t) || t.contains('/') {
             return Err("the model name may only have letters, digits and . _ : - + @".into());
         }
     }
-    let mut st = settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut st = settings.lock().unwrap_or_else(|e| e.into_inner());
     update(dir, |c| {
         if let Some(t) = ch.tier {
             c.tier = t;
@@ -603,10 +603,10 @@ pub fn apply(dir: &Path, settings: &Mutex<SettingsStore>, ch: &Change) -> Result
 }
 
 /// The state in plain words for the Settings page and `gemini_status`. Never the key: only whether one is stored.
-pub fn status_text(dir: &Path, user: &str, key_present: bool, settings: &Mutex<SettingsStore>) -> String {
+pub fn status_text(dir: &Path, user: &str, key_present: bool, settings: &crate::settings_ref::SettingsRef) -> String {
     let c = load(dir);
     let (chat_on, stt_on) = {
-        let g = settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let g = settings.lock().unwrap_or_else(|e| e.into_inner());
         (g.get().chat.as_ref().is_some_and(|m| m.provider == PROVIDER_ID), names_gemini_stt(&g.get().voice.stt))
     };
     let consent = match consent_state(dir, user) {

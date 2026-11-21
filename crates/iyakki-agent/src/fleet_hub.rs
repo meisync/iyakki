@@ -151,8 +151,7 @@ fn exchange_via(link: Option<&Arc<relay::RelayLink>>, addr: &str, env: &Env, ope
 }
 
 fn exchange_plain(addr: &str, env: &Env) -> Result<Reply, String> {
-    let sa = addr.to_socket_addrs().map_err(|_| "that address is not valid (use host:port)".to_string())?.next().ok_or("that address is not valid")?;
-    let mut s = TcpStream::connect_timeout(&sa, Duration::from_secs(3)).map_err(|e| format!("could not reach {addr}: {e}"))?;
+    let mut s = tls::connect_tcp(addr)?;
     let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
     write_frame(&mut s, env)?;
@@ -1228,7 +1227,7 @@ impl Hub {
     fn handle(&self, env: Env, peer: SocketAddr) -> Reply {
         match env.kind.as_str() {
             "join_request" | "join_poll" => self.handle_join(env, peer),
-            "record_push" | "heartbeat" | "assign" | "assign_reply" | "leave_notice" | "task_status" | "task_answer" | "base_chunk" | "handback" | "handback_have" | "context" | "models_query" => self.handle_member(env, peer),
+            "record_push" | "heartbeat" | "assign" | "assign_reply" | "leave_notice" | "task_status" | "task_answer" | "base_chunk" | "base_have" | "handback" | "handback_have" | "context" | "models_query" => self.handle_member(env, peer),
             _ => Reply::err("a message kind this system does not know"),
         }
     }
@@ -1485,7 +1484,7 @@ impl Hub {
                 self.audit_once(&format!("mq/{}", env.from), "fleet.models.out", &format!("fleet={} to={} models={}", short_id(&fid), fingerprint(&env.from), list.len()));
                 Reply::ok("models", json!({"models": list}))
             }
-            "task_status" | "task_answer" | "base_chunk" | "handback" | "handback_have" | "context" => self.handle_work(i, &env, &fid, &sender.name, plain),
+            "task_status" | "task_answer" | "base_chunk" | "base_have" | "handback" | "handback_have" | "context" => self.handle_work(i, &env, &fid, &sender.name, plain),
             "leave_notice" => {
                 // the member left: the administrator with the lowest id among those that remain makes the removal (so two do not both)
                 let me = i.keys.public().sign;

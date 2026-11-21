@@ -181,6 +181,18 @@ impl SettingsApp {
             }
             'a' => self.ap_pin_next(cx),
             'x' => self.ap_unpin_last(cx),
+            't' | 'T' => {
+                // EDIT (t) and CLI (T): the version written on the UI SDK or the usual screen, the person's own choice (experimental)
+                let app = if c == 't' { "edit" } else { "cli" };
+                let on = !crate::apps::sdk_apps::chosen(cx, app);
+                match crate::apps::sdk_apps::set_chosen(&*cx.core, &cx.session.user, app, on) {
+                    Ok(said) => {
+                        cx.audit.record(&cx.session.user, "settings.display.sdk_apps", &format!("{app} {}", if on { "on" } else { "off" }));
+                        self.ok(format!("{said} It applies the next time the app is opened."));
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
             'o' => {
                 iyakki_uikit::look_registry::save_dock(cx.data_dir(), &cx.session.user, &[]);
                 iyakki_uikit::look_registry::clear_dock(cx.data_dir(), &cx.session.user);
@@ -374,6 +386,8 @@ impl SettingsApp {
         at(g, &mut y, "Spacing", l.launcher.density.key(), 'e', "compact, comfortable or roomy");
         at(g, &mut y, "Dock", l.dock.position.key(), 'd', "bottom, left, right or off");
         at(g, &mut y, "Dot under running apps", if l.dock.running { "on" } else { "off" }, 'r', "in the dock");
+        at(g, &mut y, "EDIT version (experimental)", if crate::apps::sdk_apps::chosen(cx, "edit") { "the SDK version" } else { "the usual screen" }, 't', "the editor written on the UI SDK: pinch changes the text size; the usual one stays");
+        at(g, &mut y, "CLI version (experimental)", if crate::apps::sdk_apps::chosen(cx, "cli") { "the SDK version" } else { "the usual screen" }, 'T', "the command line written on the UI SDK, with the whole-session terminal; the usual one stays");
         at(g, &mut y, "Pinned apps", &format!("{} in the dock", pinned_names.len()), 'a', "A pins the next app, X takes the last out, O puts the usual ones back");
         let names = pinned_names.join(", ");
         for line in g.wrap(13.0 * s, &names, Face::Sans, rows_w).into_iter().take(3) {

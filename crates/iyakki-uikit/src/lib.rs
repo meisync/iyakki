@@ -4,6 +4,7 @@
 //! `iyakki-shell` re-exports every module under its old path (`crate::gfx`, `crate::ui` ...), so tiles compile unchanged.
 
 pub mod access;
+pub mod accel;
 pub mod braille;
 pub mod appicon;
 pub mod askdialog;

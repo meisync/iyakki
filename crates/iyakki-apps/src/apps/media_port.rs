@@ -39,6 +39,11 @@ pub trait MediaPort {
     /// The profile folder of the embedded web engine for this person (a video plays in it).
     fn web_profile(&self) -> Result<PathBuf, String>;
     fn audit(&self, action: &str, subject: &str);
+    /// The first sound of the session: ask the core's device broker to load the sound drivers now (a no-op unless `iyakki.lazydrivers=1`
+    /// held them back). One plain sentence; nothing else depends on the answer.
+    fn request_audio_drivers(&self) -> String {
+        String::new()
+    }
 }
 
 /// The real port, over the shell's context.
@@ -74,4 +79,10 @@ impl MediaPort for CxPort<'_> {
     fn audit(&self, action: &str, subject: &str) {
         self.0.audit.record(&self.0.session.user, action, subject);
     }
+    fn request_audio_drivers(&self) -> String {
+        self.0.os.hardware().request_class("audio", MEDIA_APP_ID)
+    }
 }
+
+/// The id the device broker knows the music player by (a built-in app: `speaker.play` is held by every one of them).
+pub const MEDIA_APP_ID: &str = "media";

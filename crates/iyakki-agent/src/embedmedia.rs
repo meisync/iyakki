@@ -444,6 +444,8 @@ struct Shared {
     video: Mutex<Option<Video>>,
     /// Where the sound is now (what the mixer says was heard), for the pacer.
     pos_ms: std::sync::atomic::AtomicU64,
+    /// How many times the player's thread has refreshed `pos_ms` (tests wait for it to move before they look at a picture).
+    turns: std::sync::atomic::AtomicU64,
 }
 
 struct Video {
@@ -511,6 +513,12 @@ pub struct AgentMedia {
 }
 
 impl AgentMedia {
+    /// Tests: how many times the session's thread has refreshed where the sound is.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn turns(&self, user: &str, session: &str) -> u64 {
+        self.mine(user, session).map_or(0, |s| s.shared.turns.load(Ordering::SeqCst))
+    }
+
     pub fn new(host: Arc<dyn MediaHost>, audit: Arc<dyn AuditSink>) -> AgentMedia {
         AgentMedia { host, audit, sessions: Mutex::new(BTreeMap::new()), next: std::sync::atomic::AtomicU64::new(1) }
     }
@@ -616,6 +624,7 @@ impl Media for AgentMedia {
             seekable: AtomicBool::new(false),
             video: Mutex::new(None),
             pos_ms: std::sync::atomic::AtomicU64::new(0),
+            turns: std::sync::atomic::AtomicU64::new(0),
         });
         let id = format!("media-{}", self.next.fetch_add(1, Ordering::SeqCst));
         let sess = Arc::new(Sess { user: user.into(), app: app.into(), shared: shared.clone(), pending: Mutex::new(Some(Start { source, title: spec.title.clone() })) });
@@ -876,6 +885,8 @@ fn play(host: &dyn MediaHost, sh: &Arc<Shared>, user: &str, app: &str, start: St
         let m = host.mixer().ok_or("the sound mixer is off (Settings -> Sound)")?;
         let eff = (u64::from(rate) * u64::from(rate_permille) / 1000).clamp(8_000, 192_000) as u32;
         let w = m.open_source_with(SourceKind::Media, eff, channels, &format!("Media ({app})"), false).map_err(|e| e.to_string())?;
+        // the person whose player this is: a client that hears only its own person's sound gets it (F-CLIENT-03)
+        w.set_owner(user);
         // the session's volume is set before the first sample, so a muted player never leaks a moment of sound while the level ramps
         w.set_gain(if sh.ctrl.muted.load(Ordering::SeqCst) { 0.0 } else { sh.ctrl.volume.load(Ordering::SeqCst) as f32 / 100.0 });
         Ok(w)
@@ -931,6 +942,7 @@ fn play(host: &dyn MediaHost, sh: &Arc<Shared>, user: &str, app: &str, start: St
             }
             sh.emit(MediaEvent::Position { ms: base_ms });
         }
+        sh.turns.fetch_add(1, Ordering::SeqCst);
         sh.pos_ms.store(if ended { duration_ms.unwrap_or(base_ms) } else { pos_ms(base_ms, &writer, cur_rate, duration_ms) }, Ordering::SeqCst);
         let want = sh.ctrl.want_play.load(Ordering::SeqCst);
         if ended {

@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 
 pub const PAIR_TAG: &str = "IYAKKI-DEV-PAIR v1";
 pub const PAIR_OK_TAG: &str = "IYAKKI-DEV-PAIR-OK v1";
-pub const REQ_TAG: &str = "IYAKKI-DEV-REQ v1";
+pub const REQ_TAG: &str = "IYAKKI-DEV-REQ v2";
 /// How far a request's clock may be from the device's.
 pub const SKEW_SECS: i64 = 120;
 /// The alphabet of pairing codes: no 0/O, 1/I/L look-alikes.
@@ -132,7 +132,8 @@ pub fn pair_answer(pk: &[u8; 32], fp: &str, key_hex: &str) -> String {
 /// The text a request's signature covers. `query` is the decoded query; it is sorted here.
 pub fn canonical(method: &str, path: &str, query: &[(String, String)], time: i64, nonce: &str, body: &[u8], fp: &str) -> String {
     let q: BTreeMap<&str, &str> = query.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    let q = q.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
+    // length-prefixed (`3:key5:value`), so no choice of keys and values can read as another query (`a=1&b=2` is one value of `a` too)
+    let q = q.iter().map(|(k, v)| format!("{}:{k}{}:{v}", k.len(), v.len())).collect::<Vec<_>>().join(",");
     format!("{REQ_TAG}\n{}\n{path}\n{q}\n{time}\n{nonce}\n{}\n{}", method.to_ascii_uppercase(), sha256_hex(body), norm_fp(fp))
 }
 
@@ -176,10 +177,14 @@ impl Nonces {
         }
         let Ok(mut g) = self.seen.lock() else { return false };
         let (map, order) = &mut *g;
-        while order.front().is_some_and(|(t, _)| now - *t > 2 * SKEW_SECS + 10) || order.len() >= Self::CAP {
+        // only nonces that left the window are dropped; a full memory refuses (fail closed) instead of forgetting a nonce that could be replayed
+        while order.front().is_some_and(|(t, _)| now - *t > 2 * SKEW_SECS + 10) {
             if let Some((_, n)) = order.pop_front() {
                 map.remove(&n);
             }
+        }
+        if order.len() >= Self::CAP {
+            return false;
         }
         if map.contains_key(nonce) {
             return false;
@@ -240,6 +245,30 @@ pub fn check(headers: &dyn Fn(&str) -> Option<String>, method: &str, path: &str,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ki106_two_different_queries_never_share_one_signed_text() {
+        let q = |v: &[(&str, &str)]| v.iter().map(|(k, x)| (k.to_string(), x.to_string())).collect::<Vec<_>>();
+        let a = canonical("GET", "/p", &q(&[("a", "1&b=2")]), 5, "n", b"", "fp");
+        let b = canonical("GET", "/p", &q(&[("a", "1"), ("b", "2")]), 5, "n", b"", "fp");
+        assert_ne!(a, b);
+        let c = canonical("GET", "/p", &q(&[("a", "1,1:b2")]), 5, "n", b"", "fp");
+        let d = canonical("GET", "/p", &q(&[("a", "1"), ("b", "2")]), 5, "n", b"", "fp");
+        assert_ne!(c, d);
+        // the pinned shape (a client and a device must agree byte for byte)
+        assert!(canonical("get", "/p", &q(&[("b", "22"), ("a", "1")]), 5, "n", b"", "fp").contains("\n1:a1:1,1:b2:22\n5\nn\n"));
+    }
+
+    #[test]
+    fn ki106_a_full_nonce_memory_refuses_and_keeps_every_nonce_it_holds() {
+        let n = Nonces::default();
+        for i in 0..Nonces::CAP {
+            assert!(n.fresh(&format!("{i:032x}"), 100));
+        }
+        assert!(!n.fresh(&format!("{:032x}", Nonces::CAP), 100), "a full memory refuses");
+        assert!(!n.fresh(&format!("{:032x}", 0), 100), "the oldest nonce was not dropped, so it is still a replay");
+        assert!(n.fresh(&format!("{:032x}", Nonces::CAP), 100 + 2 * SKEW_SECS + 11), "room again once the window has passed");
+    }
 
     #[test]
     fn hmac_matches_the_rfc_4231_test_vectors() {

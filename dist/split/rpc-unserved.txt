@@ -1,0 +1,45 @@
+# Methods of the traits in rpc-traits.txt that carry a live object (a registry, a closure, a thread handle, a run's channels) or answer one:
+# the proxy answers `not served over the UI socket` (the quiet value of the answer, see the Lost impls of iyakki-ui-rpc) and the core does
+# not serve them. Written with `unserved_for.py TYPE...` (D-SPLIT-03-HANDLE).
+ServicesFacetB3::startup_poll   # &Registry: the core polls its own startup registry
+GeminiLive::spawn               # answers a session thread handle
+HostTtsApi::helper_open         # Arc<HostVoice>
+ExtAgentFacet::start            # answers a run's channels
+TaskMgr::set_hooks              # closures
+TasksFacet::autopilot_runner    # closures
+SshHost::run                    # Option<Sink>: an I/O object of the UI
+TaskMgr::set_runner             # a closure
+DevDeployFacet::deploy          # the signing key never crosses the socket
+VaultRead::user_get             # the plain value of a secret never crosses (D-SPLIT-03-SECRETS)
+ProjectKit::wrap                # wraps the UI's tool chain: not served, wraps nothing
+ServicesFacetB4::usage_source   # a source object of the UI side
+ServicesFacetB5::work_report    # a report object with its own thread
+SpeechKit::recording_sink       # a sink object
+VoiceDeskFacet::command_sink    # a sink object
+GitKit::plan_clone              # a batch object with its own state
+ServicesFacetB5::lab_backends   # backend objects
+VoiceDeskFacet::choice_synth    # a synth object
+GitKit::plan_update             # a batch object
+DevCluster::modelhost_kube      # a kubectl object of the UI side: the core runs its own
+DevCluster::kubectl_reader      # the same, read-only
+ServicesFacetB4::project_kit    # ProjectKitSpec carries the UI's tool objects
+ServicesFacetB5::k8s_kit        # K8sKitSpec carries the UI's kube objects
+GitKit::user_ctx                # Ctx carries the UI's callbacks
+HostTtsApi::configure           # Env carries the UI's closures
+ServicesFacetB5::doctor_slow_input   # takes the audit reader of the UI side
+ServicesFacetB4::doctor_slow_probe   # takes that input
+ServicesFacetB5::story_store  # StoryStore carries the UI's file scope: the core uses its own
+ServicesFacetB5::story_store_at  # StoryStore carries the UI's file scope: the core uses its own
+ServicesFacetB4::settings_entries_a   # the Settings tools env holds closures of the UI side
+ServicesFacetB4::settings_entries_b   # the wifi parts hold closures
+CameraHubApi::set_backend   # a backend object of the UI side
+GitKit::real_probe          # answers a closure
+PlatformApi::runner   # the command runner of the core: the UI is never handed one (D-SPLIT-03-SERVED)
+PlatformApi::vault_get   # a secret never crosses (D-SPLIT-03-SECRETS)
+PlatformApi::tools_any   # an opaque handle only the core can use
+PlatformApi::with_live   # a sink of the UI
+PlatformApi::private_repair   # a progress closure
+PlatformApi::plan_waiting   # a progress closure
+PlatformApi::apply   # a progress closure
+PlatformApi::apply_with   # a progress closure and an HTTP object of the UI
+PlatformApi::upgrade   # a progress closure

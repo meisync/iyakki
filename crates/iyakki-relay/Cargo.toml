@@ -1,0 +1,19 @@
+[package]
+name = "iyakki-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The IYAKKI relay server: an owner-run mailbox that carries sealed envelopes between a client computer and a machine that only connects out (docs/RELAY.md)."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "iyakki-relay"
+path = "src/main.rs"
+
+# Deliberately small: the wire is JSON, the HTTP is in-house, TLS is rustls (already in the workspace, ring provider).
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

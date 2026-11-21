@@ -57,6 +57,12 @@ pub trait Sys: Send + Sync {
     }
     /// Take policy routing out again (the plan's undo lines and the marking table); what is not there is skipped.
     fn remove_policy(&self, _plan: &iyakki_vpn::policyroute::PolicyPlan) {}
+    /// A TCP connection whose socket carries the policy mark (F-VPN-08), so the plan's rules send it through the tunnel. The default
+    /// marks the socket here (needs administrator rights); the client of the privileged helper asks the helper, which hands the open
+    /// socket back, so the session needs no rights of its own.
+    fn marked_connect(&self, addr: std::net::SocketAddr, mark: u32, timeout: std::time::Duration) -> std::io::Result<std::net::TcpStream> {
+        crate::tunnel_connect::connect_marked(addr, Some(mark), timeout)
+    }
     /// The networks of the tunnel that is up (empty when it is down), told to the firewall, which counts them as the local network only
     /// when its setting says so. The default does nothing (stand-ins in tests).
     fn tunnel_networks(&self, _nets: &[String]) {}
@@ -118,21 +124,8 @@ fn find_program(name: &str) -> Option<std::path::PathBuf> {
 }
 
 fn run(prog: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
     let p = find_program(prog).ok_or_else(|| format!("the program `{prog}` is not on this system"))?;
-    let mut c = Command::new(p);
-    c.args(args).env_clear().env("PATH", "/usr/sbin:/sbin:/usr/bin:/bin").stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
-    let mut child = c.spawn().map_err(|e| format!("could not start {prog}: {e}"))?;
-    if let (Some(text), Some(mut si)) = (stdin, child.stdin.take()) {
-        si.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
-    }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        Err(format!("{prog} {}: {}", args.first().copied().unwrap_or(""), String::from_utf8_lossy(&out.stderr).trim()))
-    }
+    iyakki_core_local::starters::sys_tool_run(&p, prog, args, stdin)
 }
 
 impl Sys for OsSys {
@@ -185,7 +178,7 @@ impl Sys for OsSys {
     }
 
     fn link_exists(&self, ifname: &str) -> bool {
-        std::path::Path::new("/sys/class/net").join(ifname).exists()
+        iyakki_core_local::net::iface_exists(ifname)
     }
 
     fn wg_configure(&self, d: &DeviceSet) -> Result<(), String> {
@@ -292,7 +285,7 @@ fn nf_socket() -> Result<iyakki_fw::nl::NfSocket, String> {
     static LOAD: Once = Once::new();
     LOAD.call_once(|| {
         for m in crate::vpn_nft::MODULES {
-            let _ = std::process::Command::new("modprobe").arg(m).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+            iyakki_core_local::starters::modprobe_quiet(m);
         }
     });
     iyakki_fw::nl::NfSocket::open(5).map_err(|e| e.to_string())
@@ -631,6 +624,12 @@ impl Sys for FakeSys {
         let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.calls.push("policy remove".into());
         s.policy = None;
+    }
+
+    /// The fake needs no rights: a plain connection, with the mark written to the call list.
+    fn marked_connect(&self, addr: std::net::SocketAddr, mark: u32, timeout: std::time::Duration) -> std::io::Result<std::net::TcpStream> {
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).calls.push(format!("marked connect {addr} {mark:#x}"));
+        std::net::TcpStream::connect_timeout(&addr, timeout)
     }
 
     fn install_dns_capture(&self, spec: &DnsCaptureSpec) -> Result<(), String> {

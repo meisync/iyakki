@@ -12,6 +12,7 @@ use iyakki_shared::enginelog::Health;
 use iyakki_sec::policy::{Policy, Role};
 
 use super::doctor::*;
+use super::doctor_port::DoctorPort;
 use super::doctor_facts::SlowOut;
 use super::tests::cx_with_admin_store;
 use super::{App, AppCx, Flow};
@@ -145,7 +146,7 @@ impl Fx {
         self.g.text_log.iter().map(|t| t.2.clone()).collect::<Vec<_>>().join("\n")
     }
     fn audit(&self) -> String {
-        std::fs::read_to_string(self.cx.audit.path()).unwrap_or_default()
+        std::fs::read_to_string(self.cx.audit.path_buf()).unwrap_or_default()
     }
 }
 
@@ -483,7 +484,7 @@ fn the_real_readers_run_on_this_computer_without_panicking() {
     let mut g = Gfx::new(1280, 720);
     g.clear(rgb(8, 10, 22));
     a.render(&mut g, R::new(0.0, 0.0, 1280.0, 720.0), 1.0, &cx, 1);
-    a.open_share(&cx);
+    a.open_share(&super::doctor_port::CxPort(&cx));
     let t = a.preview.as_ref().unwrap().text.clone();
     assert!(t.starts_with("IYAKKI diagnostics.") && t.contains("=== Version"));
     let home = std::env::var("HOME").unwrap_or_default(); // home-ok: read only
@@ -505,4 +506,115 @@ fn the_harness_drives_the_tile_by_label_and_no_two_controls_collide_at_the_four_
     t.click_label("Check again");
     assert_eq!(t.app.rounds, before + 1, "the click ran another round of checks");
     t.assert_no_overlap_at_standard_sizes();
+}
+
+// ---- the tile on a fake port: no shell context, no real machine ----------------------------------------------------------------------------
+
+/// A port in memory: the facts, the audit lines and the answer to "extend developer mode" are the test's.
+struct FakePort {
+    admin: bool,
+    facts: Facts,
+    home: PathBuf,
+    audit: std::cell::RefCell<Vec<(String, String)>>,
+    extend: std::cell::RefCell<Vec<u32>>,
+    extend_answer: Result<i64, String>,
+}
+
+impl FakePort {
+    fn new(tag: &str, admin: bool, facts: Facts) -> FakePort {
+        FakePort { admin, facts, home: tmp(tag), audit: Default::default(), extend: Default::default(), extend_answer: Ok(1_800_000_000 + 4 * 3600) }
+    }
+    fn audit_text(&self) -> String {
+        self.audit.borrow().iter().map(|(a, s)| format!("{a} {s}")).collect::<Vec<_>>().join("\n")
+    }
+}
+
+impl DoctorPort for FakePort {
+    fn admin(&self) -> bool {
+        self.admin
+    }
+    fn gather(&self) -> Facts {
+        self.facts.clone()
+    }
+    fn slow_input(&self) -> super::doctor_facts::SlowIn {
+        super::doctor_facts::SlowIn { servers: Vec::new(), audit_recent: Arc::new(|_| Vec::new()), dev_port: None }
+    }
+    fn bundle_inputs(&self, found: &[Finding]) -> Inputs {
+        Inputs { version: vec!["IYAKKI test".into()], services: vec![], hardware: "CPU test".into(), doctor: iyakki_shared::doctor::report_lines(found, true), engine_log: String::new(), boot_log: String::new(), switches: vec![], checkup: vec![], compat: vec![] }
+    }
+    fn home(&self) -> PathBuf {
+        self.home.clone()
+    }
+    fn audit(&self, action: &str, subject: &str) {
+        self.audit.borrow_mut().push((action.into(), subject.into()));
+    }
+    fn extend_devmode(&self, hours: u32) -> Result<i64, String> {
+        self.extend.borrow_mut().push(hours);
+        self.extend_answer.clone()
+    }
+}
+
+fn real_parts() -> Parts {
+    Parts { slow: Arc::new(|_| SlowOut::default()), now: Arc::new(|| 1_800_000_000), ..Parts::real() }
+}
+
+#[test]
+fn fake_port_the_tile_asks_the_port_for_its_facts_and_lists_the_findings() {
+    let port = FakePort::new("fp-list", true, sick());
+    let app = DoctorApp::with_port(&port, real_parts());
+    assert!(app.found.iter().any(|f| f.id == "dev-mode-ending"));
+    assert!(app.admin);
+    assert!(app.rounds >= 1);
+    assert!(port.audit.borrow().is_empty(), "reading is silent");
+}
+
+#[test]
+fn fake_port_a_fix_is_audited_and_the_extension_asks_the_port_for_four_hours_for_administrators() {
+    let port = FakePort::new("fp-extend", true, sick());
+    let mut app = DoctorApp::with_port(&port, real_parts());
+    let i = app.found.iter().position(|x| x.id == "dev-mode-ending").unwrap();
+    app.do_fix(i, &port);
+    assert_eq!(port.extend.borrow().as_slice(), [4]);
+    let a = port.audit_text();
+    assert!(a.contains("doctor.fix dev-mode-ending") && a.contains("devmode.extend 4 h (from DOCTOR)"), "{a}");
+    assert!(app.msg.as_ref().is_some_and(|m| m.1 && m.0.contains("switches off at")), "{:?}", app.msg);
+    assert!(app.rounds >= 2, "it checks again after the fix");
+}
+
+#[test]
+fn fake_port_an_ordinary_account_is_sent_to_the_page_and_the_port_is_not_asked_to_extend() {
+    let port = FakePort::new("fp-user", false, sick());
+    let mut app = DoctorApp::with_port(&port, real_parts());
+    let i = app.found.iter().position(|x| x.id == "dev-mode-ending").unwrap();
+    app.do_fix(i, &port);
+    assert!(port.extend.borrow().is_empty());
+    assert_eq!(app.take_request(), Some(("settings".into(), "tab:developer".into())));
+    assert!(!port.audit_text().contains("devmode.extend"));
+}
+
+#[test]
+fn fake_port_a_refused_extension_says_why_and_audits_only_the_fix() {
+    let mut port = FakePort::new("fp-refused", true, sick());
+    port.extend_answer = Err("developer mode is not on".into());
+    let mut app = DoctorApp::with_port(&port, real_parts());
+    let i = app.found.iter().position(|x| x.id == "dev-mode-ending").unwrap();
+    app.do_fix(i, &port);
+    assert_eq!(app.msg, Some(("developer mode is not on".to_string(), false)));
+    assert!(!port.audit_text().contains("devmode.extend"));
+}
+
+#[test]
+fn fake_port_sharing_previews_audits_and_saves_into_the_ports_home_folder_once() {
+    let port = FakePort::new("fp-share", true, sick());
+    let mut app = DoctorApp::with_port(&port, real_parts());
+    app.open_share(&port);
+    assert!(app.preview.is_some());
+    assert_eq!(app.preview.as_ref().unwrap().dests[0].dir, port.home);
+    app.save_to(0, &port);
+    app.save_to(0, &port);
+    let a = port.audit_text();
+    assert!(a.contains("doctor.share.preview"), "{a}");
+    assert_eq!(a.matches("doctor.share.saved").count(), 1, "{a}");
+    let saved = app.preview.as_ref().unwrap().saved.clone().unwrap();
+    assert!(saved.starts_with(&port.home) && saved.exists());
 }

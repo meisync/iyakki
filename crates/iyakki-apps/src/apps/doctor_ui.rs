@@ -23,6 +23,20 @@ const CHECKED: &str = "Checked: the dev cluster and its address, services open t
 
 impl DoctorApp {
     pub(super) fn draw(&mut self, g: &mut Gfx, area: R, s: f32, _cx: &AppCx, tick: u64) {
+        // the two tabs
+        let tsize = 14.0 * s;
+        let mut tx = area.x + 20.0 * s;
+        let ty = area.y + 8.0 * s;
+        tx += g.button(tx, ty, tsize, "Findings", if self.tab_manual { MUTED } else { ACCENT }, Event::Tab(T_TAB_FINDINGS)) + 8.0 * s;
+        g.button(tx, ty, tsize, "Manual tests (m)", if self.tab_manual { ACCENT } else { MUTED }, Event::Tab(T_TAB_MANUAL));
+        let strip = tsize * 2.1 + 12.0 * s;
+        let area = R::new(area.x, area.y + strip, area.w, (area.h - strip).max(0.0));
+        if self.tab_manual {
+            if let Some(m) = self.manual.as_mut() {
+                m.draw(g, area, s);
+                return;
+            }
+        }
         let pad = 20.0 * s;
         let x = area.x + pad;
         let w = (area.w - 2.0 * pad).max(40.0 * s);

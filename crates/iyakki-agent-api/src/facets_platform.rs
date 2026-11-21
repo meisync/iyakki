@@ -10,7 +10,7 @@ use iyakki_shared::platform_types::*;
 pub const UNAVAILABLE_PLATFORM: &str = "unavailable: this core does not serve this call";
 
 /// What the UI shows of one service.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ServiceInfo {
     pub id: String,
     pub title: String,

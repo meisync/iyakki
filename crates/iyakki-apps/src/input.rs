@@ -163,6 +163,8 @@ pub struct InputState {
     meta: bool,
     /// A Control+click made a right click (Mac profile): the release that follows is not a click.
     ctrl_click: bool,
+    /// The key of the voice assistant's chord that is held down (press-to-talk, F-GEMVOICE-08): its release is told to the shell.
+    voice_down: Option<u16>,
     /// The last scroll came from a touchpad (true) or a wheel, for the live row of Settings.
     scroll_from_pad: bool,
     caps: bool,
@@ -204,7 +206,7 @@ pub struct InputState {
 
 impl InputState {
     pub fn new(w: u32, h: u32) -> InputState {
-        InputState { shift: false, ctrl: false, alt: false, meta: false, ctrl_click: false, scroll_from_pad: false, caps: false, x: w as i32 / 2, y: h as i32 / 2, w: w as i32, h: h as i32, abs: (0, 0), slot: 0, pending_touch: false, pad: crate::touchpad::Touchpad::new(), touches: Default::default(), started: std::time::Instant::now(), sticky: Default::default(), slow: Default::default(), opts: None, scroll: crate::scrolleng::ScrollEngine::new(), wheel_legacy: 0, wheel_hires: 0, rel_rem: (0, 0), mouse_pct: None, fake_ms: None, scroll_due: None }
+        InputState { shift: false, ctrl: false, alt: false, meta: false, ctrl_click: false, voice_down: None, scroll_from_pad: false, caps: false, x: w as i32 / 2, y: h as i32 / 2, w: w as i32, h: h as i32, abs: (0, 0), slot: 0, pending_touch: false, pad: crate::touchpad::Touchpad::new(), touches: Default::default(), started: std::time::Instant::now(), sticky: Default::default(), slow: Default::default(), opts: None, scroll: crate::scrolleng::ScrollEngine::new(), wheel_legacy: 0, wheel_hires: 0, rel_rem: (0, 0), mouse_pct: None, fake_ms: None, scroll_due: None }
     }
 
     fn now_ms(&self) -> u64 {
@@ -420,6 +422,11 @@ impl InputState {
         let mut out = Vec::new();
         match r.typ {
             EV_KEY => match r.code {
+                // the voice chord's key let go: the shell is told, so a held key can mean press-to-talk (the press was told when it went down)
+                c if r.value == 0 && self.voice_down == Some(c) => {
+                    self.voice_down = None;
+                    out.push(Event::Fn(crate::fnkeys::FnKey::VoiceAssist, false));
+                }
                 42 | 54 => {
                     self.shift = r.value != 0;
                     // a Shift+click extends a text selection: the shell reads this while it handles the press
@@ -496,8 +503,8 @@ impl InputState {
                 }
                 // the Gemini voice assistant's start key (EXPERIMENTAL; Super+V by default, set in Settings): the shell starts or ends a session
                 c if r.value == 1 && voice_chord_hit(c, self.meta, self.ctrl, self.alt, self.shift) => {
+                    self.voice_down = Some(c);
                     out.push(Event::Fn(crate::fnkeys::FnKey::VoiceAssist, true));
-                    out.push(Event::Fn(crate::fnkeys::FnKey::VoiceAssist, false));
                 }
                 // Super+L locks the screen (a PC keyboard; the Mac profile keeps Command+L for the browser's address bar)
                 38 if self.meta && r.value == 1 && crate::inputprofile::resolved() != iyakki_shared::inputprofile::Resolved::Mac => {
@@ -1284,7 +1291,7 @@ mod tests {
 
     #[test]
     fn a_mouse_moves_by_the_chosen_speed_and_the_pointer_stays_on_the_screen() {
-        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        let _shared = iyakki_testkit::process_lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
         let rel = |st: &mut InputState, code: u16, v: i32| st.feed(Raw { typ: EV_REL, code, value: v }, None);
         let mut st = InputState::new(1920, 1080);
         st.mouse_pct = Some(200);
@@ -1395,11 +1402,12 @@ mod tests {
 
     #[test]
     fn the_background_scan_never_makes_the_caller_wait_and_stops_when_dropped() {
-        let t = std::time::Instant::now();
+        // the CPU time of this thread, not the wall clock: a loaded machine stretches the wall time of any call
+        let cpu = iyakki_testkit::thread_cpu_time();
         let scan = BackgroundScan::start();
         let mut devs = Vec::new();
         scan.take_into(&mut devs); // returns at once, whatever the scan thread is doing
-        assert!(t.elapsed() < std::time::Duration::from_millis(200), "starting and taking must not wait for the scan");
+        assert!(iyakki_testkit::thread_cpu_time() - cpu < std::time::Duration::from_millis(200), "starting and taking must not do the scan's work");
         std::thread::sleep(std::time::Duration::from_millis(250));
         scan.take_into(&mut devs); // what was found (maybe nothing on a build machine) arrives without waiting
         let stop = scan.stop.clone();
@@ -1437,7 +1445,7 @@ mod tests {
 
     #[test]
     fn modifiers_are_tracked_across_events() {
-        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        let _shared = iyakki_testkit::process_lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
         let mut st = InputState::new(800, 600);
         st.feed(Raw { typ: EV_KEY, code: 42, value: 1 }, None); // shift down
         assert_eq!(press(&mut st, 35), vec![Event::Key(Key::Char('H'))]);
@@ -1548,11 +1556,12 @@ mod tests {
 
     #[test]
     fn the_gemini_voice_start_key_is_a_chord_only_while_the_assistant_is_on_and_follows_the_setting() {
-        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        let _shared = iyakki_testkit::process_lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
         // the chord is process wide: this test sets it and puts it back
         let down = |st: &mut InputState, code: u16| st.feed(Raw { typ: EV_KEY, code, value: 1 }, None);
         let up = |st: &mut InputState, code: u16| st.feed(Raw { typ: EV_KEY, code, value: 0 }, None);
-        let voice = vec![Event::Fn(crate::fnkeys::FnKey::VoiceAssist, true), Event::Fn(crate::fnkeys::FnKey::VoiceAssist, false)];
+        let voice = vec![Event::Fn(crate::fnkeys::FnKey::VoiceAssist, true)];
+        let released = vec![Event::Fn(crate::fnkeys::FnKey::VoiceAssist, false)];
         let mut st = InputState::new(100, 50);
         set_voice_chord(None);
         down(&mut st, 125);
@@ -1560,7 +1569,8 @@ mod tests {
         up(&mut st, 47);
         set_voice_chord(Some("Super+V"));
         assert_eq!(down(&mut st, 47), voice, "Super+V");
-        up(&mut st, 47);
+        assert_eq!(up(&mut st, 47), released, "the release of the key is told too: a held key is press-to-talk");
+        assert!(up(&mut st, 47).is_empty(), "a second release says nothing");
         assert!(!down(&mut st, 34).contains(&voice[0]), "Super+G is not it");
         up(&mut st, 34);
         up(&mut st, 125);
@@ -1571,7 +1581,7 @@ mod tests {
         down(&mut st, 56);
         assert_eq!(down(&mut st, 34), voice, "a changed name is followed");
         set_voice_chord(Some("Esc"));
-        up(&mut st, 34);
+        assert_eq!(up(&mut st, 34), released);
         assert!(!down(&mut st, 34).contains(&voice[0]), "a name that is not a valid shortcut disables it");
         set_voice_chord(None);
     }
@@ -1641,7 +1651,7 @@ mod tests {
 
     #[test]
     fn a_touchpad_swipe_moves_the_pointer_a_tap_clicks_and_the_old_paths_are_untouched() {
-        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        let _shared = iyakki_testkit::process_lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
         use crate::touchpad::PadRange;
         const PAD: PadRange = PadRange { x_min: -5087, x_max: 8270, y_min: -182, y_max: 6749, major_max: 5000 };
         let mut st = InputState::new(1920, 1080);
@@ -1717,7 +1727,7 @@ mod tests {
 
     #[test]
     fn control_and_the_wheel_zoom_instead_of_scrolling() {
-        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        let _shared = iyakki_testkit::process_lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
         crate::scrolleng::request_config(crate::scrolleng::ScrollConfig::default());
         let mut st = InputState::new(800, 600);
         st.fake_ms = Some(0);
@@ -1738,7 +1748,7 @@ mod tests {
 
     #[test]
     fn a_hi_res_wheel_is_counted_once_not_twice_and_a_plain_wheel_still_works() {
-        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        let _shared = iyakki_testkit::process_lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
         crate::scrolleng::request_config(crate::scrolleng::ScrollConfig::default());
         crate::scrolleng::set_raw(false);
         // a hi-res wheel sends the click (1) and its 120 units in one frame, in either order
@@ -1775,7 +1785,7 @@ mod tests {
 
     #[test]
     fn a_scroll_asks_for_about_sixty_steps_a_second_and_stops_when_it_settles() {
-        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        let _shared = iyakki_testkit::process_lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
         crate::scrolleng::request_config(crate::scrolleng::ScrollConfig::default());
         crate::scrolleng::set_raw(false);
         let mut st = InputState::new(800, 600);
@@ -1794,7 +1804,7 @@ mod tests {
 
     #[test]
     fn two_finger_travel_is_sent_with_the_chosen_direction_and_momentum_follows_the_lift() {
-        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        let _shared = iyakki_testkit::process_lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
         use crate::touchpad::PadRange;
         const PAD: PadRange = PadRange { x_min: -5087, x_max: 8270, y_min: -182, y_max: 6749, major_max: 5000 };
         let keep = crate::scrolleng::config();
@@ -1848,7 +1858,7 @@ mod tests {
 
     #[test]
     fn a_new_touch_stops_the_coasting() {
-        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        let _shared = iyakki_testkit::process_lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
         use crate::touchpad::PadRange;
         const PAD: PadRange = PadRange { x_min: -5087, x_max: 8270, y_min: -182, y_max: 6749, major_max: 5000 };
         crate::scrolleng::request_config(crate::scrolleng::ScrollConfig::default());
@@ -1872,7 +1882,7 @@ mod tests {
 
     #[test]
     fn the_end_of_a_list_stops_momentum_through_the_shared_flag() {
-        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        let _shared = iyakki_testkit::process_lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
         crate::scrolleng::request_config(crate::scrolleng::ScrollConfig::default());
         let mut st = InputState::new(800, 600);
         st.fake_ms = Some(0);
@@ -2022,7 +2032,7 @@ mod profile_tests {
     /// side, the saved swap setting agreeing or not with what the driver does, and an unrecognised keyboard under Automatic.
     #[test]
     fn control_command_q_signs_out_and_l_locks_for_every_way_a_keyboard_reaches_the_shell() {
-        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        let _shared = iyakki_testkit::process_lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
         let lock = vec![Event::Fn(crate::fnkeys::FnKey::Lock, true), Event::Fn(crate::fnkeys::FnKey::Lock, false)];
         let out = vec![Event::Fn(crate::fnkeys::FnKey::SignOut, true), Event::Fn(crate::fnkeys::FnKey::SignOut, false)];
         const EV_MSC: u16 = 4;
@@ -2204,7 +2214,7 @@ pub(crate) mod swipe_tests {
 
     #[test]
     fn the_pad_turns_a_swipe_into_an_event_and_the_setting_and_three_finger_drag_decide() {
-        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        let _shared = iyakki_testkit::process_lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
         home_swipe_for_this_thread(Some((true, 3)));
         let ev = three_finger_swipe(&mut InputState::new(1920, 1080), 4000, 0);
         assert_eq!(ev.iter().filter(|e| matches!(e, Event::Swipe { back: true, at: None })).count(), 1, "{ev:?}");

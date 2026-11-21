@@ -11,6 +11,7 @@ pub use iyakki_shared::flows_channel_policy as channel_policy;
 pub use iyakki_flowsx::failfix;
 pub mod failnote;
 pub mod hookenv;
+pub mod hookapi;
 pub use iyakki_flowsx::hookstore;
 pub mod host;
 pub mod permission;
@@ -23,6 +24,8 @@ pub mod webhook;
 
 #[cfg(test)]
 mod hookenv_tests;
+#[cfg(test)]
+mod hookapi_tests;
 #[cfg(test)]
 mod failfix_tests;
 

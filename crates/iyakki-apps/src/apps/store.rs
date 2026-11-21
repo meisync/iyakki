@@ -178,6 +178,8 @@ pub struct StoreApp {
     /// The Drivers chip: drivers for this machine (docs/MAC-HARDWARE.md). `drivers_for` replaces what is read (tests).
     drivers: drv::Pane,
     pub drivers_for: Option<Arc<dyn iyakki_agent_api::StoreDrivers>>,
+    /// The same machine as the core reads it (`cx.os.drivers()`); tests replace it together with `drivers_for`.
+    pub drivers_read_for: Option<Arc<dyn iyakki_core_api::drivers::Drivers>>,
     /// The lifecycle of everything installed (update state, pins, kept versions) and what the last look at the network found.
     lives: Vec<Life>,
     ctx: Ctx,
@@ -406,6 +408,7 @@ impl StoreApp {
             catalog: false,
             drivers: drv::Pane::default(),
             drivers_for: None,
+            drivers_read_for: None,
             lives: vec![],
             ctx: Ctx::default(),
             iupdates: false,
@@ -539,6 +542,38 @@ impl StoreApp {
         self.detail = Some((it.entry.kind.clone(), it.entry.name.clone()));
         self.mode = Mode::Detail;
         self.text_for = None;
+    }
+
+    /// The licence the browser tile left (`checkout::PENDING_*`): verified like any other (signature, issuer, device, account, expiry,
+    /// revocation) and kept only when good; it is removed from the waiting place either way.
+    fn add_pending_licence(&mut self, cx: &AppCx) {
+        use iyakki_shared::store_licencelink::{PENDING_APP, PENDING_KEY};
+        let user = cx.session.user.clone();
+        let Some(text) = cx.core.app_data().get(&user, PENDING_APP, PENDING_KEY) else {
+            self.say("No licence is waiting. When a seller's page hands one over it waits here.", false);
+            return;
+        };
+        let _ = cx.core.app_data().remove(&user, PENDING_APP, PENDING_KEY);
+        let a = self.actor(cx);
+        let items = self.items.clone();
+        let r = self.store.add_license(&a, &text, &|app| items.iter().filter(|i| i.entry.name == app && !i.entry.signer.is_empty()).map(|i| i.entry.signer.clone()).collect());
+        match r {
+            Ok(tok) => {
+                cx.audit.record(&user, "store.license", &tok.app);
+                self.say(format!("Licence added for {} ({}).", tok.app, tok.describe()), true);
+                self.reload(cx);
+            }
+            Err(e) => self.say(format!("The licence from the seller's page was not accepted: {e}"), false),
+        }
+    }
+
+    /// Tell the person a licence is waiting (at open and now and then): the key is L.
+    fn note_pending_licence(&mut self, cx: &AppCx) {
+        use iyakki_shared::store_licencelink::{PENDING_APP, PENDING_KEY};
+        if self.status.is_none() && cx.core.app_data().get(&cx.session.user, PENDING_APP, PENDING_KEY).is_some() {
+            self.say("A licence from the seller's page is waiting: press L to add it (it is checked first).", true);
+            self.redraw = true;
+        }
     }
 
     fn say(&mut self, m: impl Into<String>, ok: bool) {
@@ -1055,6 +1090,8 @@ impl StoreApp {
                 }
             }
             Key::Char('i') => self.mode = Mode::Form(Form::new("Install from a file").path("File path", "", "/mnt/usb/notes.iyp", crate::filepicker::PathKind::File, &[]).choice("For", &["Me only", "Everyone"], usize::from(self.shared && self.actor(cx).can_shared)), FormKind::FromFile),
+            // a licence the seller's return page handed to the browser tile (F-APPSTORE-13): checked offline, added on this key
+            Key::Char('L') => self.add_pending_licence(cx),
             Key::Char('l') => self.mode = Mode::Form(Form::new("Add a licence").path("File path", "", "a licence file, or leave empty to use what you copied", crate::filepicker::PathKind::File, &[]), FormKind::License),
             Key::Char('t') => {
                 if admin {
@@ -1582,6 +1619,9 @@ impl App for StoreApp {
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
         if matches!(ev, Event::Tick) {
             self.apply_job(cx);
+            if matches!(self.mode, Mode::Browse) {
+                self.note_pending_licence(cx);
+            }
             if self.section == Section::Setup && self.setup.tick(cx) {
                 self.redraw = true;
             }
@@ -2060,7 +2100,7 @@ impl StoreApp {
                 let k = d / r.pm.width().max(1) as f32 * r.k.max(0.01) / r.k.max(0.01);
                 let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..tiny_skia::PixmapPaint::default() };
                 g.rrect(x, y, d, d, d * 0.22, fx::WELL);
-                g.pm.draw_pixmap(0, 0, r.pm.as_ref().as_ref(), &paint, tiny_skia::Transform::from_translate(x, y).pre_scale(k, k), None);
+                g.pm_mut().draw_pixmap(0, 0, r.pm.as_ref().as_ref(), &paint, tiny_skia::Transform::from_translate(x, y).pre_scale(k, k), None);
                 return;
             }
         }
@@ -2742,7 +2782,7 @@ impl StoreApp {
     /// Read the machine again for the Drivers chip (only while it is showing).
     fn refresh_drivers(&mut self, cx: &AppCx) {
         if self.ifilter == Some(IType::Driver) {
-            let d = self.drivers_handle(cx);
+            let d = self.drivers_read_for.clone().unwrap_or_else(|| cx.os.drivers());
             self.drivers.refresh(&*d);
         }
     }
@@ -3983,6 +4023,35 @@ mod tests {
     }
 
     #[test]
+    fn a_licence_the_sellers_page_handed_to_the_browser_waits_and_is_added_on_l_after_the_offline_check() {
+        let cx = cx("st-pending", Role::Admin);
+        let mut a = StoreApp::new(&cx);
+        let k = new_signing_key().unwrap();
+        let paid = Pricing { model: PriceModel::Paid, price: 999, currency: "USD".into(), ..Default::default() };
+        let d = stick("st-pending-files", &[("late-helper", "1.0.0", &pub_meta("Late helper", paid), &k)]);
+        add_folder(&mut a, &cx, &d);
+        assert_eq!(a.items.iter().find(|i| i.entry.id == "late-helper").unwrap().state, State::Locked);
+        use iyakki_shared::store_licencelink::{PENDING_APP, PENDING_KEY};
+        let user = cx.session.user.clone();
+        // nothing waiting: said in words
+        key(&mut a, &cx, Key::Char('L'));
+        assert!(a.status_text().unwrap().contains("No licence is waiting"), "{:?}", a.status_text());
+        // a token for another device is not accepted, and does not stay waiting
+        let device = iyakki_agent::store::Store::for_services(cx.services.real()).licenses().device_id();
+        let wrong = iyakki_shared::store_license::Token::issue(&k, "late-helper", "acme", "some-other-device", "", "L-1", "", 1, 0);
+        cx.core.app_data().set(&user, PENDING_APP, PENDING_KEY, &wrong.to_json()).unwrap();
+        key(&mut a, &cx, Key::Char('L'));
+        assert!(a.status_text().unwrap().contains("not accepted"), "{:?}", a.status_text());
+        assert!(cx.core.app_data().get(&user, PENDING_APP, PENDING_KEY).is_none());
+        // the right one unlocks the app
+        let right = iyakki_shared::store_license::Token::issue(&k, "late-helper", "acme", &device, "", "L-2", "standard", 1, 0);
+        cx.core.app_data().set(&user, PENDING_APP, PENDING_KEY, &right.to_json()).unwrap();
+        key(&mut a, &cx, Key::Char('L'));
+        assert!(a.status_text().unwrap().contains("Licence added"), "{:?}", a.status_text());
+        assert_ne!(a.items.iter().find(|i| i.entry.id == "late-helper").unwrap().state, State::Locked);
+    }
+
+    #[test]
     fn a_paid_app_is_locked_until_a_licence_is_added_from_a_file_and_buying_is_disabled() {
         let cx = cx("st-paid", Role::Admin);
         let mut a = StoreApp::new(&cx);
@@ -4570,7 +4639,14 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, c).unwrap();
         }
-        iyakki_agent::store::drivers::Drivers::for_services(cx.services.real()).with_roots(iyakki_drivers::Roots { sys: root.join("sys"), proc: root.join("proc") })
+        iyakki_agent::store::drivers::Drivers::for_services(cx.services.real()).with_roots(iyakki_core_api::device_types::driver_packs::Roots { sys: root.join("sys"), proc: root.join("proc") })
+    }
+
+    /// Point the store tile at one made-up machine, for the pack side and for the core's read side.
+    fn inject(a: &mut StoreApp, d: iyakki_agent::store::drivers::Drivers) {
+        let d = Arc::new(d);
+        a.drivers_for = Some(d.clone());
+        a.drivers_read_for = Some(d);
     }
 
     fn pane_row(a: &StoreApp, id: &str) -> usize {
@@ -4581,7 +4657,7 @@ mod tests {
     fn the_drivers_chip_lists_this_machine_with_the_right_buttons_at_every_size() {
         let cx = cx("st-drivers-chip", Role::Admin);
         let mut a = StoreApp::new(&cx);
-        a.drivers_for = Some(Arc::new(fake_mini(&cx, "st-drivers-chip-mini")));
+        inject(&mut a, fake_mini(&cx, "st-drivers-chip-mini"));
         draw(&mut a, &cx, 1280, 720);
         let labels: Vec<String> = a.ifiltered().iter().map(|e| e.title.clone()).collect();
         assert!(!labels.iter().any(|l| l.contains("Mac")), "the Drivers chip is not the All list");
@@ -4614,7 +4690,7 @@ mod tests {
     fn a_built_in_pack_installs_from_the_drivers_view_through_the_review_and_removes_after_asking() {
         let cx = cx("st-drivers-pack", Role::Admin);
         let mut a = StoreApp::new(&cx);
-        a.drivers_for = Some(Arc::new(fake_mini(&cx, "st-drivers-pack-mini")));
+        inject(&mut a, fake_mini(&cx, "st-drivers-pack-mini"));
         a.handle(&Event::Tab(226), &cx);
         let kb = pane_row(&a, "mac-keyboard-options");
         a.handle(&Event::Tab(drv::BASE + kb * 4), &cx);
@@ -4640,12 +4716,12 @@ mod tests {
     fn firmware_from_a_usb_folder_is_asked_for_reviewed_as_unsigned_and_installed_for_the_machine() {
         let cx = cx("st-drivers-usb", Role::Admin);
         let mut a = StoreApp::new(&cx);
-        a.drivers_for = Some(Arc::new(fake_mini(&cx, "st-drivers-usb-mini")));
+        inject(&mut a, fake_mini(&cx, "st-drivers-usb-mini"));
         let stick = temp_dir("st-drivers-usb-stick");
         std::fs::write(stick.join("BCM20702A1-05ac-8289.hcd"), b"HCD").unwrap();
         a.handle(&Event::Tab(226), &cx);
         let bt = pane_row(&a, "mac-bt-broadcom");
-        assert_eq!(a.drivers.rows[bt].status, Some(iyakki_drivers::Status::FirmwareMissing));
+        assert_eq!(a.drivers.rows[bt].status, Some(iyakki_core_api::device_types::driver_packs::Status::FirmwareMissing));
         a.handle(&Event::Tab(drv::BASE + bt * 4), &cx);
         assert!(matches!(a.mode, Mode::Form(_, FormKind::DriverFolder(_))), "it asks for the folder");
         for (w, h) in SIZES {
@@ -4668,7 +4744,7 @@ mod tests {
         // a person without the right gets a plain refusal in the review, not a silent install
         let alice = cx_for_user("st-drivers-alice");
         let mut b = StoreApp::new(&alice);
-        b.drivers_for = Some(Arc::new(fake_mini(&alice, "st-drivers-alice-mini")));
+        inject(&mut b, fake_mini(&alice, "st-drivers-alice-mini"));
         b.handle(&Event::Tab(226), &alice);
         let bt = pane_row(&b, "mac-bt-broadcom");
         b.handle(&Event::Tab(drv::BASE + bt * 4), &alice);
@@ -4692,7 +4768,7 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, c).unwrap();
         }
-        a.drivers_for = Some(Arc::new(iyakki_agent::store::drivers::Drivers::for_services(cx.services.real()).with_roots(iyakki_drivers::Roots { sys: root.join("sys"), proc: root.join("proc") })));
+        inject(&mut a, iyakki_agent::store::drivers::Drivers::for_services(cx.services.real()).with_roots(iyakki_core_api::device_types::driver_packs::Roots { sys: root.join("sys"), proc: root.join("proc") }));
         a.handle(&Event::Tab(226), &cx);
         let cam = pane_row(&a, "mac-facetimehd");
         a.handle(&Event::Tab(drv::BASE + cam * 4), &cx);

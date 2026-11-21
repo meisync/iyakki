@@ -576,6 +576,7 @@ pub(crate) mod tests {
         for (i, x) in t[512..512 + 11 * 512].iter_mut().enumerate() {
             *x = (i * 13 % 251) as u8 + 1;
         }
+        t[512 + 488..512 + 500].fill(0); // the zero-length entry that ends the block list, as in GRUB's diskboot.img
         t[512 + 500..512 + 508].copy_from_slice(&2u64.to_le_bytes());
         t[512 + 508..512 + 510].copy_from_slice(&10u16.to_le_bytes());
         t[512 + 510..512 + 512].copy_from_slice(&0x820u16.to_le_bytes());

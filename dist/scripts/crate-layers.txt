@@ -10,6 +10,8 @@ iyakki-apps       apps
 iyakki-uikit      ui
 iyakki-ui-sdk     ui
 iyakki-app-sample apps
+iyakki-app-edit apps
+iyakki-app-terminal apps
 iyakki-sdk-tile   apps
 iyakki-app-markdown apps
 iyakki-ui-preview ui
@@ -22,7 +24,7 @@ iyakki-compose    core   # the composition root: names both the agent and the UI
 iyakki-agent      agent
 iyakki-remote     core
 iyakki-memx        core   # the knowledge base, embedder and history (F-SPLIT-03), below the agent
-iyakki-disksx      core   # the disk engine (F-SPLIT-03), below the agent
+iyakki-disksx      core   # re-export of the disk engine in iyakki-core-local
 iyakki-flowsx      core   # pure FLOWS parts (F-SPLIT-03), below the agent; same layer as the engine it builds on
 iyakki-flow*      core
 iyakki-usb        core
@@ -31,6 +33,7 @@ iyakki-connect    core
 # host-side tools
 iyakki-relcheck     tools
 iyakki-store-server tools
+iyakki-relay        tools   # the owner-run relay mailbox server (F-CORE-17, docs/RELAY.md)
 iyakki-sdk-emulator tools
 iyakki-lint         tools
 
@@ -42,7 +45,9 @@ iyakki-battery            base
 iyakki-bindelta           base
 iyakki-camdetect          base
 iyakki-client-engine      base
+iyakki-board-model        base
 iyakki-clock              base
+iyakki-devtools-engine    base   # the DEV TOOLS tile's thirteen tools as plain functions (alpha.7 SDK batch 1)
 iyakki-testkit            base   # test support only (locks, ports, waits, gated children); a dev-dependency, never shipped
 iyakki-clockfloor         base
 iyakki-data               base
@@ -55,6 +60,8 @@ iyakki-extagentx          base
 iyakki-enchome            base
 iyakki-filter             base
 iyakki-fw                 base
+iyakki-hostfiles          base   # host files bridge rules (window mode); iyakki-shared re-exports it (alpha.7 SDK batch 1)
+iyakki-linuxinit          base   # the Linux apps sandbox program side, network plan, device nodes, forwarding switch and quiet print macros; iyakki-shared re-exports it (F-ARCH-07)
 iyakki-hotspot            base
 iyakki-hw                 base
 iyakki-hwinfo             base
@@ -87,9 +94,11 @@ iyakki-webview            base
 iyakki-wordtime           base
 iyakki-zram               base
 iyakki-audiodec           base
+iyakki-audiolink          base   # the cloud audio frames, pinned TLS link and device client (shared by the agent and the connector)
 iyakki-cloudmode          base
 iyakki-filescope          base
 iyakki-shared             base
+iyakki-site-apps          base   # sites installed as app tiles: record, manifest, origin rules (F-BROW-100); the shell keeps the file (alpha.7 SDK batch 1)
 iyakki-dash               base
 iyakki-webcrypto          base
 iyakki-agent-api          base

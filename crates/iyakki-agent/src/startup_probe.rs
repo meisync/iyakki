@@ -248,7 +248,7 @@ pub fn gather(svc: &Arc<crate::services::Services>, firewall_alert: bool) -> Fac
     let wifi_ifaces: Vec<String> = std::fs::read_dir(crate::sysinfo::net_class_root()).map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| wireless(n)).collect()).unwrap_or_default();
     Facts {
         wired_route: wired_default_route(&route_text, &wireless),
-        wifi_hw: !wifi_ifaces.is_empty() || std::fs::read_dir("/sys/bus/pci/devices").map(|d| d.flatten().any(|e| std::fs::read_to_string(e.path().join("class")).is_ok_and(|c| c.trim().starts_with("0x0280")))).unwrap_or(false),
+        wifi_hw: !wifi_ifaces.is_empty() || iyakki_core_local::machinefacts::pci_wifi_present(),
         wifi_online: wifi_ifaces.iter().any(|n| std::fs::read_to_string(crate::sysinfo::net_class_root().join(n).join("operstate")).is_ok_and(|t| t.trim() == "up")),
         uptime_secs: crate::doctor_sys::uptime_secs(),
         clock_floor_pending: crate::clockfloor::pending(),
@@ -257,7 +257,7 @@ pub fn gather(svc: &Arc<crate::services::Services>, firewall_alert: bool) -> Fac
         no_nic: !std::fs::read_dir(crate::sysinfo::net_class_root()).map(|d| d.flatten().any(|e| e.path().join("device").exists())).unwrap_or(true),
         k3s: K3sFact { installed: h.installed, autostart: h.autostart, state: h.state.clone(), note: h.note.clone(), failed_reason: h.failed_reason.clone(), node_ready: h.node_ready },
         firewall_alert,
-        sound_cards: std::fs::read_to_string("/proc/asound/cards").map(|t| t.lines().filter(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit())).count()).unwrap_or(0),
+        sound_cards: iyakki_core_api::AudioRoute::card_count(&iyakki_core_local::LocalAudioRoute::system()),
         web_engine: crate::webengine::offered(),
         shares_running: crate::sharedfolder::running_total(),
         touch: crate::touchprobe::state(),

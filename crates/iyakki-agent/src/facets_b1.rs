@@ -1,7 +1,7 @@
 //! The real implementation of the facets of `iyakki_agent_api::facets_b1` (F-SPLIT-03, bucket b1): each method delegates to the agent module.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use iyakki_agent_api::{DirectVoice, HostEnginesFacet, StoryFacet, StoryReader, LinkedPicture, SceneFacet, KubeFeed, KubeFeedFacet, MatrixAccount, MatrixAuth, MatrixRoom, MatrixService, ServicesB1, BrowserHeadersFacet, HeaderRuleStore, HeaderValues, ContextDone, ContextIntentFacet, ContextUndo, AgentFacetsB1, AiMachine, AiProfileFacet, AvBuildFacet, HwAccepted, HwFirmwareFacet, HwOffer, HwView};
 use iyakki_shared::aiprofile::Vis;
@@ -201,10 +201,21 @@ impl ServicesB1 for crate::services::Services {
         crate::avbuild::notify_if_stale(self, user)
     }
     fn msg_mirror_tick(self: &Arc<Self>, user: &str, audit: iyakki_shared::gitkeys::AuditFn) -> bool {
-        crate::msg::mirror::tick(self, user, audit)
+        // pushes that waited at the person's push service are shown first (a cheap no-op without a saved subscription)
+        let pushed = crate::browserpush::poll_tick(self, user, audit.clone());
+        crate::msg::mirror::tick(self, user, audit) || pushed
+    }
+    fn rag_refresh_tick(self: &Arc<Self>, user: &str, policy: &iyakki_sec::policy::Policy, audit: iyakki_shared::gitkeys::AuditFn) -> bool {
+        crate::ragrefresh::tick(self, user, policy, audit)
     }
     fn msg_offer_tools(self: &Arc<Self>, tools: Arc<dyn iyakki_shared::agent::Tools>, user: &str, audit: iyakki_shared::gitkeys::AuditFn) -> Arc<dyn iyakki_shared::agent::Tools> {
         crate::msg::tools::offer(tools, self, user, audit)
+    }
+    fn page_passkeys(self: &Arc<Self>, user: &str, audit: iyakki_shared::gitkeys::AuditFn) -> Option<Arc<Mutex<dyn iyakki_agent_api::PagePasskeyHost>>> {
+        Some(crate::passkeys::page_host(self, user, audit))
+    }
+    fn page_push(self: &Arc<Self>, user: &str, audit: iyakki_shared::gitkeys::AuditFn) -> Option<Arc<Mutex<dyn iyakki_agent_api::PagePushHost>>> {
+        Some(crate::browserpush::page_host(self, user, audit))
     }
     fn msg_prompt_rules(self: &Arc<Self>, user: &str) -> String {
         crate::msg::tools::prompt_rules(self, user)

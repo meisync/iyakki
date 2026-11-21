@@ -176,7 +176,8 @@ fn run_real(args: &Args, connect: &dyn Fn() -> Result<DevClient, String>, out: &
     let argv = script_argv(&repo, args);
     let mut step = |out: &mut dyn FnMut(&str)| -> i32 {
         use std::io::BufRead;
-        let mut child = match std::process::Command::new(&argv[0]).args(&argv[1..]).current_dir(&repo).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit()).spawn() {
+        use iyakki_core_local::starters_launch::{Launch, Stream};
+        let mut child = match Launch::new(&argv[0]).args(&argv[1..]).cwd(&repo).stdout(Stream::Piped).stderr(Stream::Inherit).spawn() {
             Ok(c) => c,
             Err(e) => {
                 out(&format!("loop: cannot start {}: {e}", argv[0]));

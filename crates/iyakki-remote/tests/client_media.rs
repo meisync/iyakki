@@ -27,6 +27,9 @@ use std::time::{Duration, Instant};
 struct Seen {
     inputs: Vec<String>,
     copy: Option<String>,
+    /// The person's home as the fake screen's files facet has it (name -> bytes), the reads it served and what it saved.
+    files: std::collections::BTreeMap<String, Vec<u8>>,
+    reads: u32,
 }
 
 struct Fake {
@@ -50,6 +53,20 @@ impl Screen for Fake {
     fn arm(&mut self) {}
     fn take_pixels(&mut self) -> Option<Pixels> {
         None
+    }
+    fn files_list(&mut self, dir: &str) -> Result<iyakki_core_api::Listing, iyakki_remote::screen::AppRefusal> {
+        let g = self.seen.lock().unwrap();
+        let entries = g.files.iter().map(|(n, b)| iyakki_core_api::FileEntry { name: n.clone(), is_dir: false, size: b.len() as u64, modified: None }).collect();
+        Ok(iyakki_core_api::Listing { dir: dir.into(), entries, truncated: false })
+    }
+    fn files_read(&mut self, path: &str) -> Result<Vec<u8>, iyakki_remote::screen::AppRefusal> {
+        let mut g = self.seen.lock().unwrap();
+        g.reads += 1;
+        g.files.get(path).cloned().ok_or_else(|| iyakki_remote::screen::AppRefusal::new("failed", "that file cannot be read"))
+    }
+    fn files_save(&mut self, path: &str, bytes: Vec<u8>) -> Result<String, iyakki_remote::screen::AppRefusal> {
+        self.seen.lock().unwrap().files.insert(path.to_string(), bytes);
+        Ok("Saved.".into())
     }
     fn finished(&self) -> bool {
         false
@@ -211,6 +228,8 @@ fn masked(op: u8, p: &[u8]) -> Vec<u8> {
 
 enum Got {
     Msg(ServerMsg),
+    /// A file-transfer message (not a `ServerMsg`: its own `file_*` tags).
+    File(serde_json::Value),
     Bin(Vec<u8>),
     Close,
 }
@@ -266,6 +285,7 @@ impl Client {
         let mut p = vec![0u8; len];
         self.s.read_exact(&mut p).ok()?;
         Some(match h[0] & 0x0f {
+            1 if p.starts_with(br#"{"t":"file_"#) => Got::File(serde_json::from_slice(&p).unwrap()),
             1 => Got::Msg(proto::decode_server(std::str::from_utf8(&p).unwrap()).expect("a message of the protocol")),
             2 => Got::Bin(p),
             _ => Got::Close,
@@ -292,6 +312,7 @@ impl Client {
         while t0.elapsed() < wait {
             match self.next(Duration::from_millis(50)) {
                 Some(Got::Msg(x)) => m.push(x),
+                Some(Got::File(_)) => {}
                 Some(Got::Bin(x)) => b.push((x[0], x[1..].to_vec())),
                 Some(Got::Close) => break,
                 None => {}
@@ -323,6 +344,7 @@ impl Client {
         let mut offered: Vec<String> = ["picture", "input", "events", "calls"].iter().map(|s| s.to_string()).collect();
         if offer_media {
             offered.extend(proto::cap::SERVER_MEDIA.iter().map(|s| s.to_string()));
+            offered.extend(proto::cap::SERVER_FILES.iter().map(|s| s.to_string()));
         }
         self.send(&ClientMsg::Hello { v: 1, min_v: 1, offered, needed: vec![], client: "test".into() });
         match self.msg() {
@@ -781,4 +803,147 @@ fn frames_without_an_offer_or_malformed_ones_are_refused_once_and_never_kept() {
     r.ep.revoke(&id, "ann").unwrap();
     assert!(c.closed_within(Duration::from_secs(3)));
     wait_for("vanished", || r.host.sources.list("tenant-of-ann").is_empty());
+}
+
+
+// ------------------------------------------------------------------------------------------------------------------ file transfer (F-CLIENT-01)
+
+impl Client {
+    /// The next file-transfer message (other messages are skipped; binary chunks are collected into `chunks`).
+    fn file(&mut self, chunks: &mut Vec<(u32, Vec<u8>)>) -> serde_json::Value {
+        loop {
+            match self.next(Duration::from_secs(8)) {
+                Some(Got::File(v)) => return v,
+                Some(Got::Bin(b)) if b.first() == Some(&proto::STREAM_FILE_OUT) => {
+                    let (id, bytes) = proto::split_file_chunk(&b[1..]).unwrap();
+                    chunks.push((id, bytes.to_vec()));
+                }
+                Some(Got::Close) => panic!("closed"),
+                Some(_) => {}
+                None => panic!("no file message"),
+            }
+        }
+    }
+
+    fn put_chunk(&mut self, id: u32, bytes: &[u8]) {
+        let mut p = id.to_be_bytes().to_vec();
+        p.extend_from_slice(bytes);
+        self.send_bin(proto::STREAM_FILE_IN, &p);
+    }
+}
+
+fn kind(v: &serde_json::Value) -> &str {
+    v["t"].as_str().unwrap_or("")
+}
+
+#[test]
+fn files_are_listed_once_asked_per_session_and_a_download_is_a_card_then_chunks_in_order_then_done() {
+    let r = rig("files-get", true);
+    let body: Vec<u8> = (0..(proto::FILE_CHUNK * 2 + 100)).map(|i| (i % 251) as u8).collect();
+    r.seen.lock().unwrap().files.insert("photo.bin".into(), body.clone());
+    let (mut c, _, _) = connect(&r, "Maya's phone", 40, true, &["files.client"]);
+    let mut chunks = Vec::new();
+    c.send(&ClientMsg::FileList { dir: String::new() });
+    let l = c.file(&mut chunks);
+    assert_eq!((kind(&l), l["entries"][0]["name"].as_str(), l["entries"][0]["size"].as_u64()), ("file_list", Some("photo.bin"), Some(body.len() as u64)));
+    // the card was answered yes for browsing; a second listing does not ask again, even with the card set to no
+    r.card.store(1, Ordering::SeqCst);
+    c.send(&ClientMsg::FileList { dir: String::new() });
+    assert_eq!(kind(&c.file(&mut chunks)), "file_list");
+    // a file asks every time: the card says no, nothing is read from the home
+    c.send(&ClientMsg::FileGet { id: 1, path: "photo.bin".into() });
+    let e = c.file(&mut chunks);
+    assert_eq!((kind(&e), e["id"].as_u64(), e["code"].as_str()), ("file_err", Some(1), Some("card_declined")), "{e}");
+    assert_eq!(r.seen.lock().unwrap().reads, 0, "a refused file is never read");
+    // the card says yes: the size, then the chunks of at most 32 KB with the id, then done
+    r.card.store(0, Ordering::SeqCst);
+    c.send(&ClientMsg::FileGet { id: 2, path: "photo.bin".into() });
+    let ok = c.file(&mut chunks);
+    assert_eq!((kind(&ok), ok["size"].as_u64()), ("file_get_ok", Some(body.len() as u64)));
+    let done = c.file(&mut chunks);
+    assert_eq!((kind(&done), done["id"].as_u64()), ("file_done", Some(2)));
+    assert!(chunks.iter().all(|(id, b)| *id == 2 && b.len() <= proto::FILE_CHUNK) && chunks.len() == 3);
+    assert_eq!(chunks.into_iter().flat_map(|(_, b)| b).collect::<Vec<u8>>(), body);
+    let a = r.audit.lock().unwrap().join("\n");
+    assert!(a.contains("ann|client.file.get|") && !a.contains("photo.bin"), "audited by size, never by the file's name: {a}");
+    // a file that is not there is a sentence, not a crash
+    c.send(&ClientMsg::FileGet { id: 3, path: "nope.bin".into() });
+    let e = c.file(&mut Vec::new());
+    assert_eq!((kind(&e), e["code"].as_str()), ("file_err", Some("failed")));
+}
+
+#[test]
+fn an_upload_asks_on_the_machine_then_takes_exactly_the_announced_bytes_and_saves_them_through_the_screen() {
+    let r = rig("files-put", true);
+    let (mut c, _, _) = connect(&r, "Maya's phone", 41, true, &["files.client"]);
+    let mut none = Vec::new();
+    let body: Vec<u8> = (0..70_000).map(|i| (i % 7) as u8).collect();
+    // the card says no: nothing is accepted
+    r.card.store(1, Ordering::SeqCst);
+    c.send(&ClientMsg::FilePut { id: 1, path: "in/up.bin".into(), size: body.len() as u64 });
+    assert_eq!(c.file(&mut none)["code"].as_str(), Some("card_declined"));
+    r.card.store(0, Ordering::SeqCst);
+    c.send(&ClientMsg::FilePut { id: 2, path: "up.bin".into(), size: body.len() as u64 });
+    assert_eq!(kind(&c.file(&mut none)), "file_put_ok");
+    for part in body.chunks(proto::FILE_CHUNK) {
+        c.put_chunk(2, part);
+    }
+    c.send(&ClientMsg::FileEnd { id: 2 });
+    let saved = c.file(&mut none);
+    assert_eq!((kind(&saved), saved["path"].as_str()), ("file_saved", Some("up.bin")));
+    assert_eq!(r.seen.lock().unwrap().files.get("up.bin"), Some(&body));
+    // fewer bytes than announced, more bytes than announced, a size over the limit and a name outside the home are refused
+    c.send(&ClientMsg::FilePut { id: 3, path: "short.bin".into(), size: 10 });
+    assert_eq!(kind(&c.file(&mut none)), "file_put_ok");
+    c.put_chunk(3, &[1, 2, 3]);
+    c.send(&ClientMsg::FileEnd { id: 3 });
+    assert_eq!(c.file(&mut none)["code"].as_str(), Some("bad_request"));
+    assert!(r.seen.lock().unwrap().files.get("short.bin").is_none());
+    c.send(&ClientMsg::FilePut { id: 4, path: "over.bin".into(), size: 2 });
+    assert_eq!(kind(&c.file(&mut none)), "file_put_ok");
+    c.put_chunk(4, &[1, 2, 3]);
+    assert_eq!(c.file(&mut none)["code"].as_str(), Some("bad_request"), "more than announced throws the upload away");
+    c.send(&ClientMsg::FilePut { id: 5, path: "big.bin".into(), size: proto::MAX_FILE as u64 + 1 });
+    assert_eq!(c.file(&mut none)["code"].as_str(), Some("too_big"));
+    for bad in ["../x", "/etc/passwd", ""] {
+        c.send(&ClientMsg::FilePut { id: 6, path: bad.into(), size: 1 });
+        assert_eq!(c.file(&mut none)["code"].as_str(), Some("bad_request"), "{bad}");
+    }
+    // a chunk with no upload open is refused, and a cancel ends one
+    c.put_chunk(9, &[1]);
+    assert_eq!(c.file(&mut none)["code"].as_str(), Some("bad_request"));
+    c.send(&ClientMsg::FilePut { id: 7, path: "c.bin".into(), size: 3 });
+    assert_eq!(kind(&c.file(&mut none)), "file_put_ok");
+    c.send(&ClientMsg::FileCancel { id: 7 });
+    c.send(&ClientMsg::FileEnd { id: 7 });
+    assert_eq!(c.file(&mut none)["code"].as_str(), Some("bad_request"), "a cancelled upload is gone");
+}
+
+#[test]
+fn a_device_that_was_not_given_files_or_that_did_not_offer_them_gets_nothing_and_a_machine_without_media_says_unsupported() {
+    let r = rig("files-denied", true);
+    r.seen.lock().unwrap().files.insert("a.txt".into(), b"secret".to_vec());
+    let (mut c, _, _) = connect(&r, "Phone", 42, true, &["speaker.play"]);
+    let mut none = Vec::new();
+    c.send(&ClientMsg::FileList { dir: String::new() });
+    assert_eq!(c.file(&mut none)["code"].as_str(), Some("not_granted"), "an on switch is needed before the card is even asked");
+    c.send(&ClientMsg::FileGet { id: 1, path: "a.txt".into() });
+    assert_eq!(c.file(&mut none)["code"].as_str(), Some("not_granted"));
+    assert_eq!(r.seen.lock().unwrap().reads, 0);
+    // a client that did not offer the capability in hello
+    let (mut old, _, _) = connect(&r, "Old", 43, false, &["files.client"]);
+    old.send(&ClientMsg::FileList { dir: String::new() });
+    assert_eq!(old.file(&mut none)["code"].as_str(), Some("capability_missing"));
+    // an instance with no media half serves no files
+    let r2 = rig("files-nomedia", false);
+    let (mut c2, _, _) = connect(&r2, "Phone", 44, true, &[]);
+    c2.send(&ClientMsg::FileList { dir: String::new() });
+    assert_eq!(c2.file(&mut none)["code"].as_str(), Some("unsupported"));
+}
+
+#[test]
+fn file_messages_are_not_printed_with_their_names_and_the_old_wire_is_unchanged() {
+    let shown = format!("{:?} {:?}", ClientMsg::FileGet { id: 1, path: "tax/2025/return.pdf".into() }, ClientMsg::FileList { dir: "private".into() });
+    assert!(!shown.contains("return") && !shown.contains("private"), "{shown}");
+    assert!(proto::cap::SERVER_FILES.contains(&"files.transfer") && !proto::cap::SERVER.contains(&"files.transfer") && !proto::cap::SERVER_MEDIA.contains(&"files.transfer"));
 }

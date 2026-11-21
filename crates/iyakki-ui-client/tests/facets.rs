@@ -184,3 +184,89 @@ fn the_consent_scope_gates_a_yes_and_ending_the_connection_closes_what_it_opened
     }
     assert_eq!(m.cameras.open_views("amy"), 0, "a gone UI leaves no view open");
 }
+
+/// An app event feed with nothing in it that still holds the scope of the real one.
+struct EmptyFeed;
+impl AppEventFeed for EmptyFeed {
+    fn register(&self, ctx: &CallContext, _event: &str, _filter: &str) -> CallResult<()> {
+        iyakki_core_api::contract::guard(ctx, Scope::EVENTS_READ, Risk::Change)
+    }
+    fn events(&self, ctx: &CallContext, _resume: Resume, _limit: usize) -> CallResult<EventBatch<AppEventBody>> {
+        iyakki_core_api::contract::guard(ctx, Scope::EVENTS_READ, Risk::Read)?;
+        Ok(EventBatch { events: vec![], next: 0, gap: false })
+    }
+}
+
+/// A machine that serves the sample flows (and no assistant), for the pushed flow events.
+fn flows_machine(scopes: &[&str]) -> (String, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let stop = Arc::new(AtomicBool::new(false));
+    let s2 = stop.clone();
+    let scopes: Vec<String> = scopes.iter().map(|s| s.to_string()).collect();
+    let thread = std::thread::spawn(move || {
+        let refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
+        let served = Served {
+            hello: settings_hello("m", RateLimit { calls: 100_000, per_ms: 1000 }),
+            settings: None,
+            vault: None,
+            flows: Some(Arc::new(iyakki_core_fake::contract::FakeFlows::sample())),
+            assistant: None,
+            cameras: None,
+            rpc: None,
+            appevents: Some(Arc::new(EmptyFeed)),
+            ctx: CallContext::remote("amy", Transport::LocalSocket, &refs),
+        };
+        serve(l, Arc::new(served), s2).unwrap();
+    });
+    (addr, stop, thread)
+}
+
+#[test]
+fn flow_events_are_pushed_to_a_subscribed_connection_and_the_subscription_needs_the_read_scope() {
+    // F-SPLIT-07: `flows.subscribe` pushes `{"push":"flows"}` lines as runs start, instead of the client asking `flows.events` again and again
+    let (addr, stop, thread) = flows_machine(&["flows:read", "flows:run"]);
+    let mut watcher = Connection::tcp(addr.as_str(), Duration::from_secs(20)).unwrap();
+    watcher.call("flows.subscribe", serde_json::json!({})).unwrap();
+    watcher.call("flows.subscribe", serde_json::json!({})).unwrap(); // a second one is the same subscription
+    let mut starter = Connection::tcp(addr.as_str(), Duration::from_secs(20)).unwrap();
+    starter.call("flows.start", serde_json::json!({"flow": "tidy", "idempotency_key": "push-key-1"})).unwrap();
+    let mut kinds: Vec<String> = Vec::new();
+    while !kinds.iter().any(|k| k == "started") {
+        watcher.read_push().unwrap();
+        for line in watcher.take_pushed() {
+            if line["push"] == "flows" {
+                kinds.extend(line["events"].as_array().unwrap().iter().filter_map(|e| e["body"]["type"].as_str().or_else(|| e["type"].as_str()).map(String::from)));
+            }
+        }
+    }
+    drop(watcher);
+    drop(starter);
+    stop.store(true, Ordering::Relaxed);
+    let _ = thread.join();
+
+    // without the read scope the subscription is refused, and so is the app event feed without its own scope
+    let (addr, stop, thread) = flows_machine(&[]);
+    let mut c = Connection::tcp(addr.as_str(), Duration::from_secs(20)).unwrap();
+    assert_eq!(c.call("flows.subscribe", serde_json::json!({})).unwrap_err().code, ErrorCode::Denied);
+    assert_eq!(c.call("appevents.subscribe", serde_json::json!({})).unwrap_err().code, ErrorCode::Denied);
+    drop(c);
+    stop.store(true, Ordering::Relaxed);
+    let _ = thread.join();
+}
+
+#[test]
+fn app_events_are_subscribed_with_their_own_scope_and_the_domain_not_served_says_so() {
+    let (addr, stop, thread) = flows_machine(&["events:read"]);
+    let mut c = Connection::tcp(addr.as_str(), Duration::from_secs(20)).unwrap();
+    c.call("appevents.subscribe", serde_json::json!({})).unwrap();
+    // flows are served but the scope of flows is not held
+    assert_eq!(c.call("flows.subscribe", serde_json::json!({})).unwrap_err().code, ErrorCode::Denied);
+    drop(c);
+    stop.store(true, Ordering::Relaxed);
+    let _ = thread.join();
+    let m = machine(&ALL, true); // no flows, no app events served
+    let mut c = Connection::tcp(m.addr.as_str(), Duration::from_secs(20)).unwrap();
+    assert_eq!(c.call("flows.subscribe", serde_json::json!({})).unwrap_err().code, ErrorCode::Unsupported);
+    assert_eq!(c.call("appevents.subscribe", serde_json::json!({})).unwrap_err().code, ErrorCode::Unsupported);
+}

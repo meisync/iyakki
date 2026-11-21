@@ -35,7 +35,54 @@ fn checksum(b: &[u8]) -> u32 {
     sum
 }
 
+/// The cmap subtable to use: Unicode full repertoire (3,10), else Unicode BMP (3,1 or 0,x); a subset has none. `None` for a damaged table.
+fn find_cmap(data: &[u8], tables: &HashMap<[u8; 4], (usize, usize)>) -> Option<Option<(usize, u16)>> {
+    let mut best: Option<(u8, usize, u16)> = None;
+    if let Some(&(cm, _)) = tables.get(b"cmap") {
+        let count = u16_at(data, cm + 2)? as usize;
+        for i in 0..count {
+            let r = cm + 4 + i * 8;
+            let (plat, enc) = (u16_at(data, r)?, u16_at(data, r + 2)?);
+            let off = cm + u32_at(data, r + 4)? as usize;
+            let fmt = u16_at(data, off)?;
+            let rank = match (plat, enc, fmt) {
+                (3, 10, 12) => 3,
+                (3, 1, 4) => 2,
+                (0, _, 4) | (0, _, 12) => 1,
+                _ => 0,
+            };
+            if rank > 0 && best.is_none_or(|b| rank > b.0) {
+                best = Some((rank, off, fmt));
+            }
+        }
+    }
+    Some(best.map(|(_, o, f)| (o, f)))
+}
+
 impl<'a> Ttf<'a> {
+    /// Only the character map of an OpenType font that holds CFF outlines (`OTTO`) or TrueType outlines: enough to turn glyph numbers back
+    /// into characters (F-PDF-18). Nothing else of the font is read, so the subsetting functions must not be used on it.
+    pub fn cmap_only(data: &'a [u8]) -> Option<Ttf<'a>> {
+        let tag = u32_at(data, 0)?;
+        if tag != 0x0001_0000 && tag != 0x4F54_544F {
+            return None;
+        }
+        let n = u16_at(data, 4)? as usize;
+        let mut tables = HashMap::new();
+        for i in 0..n.min(64) {
+            let e = 12 + i * 16;
+            let t: [u8; 4] = data.get(e..e + 4)?.try_into().ok()?;
+            let (off, len) = (u32_at(data, e + 8)? as usize, u32_at(data, e + 12)? as usize);
+            if off.checked_add(len)? > data.len() {
+                return None;
+            }
+            tables.insert(t, (off, len));
+        }
+        let cmap = find_cmap(data, &tables)?;
+        let num_glyphs = tables.get(b"maxp").and_then(|&(o, _)| u16_at(data, o + 4)).filter(|&n| n > 0).unwrap_or(u16::MAX);
+        Some(Ttf { data, tables, units: 0, num_glyphs, long_loca: false, hmetrics: 0, cmap })
+    }
+
     pub fn parse(data: &'a [u8]) -> Option<Ttf<'a>> {
         if u32_at(data, 0)? != 0x0001_0000 {
             return None;
@@ -66,27 +113,7 @@ impl<'a> Ttf<'a> {
         if units == 0 || num_glyphs == 0 || hmetrics == 0 || hmetrics > num_glyphs {
             return None;
         }
-        // the cmap: Unicode full repertoire (3,10), else Unicode BMP (3,1 or 0,x); a subset has none
-        let mut best: Option<(u8, usize, u16)> = None;
-        if let Some(&(cm, _)) = tables.get(b"cmap") {
-            let count = u16_at(data, cm + 2)? as usize;
-            for i in 0..count {
-                let r = cm + 4 + i * 8;
-                let (plat, enc) = (u16_at(data, r)?, u16_at(data, r + 2)?);
-                let off = cm + u32_at(data, r + 4)? as usize;
-                let fmt = u16_at(data, off)?;
-                let rank = match (plat, enc, fmt) {
-                    (3, 10, 12) => 3,
-                    (3, 1, 4) => 2,
-                    (0, _, 4) | (0, _, 12) => 1,
-                    _ => 0,
-                };
-                if rank > 0 && best.is_none_or(|b| rank > b.0) {
-                    best = Some((rank, off, fmt));
-                }
-            }
-        }
-        let cmap = best.map(|(_, o, f)| (o, f));
+        let cmap = find_cmap(data, &tables)?;
         Some(Ttf { data, tables, units, num_glyphs, long_loca, hmetrics, cmap })
     }
 

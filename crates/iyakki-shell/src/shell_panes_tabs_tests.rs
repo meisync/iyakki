@@ -19,12 +19,12 @@ fn apps() -> Vec<PApp> {
 
 fn pixel(g: &Gfx, x: i32, y: i32) -> [u8; 4] {
     let i = ((y as u32 * g.width() + x as u32) * 4) as usize;
-    let d = g.pm.data();
+    let d = g.pm_ref().data();
     [d[i], d[i + 1], d[i + 2], d[i + 3]]
 }
 
 fn hash(g: &Gfx, r: R) -> u64 {
-    let d = g.pm.data();
+    let d = g.pm_ref().data();
     let (gw, gh) = (g.width() as i32, g.height() as i32);
     let mut h = 0xcbf29ce484222325u64;
     for y in (r.y as i32).max(0)..((r.y + r.h) as i32).min(gh) {

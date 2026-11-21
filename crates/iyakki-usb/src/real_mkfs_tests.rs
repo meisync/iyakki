@@ -133,3 +133,66 @@ fn a_dos_table_made_by_sfdisk_with_logical_partitions_is_listed_and_its_inner_ga
     assert!(crate::plan_cli::list_text(std::slice::from_ref(&m)).contains("free space inside an extended partition"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// F-UPG-05 against a stick made and judged by the real tools: a FAT32 volume from `mkfs.fat`, filled and read back with the real
+/// mtools (`mcopy`), updated by `stickupdate::apply`, and checked by the real `fsck.vfat`. The update replaces and adds only the boot
+/// files; the other system's loader, the person's file and every file outside the update stay byte for byte. Skipped, and said so,
+/// where a tool is missing.
+#[test]
+fn a_stick_from_mkfs_fat_is_updated_in_place_and_the_real_fsck_and_mtools_agree_with_what_was_written() {
+    for t in ["mkfs.fat", "fsck.vfat", "mcopy", "mmd", "mdir", "truncate"] {
+        if !have(t) {
+            eprintln!("skipped: {t} is not installed");
+            return;
+        }
+    }
+    use crate::stickupdate::{apply, plan};
+    let d = std::env::temp_dir().join(format!("iyakki-usb-realstick-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let img = d.join("stick.img");
+    let img_s = img.to_str().unwrap();
+    run("truncate", &["-s", "64M", img_s]);
+    run("mkfs.fat", &["-F", "32", "-n", "IYAKKISTK", img_s]);
+    let bytes = |n: usize, seed: u8| -> Vec<u8> { (0..n).map(|i| (i as u8).wrapping_mul(29).wrapping_add(seed).wrapping_add((i >> 9) as u8)).collect() };
+    let put = |rel: &str, data: &[u8]| {
+        let src = d.join("put.tmp");
+        std::fs::write(&src, data).unwrap();
+        run("mcopy", &["-i", img_s, "-o", src.to_str().unwrap(), &format!("::{rel}")]);
+    };
+    for dir in ["boot", "EFI", "EFI/BOOT", "EFI/MSFT", "EFI/MSFT/BOOT"] {
+        run("mmd", &["-i", img_s, &format!("::{dir}")]);
+    }
+    let old: Vec<(&str, Vec<u8>)> = vec![("boot/KERNEL.BIN", bytes(300_000, 1)), ("boot/INITRD.GZ", bytes(90_000, 2)), ("boot/KEEP.TXT", bytes(40, 3)), ("EFI/BOOT/BOOTX64.EFI", bytes(70_000, 4)), ("EFI/MSFT/BOOT/BOOTMGFW.EFI", bytes(120_000, 5)), ("PERSON.TXT", b"the person's own file".to_vec())];
+    for (p, c) in &old {
+        put(p, c);
+    }
+    let read = |rel: &str| -> Vec<u8> {
+        let o = Command::new("mcopy").args(["-i", img_s, &format!("::{rel}"), "-"]).output().unwrap();
+        assert!(o.status.success(), "mcopy ::{rel}: {}", String::from_utf8_lossy(&o.stderr));
+        o.stdout
+    };
+    assert_eq!(read("boot/KERNEL.BIN"), old[0].1, "the real mtools read what they wrote");
+    let from = d.join("pack");
+    let new: Vec<(&str, Vec<u8>)> = vec![("boot/KERNEL.BIN", bytes(410_000, 11)), ("boot/INITRD.GZ", bytes(33, 12)), ("boot/NEW.CFG", bytes(30, 13)), ("EFI/BOOT/BOOTX64.EFI", bytes(150_000, 14)), ("README.txt", b"not part of an update".to_vec())];
+    for (p, c) in &new {
+        let f = from.join(p);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, c).unwrap();
+    }
+    let pl = plan(&img, &from).unwrap();
+    apply(&img, &from, &pl, &mut |_, _, _| {}).unwrap();
+    // read back by the real tools, not by our reader
+    for (p, c) in new.iter().filter(|(p, _)| *p != "README.txt") {
+        assert_eq!(&read(p), c, "{p} is the new file");
+    }
+    assert_eq!(read("boot/KEEP.TXT"), old[2].1, "a boot file that is not in the update stays");
+    assert_eq!(read("EFI/MSFT/BOOT/BOOTMGFW.EFI"), old[4].1, "the other system's loader is untouched");
+    assert_eq!(read("PERSON.TXT"), old[5].1, "the person's own file is untouched");
+    let listing = run("mdir", &["-i", img_s, "-/", "::"]);
+    assert!(!listing.to_lowercase().contains("readme"), "a file outside the update was not added:\n{listing}");
+    let fsck = Command::new("fsck.vfat").args(["-n", img_s]).output().unwrap();
+    let out = format!("{}{}", String::from_utf8_lossy(&fsck.stdout), String::from_utf8_lossy(&fsck.stderr));
+    assert!(fsck.status.success(), "fsck.vfat found a problem after the update:\n{out}");
+    let _ = std::fs::remove_dir_all(&d);
+}

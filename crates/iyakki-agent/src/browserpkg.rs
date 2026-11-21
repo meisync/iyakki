@@ -77,7 +77,8 @@ pub trait Source {
     fn download(&self, dest: &Path) -> Result<(), String>;
 }
 
-fn root(data: &Path) -> PathBuf {
+/// The folder of the package under the data folder.
+pub fn root(data: &Path) -> PathBuf {
     data.join("addons").join("browser")
 }
 

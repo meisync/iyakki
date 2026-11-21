@@ -176,15 +176,15 @@ impl FrameSource for Ffmpeg {
     }
 
     fn frame_rgba(&self, file: &str, t: f64, size: (u32, u32), cancel: &Arc<AtomicBool>) -> Result<Vec<u8>, String> {
-        use std::os::unix::process::CommandExt;
+        use iyakki_core_local::starters_launch::{Launch, Stream};
         let cfg = crate::player::Config::system().ok_or_else(|| NO_FFMPEG.to_string())?;
         let want = size.0 as usize * size.1 as usize * 4;
-        let mut child = std::process::Command::new(&cfg.ffmpeg)
+        let mut child = Launch::new(&cfg.ffmpeg)
             .args(frame_args(file, t, size.0, size.1))
-            .process_group(0)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .own_group()
+            .stdin(Stream::Null)
+            .stdout(Stream::Piped)
+            .stderr(Stream::Null)
             .spawn()
             .map_err(|e| format!("could not start ffmpeg: {e}"))?;
         let pid = child.id() as i32;

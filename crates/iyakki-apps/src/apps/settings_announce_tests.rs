@@ -24,9 +24,12 @@ fn status(a: &SettingsApp) -> String {
 }
 
 #[test]
-#[cfg_attr(not(target_os = "linux"), ignore = "cloud-mode detection reads the machine (Linux hardware folders); a Mac looks like a cloud pod, which turns the default off")]
 fn it_is_on_by_default_switches_off_and_on_with_a_reason_shown_and_is_audited() {
     let cx = admin("announce");
+    // "on by default on a desktop": the person's Cloud mode setting is Off, so the machine running the test (a CI runner or a Mac that
+    // has no screen, keyboard or sound card in the places the automatic detection reads, which would look like a cloud pod and turn
+    // the default off) cannot change the answer. What the default is in cloud mode is tested with the facts in iyakki-cloudmode.
+    cx.services.real().set_cloud_setting(iyakki_shared::cloudmode::Setting::Off).unwrap();
     assert_eq!(cx.services.real().announce_name_setting(), None);
     assert!(cx.services.announce_name_on(), "on by default on a desktop");
     let mut a = SettingsApp::new(&cx);

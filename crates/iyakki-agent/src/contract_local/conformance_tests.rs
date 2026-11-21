@@ -497,6 +497,7 @@ fn flows_rules_hold_for_the_fake_and_the_real_adapter() {
                 FlowEvent::ApprovalAnswered { .. } => "approval_denied",
                 FlowEvent::Frame { .. } => "frame",
                 FlowEvent::Finished { .. } => "finished",
+                FlowEvent::Unknown => "unknown",
             })
             .map(String::from)
             .collect();

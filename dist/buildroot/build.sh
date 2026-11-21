@@ -108,6 +108,8 @@ if [ "$VARIANT" = "web" ] || [ "$VARIANT" = "macweb" ]; then
   # The consolidated web-engine rebuild is: WEB_IRIS=1 WEB_MEDIA=1 WEB_VAAPI=1 ./build.sh web (docs/BROWSER-SPEED.md); iris stays opt-in (hours and about 1 GB).
   if [ "${WEB_SPEED:-1}" = 1 ]; then cat "$HERE/configs/iyakki_web_speed.fragment" >> "$OUT/defconfig"; fi
   if [ "${WEB_VAAPI:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_vaapi.fragment" >> "$OUT/defconfig"; fi
+  # OPTIONAL (WEB_SCREEN=1): PipeWire and the bus daemon for the in-house screen portal (F-BROW-71); never in a release image before it has been run.
+  if [ "${WEB_SCREEN:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_screen.fragment" >> "$OUT/defconfig"; fi
   # OPTIONAL, default OFF: camera, microphone, screen share and WebRTC in the page (WPE media-stream + GStreamer capture and webrtc plugins).
   # Rebuilds WPE WebKit (about 9 h without ccache). docs/development/BROWSER-MEDIA-DEVICES.md. external.mk reads IYAKKI_WEB_MEDIA.
   if [ "${WEB_MEDIA:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_media.fragment" >> "$OUT/defconfig"; export IYAKKI_WEB_MEDIA=1; else export IYAKKI_WEB_MEDIA=0; fi
@@ -127,6 +129,9 @@ if [ "${IYAKKI_NVIDIA_OPEN:-0}" = 1 ]; then
   [ "$ARCH" = "x86_64" ] || { echo "IYAKKI_NVIDIA_OPEN=1 is x86_64 only" >&2; exit 2; }
   cat "$HERE/configs/iyakki_nvidia_open.fragment" >> "$OUT/defconfig"
 fi
+# OPTIONAL, any variant (F-PKG-11, docs/development/IMAGE-SHRINK.md): compressed kernel modules. The kernel must be built with the fragment that
+# lets it read .ko.gz (post-build.sh compresses the modules when IYAKKI_MODULE_COMPRESS=1); this adds that fragment to the kernel fragment list.
+IYAKKI_MODULE_COMPRESS="${IYAKKI_MODULE_COMPRESS:-0}" sh "$HERE/board/iyakki/modcompress-config.sh" "$OUT/defconfig" || exit 2
 # Shared compiler cache (docs/BUILD-INCREMENTAL.md): only for an output directory that has no build yet, or when asked for
 # (IYAKKI_CCACHE=1); IYAKKI_CCACHE=0 switches it off. A finished tree is not changed behind its back.
 if [ "${IYAKKI_CCACHE:-auto}" = 1 ] || { [ "${IYAKKI_CCACHE:-auto}" = auto ] && [ ! -d "$OUT/build" ]; }; then
@@ -173,6 +178,9 @@ case "$PATCH_DIR_LINE" in *board/iyakki/patches*) KSTATE="$KSTATE
 $(cat "$HERE/board/iyakki/linux.fragment" 2>/dev/null || true)" ;; esac
 case "$PATCH_DIR_LINE" in *board/iyakki/patches*) KSTATE="$KSTATE
 $(cat "$HERE/board/iyakki/linux-mac.fragment")" ;; esac
+# the compressed-module fragment (opt-in) counts too, so asking for it rebuilds the kernel; without it the record is what it was
+[ "${IYAKKI_MODULE_COMPRESS:-0}" != 1 ] || KSTATE="$KSTATE
+$(cat "$HERE/board/iyakki/linux-modcompress.fragment")"
 rebuild_if_changed linux "$KSTATE" "$LNEW"
 # An out-of-tree module is built against the kernel tree: when the kernel is rebuilt, so is apple-bce (Mac variant).
 if grep -q '^BR2_PACKAGE_APPLE_BCE=y' "$OUT/.config"; then

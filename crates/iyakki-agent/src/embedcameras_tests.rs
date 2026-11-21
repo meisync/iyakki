@@ -87,7 +87,7 @@ fn rig(tag: &str, motion: bool) -> (Rig, Option<Arc<MotionService>>) {
     });
     let cams = Arc::new(AgentCameras::new(hub.clone(), who_of, svc.clone(), None));
     // no test asks a real address whether it can move
-    cams.set_ptz_probe(Arc::new(|_, _, _| Ok(None)));
+    cams.set_ptz_probe(Arc::new(|_, _, _, _| Ok(None)));
     (Rig { cams, hub, audit, saved, dir, fake, id }, svc)
 }
 
@@ -435,12 +435,36 @@ impl crate::onvif::Source for FixedSource {
 }
 
 #[test]
+fn a_list_of_a_network_camera_nobody_asked_starts_the_question_so_the_buttons_show_at_the_next_look() {
+    let (r, _) = rig("ptzlist", false);
+    let fake = OnvifFake::default();
+    let f2 = fake.clone();
+    let asked = Arc::new(Mutex::new(0u32));
+    let a2 = asked.clone();
+    r.cams.set_ptz_probe(Arc::new(move |_id, _addr, user, pass| {
+        *a2.lock().unwrap() += 1;
+        let c = crate::onvif::Onvif::new(Box::new(f2.clone()), Box::new(FixedSource), user, pass);
+        crate::onvif::PtzCamera::probe(c, "http://c/device_service")
+    }));
+    // off until asked for: a list never touches the network
+    assert!(r.cams.list("amy", "app").iter().all(|c| !c.ptz));
+    r.cams.wait_probes();
+    assert_eq!(*asked.lock().unwrap(), 0);
+    r.cams.probe_on_list(true);
+    assert!(r.cams.list("amy", "app").iter().all(|c| !c.ptz), "the answer is not there yet at the first look");
+    r.cams.wait_probes();
+    assert!(r.cams.list("amy", "app").iter().all(|c| c.ptz), "the buttons are there at the next look");
+    r.cams.wait_probes();
+    assert_eq!(*asked.lock().unwrap(), 1, "asked once, not at every list");
+}
+
+#[test]
 fn a_network_camera_that_can_move_says_so_asks_once_per_view_and_then_moves() {
     let (r, _) = rig("ptz", false);
     let fake = OnvifFake::default();
     let f2 = fake.clone();
     // the probe is handed the stream address, the user name and the password from the vault, and never shows them
-    r.cams.set_ptz_probe(Arc::new(move |addr, user, pass| {
+    r.cams.set_ptz_probe(Arc::new(move |_id, addr, user, pass| {
         assert!(addr.starts_with("rtsp://127.0.0.1:") && user == "admin" && pass == "pw-12345");
         let c = crate::onvif::Onvif::new(Box::new(f2.clone()), Box::new(FixedSource), user, pass);
         crate::onvif::PtzCamera::probe(c, "http://c/device_service")
@@ -468,7 +492,7 @@ fn a_no_to_the_first_move_moves_nothing_and_a_camera_that_cannot_move_refuses_in
     let (r, _) = rig("ptz-no", false);
     let fake = OnvifFake::default();
     let f2 = fake.clone();
-    r.cams.set_ptz_probe(Arc::new(move |_, user, pass| crate::onvif::PtzCamera::probe(crate::onvif::Onvif::new(Box::new(f2.clone()), Box::new(FixedSource), user, pass), "http://c/device_service")));
+    r.cams.set_ptz_probe(Arc::new(move |_, _, user, pass| crate::onvif::PtzCamera::probe(crate::onvif::Onvif::new(Box::new(f2.clone()), Box::new(FixedSource), user, pass), "http://c/device_service")));
     let view = open_allowed(&r, "amy", "app", &[&r.id]);
     let call = r.cams.ptz("amy", &view, &r.id, PtzCommand::Move { pan: 1.0, tilt: 1.0, zoom: 0.0 }).unwrap().unwrap();
     r.cams.decide("amy", &view, &call, false).unwrap();

@@ -562,7 +562,7 @@ pub trait KubeFeedFacet: Send + Sync {
 // ------------------------------------------------------------------------------------------------ services-bound facets (avbuild, msg)
 
 /// A messaging account as the Settings page shows it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MatrixAccount {
     pub id: String,
     pub label: String,
@@ -572,7 +572,7 @@ pub struct MatrixAccount {
 }
 
 /// A room the person named.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MatrixRoom {
     pub name: String,
     /// Copied into the INBOX while the account's copy is on?
@@ -580,7 +580,7 @@ pub struct MatrixRoom {
 }
 
 /// How to sign in to a homeserver.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum MatrixAuth {
     Password { user: String, password: String },
     Token(String),
@@ -702,6 +702,37 @@ impl iyakki_shared::agent::Tools for NoTools {
     }
 }
 
+/// The page-facing end of the passkeys, as the browser app hands it to the script engine (the shape of `iyakki_js::modules::PasskeyHost`, kept
+/// here so the UI does not need the agent). Requests and answers are the JSON the script side writes: `rpId`, `challenge` and ids in base64url.
+/// An `Err` reaches the page as a refusal (`NotAllowedError` unless it begins with another error name and a colon).
+pub trait PagePasskeyHost: Send {
+    fn create(&mut self, origin: &str, request: &serde_json::Value) -> Result<serde_json::Value, String>;
+    fn get(&mut self, origin: &str, request: &serde_json::Value) -> Result<serde_json::Value, String>;
+}
+
+/// One push subscription of a page as the core keeps it (the shape of `iyakki_js::modules::PushSub`, kept here so the UI does not need the
+/// agent). All fields are base64url without padding except `endpoint`; the private key of the subscription never leaves the core.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PagePushSub {
+    pub endpoint: String,
+    pub expiration_ms: Option<i64>,
+    pub key: String,
+    pub p256dh: String,
+    pub auth: String,
+}
+
+/// The page-facing end of Web Push (F-INBOX-09), as the browser app hands it to the script engine (the shape of `iyakki_js::modules::PushHost`).
+/// Every call carries the origin of the asking page. An `Err` reaches the page as a refusal (`NotAllowedError` unless it begins with another
+/// error name and a colon).
+pub trait PagePushHost: Send {
+    fn permission(&mut self, origin: &str) -> String;
+    fn register(&mut self, origin: &str, scope: &str, script: &str) -> Result<(), String>;
+    fn unregister(&mut self, origin: &str, scope: &str) -> Result<bool, String>;
+    fn subscribe(&mut self, origin: &str, scope: &str, key: &str) -> Result<PagePushSub, String>;
+    fn get(&mut self, origin: &str, scope: &str) -> Option<PagePushSub>;
+    fn unsubscribe(&mut self, origin: &str, scope: &str) -> Result<bool, String>;
+}
+
 /// A messaging service with no account that refuses everything.
 pub struct NoMatrix;
 impl MatrixService for NoMatrix {}
@@ -715,9 +746,23 @@ pub trait ServicesB1 {
     fn msg_mirror_tick(self: &Arc<Self>, _user: &str, _audit: iyakki_shared::gitkeys::AuditFn) -> bool {
         false
     }
+    /// The heartbeat of the timed refresh of kept web pages (F-RAG-17): only collections the person chose a timer for; true when a round was started.
+    fn rag_refresh_tick(self: &Arc<Self>, _user: &str, _policy: &iyakki_sec::policy::Policy, _audit: iyakki_shared::gitkeys::AuditFn) -> bool {
+        false
+    }
     /// The chat's tools for messaging (once an account exists), Web Push and passkeys, wrapped around `tools`.
     fn msg_offer_tools(self: &Arc<Self>, tools: Arc<dyn iyakki_shared::agent::Tools>, _user: &str, _audit: iyakki_shared::gitkeys::AuditFn) -> Arc<dyn iyakki_shared::agent::Tools> {
         tools
+    }
+    /// What a web page's `navigator.credentials` reaches (F-BROX-03): the person's passkeys behind a card that asks on EVERY use.
+    /// `None` (the default): this core serves no page passkeys, pages see no `navigator.credentials`.
+    fn page_passkeys(self: &Arc<Self>, _user: &str, _audit: iyakki_shared::gitkeys::AuditFn) -> Option<Arc<Mutex<dyn PagePasskeyHost>>> {
+        None
+    }
+    /// What a web page's `PushManager` reaches (F-INBOX-09): the person's registrations and subscriptions, a card for the permission.
+    /// `None` (the default): this core serves no page push, pages keep the plain service worker stub.
+    fn page_push(self: &Arc<Self>, _user: &str, _audit: iyakki_shared::gitkeys::AuditFn) -> Option<Arc<Mutex<dyn PagePushHost>>> {
+        None
     }
     /// The prompt text for those tools.
     fn msg_prompt_rules(self: &Arc<Self>, _user: &str) -> String {

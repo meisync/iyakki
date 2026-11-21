@@ -42,7 +42,7 @@ fn the_wiring_main_builds_is_the_real_one_and_developer_mode_switches_on_through
     // the services handle the UI holds (`ShellEnv::services`, `AppCx::services`) is the agent's real `Services`, not a fake default (KI-1010 class)
     assert!(shell.services_for_demo().is_real(), "the services handle of the shell is not the real implementation");
     assert!(shell.services_for_demo().as_any().is::<iyakki_agent::services::Services>(), "the services handle is not the agent's Services");
-    assert!(shell.services_for_demo().kb().lock().is_ok() && shell.services_for_demo().dir() == data.as_path(), "the handle does not read the data folder it was opened on");
+    assert!(!shell.services_for_demo().kb().embedder_id().is_empty() && shell.services_for_demo().dir() == data.as_path(), "the handle does not read the data folder it was opened on");
 
     // the facets that take the services as `Any` work through the handle the UI holds (the gate failure of 2026-11-18: they downcast to the concrete type only)
     {

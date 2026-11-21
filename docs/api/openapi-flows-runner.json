@@ -721,6 +721,149 @@
         ],
         "type": "object"
       },
+      "HookCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "content_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "flow": {
+            "type": "string"
+          },
+          "max_body": {
+            "type": "integer"
+          },
+          "methods": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "rate_per_min": {
+            "type": "integer"
+          },
+          "signed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "flow"
+        ],
+        "type": "object"
+      },
+      "HookList": {
+        "additionalProperties": false,
+        "properties": {
+          "hooks": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "hooks"
+        ],
+        "type": "object"
+      },
+      "HookPublic": {
+        "additionalProperties": false,
+        "properties": {
+          "minutes": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "minutes"
+        ],
+        "type": "object"
+      },
+      "HookReveal": {
+        "additionalProperties": false,
+        "properties": {
+          "flow": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "secret": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "shown_once": {
+            "type": "boolean"
+          },
+          "waiting": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "waiting"
+        ],
+        "type": "object"
+      },
+      "HookSecret": {
+        "additionalProperties": false,
+        "properties": {
+          "flow": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "secret": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "shown_once": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "shown_once"
+        ],
+        "type": "object"
+      },
+      "HookState": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "open_to_public": {
+            "type": "boolean"
+          },
+          "public_until": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "Html": {
+        "type": "string"
+      },
       "LoginRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1355,6 +1498,128 @@
       "Text": {
         "type": "string"
       },
+      "TileBundle": {
+        "additionalProperties": false,
+        "properties": {
+          "bridge": {
+            "type": "string"
+          },
+          "caps": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "frame": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "page": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "type": "object"
+      },
+      "TileBundleCall": {
+        "additionalProperties": false,
+        "properties": {
+          "args": {
+            "type": "object"
+          },
+          "call": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "call"
+        ],
+        "type": "object"
+      },
+      "TileBundleInstall": {
+        "additionalProperties": false,
+        "properties": {
+          "caps": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "files": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "base64": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "base64"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "files"
+        ],
+        "type": "object"
+      },
+      "TileBundleResult": {
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "value": {}
+        },
+        "required": [
+          "ok"
+        ],
+        "type": "object"
+      },
+      "TileBundles": {
+        "additionalProperties": false,
+        "properties": {
+          "bundles": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "bundles"
+        ],
+        "type": "object"
+      },
       "TileEvents": {
         "additionalProperties": false,
         "properties": {
@@ -1533,6 +1798,38 @@
         ],
         "type": "object"
       },
+      "VoiceOffer": {
+        "additionalProperties": false,
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "offer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "addr",
+          "offer"
+        ],
+        "type": "object"
+      },
+      "VoiceReturn": {
+        "additionalProperties": false,
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "offer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "addr",
+          "offer"
+        ],
+        "type": "object"
+      },
       "WebAccess": {
         "additionalProperties": false,
         "properties": {
@@ -1706,7 +2003,7 @@
             "bearer": []
           }
         ],
-        "summary": "WebSocket (Upgrade; the upgrade itself is answered before the ordinary sign-in, because a browser cannot send a header, and signs in by its first message). The first message is {\"type\":\"auth\",\"token\":...}; the token is never in the address. Then the caller's own `notification`, `count` and `approval` events and `changed` (an area name, after any change made through the API), a ping every 25 seconds. Capped per person and per tenant.",
+        "summary": "WebSocket (Upgrade; the upgrade itself is answered before the ordinary sign-in, because a browser cannot send a header, and signs in by its first message). The first message is {\"type\":\"auth\",\"token\":...}; the token is never in the address. Then the caller's own `notification`, `count` and `approval` events, `data_import` (`id`, `tool`, `status`: denied, done or failed; never rows or arguments), `tile` (`call`, `tile`, `tool`, `verdict`: the answer to a tile's question) and `changed` (an area name, after any change made through the API), a ping every 25 seconds. Capped per person and per tenant.",
         "x-access": "user"
       }
     },

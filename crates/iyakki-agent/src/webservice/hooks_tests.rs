@@ -81,6 +81,7 @@ impl HookWorld for World<'_> {
 struct HookExtras {
     hooks: Hooks,
     started: Mutex<Vec<Value>>,
+    managed: Mutex<Vec<String>>,
 }
 
 impl Extras for HookExtras {
@@ -105,6 +106,18 @@ impl Extras for HookExtras {
     fn hook_serve(&self, _: &dyn Authenticator, audit: &dyn AuditSink, rq: &HookRequest) -> Option<Answer> {
         Some(self.hooks.serve(&World { audit, started: &self.started }, rq))
     }
+    fn hook_manage(&self, p: &Principal, op: super::deps::HookOp<'_>) -> ApiResult<Value> {
+        use super::deps::HookOp;
+        self.managed.lock().unwrap().push(format!("{} {op:?}", p.user));
+        match op {
+            HookOp::Create { flow, .. } => Ok(json!({"id": "hk-new", "flow": flow, "path": format!("/hooks/hk-new/{TOKEN}"), "secret": null, "shown_once": true})),
+            HookOp::Regenerate(id) => Ok(json!({"id": id, "path": format!("/hooks/{id}/{TOKEN}"), "secret": null, "shown_once": true})),
+            HookOp::Reveal => Ok(json!({"waiting": false})),
+            HookOp::List(_) => Ok(json!({"hooks": []})),
+            HookOp::Enable(id) | HookOp::Disable(id) => Ok(json!({"id": id, "enabled": true})),
+            HookOp::Public(id, m) => Ok(json!({"id": id, "public_until": m, "open_to_public": m > 0})),
+        }
+    }
 }
 
 struct Rig {
@@ -122,7 +135,7 @@ fn rig(profile: &str, enabled: bool) -> Rig {
     let accounts = Arc::new(FakeAccounts::new(&[("ann", "ann-password-1", Role::User)]));
     let store = Arc::new(HookStore::open(&dir.join("hooks.json")));
     store.insert(HookRec { id: "hk-loop".into(), owner: "ann".into(), flow: "deploy".into(), trigger: "hk-loop".into(), token_hash: token_hash(TOKEN), enabled, created: 1, rotated: 0, public_until: 0, has_secret: true, deliveries: vec![] }).unwrap();
-    let extras = Arc::new(HookExtras { hooks: Hooks::new(store), started: Mutex::new(vec![]) });
+    let extras = Arc::new(HookExtras { hooks: Hooks::new(store), started: Mutex::new(vec![]), managed: Mutex::new(vec![]) });
     let deps = Arc::new(Deps { auth: accounts.clone(), audit: accounts.clone(), store: Arc::new(RunStore::new(&dir.join("runs"))), chat: Arc::new(NoChat), tools: Arc::new(Src), extras: extras.clone(), system_prompt: "t".into() });
     let id = tls::self_signed(&dir.join("tls"), &[]).expect("certificate");
     let svc = server::start(&chk, deps, id).expect("start");
@@ -199,16 +212,46 @@ fn hostile_requests_to_the_endpoint_get_plain_404_405_and_never_reach_the_flow()
 }
 
 #[test]
-fn a_hook_that_is_off_and_the_cloud_profile_answer_404() {
+fn a_hook_that_is_off_and_the_profiles_without_hooks_answer_404() {
     let off = rig("agent-api", false);
     let now = crate::clock::now_unix();
     let body = b"{}";
     assert_eq!(post(&off, &format!("/hooks/hk-loop/{TOKEN}"), body, &signed(body, now)).0, 404);
     assert_eq!(off.extras.started.lock().unwrap().len(), 0);
+    for profile in ["flows-runner", "data-api", "tile-host"] {
+        let r = rig(profile, true);
+        assert_eq!(post(&r, &format!("/hooks/hk-loop/{TOKEN}"), body, &signed(body, now)).0, 404, "{profile} has no webhooks");
+        assert_eq!(r.extras.started.lock().unwrap().len(), 0);
+    }
+}
+
+#[test]
+fn a_tenant_pod_takes_a_hook_from_the_gateways_forwarded_sender_and_judges_local_and_outside_by_it() {
     let cloud = rig("cloud", true);
     assert_eq!(cloud.svc.shared().profile, Profile::Cloud);
-    assert_eq!(post(&cloud, &format!("/hooks/hk-loop/{TOKEN}"), body, &signed(body, now)).0, 404, "a tenant pod has no webhooks");
-    assert_eq!(cloud.extras.started.lock().unwrap().len(), 0);
+    let shared = cloud.svc.shared();
+    let gateway: std::net::IpAddr = "10.42.0.7".parse().unwrap();
+    let body = br#"{"event":"push"}"#;
+    let now = crate::clock::now_unix();
+    let good = format!("/hooks/hk-loop/{TOKEN}");
+    let ask = |fwd: Option<&str>, ts: i64| {
+        let mut h: HashMap<String, String> = [("host".to_string(), "svc.test".to_string()), ("content-type".into(), "application/json".into()), ("x-iyakki-timestamp".into(), ts.to_string()), ("x-iyakki-signature".into(), sign(SECRET, ts, body))].into();
+        if let Some(f) = fwd {
+            h.insert("x-forwarded-for".into(), f.into());
+        }
+        server::handle(shared, &Request { method: "POST".into(), path: good.clone(), query: HashMap::new(), headers: h, body: body.to_vec() }, gateway)
+    };
+    // a sender on the private network behind the gateway starts the run
+    assert_eq!(ask(Some("192.168.1.20"), now).status, 202);
+    // a sender outside is refused (the hook is not opened to the public), and so is a request with no forwarded address at all
+    assert_eq!(ask(Some("203.0.113.9"), now + 1).status, 403);
+    assert_eq!(ask(None, now + 2).status, 403);
+    // a client's own earlier claim of a private address does not help: the gateway's entry is the last one
+    assert_eq!(ask(Some("192.168.1.20, 203.0.113.9"), now + 3).status, 403);
+    assert_eq!(cloud.extras.started.lock().unwrap().len(), 1);
+    let log = cloud.accounts.lines().join("\n");
+    assert!(log.contains("outcome=outside_network addr=203.0.113.9"), "{log}");
+    assert!(!log.contains(TOKEN));
 }
 
 /// A real external sender: `curl` posts to the live TLS listener and `openssl` (a second implementation of HMAC-SHA256) makes the signature,
@@ -255,4 +298,49 @@ fn curl_signed_with_openssl_starts_a_run_and_a_bad_signature_starts_nothing() {
     let (code, _) = curl(ts + 1, &sign_with_openssl(ts + 1, b"{}"), body);
     assert_eq!(code, "401");
     assert_eq!(r.extras.started.lock().unwrap().len(), 1);
+}
+
+fn api(r: &Rig, method: &str, path: &str, token: Option<&str>, body: Option<Value>) -> (u16, Value) {
+    let mut h = vec![("Content-Type".to_string(), "application/json".to_string())];
+    if let Some(t) = token {
+        h.push(("Authorization".into(), format!("Bearer {t}")));
+    }
+    let bytes = body.map(|b| b.to_string().into_bytes()).unwrap_or_default();
+    let rep = crate::devmode::client::https("127.0.0.1", r.svc.local_addr().port(), Some(r.svc.fingerprint()), method, path, &h, &bytes, Duration::from_secs(5)).expect("the request goes through");
+    (rep.status, serde_json::from_slice(&rep.body).unwrap_or(Value::Null))
+}
+
+#[test]
+fn the_cloud_profile_has_the_webhook_routes_for_the_person_and_the_audit_never_has_the_address() {
+    let r = rig("cloud", true);
+    let (s, v) = api(&r, "POST", "/api/v1/login", None, Some(json!({"name": "ann", "password": "ann-password-1"})));
+    assert_eq!(s, 200, "{v}");
+    let t = v["token"].as_str().unwrap().to_string();
+    // no token: no hooks API
+    assert_eq!(api(&r, "GET", "/api/v1/hooks", None, None).0, 401);
+    assert_eq!(api(&r, "GET", "/api/v1/hooks", Some(&t), None).1, json!({"hooks": []}));
+    let (s, v) = api(&r, "POST", "/api/v1/hooks", Some(&t), Some(json!({"flow": "deploy", "signed": false, "methods": ["post"]})));
+    assert_eq!((s, v["id"].as_str(), v["path"].as_str().map(|p| p.len())), (200, Some("hk-new"), Some("/hooks/hk-new/".len() + 64)), "{v}");
+    assert_eq!(api(&r, "POST", "/api/v1/hooks/hk-new/regenerate", Some(&t), None).0, 200);
+    assert_eq!(api(&r, "POST", "/api/v1/hooks/hk-new/enable", Some(&t), None).0, 200);
+    assert_eq!(api(&r, "POST", "/api/v1/hooks/hk-new/disable", Some(&t), None).0, 200);
+    assert_eq!(api(&r, "POST", "/api/v1/hooks/hk-new/public", Some(&t), Some(json!({"minutes": 30}))).1["open_to_public"], true);
+    assert_eq!(api(&r, "GET", "/api/v1/hooks/reveal", Some(&t), None).1["waiting"], false);
+    // malformed requests never reach the machine
+    let before = r.extras.managed.lock().unwrap().len();
+    assert_eq!(api(&r, "POST", "/api/v1/hooks", Some(&t), Some(json!({"flow": "deploy", "bogus": 1}))).0, 400);
+    assert_eq!(api(&r, "POST", "/api/v1/hooks", Some(&t), Some(json!({"flow": ""}))).0, 400);
+    assert_eq!(api(&r, "POST", "/api/v1/hooks/hk-new/public", Some(&t), Some(json!({"minutes": "soon"}))).0, 400);
+    assert_eq!(api(&r, "POST", "/api/v1/hooks/bad!id/enable", Some(&t), None).0, 404);
+    assert_eq!(r.extras.managed.lock().unwrap().len(), before);
+    // the operations were made as the signed-in person
+    assert!(r.extras.managed.lock().unwrap().iter().all(|l| l.starts_with("ann ")));
+    // the audit log names the hook and the flow, never the address
+    let log = r.accounts.lines().join("\n");
+    assert!(log.contains("hooks_create") && log.contains("hook=hk-new flow=deploy"), "{log}");
+    assert!(!log.contains(TOKEN) && !log.contains("/hooks/hk-new/"), "{log}");
+    // the agent API has none of these routes
+    let agent = rig("agent-api", true);
+    let (_, v) = api(&agent, "POST", "/api/v1/login", None, Some(json!({"name": "ann", "password": "ann-password-1"})));
+    assert_eq!(api(&agent, "GET", "/api/v1/hooks", Some(v["token"].as_str().unwrap()), None).0, 404);
 }

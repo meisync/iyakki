@@ -275,7 +275,7 @@ pub const SPEED_MAX: f32 = 1.5;
 // ------------------------------------------------------------------------------------------------------------ voices
 
 /// A voice to read with.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReadVoice {
     /// Stable id (the choice is remembered by it).
     pub id: String,
@@ -310,7 +310,7 @@ pub fn engine_url(e: &SpeechEngine) -> Option<String> {
 // ------------------------------------------------------------------------------------------------------------ where it goes
 
 /// Where an engine's server is.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Dest {
     /// What the person calls it: the provider's id when Settings knows the address, else the host.
     pub name: String,

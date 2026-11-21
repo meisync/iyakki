@@ -813,9 +813,9 @@ impl CameraView {
             }
             let name = format!("{}, {}{}", cam.name, cam.status.word(), if cam.recording { ", recording" } else { "" });
             if multi {
-                cc.hit(cell, Hit { action: base + A_CELL + idx, name: format!("{name}. Enlarge"), role: Role::Button });
+                cc.hit(cell, Hit { action: base + A_CELL + idx, name: format!("{name}. Enlarge"), role: Role::Button, ..Default::default() });
             } else {
-                cc.hit(cell, Hit { action: base + A_CELL + idx, name, role: Role::Image });
+                cc.hit(cell, Hit { action: base + A_CELL + idx, name, role: Role::Image, ..Default::default() });
             }
         });
     }

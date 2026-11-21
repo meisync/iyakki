@@ -204,15 +204,19 @@ fn tcfg_local_chat_is_gated_before_anything_is_sent_and_a_plain_question_offers_
 #[test]
 fn tcfg_local_chat_holds_the_fair_share_slot_while_the_host_answers() {
     let x = Arc::new(host("lc-slot", json!({"max_concurrent_team": 1, "max_concurrent_per_person": 1, "queue_timeout_secs": 1}), true));
-    let f = fake(|_| Reply { delay_ms: 2500, ..ok("slow") });
+    // the host answers the first call only when the test lets it (a gate, not a delay: a loaded machine cannot make the answer come "too early")
+    let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let g2 = gate.clone();
+    let f = fake(move |_| {
+        iyakki_testkit::wait_until(iyakki_testkit::BUDGET, || g2.load(std::sync::atomic::Ordering::SeqCst));
+        ok("slow")
+    });
     let x2 = x.clone();
     let port = f.port;
     let first = std::thread::spawn(move || ask(&x2, "max", "llama3", to(port), &q("one")));
-    let end = std::time::Instant::now() + Duration::from_secs(5);
-    while f.seen.lock().unwrap().is_empty() && std::time::Instant::now() < end {
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    iyakki_testkit::wait_until(iyakki_testkit::BUDGET, || !f.seen.lock().unwrap().is_empty());
     let second = ask(&x, "vic", "llama3", to(f.port), &q("two"));
+    gate.store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(second, Err("the queue timed out".to_string()), "the first call still holds the only slot");
     assert_eq!(first.join().unwrap(), Ok("slow".to_string()));
     assert_eq!(f.seen.lock().unwrap().len(), 1, "the second call never reached the host");

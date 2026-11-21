@@ -233,8 +233,13 @@ pub trait StorePublish: Send + Sync {
     fn author_pack_dir(&self, _dir: &Path, _key: Option<&SigningKey>) -> Result<(String, Vec<String>), String> {
         Err(UNAVAILABLE_STORE.into())
     }
+    /// The tile app of this person with this key, as the core lists it (the core never runs an entry the UI describes: over the socket the entry
+    /// of the core's own list is used, D-SPLIT-03-TILES). The default lists none.
+    fn tile_listed(&self, _policy: &Policy, _user: &str, _key: &str) -> Option<iyakki_shared::store_tilehub::TileEntry> {
+        None
+    }
     /// Open an installed tile as a WebAssembly tile (the browser renderer of the tile host).
-    fn tile_open_wasm(&self, _policy: &Policy, _user: &str, _entry: &iyakki_shared::store_tilehub::TileEntry) -> Result<iyakki_tile_host::TileRunner, String> {
+    fn tile_open_wasm(&self, _policy: &Policy, _user: &str, _entry: &iyakki_shared::store_tilehub::TileEntry) -> Result<Box<dyn WasmTileRt>, String> {
         Err(UNAVAILABLE_STORE.into())
     }
     /// The pictures a WebAssembly tile carries in its bundle (F-WASM-16), decoded into the tile's table. The default has none.
@@ -247,8 +252,54 @@ pub trait StorePublish: Send + Sync {
     }
 }
 
+/// A running WebAssembly tile, as the shell drives it: events in, a display list out (the real one is the host's `TileRunner`, in the core's
+/// process; over the UI socket the UI holds a remote object and draws the lists the core sends, D-SPLIT-03-TILES).
+pub trait WasmTileRt: Send {
+    fn init(&mut self, w: i32, h: i32, scale_pct: u32, theme: iyakki_tile_abi::Event) -> Result<(), String>;
+    /// Deliver events; whether the tile asked for a redraw.
+    fn event(&mut self, events: &[iyakki_tile_abi::Event]) -> Result<bool, String>;
+    /// A tap at a point; the hit id of the topmost hit region of the last frame there.
+    fn click(&mut self, x: i32, y: i32) -> Result<Option<u32>, String>;
+    /// The newest picture of the tile.
+    fn frame(&mut self) -> Result<iyakki_tile_abi::DisplayList, String>;
+    /// What waits for the person's answer: (id, kind, arguments as JSON), oldest first.
+    fn requests(&self) -> Vec<(u32, String, String)>;
+    fn answer(&self, id: u32, allow: bool) -> bool;
+    /// The app the tile asked the dock to open since the last time, once.
+    fn take_dock_open(&self) -> Option<String>;
+    /// Whether the tile reported ABI 3 and so may be sent app events.
+    fn takes_app_events(&self) -> bool;
+}
+
+impl WasmTileRt for iyakki_tile_host::TileRunner {
+    fn init(&mut self, w: i32, h: i32, scale_pct: u32, theme: iyakki_tile_abi::Event) -> Result<(), String> {
+        iyakki_tile_host::TileRunner::init(self, w, h, scale_pct, theme).map_err(|e| e.to_string())
+    }
+    fn event(&mut self, events: &[iyakki_tile_abi::Event]) -> Result<bool, String> {
+        iyakki_tile_host::TileRunner::event(self, events).map_err(|e| e.to_string())
+    }
+    fn click(&mut self, x: i32, y: i32) -> Result<Option<u32>, String> {
+        iyakki_tile_host::TileRunner::click(self, x, y).map_err(|e| e.to_string())
+    }
+    fn frame(&mut self) -> Result<iyakki_tile_abi::DisplayList, String> {
+        iyakki_tile_host::TileRunner::frame(self).map_err(|e| e.to_string())
+    }
+    fn requests(&self) -> Vec<(u32, String, String)> {
+        iyakki_tile_host::TileRunner::requests(self)
+    }
+    fn answer(&self, id: u32, allow: bool) -> bool {
+        iyakki_tile_host::TileRunner::answer(self, id, allow)
+    }
+    fn take_dock_open(&self) -> Option<String> {
+        iyakki_tile_host::TileRunner::take_dock_open(self)
+    }
+    fn takes_app_events(&self) -> bool {
+        iyakki_tile_host::TileRunner::takes_app_events(self)
+    }
+}
+
 /// What the shell takes out of a running tile app's outbox on each tick (the rest of the outbox stays with the runtime).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct TileTake {
     pub toasts: Vec<String>,
     pub title: Option<String>,
@@ -261,7 +312,7 @@ pub struct TileTake {
 
 /// A running tile app, as the shell drives it (the real one is the agent's `TileRuntime`).
 /// A viewer an app mounted inside its page, as the screen paints it (`iyakki.embed`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TileEmbed {
     pub id: u32,
     pub kind: String,
@@ -270,6 +321,17 @@ pub struct TileEmbed {
     pub text: String,
     pub hosts: Vec<String>,
     pub profile: String,
+    /// The options the app mounted it with, as JSON (a browser viewer's `url`, a media viewer's `file`, a dashboard viewer's `dashboard`).
+    pub options_json: String,
+}
+
+/// What a media or dashboard viewer shows inside its rectangle: a heading, lines of text and, for a player, how far it has played
+/// (`(position, length)` in seconds, the length 0 when unknown). Read by the tile screen (`TileRt::sdk_embed_data`), which draws it.
+#[derive(Clone, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct TileEmbedData {
+    pub heading: String,
+    pub lines: Vec<String>,
+    pub progress: Option<(u64, u64)>,
 }
 
 pub trait TileRt: Send {
@@ -308,5 +370,13 @@ pub trait TileRt: Send {
     /// The viewers the app has mounted inside its page, oldest first.
     fn sdk_embeds(&self) -> Vec<TileEmbed> {
         Vec::new()
+    }
+    /// The calls the app made on a viewer (`embed.call`: method and the arguments as JSON), oldest first; taken once.
+    fn sdk_embed_calls(&mut self, _id: u32) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// What a media viewer (the app's playback state) or a dashboard viewer (the dashboard's data) shows now; kept for a moment, so it is cheap to ask on every frame.
+    fn sdk_embed_data(&mut self, _id: u32) -> Option<TileEmbedData> {
+        None
     }
 }

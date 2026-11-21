@@ -13,7 +13,14 @@ import time
 
 import ws
 
-ENGINE_FILES = {"engine.js": "js/engine.js", "keys.js": "js/keys.js", "media.js": "js/media.js", "audio-worklet.js": "js/audio-worklet.js", "engine.wasm": "assets/iyakki-client-engine.wasm"}
+ENGINE_FILES = {"engine.js": "js/engine.js", "keys.js": "js/keys.js", "media.js": "js/media.js", "audio-worklet.js": "js/audio-worklet.js", "uidisplay.js": "js/uidisplay.js", "files.js": "js/files.js", "engine.wasm": "assets/iyakki-client-engine.wasm"}
+
+
+# two frames of a small app for the display-list mode (D-CLIENT-PROTO-DISPLAYLIST): the first after `app_open`, the second after any `app_input`
+APP_LIST_1 = ("iyakki-display-list 1 400 300\nrect 0 0 400 300 1e1e2eff\ntext 16 16 20 ffffffff bold SAMPLE%20app\ntext 16 56 14 c0c0d0ff regular Shown%20by%20the%20browser\n"
+              "rect 16 100 120 40 3a6ea5ff\ntext 28 112 14 ffffffff regular Press%20me\nhit 16 100 120 40 7 button Press%20me\n")
+APP_LIST_2 = ("iyakki-display-list 1 400 300\nrect 0 0 400 300 1e1e2eff\ntext 16 16 20 ffffffff bold SAMPLE%20app\ntext 16 56 14 80e080ff regular Pressed\n"
+              "rect 16 100 120 40 2d8a4eff\ntext 28 112 14 ffffffff regular Press%20me\nhit 16 100 120 40 7 button Press%20me\n")
 
 
 def page_files(root):
@@ -152,6 +159,13 @@ class FakeHost:
                     sock.send(json.dumps({"t": "clipboard_ok"}))
                 elif t == "camera_list":
                     sock.send(json.dumps({"t": "camera_list", "cameras": [{"unit": "usb:video0", "name": "Desk camera"}]}))
+                elif t == "app_open":
+                    self.app_open_msgs = getattr(self, "app_open_msgs", 0) + 1
+                    sock.send(json.dumps({"t": "app_list", "app": d.get("app", ""), "text": APP_LIST_1}, separators=(",", ":")))  # compact: the engine tells these messages by their first bytes
+                elif t == "app_input":
+                    sock.send(json.dumps({"t": "app_list", "app": "sample", "text": APP_LIST_2}, separators=(",", ":")))
+                elif t == "app_close":
+                    sock.send(json.dumps({"t": "app_closed", "app": "sample", "reason": "closed"}, separators=(",", ":")))
                 elif t == "ping":
                     sock.send(json.dumps({"t": "pong", "ts": d.get("ts", 0)}))
         except (ws.WsError, OSError, ValueError):

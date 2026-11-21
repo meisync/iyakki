@@ -61,7 +61,7 @@ ordinary programs through four listed interfaces ([`../BOUNDARY.md`](../BOUNDARY
 | `iyakki-flow` | Workflow engine for FLOWS: model, scheduler, retries, healing, versions; no UI or network |
 | `iyakki-drivers` | Driver packs: detection, known-driver table, firmware placement, kernel-module checks |
 | `iyakki-zram` | Memory tuning: zram swap, optional swap file, figures for SYSTEM ([`ZRAM-AND-INSTALL.md`](ZRAM-AND-INSTALL.md)) |
-| `iyakki-relcheck` | Release checks (links, secrets, version, features, SBOM, licences) run by `./run.sh alpha-check` |
+| `iyakki-relcheck` | Release checks (links, secrets, version, features, known-issues, SBOM, licences) run by `./run.sh alpha-check` |
 | `iyakki-usb` | Host tool: writes an image to a USB stick safely (Linux, macOS) |
 | `iyakki-gui` | Desktop window `iyakki-desktop` (eframe); a separate Cargo workspace |
 

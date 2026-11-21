@@ -28,3 +28,7 @@ Generated from `legal/downloads.txt` on 2026-11-14 (Q-C) by reading the pin kind
 ## What the gate already enforces
 
 The gate (`licence_gate`) fails when an item has no row, a pin in the file differs from the code, a tool without a vendor checksum is described as verified, or a store entry has no licence. It does not fetch anything, so a row that says digest is only as good as the person who copied it.
+
+## Update 2026-11-19 (owner: "address them")
+
+Filled from the vendors' own files (read over HTTPS, nothing invented): gpu-rocm (digest of the device plugin in the row; the test image and Ollama digests are in the row text and `gpu_rocm.rs`), yt-dlp (new row), the Debian archive keys (`legal/debian-archive-pgp.asc`), and the data science toolkit table (x86_64). Left empty on purpose: openvpn, cryptsetup, dislocker, exfatprogs, ntfs-3g (only source tarballs exist, so there is no program to pin; the person's setting remains the pin), and the signed-manifest SHA-256 items (the manifest must be re-signed by the owner's key).

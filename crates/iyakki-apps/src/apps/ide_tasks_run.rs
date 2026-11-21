@@ -74,6 +74,22 @@ pub fn hooks(cx: &AppCx, workspace: &str) -> TaskHooksIn {
     }
 }
 
+/// The managers that are alive, by person and workspace folder: the IDE's Tasks tab and a voice session that means the same workspace get the
+/// SAME manager, so a spoken "start a task" lands in the list the person sees and two managers never write one task store.
+static LIVE: std::sync::Mutex<Vec<(String, std::path::PathBuf, std::sync::Weak<dyn TaskMgr>)>> = std::sync::Mutex::new(Vec::new());
+
+/// The live manager of this person's workspace, or a new one (kept only as long as someone holds it).
+pub fn shared_manager(cx: &AppCx, root: &Path, features: &Path, name: &str) -> Arc<dyn TaskMgr> {
+    let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    live.retain(|(_, _, w)| w.strong_count() > 0);
+    if let Some(m) = live.iter().find(|(u, r, _)| *u == cx.session.user && r == root).and_then(|(_, _, w)| w.upgrade()) {
+        return m;
+    }
+    let m = manager(cx, root, features, name);
+    live.push((cx.session.user.clone(), root.to_path_buf(), Arc::downgrade(&m)));
+    m
+}
+
 /// A manager for a workspace, with its runner and hooks (the IDE owns it; the workspace chat gets a clone).
 pub fn manager(cx: &AppCx, root: &Path, features: &Path, name: &str) -> Arc<dyn TaskMgr> {
     let m = cx.tasks_facet().open(root, features).expect("the real core opens task managers");

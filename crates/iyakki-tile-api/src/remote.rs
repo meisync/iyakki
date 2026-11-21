@@ -3,7 +3,7 @@
 //! (the agent implements this trait through a thin adapter). Calls that touch the network never block the tile: `submit` returns a ticket
 //! and the tile polls `take` on every tick.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Proto {
     #[default]
     Sftp,
@@ -30,7 +30,7 @@ impl Proto {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Auth {
     #[default]
     Password,
@@ -39,7 +39,7 @@ pub enum Auth {
 }
 
 /// A saved connection. No secret is in it: a password is in the vault under a name the source derives from `name`; a key is named in `key`.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Conn {
     pub name: String,
     pub host: String,
@@ -55,7 +55,7 @@ pub struct Conn {
     pub has_password: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Entry {
     pub name: String,
     pub is_dir: bool,
@@ -68,7 +68,7 @@ pub struct Entry {
 }
 
 /// A server's host key (SFTP) or certificate (FTPS) the person has to compare and confirm.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HostCard {
     pub host: String,
     pub port: u16,
@@ -80,7 +80,7 @@ pub struct HostCard {
     pub pinned: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Opened {
     Ready(u64),
     /// First contact: show the card; on the person's confirmation call `trust` and open again.
@@ -89,7 +89,7 @@ pub enum Opened {
     Changed(HostCard),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Job {
     Open(String),
     List(u64, String),
@@ -99,7 +99,7 @@ pub enum Job {
     Delete(u64, String, bool),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum JobResult {
     Opened(Opened),
     /// The canonical path and its entries (unsorted).
@@ -108,7 +108,7 @@ pub enum JobResult {
     Failed(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TransferReq {
     pub session: u64,
     pub download: bool,
@@ -119,7 +119,7 @@ pub struct TransferReq {
     pub overwrite: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     Queued,
     Running,
@@ -134,7 +134,7 @@ impl State {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TransferInfo {
     pub id: u64,
     pub download: bool,

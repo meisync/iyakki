@@ -31,7 +31,7 @@ impl SettingsApp {
             let g = cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             (g.get().chat.as_ref().is_some_and(|m| m.provider == gemini::PROVIDER_ID), matches!(g.get().voice.stt, Some(iyakki_shared::voice::SpeechEngine::Gemini { .. })))
         };
-        let have = cx.secrets().resolve(gemini::KEY_REF, None).is_ok();
+        let have = cx.secrets_api().has_ref(gemini::KEY_REF);
         let f = Form::new("Google Gemini (experimental, optional)")
             .with_note(&format!(
                 "Off unless you use it. Nothing is sent to Google until you say Yes on the next card. Free key: aistudio.google.com, sign in, Get API key (the free tier has small limits; Google may use what you send to improve its products, according to Google's published terms: check them). Or use your own paid key. The key is kept in the system vault, never in settings or logs. {}",

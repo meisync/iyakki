@@ -1258,7 +1258,7 @@ impl StoryApp {
             return "Default".into();
         }
         let cfg = cx.agents_cfg();
-        cfg.agent(id).and_then(|a| cx.ext_status().models_for(a.as_ref()).into_iter().find(|m| m.id == model)).map_or(model.to_string(), |m| m.label)
+        cfg.agent(id).and_then(|a| iyakki_shared::extagent::models_with(cx.ext_status().cli_models(&a.as_ref().id()), a.as_ref()).into_iter().find(|m| m.id == model)).map_or(model.to_string(), |m| m.label)
     }
 
     /// What the Model chip says: `Model: Sonnet · Claude Code`, `Model: qwen3:8b · nvidia_ollama` or `Model: same as chat`.
@@ -1536,7 +1536,7 @@ impl StoryApp {
                 let (pw, ph) = (rd.pm.width() as f32, rd.pm.height() as f32);
                 let k = (tw / pw).min(th / ph);
                 let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
-                g.pm.draw_pixmap(0, 0, rd.pm.as_ref().as_ref(), &paint, tiny_skia::Transform::from_translate(r.x + (tw - pw * k) / 2.0, r.y + (th - ph * k) / 2.0).pre_scale(k, k), None);
+                g.pm_mut().draw_pixmap(0, 0, rd.pm.as_ref().as_ref(), &paint, tiny_skia::Transform::from_translate(r.x + (tw - pw * k) / 2.0, r.y + (th - ph * k) / 2.0).pre_scale(k, k), None);
             }
             g.rrect_outline(r.x, r.y, r.w, r.h, 8.0 * s, if alt.is_none() { 2.2 * s } else { 1.0 }, if alt.is_none() { ACCENT } else { with_alpha(MUTED, 120) });
             let cap = format!("{}{}", if alt.is_none() { "main \u{b7} " } else { "" }, look.label());
@@ -5088,6 +5088,31 @@ impl StoryApp {
         (pw, pw * 0.6)
     }
 
+    /// The poster frame of a WebM clip, scaled to the slot and kept with the pictures (`pic_scaled`, under a key of its own); `None` when the
+    /// clip is not a VP8 one or its first picture cannot be decoded.
+    fn poster_scaled(&mut self, key: u64, bytes: &[u8], slot: R, s: f32) -> Option<usize> {
+        let ident = (key ^ 0x5649_4445_4F00_0000, slot.w.round() as i32, slot.h.round() as i32, (s * 1000.0) as i32);
+        if let Some(i) = self.pic_scaled.iter().position(|e| (e.0, e.1, e.2, e.3) == ident) {
+            return Some(i);
+        }
+        let bm = iyakki_web::webm::poster(bytes).ok()?;
+        let mut full = tiny_skia::Pixmap::new(bm.width, bm.height)?;
+        for (dst, px) in full.pixels_mut().iter_mut().zip(bm.rgba.chunks_exact(4)) {
+            *dst = tiny_skia::ColorU8::from_rgba(px[0], px[1], px[2], px[3]).premultiply();
+        }
+        let (pw, ph) = (bm.width as f32, bm.height as f32);
+        let k = ((slot.w - 8.0 * s) / pw).min((slot.h - 8.0 * s) / ph);
+        let (iw, ih) = ((pw * k).round().max(1.0) as u32, (ph * k).round().max(1.0) as u32);
+        let mut scaled = tiny_skia::Pixmap::new(iw, ih)?;
+        let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
+        scaled.draw_pixmap(0, 0, full.as_ref(), &paint, tiny_skia::Transform::from_scale(iw as f32 / pw, ih as f32 / ph), None);
+        if self.pic_scaled.len() >= 10 {
+            self.pic_scaled.remove(0);
+        }
+        self.pic_scaled.push((ident.0, ident.1, ident.2, ident.3, scaled));
+        Some(self.pic_scaled.len() - 1)
+    }
+
     /// Draw one picture (or its placeholder) in `slot`; the buttons to draw it again sit in its corner.
     fn draw_pic(&mut self, g: &mut Gfx, slot: R, s: f32, idx: usize, tick: u64) {
         let (state, title, bytes, key) = {
@@ -5099,6 +5124,14 @@ impl StoryApp {
             // a video clip is kept with the story; this view has no video player, so the slot says so and where it is
             (PicState::Ready, Some(b)) if video => {
                 cover(g, R::new(slot.x + 4.0 * s, slot.y + 4.0 * s, slot.w - 8.0 * s, slot.h - 8.0 * s), s, &title);
+                // the first picture of a VP8 WebM clip is the poster frame; any other clip keeps the card (the sentence says why)
+                let poster = if self.pics[idx].ext == "webm" { self.poster_scaled(key, &b, slot, s) } else { None };
+                if let Some(i) = poster {
+                    let scaled = &self.pic_scaled[i].4;
+                    let (dx, dy) = ((slot.x + (slot.w - scaled.width() as f32) / 2.0).round() as i32, (slot.y + (slot.h - scaled.height() as f32) / 2.0).round() as i32);
+                    g.pm_mut().draw_pixmap(dx, dy, scaled.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
+                    g.rrect_outline(slot.x, slot.y, slot.w, slot.h, 12.0 * s, 1.0, with_alpha(ACCENT, 90));
+                }
                 let label = format!("Video clip ({} KB, {}): saved in the story's pics folder", b.len() / 1024, self.pics[idx].ext);
                 let t = g.fit(12.0 * s, &label, Face::Bold, slot.w - 24.0 * s);
                 let tw = g.text_width(12.0 * s, &t, Face::Bold);
@@ -5130,7 +5163,7 @@ impl StoryApp {
                     Ok(i) => {
                         let scaled = &self.pic_scaled[i].4;
                         let (dx, dy) = ((slot.x + (slot.w - scaled.width() as f32) / 2.0).round() as i32, (slot.y + (slot.h - scaled.height() as f32) / 2.0).round() as i32);
-                        g.pm.draw_pixmap(dx, dy, scaled.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
+                        g.pm_mut().draw_pixmap(dx, dy, scaled.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
                     }
                     Err(e) => {
                         let m = g.fit(12.0 * s, &format!("The picture cannot be shown: {e}"), Face::Sans, slot.w - 16.0 * s);
@@ -6386,7 +6419,7 @@ mod tests {
     fn gated_player(dir: &Path) -> String {
         std::fs::create_dir_all(dir).unwrap();
         let script = dir.join("gated.sh");
-        std::fs::write(&script, format!("#!/bin/sh\ncat >/dev/null\nn=$(cat '{d}/played.log' 2>/dev/null | wc -l)\nwhile [ ! -f '{d}/go.'$n ]; do sleep 0.02; done\necho p >> '{d}/played.log'\n", d = dir.display())).unwrap();
+        std::fs::write(&script, format!("#!/bin/sh\ncat >/dev/null\nn=$(cat '{d}/played.log' 2>/dev/null | wc -l | tr -d ' ')\nwhile [ ! -f '{d}/go.'$n ]; do sleep 0.02; done\necho p >> '{d}/played.log'\n", d = dir.display())).unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         script.display().to_string()
     }
@@ -6432,7 +6465,7 @@ mod tests {
         assert_eq!(id, "the-brave-little-fox");
         let md = std::fs::read_to_string(home.join("Stories/the-brave-little-fox/story.md")).unwrap();
         assert!(md.starts_with("---\ntitle: The Brave Little Fox") && md.contains("audience: teen") && md.contains("language: Hindi") && md.contains("# The Brave Little Fox"), "{md}");
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("story.create") && log.contains("teen scifi medium Hindi"), "{log}");
         assert!(!log.contains("a fox and the moon"), "the topic text is not logged");
         // the choices are remembered for the next visit, the topic is not
@@ -6551,7 +6584,7 @@ mod tests {
         click(&mut a, &cx, T_QUICK);
         assert!(matches!(cx.voice_settings().tts, Some(SpeechEngine::Command { ref command }) if command.starts_with("piper")), "{:?}", cx.voice_settings().tts);
         assert!(a.note_text().unwrap().contains("piper (en_US-test)"), "{:?}", a.note_text());
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("story.engine"));
         // the button is only drawn for administrators
         let mut c2 = cx.clone();
@@ -6617,7 +6650,7 @@ mod tests {
         assert_eq!(played(&dir.join("p")), a.chunks.len(), "and every piece was played");
         assert!(highlighted.len() >= 2, "the highlight moved along the paragraphs: {highlighted:?}");
         assert_eq!(a.reader.snapshot().fraction, 1.0);
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("story.read"));
     }
 
@@ -6720,7 +6753,7 @@ mod tests {
                 // a solid gold fill (not a wash) at the left edge of the highlight, where no glyph is drawn (the right edge when the
                 // word starts the line: the left padding of the fill is outside the text area, which clips it)
                 let (lx, rx) = (word.x + 1.5 * s, word.x + word.w - 1.5 * s);
-                let px = g.pm.pixel((if lx >= area.x + 0.5 { lx } else { rx }) as u32, (word.y + word.h / 2.0) as u32).expect("pixel");
+                let px = g.pm_mut().pixel((if lx >= area.x + 0.5 { lx } else { rx }) as u32, (word.y + word.h / 2.0) as u32).expect("pixel");
                 assert!(px.red() > 200 && px.green() > 170 && px.blue() > 80, "{w}x{h} word {k}: {px:?}");
                 lines_seen.insert((word.y * 10.0) as i32);
             }
@@ -6891,6 +6924,12 @@ mod tests {
         a.reader.stop();
     }
 
+    /// Whether a process with this id exists (signal 0 asks the kernel; there is no /proc on a Mac: KI-664).
+    fn process_exists(n: u32) -> bool {
+        // SAFETY: signal 0 only checks that the process exists.
+        unsafe { libc::kill(n as libc::pid_t, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+    }
+
     #[test]
     fn play_pause_stop_and_replay_end_the_speaker_process() {
         let _route = iyakki_agent::mixer::pin_command_route(); // these play through the speaker command
@@ -6905,9 +6944,9 @@ mod tests {
         assert_eq!(a.reader_status(), Status::Idle, "nothing is read until asked");
         let alive = |p: &Path| -> Option<u32> {
             let n: u32 = std::fs::read_to_string(p).ok()?.trim().parse().ok()?;
-            Path::new(&format!("/proc/{n}")).exists().then_some(n)
+            process_exists(n).then_some(n)
         };
-        let gone = |a: &mut StoryApp, cx: &AppCx, n: u32| until(a, cx, "the speaker process to end", |_| !Path::new(&format!("/proc/{n}")).exists());
+        let gone = |a: &mut StoryApp, cx: &AppCx, n: u32| until(a, cx, "the speaker process to end", |_| !process_exists(n));
         click(&mut a, &cx, T_PLAY);
         until(&mut a, &cx, "the first piece to play", |a| alive(&pid).is_some() && a.reader_status() == Status::Playing);
         let first = alive(&pid).unwrap();
@@ -6939,7 +6978,7 @@ mod tests {
         if let Some(n) = last {
             let __wall = std::time::Instant::now();
             while __wall.elapsed() < std::time::Duration::from_secs(30) {
-                if !Path::new(&format!("/proc/{n}")).exists() {
+                if !process_exists(n) {
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(10));
@@ -7113,7 +7152,7 @@ mod tests {
         key(&mut a, &cx, Key::Char('y'));
         assert_eq!(a.library_ids().len(), 1);
         assert!(!home.join(format!("Stories/{chosen}")).exists());
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("story.delete"));
         // open: the saved text is on the page and the list survives a new visit
         key(&mut a, &cx, Key::Enter);
@@ -8172,7 +8211,9 @@ mod tests {
     // ------------------------------------------------------------------ browser voice
 
     /// A page that answers like a browser: the voices at once, then each piece starts, lasts a moment and ends.
-    fn browser_page(hv: &Arc<HostVoice>, talk_ms: u64) -> (Arc<Mutex<Vec<String>>>, Arc<AtomicBool>) {
+    /// While `held` is true a piece that has been started does not end (however long it has talked): the test decides when the page
+    /// says it is done, not a wall-clock time that a loaded machine can overrun between two steps of the test.
+    fn browser_page(hv: &Arc<HostVoice>, talk_ms: u64, held: Arc<AtomicBool>) -> (Arc<Mutex<Vec<String>>>, Arc<AtomicBool>) {
         use iyakki_shared::hostvoice::{FromClient, Front, ToClient, VoiceInfo};
         hv.connect(Front::Browser);
         let (said, stop) = (Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicBool::new(false)));
@@ -8201,7 +8242,7 @@ mod tests {
                     }
                 }
                 if let Some((id, t0)) = cur {
-                    if t0.elapsed() >= Duration::from_millis(talk_ms) {
+                    if t0.elapsed() >= Duration::from_millis(talk_ms) && !held.load(Ordering::SeqCst) {
                         h.event(FromClient::Ended { id });
                         cur = None;
                     }
@@ -8221,7 +8262,8 @@ mod tests {
         let t = Teller::new(STORY);
         let (mut a, cx, _) = make("tales-bv", &t);
         let hv = HostVoice::current();
-        let (said, stop) = browser_page(&hv, 1200);
+        let held = Arc::new(AtomicBool::new(false));
+        let (said, stop) = browser_page(&hv, 1200, held.clone());
         until(&mut a, &cx, "the page's answer", |_| hv.is_ready());
         a.refresh_tts(&cx);
         assert!(a.browser_voice && matches!(a.tts, TtsStatus::Ready { .. }), "{:?}", a.tts);
@@ -8248,6 +8290,7 @@ mod tests {
             said.lock().unwrap().clear();
             a.reader.stop();
             a.live = false;
+            held.store(true, Ordering::SeqCst);
             a.handle(&hit_ev(&g, "Play"), &cx);
             until(&mut a, &cx, "reading", |a| a.reader_status() == Status::Playing);
             let (g2, area) = draw_at(&mut a, &cx, w, h, s, 3);
@@ -8260,6 +8303,7 @@ mod tests {
             a.handle(&hit_ev(&g2, "Pause"), &cx);
             assert_eq!(a.reader_status(), Status::Paused);
             a.handle(&Event::Tab(T_PLAY), &cx);
+            held.store(false, Ordering::SeqCst);
             // jump to the last piece with the progress bar's own path; it is said and the reading ends
             let last = a.chunks.len() - 1;
             a.seek(last, &cx);
@@ -8598,6 +8642,32 @@ mod tests {
     }
 
     #[test]
+    fn a_vp8_webm_clip_shows_its_first_picture_as_the_poster_and_the_slot_keeps_its_label() {
+        let webp = include_bytes!("../../../iyakki-web/tests/data/webp_lossy.webp");
+        let at = webp.windows(4).position(|w| w == b"VP8 ").unwrap();
+        let n = u32::from_le_bytes([webp[at + 4], webp[at + 5], webp[at + 6], webp[at + 7]]) as usize;
+        let webm = iyakki_web::webm::one_frame_clip_for_test(&webp[at + 8..at + 8 + n]);
+        let reply = format!("data:video/webm;base64,{}", st::base64_encode(&webm));
+        let own = Teller::new(STORY);
+        let agent = Teller::new(STORY);
+        *agent.svg.lock().unwrap() = reply;
+        let (mut a, cx, _home) = make("tales-webm-poster", &own);
+        let (ta, to) = (agent.clone(), own.clone());
+        a.test_drawers = Some(Arc::new(move |_| vec![Drawer { chat: Arc::new(Shared(ta.clone())), strong: true, who: "Claude Code".into() }, Drawer { chat: Arc::new(Shared(to.clone())), strong: false, who: "qwen3:8b".into() }]));
+        click(&mut a, &cx, T_VIDEO);
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the clips", all_pictures_ready);
+        assert!(a.pics.iter().all(|p| p.ext == "webm"), "{:?}", a.pics.iter().map(|p| p.ext.clone()).collect::<Vec<_>>());
+        assert!(a.pic_scaled.is_empty());
+        let (g, area) = draw(&mut a, &cx, 1280, 720, 0);
+        assert_layout(&g, area, "story with a poster frame");
+        assert!(!a.pic_scaled.is_empty(), "the poster frame was decoded and kept for the slot");
+        assert!(g.text_log.iter().any(|(_, _, t)| t.contains("Video clip")), "the label stays");
+        // a clip whose first picture cannot be decoded keeps the card
+        assert!(iyakki_web::webm::poster(b"\x1a\x45\xdf\xa3").is_err());
+    }
+
+    #[test]
     fn a_video_clip_needs_the_option_and_is_kept_and_exported_when_allowed_and_a_link_is_never_fetched() {
         let mp4 = b"\0\0\0\x18ftypmp42\0\0\0\0mp42isom-and-some-more-bytes-of-a-tiny-fake-clip".to_vec();
         let reply = format!("data:video/mp4;base64,{}", st::base64_encode(&mp4));
@@ -8629,6 +8699,7 @@ mod tests {
         assert!(b.pics.iter().all(|p| p.ext == "mp4" && p.how == "video clip by Claude Code"));
         let (g, area) = draw(&mut b, &cx2, 1280, 720, 0);
         assert_layout(&g, area, "story with a video clip");
+        assert!(b.pic_scaled.is_empty(), "an mp4 clip has no poster frame: the card stays");
         let id = b.saved_id().unwrap();
         assert_eq!(std::fs::read(home.join(format!("Stories/{id}/pics/01.mp4"))).unwrap(), mp4);
         assert!(std::fs::read_to_string(home.join(format!("Stories/{id}/pics/index.json"))).unwrap().contains("\"kind\": \"video\""));
@@ -9145,14 +9216,22 @@ mod tests {
     struct LiveUp {
         sdxl_downloaded: std::sync::atomic::AtomicBool,
         delay_ms: u64,
+        /// `delay_ms == HELD`: the picture call answers only after [`LiveUp::release`] (a gate, not a time a loaded machine can overrun)
+        released: std::sync::atomic::AtomicBool,
         gens: AtomicUsize,
         health_calls: AtomicUsize,
         pulls: AtomicUsize,
     }
 
+    const HELD: u64 = u64::MAX;
+
     impl LiveUp {
+        fn release(&self) {
+            self.released.store(true, Ordering::SeqCst);
+        }
+
         fn new(downloaded: bool, delay_ms: u64) -> Arc<LiveUp> {
-            Arc::new(LiveUp { sdxl_downloaded: std::sync::atomic::AtomicBool::new(downloaded), delay_ms, gens: AtomicUsize::new(0), health_calls: AtomicUsize::new(0), pulls: AtomicUsize::new(0) })
+            Arc::new(LiveUp { sdxl_downloaded: std::sync::atomic::AtomicBool::new(downloaded), delay_ms, released: std::sync::atomic::AtomicBool::new(false), gens: AtomicUsize::new(0), health_calls: AtomicUsize::new(0), pulls: AtomicUsize::new(0) })
         }
     }
 
@@ -9175,7 +9254,11 @@ mod tests {
             }
             if u.ends_with("/images/generations") {
                 t.gens.fetch_add(1, Ordering::SeqCst);
-                std::thread::sleep(Duration::from_millis(t.delay_ms));
+                if t.delay_ms == HELD {
+                    iyakki_testkit::wait_until(iyakki_testkit::BUDGET, || t.released.load(Ordering::SeqCst));
+                } else {
+                    std::thread::sleep(Duration::from_millis(t.delay_ms));
+                }
                 return ok(serde_json::json!({ "data": [{"b64_json": st::base64_encode(&tiny_png())}] }));
             }
             Err("offline".into())
@@ -9254,16 +9337,21 @@ mod tests {
 
     #[test]
     fn tales_picture_that_is_slow_shows_elapsed_time_and_the_server_state_and_logs_the_wait() {
-        let (mut a, cx, live) = with_live_lemonade("tales-slow", true, 900);
+        let (mut a, cx, live) = with_live_lemonade("tales-slow", true, HELD);
         a.test_timing = Some((Duration::from_secs(60), Duration::from_millis(40), Duration::from_millis(100)));
         write_story(&mut a, &cx, "a fox");
         until(&mut a, &cx, "a wait line with the server state", |a| a.wait_text.as_ref().is_some_and(|n| n.contains("so far") && n.contains("server: loaded models: kokoro-v1")));
         let n = a.wait_text.clone().unwrap();
         assert!(n.contains("Drawing picture 1") && n.contains("The model is loading or generating; on a CPU this can take minutes") && n.contains("SDXL-Base-1.0 is not loaded yet") && n.contains("Cancel pictures"), "{n}");
         assert!(live.health_calls.load(Ordering::SeqCst) >= 1, "the health is polled while it waits");
+        // the first "waiting" line can be written before the server's first answer has arrived (a slow health call): the line that
+        // carries the server state is the one that proves the state reaches the log, and the log repeats the line, so wait for it
+        until(&mut a, &cx, "a wait line with the server state in the picture log", |a| a.pic_log_events().iter().any(|e| e.kind == plk::WAITING && e.decision.contains("kokoro-v1")));
+        live.release();
         until(&mut a, &cx, "the pictures", all_pictures_ready);
         let ev = a.pic_log_events();
-        let w = ev.iter().find(|e| e.kind == plk::WAITING).unwrap_or_else(|| panic!("{ev:?}"));
+        let w = ev.iter().find(|e| e.kind == plk::WAITING && e.decision.contains("kokoro-v1")).unwrap_or_else(|| panic!("{ev:?}"));
+        assert!(ev.iter().filter(|e| e.kind == plk::WAITING).all(|e| e.decision.starts_with("waiting") && e.model == "SDXL-Base-1.0"), "{ev:?}");
         assert!(w.decision.starts_with("waiting") && w.decision.contains("kokoro-v1") && w.model == "SDXL-Base-1.0", "{w:?}");
         a.handle(&Event::Tick, &cx);
         assert!(a.wait_text.is_none(), "the wait line goes when the picture is done");
@@ -9271,15 +9359,21 @@ mod tests {
 
     #[test]
     fn tales_picture_stops_after_the_time_limit_says_so_and_logs_it() {
-        let (mut a, cx, live) = with_live_lemonade("tales-limit", true, 1200);
-        a.test_timing = Some((Duration::from_millis(300), Duration::from_millis(40), Duration::from_secs(30)));
+        let (mut a, cx, live) = with_live_lemonade("tales-limit", true, HELD);
+        // the limit is measured on the wall clock from the moment the picture starts: a limit that is short from the start can run out
+        // before a starved machine has even sent the call (the server then never saw it). So the limit is long until the server has
+        // the call, and then it is over at once.
+        a.test_timing = Some((Duration::from_secs(3600), Duration::from_millis(40), Duration::from_secs(30)));
         write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the picture call at the server", |_| live.gens.load(Ordering::SeqCst) >= 1);
+        a.test_timing = Some((Duration::ZERO, Duration::from_millis(40), Duration::from_secs(30)));
         until(&mut a, &cx, "the time limit", |a| a.pics.iter().all(|p| matches!(p.state, PicState::Failed(_))));
         let PicState::Failed(why) = a.pics[0].state.clone() else { unreachable!() };
         assert!(why.starts_with("Stopped after") && why.contains("time limit") && why.contains("may still be working"), "{why}");
         assert_eq!(live.gens.load(Ordering::SeqCst), 1, "the waiting picture was not started");
         let ev = a.pic_log_events();
         assert!(ev.iter().any(|e| e.kind == plk::TIMEOUT && e.decision.starts_with("timeout after")), "{ev:?}");
+        live.release();
         // the late answer is only logged: the picture stays failed
         until(&mut a, &cx, "the late answer in the log", |a| a.pic_log_events().iter().any(|e| e.kind == plk::REQUEST));
         assert!(a.pics.iter().all(|p| matches!(p.state, PicState::Failed(_))));
@@ -10333,7 +10427,7 @@ J
         assert!(a.note_text().is_some_and(|n| n.contains("Reading aloud with") && n.contains("Press play")), "{:?}", a.note_text());
         let (g, _) = draw(&mut a, &cx, 1280, 720, 0);
         assert!(!g.hits.iter().any(|x| x.label == "Turn on reading aloud"), "the chip is gone once reading works");
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("story.turn_on_reading"));
     }
 

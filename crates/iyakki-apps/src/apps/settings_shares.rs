@@ -20,6 +20,23 @@ pub(super) struct SharePanel {
     qr: bool,
     /// A folder asked for by "Share this folder..." in the IDE; the form opens with it on the next frame.
     pub(super) pending: Option<String>,
+    /// The players the last search found, the one the buttons act on, and the last progress line they were told.
+    cast: CastPanel,
+}
+
+#[derive(Default)]
+struct CastPanel {
+    players: Vec<String>,
+    player: usize,
+    progress: Option<String>,
+    paused: bool,
+}
+
+/// What a casting button's network call brings back.
+pub(super) enum CastDone {
+    Found(Result<Vec<String>, String>),
+    Said(Result<String, String>),
+    Progress(Result<(String, Option<u64>), String>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +44,8 @@ pub(super) enum ShareForm {
     New,
     Edit(String),
     Delete(String),
+    /// "Play on a player": the player and the item of the media server (a choice each).
+    Cast(Vec<String>, Vec<String>),
 }
 
 const MODES: [&str; 2] = ["Files: browse and download", "Website: serve index.html (no list)"];
@@ -152,7 +171,7 @@ impl SettingsApp {
     }
 
     pub(super) fn shares_buttons(&self) -> Vec<Btn> {
-        vec![("New share…", ACCENT, 'n'), ("Receive a package", TEXT, 'r'), ("Start/Stop", TEXT, 's'), ("Copy link", TEXT, 'c'), ("QR", TEXT, 'q'), ("Edit", TEXT, 'e'), ("New secret", TEXT, 't'), ("Delete", ERR, 'd'), ("Stop all", ERR, 'x'), ("Media server", TEXT, 'm'), ("Firewall", TEXT, 'f')]
+        vec![("New share…", ACCENT, 'n'), ("Receive a package", TEXT, 'r'), ("Start/Stop", TEXT, 's'), ("Copy link", TEXT, 'c'), ("QR", TEXT, 'q'), ("Edit", TEXT, 'e'), ("New secret", TEXT, 't'), ("Delete", ERR, 'd'), ("Stop all", ERR, 'x'), ("Media server", TEXT, 'm'), ("Firewall", TEXT, 'f'), ("Find players", TEXT, 'p'), ("Next player", TEXT, 'l'), ("Play on player…", TEXT, 'g'), ("Pause / resume", TEXT, 'u'), ("Back 30 s", TEXT, ','), ("Forward 30 s", TEXT, '.'), ("Cast progress", TEXT, 'i'), ("Stop cast", ERR, 'o')]
     }
 
     /// Open the form for a new share with `folder` filled in ("Share this folder…" in the IDE and EDIT).
@@ -226,6 +245,7 @@ impl SettingsApp {
             Key::Char('r') => self.shares_package_drop(cx),
             Key::Char('f') => self.fw_open_shares(cx),
             Key::Char('m') => self.media_server_toggle(cx),
+            Key::Char(c @ ('p' | 'l' | 'g' | 'u' | ',' | '.' | 'i' | 'o')) => self.cast_key(*c, cx),
             Key::Char('x') => {
                 let n = crate::agent().host_probe().shares_running_total();
                 if n == 0 {
@@ -253,6 +273,72 @@ impl SettingsApp {
             return;
         }
         self.modal = Some(Modal::Confirm(ConfirmKind::MediaServerOn, format!("Switch the media server on? TVs, phones and speakers on your local network will be able to list and play the audio and video files in {n} shared folder(s), without a password. Hidden files are not offered. It stops when you sign out. Press y to switch it on, or any other key to keep it off.")));
+    }
+
+    /// The casting buttons (F-MEDIA-11). Finding players, playing, pause and resume, jumping 30 s, asking how far it is and stopping each make one
+    /// call to the player on a thread of their own (the same calls as the chat tools `cast_*`); pressing the button is the person's approval, and
+    /// every one is audited as `media.cast`. Playing opens a form that names the player and the item first.
+    fn cast_key(&mut self, c: char, cx: &AppCx) {
+        let agent = cx.agent.clone();
+        let (user, audit) = (cx.session.user.clone(), cx.audit.clone());
+        if c == 'p' {
+            audit.record(&user, "media.cast", "look for players");
+            return self.start("Looking for players", move || JobOut::Cast(CastDone::Found(agent.helpers_b4().cast_find())));
+        }
+        if self.shares.cast.players.is_empty() {
+            return self.fail("Look for players first (p).");
+        }
+        let n = self.shares.cast.players.len();
+        if c == 'l' {
+            self.shares.cast.player = (self.shares.cast.player + 1) % n;
+            self.shares.cast.progress = None;
+            return self.ok(format!("Player: {}.", self.shares.cast.players[self.shares.cast.player]));
+        }
+        let name = self.shares.cast.players[self.shares.cast.player.min(n - 1)].clone();
+        if c == 'g' {
+            let items = agent.helpers_b4().cast_items(&user);
+            if items.is_empty() {
+                return self.fail("The media server is off or has nothing to play: switch it on first (m).");
+            }
+            let titles: Vec<String> = items.iter().map(|i| format!("{} ({})", i.1, if i.2 { "video" } else { "audio" })).collect();
+            let ids: Vec<String> = items.into_iter().map(|i| i.0).collect();
+            let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
+            let pl: Vec<&str> = self.shares.cast.players.iter().map(String::as_str).collect();
+            let f = Form::new("Play on a player").with_note("The player fetches the file from this computer's media server on the local network. Nothing is sent anywhere else.").choice("Player", &pl, self.shares.cast.player).choice("What to play", &refs, 0);
+            return self.open_form(FormKind::Share(ShareForm::Cast(self.shares.cast.players.clone(), ids)), f);
+        }
+        audit.record(&user, "media.cast", &format!("{c} {name}"));
+        let paused = self.shares.cast.paused;
+        self.start("Talking to the player", move || {
+            let b = agent.helpers_b4();
+            JobOut::Cast(match c {
+                'i' => CastDone::Progress(b.cast_progress(&name)),
+                'o' => CastDone::Said(b.cast_stop(&name)),
+                'u' => CastDone::Said(b.cast_move(&name, if paused { "resume" } else { "pause" }, 0)),
+                ',' => CastDone::Said(b.cast_move(&name, "by", -30)),
+                _ => CastDone::Said(b.cast_move(&name, "by", 30)),
+            })
+        });
+    }
+
+    pub(super) fn cast_done(&mut self, r: CastDone) {
+        match r {
+            CastDone::Found(Ok(list)) => {
+                let msg = if list.is_empty() { "No player that can be sent media was found on the local network.".to_string() } else { format!("Found {}: {}. l picks the next one, g plays something on it.", if list.len() == 1 { "1 player".to_string() } else { format!("{} players", list.len()) }, list.join(", ")) };
+                self.shares.cast = CastPanel { players: list, ..Default::default() };
+                self.ok(msg);
+            }
+            CastDone::Said(Ok(m)) => {
+                self.shares.cast.paused = m.contains("pause done") || (self.shares.cast.paused && !m.contains("resume done") && !m.contains("playing") && !m.contains("stop"));
+                self.ok(m);
+            }
+            CastDone::Progress(Ok((line, _))) => {
+                self.shares.cast.paused = line.contains("paused");
+                self.shares.cast.progress = Some(line.clone());
+                self.ok(line);
+            }
+            CastDone::Found(Err(e)) | CastDone::Said(Err(e)) | CastDone::Progress(Err(e)) => self.fail(e),
+        }
     }
 
     pub(super) fn media_server_start(&mut self, cx: &AppCx) {
@@ -289,6 +375,23 @@ impl SettingsApp {
                 g.text(a.x + 12.0 * s, y + h, 12.0 * s, MUTED, &format!("{} follows {} ({} min left)", sub.0, sub.1, (sub.2 + 59) / 60), Face::Sans);
                 h += 16.0 * s;
             }
+        }
+        h + 6.0 * s
+    }
+
+    /// The line under the media band: the players found and the one the casting buttons act on, with how far it was last said to be.
+    fn render_cast_band(&self, g: &mut Gfx, a: R, y: f32, s: f32) -> f32 {
+        let c = &self.shares.cast;
+        let txt = if c.players.is_empty() {
+            "Players: none yet. p looks for TVs and speakers on this network that can play from the media server.".to_string()
+        } else {
+            let names: Vec<String> = c.players.iter().enumerate().map(|(i, p)| if i == c.player { format!("[{p}]") } else { p.clone() }).collect();
+            format!("Players: {}.{}", names.join("  "), c.progress.as_ref().map(|p| format!(" {p}")).unwrap_or_default())
+        };
+        let mut h = 0.0;
+        for l in g.wrap(12.0 * s, &txt, Face::Sans, a.w).iter().take(2) {
+            g.text(a.x, y + h, 12.0 * s, MUTED, l, Face::Sans);
+            h += 16.0 * s;
         }
         h + 6.0 * s
     }
@@ -350,6 +453,17 @@ impl SettingsApp {
                 m.update(id, &d)?;
                 Ok(format!("Saved {}.", d.name))
             }
+            ShareForm::Cast(players, ids) => {
+                let (name, item) = (players.get(form.choice_idx(0)).ok_or("choose a player")?.clone(), ids.get(form.choice_idx(1)).ok_or("choose what to play")?.clone());
+                if self.job.is_some() {
+                    return Err("Another operation is still running.".into());
+                }
+                self.shares.cast.player = form.choice_idx(0);
+                cx.audit.record(&cx.session.user, "media.cast", &format!("{item} to {name}"));
+                let (agent, user) = (cx.agent.clone(), cx.session.user.clone());
+                self.start("Sending to the player", move || JobOut::Cast(CastDone::Said(agent.helpers_b4().cast_play(&user, &name, &item))));
+                Ok("Sending it to the player\u{2026}".into())
+            }
             ShareForm::Delete(id) => {
                 if form.value(0).trim() != "DELETE" {
                     return Err("Type DELETE exactly to remove the share.".into());
@@ -378,6 +492,7 @@ impl SettingsApp {
             y += 4.0 * s;
         }
         y += self.render_media_band(g, a, y, s, cx);
+        y += self.render_cast_band(g, a, y, s);
         if running > 0 {
             g.text(a.x, y, 13.0 * s, rgb(255, 196, 94), &format!("{running} share(s) running now. 'Stop all sharing' (x) closes them at once."), Face::Bold);
             y += 22.0 * s;

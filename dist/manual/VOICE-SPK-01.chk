@@ -1,0 +1,19 @@
+scenario: VOICE-SPK-01
+title: Read aloud and system sounds
+area: Voice
+rows: F-VOICE-17, F-VOICE-19, F-VOICE-20
+machines: any
+needs: person
+prereq: Speakers or headphones are working (see the sound checks).
+step: Open the VOICE tile, READ ALOUD, type a short sentence and press Read.
+expect: The sentence is read aloud in a clear voice, and the word being said is marked on screen.
+clause: F-VOICE-17.read
+step: Press Stop while a longer text is being read.
+expect: The voice stops at once.
+clause: F-VOICE-17.stop
+step: Sign out and sign in again.
+expect: You hear two soft falling notes at sign-out and two soft rising notes at sign-in.
+clause: F-VOICE-19.login-logout
+step: Make a notification arrive (finish a short job, or use the Bell test in Settings).
+expect: A short notification sound plays once, not repeated.
+clause: F-VOICE-19.notify

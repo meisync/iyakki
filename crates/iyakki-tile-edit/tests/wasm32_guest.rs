@@ -88,8 +88,10 @@ fn the_same_typing_gives_the_same_pictures_as_the_native_tile_and_a_file_is_open
     assert_eq!(seen.iter().filter(|c| c.1 == "write").count(), 3, "asked, asked again, saved");
     assert!(seen.iter().all(|c| c.0 == "files" && (c.1 == "read" || c.1 == "write")), "{seen:?}");
     // a real click on the Open button
-    r.frame().unwrap();
-    assert!(r.click(480 - 256 + 10, 14).unwrap().is_some());
+    // (the button is found by its hit id: its place depends on the tile's width, KI-990)
+    let f = r.frame().unwrap();
+    let open = f.ops.iter().find_map(|o| if let Op::Hit { id: 4, r } = o { Some(*r) } else { None }).expect("the Open button is drawn");
+    assert!(r.click(open.x + open.w / 2, open.y + open.h / 2).unwrap().is_some());
 }
 
 #[test]

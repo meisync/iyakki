@@ -31,10 +31,14 @@ chacha20poly1305 = "0.10"
 iyakki-proxy = { path = "../iyakki-proxy" }
 thiserror.workspace = true
 iyakki-clock = { workspace = true }
+iyakki-board-model = { workspace = true }
 iyakki-storage.workspace = true
 iyakki-core-api = { workspace = true }
 iyakki-link = { workspace = true }
+iyakki-audiolink = { workspace = true }
 iyakki-fw = { workspace = true }
+iyakki-linuxinit = { workspace = true }
+iyakki-hostfiles = { workspace = true }
 libc = "0.2"
 iyakki-archive = { workspace = true }
 iyakki-openpgp = { workspace = true }
@@ -48,7 +52,7 @@ iyakki-hwinfo = { workspace = true }
 
 [features]
 # test-only hooks for the tests of other crates (the signature skip of the Linux apps download tests); never on in a product build
-testing = []
+testing = ["iyakki-linuxinit/testing"]
 
 [dev-dependencies]
 iyakki-testkit = { path = "../iyakki-testkit" }

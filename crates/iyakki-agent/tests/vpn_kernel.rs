@@ -566,7 +566,7 @@ fn policy_routing_text_sends_chosen_destinations_and_accounts_through_the_tunnel
     sh("ip neigh replace 10.9.0.1 lladdr 02:00:00:00:00:02 dev iyvpn0 nud permanent");
     let include = [Cidr::parse("198.51.100.0/24").unwrap()];
     let exclude = [Cidr::parse("198.51.100.77/32").unwrap()];
-    let plan = plan_policy_routes(&PolicyInput { ifname: "iyvpn0", table: DEFAULT_TABLE, mark: DEFAULT_MARK, priority: DEFAULT_PRIORITY, include: &include, exclude: &exclude, uids: &[4242] }).expect("the plan");
+    let plan = plan_policy_routes(&PolicyInput { ifname: "iyvpn0", table: DEFAULT_TABLE, mark: DEFAULT_MARK, priority: DEFAULT_PRIORITY, include: &include, exclude: &exclude, uids: &[4242], app_sockets: false }).expect("the plan");
     // the tunnel's own table needs a way out: a default route (the helper's plan adds it too)
     for a in &plan.add {
         let o = std::process::Command::new("ip").args(a).output().unwrap();

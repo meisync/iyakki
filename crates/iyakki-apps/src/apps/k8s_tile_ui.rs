@@ -167,6 +167,8 @@ impl K8sApp {
             let (lx, ly) = c.place(btn_w(g, size, lab));
             g.button(lx, ly + (row_h - size * 2.1) / 2.0, size, lab, MUTED, Event::Tab(T_LOG));
             if self.admin {
+                let (ax1, ay1) = c.place(btn_w(g, size, "Apply YAML"));
+                g.button(ax1, ay1 + (row_h - size * 2.1) / 2.0, size, "Apply YAML", MUTED, Event::Tab(T_APPLY));
                 let (cx1, cy1) = c.place(btn_w(g, size, "Launch cloud mode"));
                 g.button(cx1, cy1 + (row_h - size * 2.1) / 2.0, size, "Launch cloud mode", MUTED, Event::Tab(super::k8s_cloud::T_CLOUD));
             }
@@ -787,6 +789,17 @@ impl K8sApp {
             g.button(p.x + p.w - 20.0 * s - bw, p.y + p.h - 46.0 * s, 13.5 * s, "Close", MUTED, Event::Tab(T_CLOSE));
             return;
         }
+        if let Some(f) = &mut self.apply_path {
+            let p = fx::modal(g, area, s, 520.0 * s, 230.0 * s, AMBER, false);
+            let y = fx::modal_title(g, p, s, "Apply a YAML manifest", AMBER);
+            let (x, w) = (p.x + 26.0 * s, p.w - 52.0 * s);
+            let used = para(g, x, y + 4.0 * s, w, 13.5 * s, TEXT, "The file is read from your own files. You see every object in it before anything is sent, and the cluster checks it with a dry run first.", 4, true);
+            f.render(g, R::new(x, y + used + 14.0 * s, w, 28.0 * s), true, s, super::blink(tick), Face::Sans, F_PATH);
+            let by = p.y + p.h - 58.0 * s;
+            let w1 = g.button(x, by, 14.0 * s, "Read file", AMBER, Event::Tab(T_APPLY_GO));
+            g.button(x + w1 + 12.0 * s, by, 14.0 * s, "Cancel", MUTED, Event::Tab(T_NO));
+            return;
+        }
         if self.reveal_ask {
             let name = self.det.key.as_ref().map(|k| k.2.clone()).unwrap_or_default();
             let p = fx::modal(g, area, s, 520.0 * s, 250.0 * s, AMBER, false);
@@ -868,13 +881,14 @@ impl K8sApp {
             Confirm::Click => None,
         };
         let scaling = p.scaling.is_some();
-        let h = 270.0 + if typed_needed.is_some() { 50.0 } else { 0.0 } + if scaling { 40.0 } else { 0.0 };
+        let applying = matches!(action, kx::Action::Apply { .. });
+        let h = 270.0 + if applying { 150.0 } else { 0.0 } + if typed_needed.is_some() { 50.0 } else { 0.0 } + if scaling { 40.0 } else { 0.0 };
         let card = fx::modal(g, area, s, 540.0 * s, h * s, if danger { ERR } else { AMBER }, danger);
         let mut y = fx::modal_title(g, card, s, &action_shown.title(), if danger { ERR } else { AMBER });
         let (x, w) = (card.x + 26.0 * s, card.w - 52.0 * s);
         let where_ = format!("{}{}.", self.card_cluster(&action), match &action { kx::Action::Restart { ns, .. } | kx::Action::Scale { ns, .. } | kx::Action::DeletePod { ns, .. } | kx::Action::Delete { ns, .. } => format!(", namespace {ns}"), _ => String::new() });
         y += para(g, x, y + 2.0 * s, w, 13.0 * s, DIM, &where_, 2, true) + 8.0 * s;
-        y += para(g, x, y, w, 14.5 * s, TEXT, &action_shown.warning(p.owned), 6, true) + 8.0 * s;
+        y += para(g, x, y, w, 14.5 * s, TEXT, &action_shown.warning(p.owned), if applying { 14 } else { 6 }, true) + 8.0 * s;
         if scaling {
             let sz = 14.0 * s;
             g.button(x, y, sz, "\u{2212}", MUTED, Event::Tab(T_SCALE_DN));
@@ -902,6 +916,7 @@ impl K8sApp {
             kx::Action::DeletePod { .. } | kx::Action::Delete { .. } => "Delete",
             kx::Action::Cordon { .. } => "Cordon",
             kx::Action::Uncordon { .. } => "Uncordon",
+            kx::Action::Apply { .. } => "Apply",
         };
         let w1 = if ok { g.button(x, by, 14.0 * s, label, if danger { ERR } else { AMBER }, Event::Tab(T_YES)) } else { g.button_off(x, by, 14.0 * s, label) };
         g.button(x + w1 + 12.0 * s, by, 14.0 * s, "Cancel", MUTED, Event::Tab(T_NO));

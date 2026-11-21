@@ -101,7 +101,7 @@ fn the_server_streams_a_converted_copy_of_a_shared_file_and_refuses_anything_els
     let d = tree("serve");
     std::fs::write(d.join("share/song.flac"), b"not really flac").unwrap();
     std::fs::write(d.join("share/clip.mp3"), b"not really mp3").unwrap();
-    let mut cfg = crate::upnp_serve::ServeCfg { name: "T".into(), uuid: "6f1c1c0a-1111-4222-8333-444455556666".into(), http_bind: "127.0.0.1:0".parse().unwrap(), ssdp_bind: "127.0.0.1:0".parse().unwrap(), multicast: false, folders: vec![d.join("share")], deny: vec![], allow_loopback: true, head_deadline: std::time::Duration::from_secs(10), audit: Arc::new(|_, _| {}), transcoder: None };
+    let mut cfg = crate::upnp_serve::ServeCfg { name: "T".into(), uuid: "6f1c1c0a-1111-4222-8333-444455556666".into(), http_bind: "127.0.0.1:0".parse().unwrap(), ssdp_bind: "127.0.0.1:0".parse().unwrap(), multicast: false, folders: vec![d.join("share")], deny: vec![], allow_loopback: true, head_deadline: std::time::Duration::from_secs(10), audit: Arc::new(|_, _| {}), transcoder: None, lan: None };
     // without a converter the query is ignored and the file is served as it is
     let plain = crate::upnp_serve::start(cfg.clone()).unwrap();
     let lib_ids = |a| {

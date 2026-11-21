@@ -93,6 +93,18 @@ impl ServiceBackend for PictureRoute {
     fn denied(&self, domain: &str, method: &str, json: &str) {
         self.inner.denied(domain, method, json)
     }
+
+    fn requests(&self) -> Vec<(u32, String, String)> {
+        self.inner.requests()
+    }
+
+    fn answer(&self, id: u32, allow: bool) -> bool {
+        self.inner.answer(id, allow)
+    }
+
+    fn take_dock_open(&self) -> Option<String> {
+        self.inner.take_dock_open()
+    }
 }
 
 #[cfg(test)]

@@ -21,6 +21,7 @@ pub use iyakki_shared::routertools::{PROMPT_RULE};
 
 pub const STATUS: &str = "router_status";
 pub const MODELS: &str = "router_models";
+pub const ROUTE: &str = "router_route";
 pub const SET: &str = "router_set";
 pub const STRATEGY_LIST: &str = "router_strategy_list";
 pub const STRATEGY_SET: &str = "router_strategy_set";
@@ -52,7 +53,7 @@ pub fn with_press<R>(ask: impl FnOnce() -> R) -> R {
 }
 
 pub fn is_router_tool(n: &str) -> bool {
-    matches!(n, STATUS | MODELS | SET | STRATEGY_LIST | STRATEGY_SET | STRATEGY_ADD | STRATEGY_REMOVE | RUN | CANCEL)
+    matches!(n, STATUS | MODELS | ROUTE | SET | STRATEGY_LIST | STRATEGY_SET | STRATEGY_ADD | STRATEGY_REMOVE | RUN | CANCEL)
 }
 
 /// What the tools need from the system. The real one keeps files; tests use a fake in memory.
@@ -107,6 +108,11 @@ pub trait Backend: Send + Sync {
     /// The core's permission to change or add a strategy (`router.strategy.set`).
     fn permit_strategy(&self, _name: &str) -> Result<(), String> {
         Ok(())
+    }
+    /// The core's router door, for the read-only routing decision (`router_route`). The default: none (the decision is made here over the
+    /// registry with the same function).
+    fn core_router(&self) -> Option<Arc<dyn iyakki_core_api::router::Router>> {
+        None
     }
     /// The one run of this person.
     fn slot(&self) -> Arc<RunSlot>;
@@ -275,6 +281,48 @@ pub fn scope_ok(s: &str) -> bool {
 
 pub fn profiles_of(be: &dyn Backend) -> Vec<Profile> {
     build(&be.providers(), &be.config().overrides)
+}
+
+/// The registry as the core's routing decision reads it: one plain entry per model, no key and no address, the mean answer time from the
+/// usage ledger when known.
+pub fn route_models(be: &dyn Backend) -> Vec<iyakki_core_api::router::RouteModel> {
+    use iyakki_core_api::router::{RouteCost, RouteModel, RouteZone};
+    let speeds = be.speeds();
+    profiles_of(be)
+        .into_iter()
+        .map(|p| RouteModel {
+            role: match p.role {
+                Role::Planner => "planner",
+                Role::Executor => "executor",
+                Role::Both => "both",
+            }
+            .into(),
+            tools: p.caps.tools,
+            vision: p.caps.vision,
+            audio: p.caps.audio,
+            context: p.caps.context,
+            cost: match p.cost {
+                Cost::Free => RouteCost::Free,
+                Cost::Low => RouteCost::Low,
+                Cost::Medium => RouteCost::Medium,
+                Cost::High => RouteCost::High,
+            },
+            zone: match p.zone {
+                Zone::Computer => RouteZone::Computer,
+                Zone::Network => RouteZone::Network,
+                Zone::Internet => RouteZone::Internet,
+            },
+            enabled: p.enabled,
+            answer_ms: speeds.get(&p.id).filter(|(n, _)| *n > 0).map(|(n, ms)| ms / n),
+            id: p.id,
+        })
+        .collect()
+}
+
+/// Hand the registry to the core (`iyakki_core_local::publish_models`) so the core's routing decision answers from it. Called when the
+/// router's tools are wired and before each `router_route`.
+pub fn publish_registry(be: &dyn Backend) {
+    iyakki_core_local::publish_models(route_models(be));
 }
 
 /// No tools underneath: for a screen that uses the same code as the chat tools.
@@ -471,6 +519,43 @@ impl RouterTools {
         out.join("\n")
     }
 
+    /// The read-only routing decision (F-ROUTER-01): through the core's router door when there is one, with the same function otherwise.
+    pub fn route(&self, a: &Value) -> Result<String, String> {
+        use iyakki_core_api::router::{RouteCost, RouteNeed, RouteZone};
+        let cost = |k: &str| -> Result<Option<RouteCost>, String> {
+            match a[k].as_str() {
+                None => Ok(None),
+                Some(s) => serde_json::from_value(json!(s)).map(Some).map_err(|_| format!("{k} must be free, low, medium or high")),
+            }
+        };
+        let zone = match a["max_zone"].as_str() {
+            None => None,
+            Some(s) => Some(serde_json::from_value::<RouteZone>(json!(s)).map_err(|_| "max_zone must be computer, network or internet".to_string())?),
+        };
+        let need = RouteNeed {
+            tools: a["tools"].as_bool().unwrap_or(false),
+            vision: a["vision"].as_bool().unwrap_or(false),
+            audio: a["audio"].as_bool().unwrap_or(false),
+            min_context: a["min_context"].as_u64().map_or(0, |n| n.min(u32::MAX as u64) as u32),
+            max_cost: cost("max_cost")?,
+            max_zone: zone,
+            planning: a["planning"].as_bool().unwrap_or(false),
+        };
+        let d = match self.be.core_router() {
+            Some(g) => {
+                publish_registry(self.be.as_ref());
+                g.route(&need)
+            }
+            None => iyakki_core_api::router::choose(&route_models(self.be.as_ref()), &need),
+        };
+        let mut out = match &d.chosen {
+            Some(c) => vec![format!("The router would use {c} first. Fitting models, best first: {}.", d.ranked.join(", "))],
+            None => vec!["No model fits this request.".to_string()],
+        };
+        out.extend(d.refused.iter().map(|(id, why)| format!("- {id}: {why}")));
+        Ok(out.join("\n"))
+    }
+
     pub fn models(&self) -> String {
         let c = self.be.config();
         let all = profiles_of(self.be.as_ref());
@@ -626,6 +711,7 @@ impl Tools for RouterTools {
         let none = json!({"type": "object", "properties": {}});
         v.push(t(STATUS, "Say whether the model router is on, its strategy, its limits and what the latest run used. Reads only.", none.clone(), Risk::Safe));
         v.push(t(MODELS, "List the models the router can use with role (planner, executor, both), abilities, cost class, where each runs and context size. Reads only.", none.clone(), Risk::Safe));
+        v.push(t(ROUTE, "Ask which model the router would use for a request, without sending anything or spending anything: the models that fit best first, and why each of the others does not. Optional: tools, vision, audio (booleans), min_context (tokens), max_cost (free, low, medium, high), max_zone (computer, network, internet), planning (true for a plan). Reads only.", json!({"type": "object", "properties": {"tools": {"type": "boolean"}, "vision": {"type": "boolean"}, "audio": {"type": "boolean"}, "min_context": {"type": "integer"}, "max_cost": {"type": "string", "enum": ["free", "low", "medium", "high"]}, "max_zone": {"type": "string", "enum": ["computer", "network", "internet"]}, "planning": {"type": "boolean"}}}), Risk::Safe));
         v.push(t(STRATEGY_LIST, "List the strategies: the built-in one and the person's own scripts. Reads only.", none, Risk::Safe));
         v.push(t(SET, "Change the router: turn it on or off, the farthest place a model may run (privacy zone), the budget limits of a run, a fixed planner, or the corrections of one model (role, cost, where it runs, context, abilities, on or off). Always asks the person.", json!({"type": "object", "properties": {"enabled": {"type": "boolean"}, "max_zone": {"type": "string", "enum": ["computer", "network", "internet"]}, "max_tokens": {"type": "integer"}, "max_calls": {"type": "integer"}, "max_attempts": {"type": "integer"}, "max_escalations": {"type": "integer"}, "parallel": {"type": "integer", "description": "steps that may run at the same time, 1 to 4; 1 is one at a time"}, "max_tokens_per_day": {"type": "integer", "description": "tokens all runs together may use in 24 hours, 0 for no limit"}, "planner": {"type": "string", "description": "a model id from router_models, or auto"}, "model": {"type": "object", "properties": {"id": {"type": "string"}, "role": {"type": "string", "enum": ["planner", "executor", "both"]}, "cost": {"type": "string", "enum": ["free", "low", "medium", "high"]}, "context": {"type": "integer"}, "tools": {"type": "boolean"}, "vision": {"type": "boolean"}, "audio": {"type": "boolean"}, "enabled": {"type": "boolean"}, "zone": {"type": "string", "enum": ["computer", "network", "internet"]}, "reset": {"type": "boolean"}}, "required": ["id"]}}}), Risk::Ask));
         v.push(t(STRATEGY_SET, "Choose the strategy that decides which model takes each step: `default` or the name of the person's own script. Always asks the person.", json!({"type": "object", "properties": {"name": {"type": "string"}, "scope": {"type": "string", "description": "workspace:NAME or fleet:NAME to choose it for that place only; leave out for the whole computer"}}, "required": ["name"]}), Risk::Ask));
@@ -640,6 +726,7 @@ impl Tools for RouterTools {
         match name {
             STATUS => Ok(self.status()),
             MODELS => Ok(self.models()),
+            ROUTE => self.route(args),
             SET => self.set(args),
             STRATEGY_LIST => Ok(self.strategy_list()),
             STRATEGY_SET => self.strategy_set(args),
@@ -655,6 +742,7 @@ impl Tools for RouterTools {
         match name {
             STATUS => "Show the model router".into(),
             MODELS => "List the models of the router".into(),
+            ROUTE => "Ask which model the router would use".into(),
             STRATEGY_LIST => "List the router strategies".into(),
             SET => "Change the model router".into(),
             STRATEGY_SET => format!("Use the router strategy {}", args["name"].as_str().unwrap_or("?")),
@@ -989,6 +1077,9 @@ impl Backend for FileBackend {
     }
     fn permit_strategy(&self, name: &str) -> Result<(), String> {
         self.gate.as_ref().map_or(Ok(()), |g| with_press(|| g.allow_strategy(name)))
+    }
+    fn core_router(&self) -> Option<Arc<dyn iyakki_core_api::router::Router>> {
+        self.gate.clone()
     }
     fn slot(&self) -> Arc<RunSlot> {
         self.slot.clone()

@@ -196,9 +196,8 @@ pub fn key_from_seed(seed: &str) -> Result<String, String> {
 
 /// A new random token (`iyk_` and 64 hex characters).
 pub fn new_token() -> Result<String, String> {
-    use std::io::Read;
     let mut b = [0u8; 32];
-    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).map_err(|e| e.to_string())?;
+    iyakki_sec::random_fill(&mut b).map_err(|e| e.to_string())?;
     Ok(format!("iyk_{}", pkg::hex(&b)))
 }
 

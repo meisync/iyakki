@@ -103,7 +103,7 @@ pub fn hub_with(cx: &AppCx, usb: Arc<dyn agent::UsbProvider>) -> Arc<dyn std::an
     hub_from(&cx.b4(), &cx.audit, &cx.store, usb)
 }
 
-fn hub_from(b4: &Arc<dyn iyakki_agent_api::ServicesFacetB4>, audit: &Arc<crate::accounts::AuditLog>, store: &Arc<Mutex<crate::accounts::UserStore>>, usb: Arc<dyn agent::UsbProvider>) -> Arc<dyn std::any::Any + Send + Sync> {
+fn hub_from(b4: &Arc<dyn iyakki_agent_api::ServicesFacetB4>, audit: &Arc<dyn iyakki_agent_api::AuditApi>, store: &crate::accounts::UsersRef, usb: Arc<dyn agent::UsbProvider>) -> Arc<dyn std::any::Any + Send + Sync> {
     let (audit, store) = (audit.clone(), store.clone());
     b4.camera_hub(
             Box::new(usb),
@@ -113,8 +113,13 @@ fn hub_from(b4: &Arc<dyn iyakki_agent_api::ServicesFacetB4>, audit: &Arc<crate::
             Arc::new(move |u, e, d| audit.record(u, e, d)),
             &crate::hostname::current("iyakki"),
         )
-        .expect("the agent core serves the cameras")
+        // a core that does not serve the cameras to this program (the UI over the socket, D-SPLIT-03-QUIET) has no hub to give: the placeholder
+        // stands for "no cameras" and every consumer of it is the core's own, which answers the quiet value
+        .unwrap_or_else(|| Arc::new(NoHub))
 }
+
+/// The hub of a core that serves no cameras to this program.
+pub struct NoHub;
 
 pub fn hub_for(cx: &AppCx) -> Arc<dyn std::any::Any + Send + Sync> {
     hub_with(cx, system_usb())
@@ -122,7 +127,7 @@ pub fn hub_for(cx: &AppCx) -> Arc<dyn std::any::Any + Send + Sync> {
 
 /// The cameras of this machine as frames for a client (EXPERIMENTAL, `clientmedia`): the installation's hub, and for each person the
 /// rights their account has (their home, the CAMERA app being allowed). A person who no longer exists sees nothing.
-pub fn client_feed(b4: &Arc<dyn iyakki_agent_api::ServicesFacetB4>, data: &std::path::Path, audit: &Arc<crate::accounts::AuditLog>, store: &Arc<Mutex<crate::accounts::UserStore>>) -> Arc<dyn iyakki_shared::clientmedia::CameraFeed> {
+pub fn client_feed(b4: &Arc<dyn iyakki_agent_api::ServicesFacetB4>, data: &std::path::Path, audit: &Arc<dyn iyakki_agent_api::AuditApi>, store: &crate::accounts::UsersRef) -> Arc<dyn iyakki_shared::clientmedia::CameraFeed> {
     let hub = hub_from(b4, audit, store, system_usb());
     let (store, data) = (store.clone(), data.to_path_buf());
     let who = Arc::new(move |person: &str| client_who(&store, &data, person));
@@ -131,7 +136,7 @@ pub fn client_feed(b4: &Arc<dyn iyakki_agent_api::ServicesFacetB4>, data: &std::
 }
 
 /// What the hub needs to know about a person who is not at the screen (a client session).
-pub fn client_who(store: &Arc<Mutex<crate::accounts::UserStore>>, data: &std::path::Path, person: &str) -> agent::Who {
+pub fn client_who(store: &crate::accounts::UsersRef, data: &std::path::Path, person: &str) -> agent::Who {
     let policy = store.lock().ok().and_then(|s| s.get(person).map(|u| u.policy()));
     // a person who no longer exists gets a guest's rights and nothing else
     let known = policy.is_some();
@@ -144,7 +149,7 @@ pub fn client_who(store: &Arc<Mutex<crate::accounts::UserStore>>, data: &std::pa
 
 /// At sign-in: start supervising recordings (those switched on start again by themselves) and the retention checks, and the motion
 /// watcher (watching that the owner switched on starts again once their vault is open).
-pub fn resume_recording(b4: &Arc<dyn iyakki_agent_api::ServicesFacetB4>, audit: &Arc<crate::accounts::AuditLog>, store: &Arc<Mutex<crate::accounts::UserStore>>) {
+pub fn resume_recording(b4: &Arc<dyn iyakki_agent_api::ServicesFacetB4>, audit: &Arc<dyn iyakki_agent_api::AuditApi>, store: &crate::accounts::UsersRef) {
     let hub = hub_from(b4, audit, store, system_usb());
     b4.camera_resume(hub);
 }
@@ -216,7 +221,8 @@ impl CamerasApp {
     }
 
     fn with<T>(cx: &AppCx, f: impl FnOnce(&TileCx) -> T) -> T {
-        let src = cx.b4().camera_source(hub_for(cx), Box::new(who_for(cx))).expect("the agent core serves the cameras");
+        // no source from the core (the UI over the socket): the tile shows no cameras instead of the program stopping
+        let src: Arc<dyn iyakki_tile_api::cameras::CameraSource> = cx.b4().camera_source(hub_for(cx), Box::new(who_for(cx))).unwrap_or_else(|| Arc::new(iyakki_tile_api::cameras::NoCameras));
         f(&TileCx { user: cx.session.user.as_str(), manage_settings: cx.session.policy.manage_settings, usage: &super::usage::ShellUsage::of(cx), calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: &iyakki_tile_api::remote::NoRemote, cameras: &*src, radio: &iyakki_tile_api::radio::NoRadio })
     }
 

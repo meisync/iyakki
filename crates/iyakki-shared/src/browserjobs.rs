@@ -3,7 +3,7 @@
 
 
 /// What the engine knows about its page.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PageState {
     pub url: String,
     pub title: String,
@@ -15,7 +15,7 @@ pub struct PageState {
     pub gone: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Op {
     Navigate(String),
     Back,
@@ -93,7 +93,7 @@ pub const BUNDLE_VERSION: u32 = 1;
 
 
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Reply {
     Ok,
     Json(String),
@@ -115,7 +115,7 @@ impl std::fmt::Debug for Reply {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Job {
     pub id: u64,
     pub user: String,
@@ -130,6 +130,45 @@ struct St {
     beat: HashMap<String, Instant>,
     /// Who is waiting for which job (so a dropped waiter's late answer is not kept forever).
     waiting: HashMap<u64, ()>,
+}
+
+/// What the engine's owner needs of the queue (the part of [`BrowserJobs`] the servicer calls). The shell holds the queue as a trait object
+/// of the services handle, which may be a connection to the core; the servicer works against this small trait either way.
+pub trait JobQueue {
+    fn beat(&self, user: &str);
+    fn take(&self, user: &str) -> Vec<Job>;
+    fn complete(&self, id: u64, r: Reply);
+    fn fail_all(&self, user: &str, why: &str);
+}
+
+impl<T: JobQueue + ?Sized> JobQueue for std::sync::Arc<T> {
+    fn beat(&self, user: &str) {
+        (**self).beat(user)
+    }
+    fn take(&self, user: &str) -> Vec<Job> {
+        (**self).take(user)
+    }
+    fn complete(&self, id: u64, r: Reply) {
+        (**self).complete(id, r)
+    }
+    fn fail_all(&self, user: &str, why: &str) {
+        (**self).fail_all(user, why)
+    }
+}
+
+impl JobQueue for BrowserJobs {
+    fn beat(&self, user: &str) {
+        BrowserJobs::beat(self, user)
+    }
+    fn take(&self, user: &str) -> Vec<Job> {
+        BrowserJobs::take(self, user)
+    }
+    fn complete(&self, id: u64, r: Reply) {
+        BrowserJobs::complete(self, id, r)
+    }
+    fn fail_all(&self, user: &str, why: &str) {
+        BrowserJobs::fail_all(self, user, why)
+    }
 }
 
 /// The queue: tools `submit` and `wait`; the engine's owner `take`s and `complete`s.
@@ -285,7 +324,7 @@ impl Servicer {
         Servicer { inflight: Vec::new(), next_script: 1 }
     }
 
-    pub fn service(&mut self, jobs: &BrowserJobs, user: &str, eng: &mut dyn PageEngine) -> Serviced {
+    pub fn service(&mut self, jobs: &dyn JobQueue, user: &str, eng: &mut dyn PageEngine) -> Serviced {
         let mut out = Serviced::default();
         jobs.beat(user);
         eng.pump();
@@ -406,7 +445,7 @@ impl Servicer {
     }
 
     /// The engine is going away: answer what is still waiting.
-    pub fn abort(&mut self, jobs: &BrowserJobs, user: &str, why: &str) {
+    pub fn abort(&mut self, jobs: &dyn JobQueue, user: &str, why: &str) {
         for f in self.inflight.drain(..) {
             jobs.complete(f.job, Reply::Err(why.to_string()));
         }
@@ -601,13 +640,13 @@ impl HeadlessSession {
             .spawn(move || {
                 let mut sv = Servicer::new();
                 while !flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    let r = sv.service(&jobs, &user, &mut eng);
+                    let r = sv.service(&*jobs, &user, &mut eng);
                     if r.close {
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(if r.busy { 2 } else { 8 }));
                 }
-                sv.abort(&jobs, &user, "the browser was closed");
+                sv.abort(&*jobs, &user, "the browser was closed");
             })
             .map_err(|e| e.to_string())?;
         Ok(HeadlessSession { stop, thread: Some(thread) })

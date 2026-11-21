@@ -2,7 +2,7 @@
 
 
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VaultState {
     Unlocked,
     Created,
@@ -15,7 +15,7 @@ pub enum VaultState {
 
 
 /// A model download started from the chat.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PullStatus {
     pub provider: String,
     pub model: String,
@@ -37,7 +37,7 @@ impl PullStatus {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionDeleted {
     pub runs: usize,
     pub files: usize,
@@ -46,7 +46,7 @@ pub struct SessionDeleted {
 // ---- moved from iyakki-agent (F-SPLIT-03) ----
 
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LoginReport {
     pub user_vault: VaultState,
     pub system_vault: VaultState,

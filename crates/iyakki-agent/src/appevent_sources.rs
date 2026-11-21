@@ -183,22 +183,7 @@ impl FlowWatch {
     }
 }
 
-/// The link state in the words of `connectivity.changed`: `online` when a network interface other than loopback is up and has a carrier,
-/// else `offline`. (Metered and a sign-in page need the network manager and are not produced yet.)
-pub fn link_state(sys: &Path) -> &'static str {
-    let Ok(rd) = std::fs::read_dir(sys.join("class/net")) else { return "offline" };
-    for e in rd.flatten() {
-        let n = e.file_name().to_string_lossy().to_string();
-        if n == "lo" {
-            continue;
-        }
-        let up = std::fs::read_to_string(e.path().join("operstate")).map(|s| s.trim() == "up").unwrap_or(false);
-        if up {
-            return "online";
-        }
-    }
-    "offline"
-}
+pub use iyakki_core_local::appevent_facts::link_state;
 
 #[derive(Default)]
 pub struct LinkWatch {
@@ -330,8 +315,7 @@ pub fn memory_level(text: &str) -> &'static str {
 
 /// The processor's heat slow-down count, summed over the cores that report one.
 pub fn throttle_total(sys: &Path) -> u64 {
-    let Ok(rd) = std::fs::read_dir(sys.join("devices/system/cpu")) else { return 0 };
-    rd.flatten().filter_map(|e| std::fs::read_to_string(e.path().join("thermal_throttle/core_throttle_count")).ok()).filter_map(|t| t.trim().parse::<u64>().ok()).sum()
+    iyakki_core_local::machinefacts::throttle_total_in(sys)
 }
 
 #[derive(Default)]
@@ -721,7 +705,7 @@ impl SourcedEvents {
         // what apps hold, when a policy, an end time or the store's list explains a change
         crate::appevent_perm::tell(hub, st.perm.observe((self.inputs.perm)()));
         // approvals, security counts and reminders, for each person who listens to one of them
-        let people: BTreeSet<String> = ["approvals.pending", "security.alert", "reminder.due", "backup.finished"].iter().flat_map(|e| hub.listeners(e)).map(|l| l.0).collect();
+        let people: BTreeSet<String> = ["approvals.pending", "security.alert", "reminder.due", "backup.finished", "transfer.finished"].iter().flat_map(|e| hub.listeners(e)).map(|l| l.0).collect();
         for u in &people {
             for (name, p) in st.more_persons.observe(u, (self.inputs.more_person)(u)) {
                 emit(hub, name, Some(u), p);
@@ -838,6 +822,7 @@ pub fn real_inputs(services: &Arc<crate::services::Services>) -> Inputs {
     let svc3 = services.clone();
     let dir4 = services.dir().to_path_buf();
     let (dir_more, dir_feed) = (services.dir().to_path_buf(), services.dir().to_path_buf());
+    let svc_models = services.clone();
     Inputs {
         settings: Arc::new(StoreChanges::new(services.settings.clone())),
         machine: Box::new(|| {
@@ -847,13 +832,13 @@ pub fn real_inputs(services: &Arc<crate::services::Services>) -> Inputs {
                 ac: r.ac_online,
                 percent: r.percent.map(|p| p.round() as u32),
                 discharging: r.status == iyakki_battery::Status::Discharging,
-                memory: memory_level(&std::fs::read_to_string("/proc/pressure/memory").unwrap_or_default()).to_string(),
+                memory: memory_level(&iyakki_core_local::machinefacts::memory_pressure()).to_string(),
                 throttle: throttle_total(&sys),
             }
         }),
         devices: Box::new(|| {
-            let cams: BTreeSet<String> = std::fs::read_dir("/sys/class/video4linux").into_iter().flatten().flatten().filter_map(|e| std::fs::read_to_string(e.path().join("name")).ok()).map(|n| n.trim().to_string()).collect();
-            DeviceFacts { volumes: block_mounts(&iyakki_storage::mounts_text()), audio: iyakki_devctl::cards(&iyakki_devctl::Roots::real()).into_iter().map(|c| if c.long_name.is_empty() { c.name } else { format!("{} - {}", c.name, c.long_name) }).filter(|n| !n.is_empty()).collect(), cameras: cams }
+            let cams: BTreeSet<String> = iyakki_core_local::machinefacts::camera_names();
+            DeviceFacts { volumes: block_mounts(&iyakki_core_local::storage::mounts_text()), audio: iyakki_core_local::devctl::cards(&iyakki_core_local::devctl::Roots::real()).into_iter().map(|c| if c.long_name.is_empty() { c.name } else { format!("{} - {}", c.name, c.long_name) }).filter(|n| !n.is_empty()).collect(), cameras: cams }
         }),
         more: Box::new(move || {
             use crate::{appevent_feed as f, appevent_more as m};
@@ -861,16 +846,23 @@ pub fn real_inputs(services: &Arc<crate::services::Services>) -> Inputs {
             let now = crate::clock::now_unix();
             m::MoreFacts {
                 suspends: m::suspend_count(&sys),
-                shutdown_in: std::fs::read_to_string("/run/systemd/shutdown/scheduled").ok().and_then(|t| m::shutdown_in(&t, now)),
-                free_percent: m::free_percents(&iyakki_storage::mounts_text()),
+                shutdown_in: iyakki_core_local::machinefacts::shutdown_scheduled().and_then(|t| m::shutdown_in(&t, now)),
+                free_percent: m::free_percents(&iyakki_core_local::storage::mounts_text()),
                 disk_ok: m::disk_states(&sys),
-                bluetooth: m::bluetooth_connected(&sys, std::path::Path::new(iyakki_devctl::bthid_sys::STORE_PATH)),
+                bluetooth: m::bluetooth_connected(&sys, std::path::Path::new(iyakki_core_local::devctl::bthid_sys::STORE_PATH)),
                 printers: m::printers_and_scanners(&sys),
                 resolution: m::screen_resolution(&sys),
                 locale: m::machine_locale(&dir_more, &std::env::var("LC_ALL").unwrap_or_default(), &std::env::var("LANG").unwrap_or_default()),
                 metered: crate::meteredlink::metered_now() == Some(true),
+                captive: f::captive_now(),
+                peers: f::paired_computers(&dir_more),
+                quiet: f::quiet_now(&dir_more, now.max(0) as u64),
                 wake_heard: crate::wakestats::load(&dir_more).heard,
-                updates: f::update_phases(&dir_more),
+                updates: f::update_phases(&dir_more, &f::outdated_items(&svc_models)),
+                model: {
+                    let ids: Vec<String> = iyakki_shared::modelhost::Hosts::new(&dir_more).list().into_iter().map(|h| h.id).collect();
+                    f::model_host(&ids, &|id| svc_models.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(id).and_then(|p| p.default_model.clone()))
+                },
                 certs: f::cert_days(&dir_more, now),
                 ..Default::default()
             }
@@ -897,8 +889,9 @@ pub fn real_inputs(services: &Arc<crate::services::Services>) -> Inputs {
             let totals = crate::appevent_feed::audit_totals(&std::fs::read_to_string(dir_feed.join("audit.log")).unwrap_or_default());
             let now = crate::clock::now_unix();
             let (backups, backup_last) = crate::appevent_more::backups_made(&dir_feed, user);
+            let (downloads, download_last) = crate::appevent_more::downloads_made(&dir_feed);
             let upcoming = svc3.calendar.events_in(user, now - 86_400, now + 86_400, &crate::clock::Zone::system());
-            crate::appevent_more::MorePersonFacts { approvals, failed_signins: totals.failed_signins, new_paired_devices: totals.new_paired_devices, reminders_due: crate::appevent_more::reminders_due_now(&upcoming, now), backups, backup_last, ..Default::default() }
+            crate::appevent_more::MorePersonFacts { approvals, failed_signins: totals.failed_signins, new_paired_devices: totals.new_paired_devices, new_place_unlocks: crate::unlockplaces::new_unlocks(&dir_feed, user), reminders_due: crate::appevent_more::reminders_due_now(&upcoming, now), backups, backup_last, downloads, download_last, ..Default::default() }
         }),
         person: Box::new(move |user| {
             let inbox = svc2.inbox.counts(user, crate::clock::now_unix()).attention;

@@ -26,7 +26,7 @@ export function createMedia({ engine, pump, send, toast, doc = document }) {
     $("offer-row").hidden = !(has("client.camera") || has("client.microphone"));
     $("offer-camera").hidden = !has("client.camera");
     $("offer-mic").hidden = !has("client.microphone");
-    $("devices").hidden = !st.caps.some((c) => ["audio.out", "clipboard.text", "camera.frames", "client.camera", "client.microphone"].includes(c));
+    $("devices").hidden = !st.caps.some((c) => ["audio.out", "clipboard.text", "camera.frames", "client.camera", "client.microphone", "files.transfer"].includes(c));
     $("sound-btn").textContent = st.playing ? "Stop the sound here" : "Hear the machine's sound here";
     $("offer-camera").textContent = st.offers.camera ? "Stop sharing this device's camera" : "Share this device's camera with the machine";
     $("offer-mic").textContent = st.offers.microphone ? "Stop sharing this device's microphone" : "Share this device's microphone with the machine";

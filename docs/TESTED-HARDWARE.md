@@ -18,7 +18,7 @@
 | An AMD PC (model not recorded) | not recorded | Booted (owner report only) | n/a | Everything: treat as untested |
 | QEMU/KVM (x86-64, UEFI and BIOS) | the project's automated tests | Boot, persistence, installer, sign-in, the session tests of alpha.6 | n/a | Real hardware drivers, Wi-Fi, Bluetooth, sound, GPU |
 
-Other machine classes: other Intel/AMD PCs are expected to boot (the loader and kernel are generic) but only the ones above did; legacy BIOS boot was tested in QEMU only; **Apple Silicon Macs are not supported on bare metal** (a VM recipe exists and was never run on a Mac); Raspberry Pi and other ARM boards are not supported; VirtualBox, VMware and Hyper-V are untested. Details and the class table: [`HARDWARE.md`](HARDWARE.md).
+Other machine classes: other Intel/AMD PCs are expected to boot (the loader and kernel are generic) but only the ones above did; legacy BIOS boot was tested in QEMU only; **Apple Silicon Macs are not supported on bare metal** (a VM recipe ran once on an Apple Silicon Mac mini, 2026-11-19, and reached a Ready k3s node); Raspberry Pi and other ARM boards are not supported; VirtualBox, VMware and Hyper-V are untested. Details and the class table: [`HARDWARE.md`](HARDWARE.md).
 
 ## Things that do not work or are limited on any machine
 

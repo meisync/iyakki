@@ -3,8 +3,30 @@
 //! `/Encoding` of its own uses the encoding of its program, so for `FontFile3` (Type1C) fonts this is what turns codes into letters.
 //! Glyph outlines are not read here.
 
-/// The names of the standard strings 1 to 228 (Appendix A of the note), the ones every font can use without carrying them.
-const STD_NAMES: [&str; 229] = [
+/// The SIDs of the Expert charset (charset id 1 in the Top DICT): glyph 0 is .notdef, glyph i has the SID in position i. 166 glyphs.
+/// Appendix C of the note lists them by name; the names here were taken by a script from two openly licensed tables that agree glyph
+/// for glyph (pdf.js `src/core/charsets.js`, Apache-2.0, and fontTools `cffLib`, MIT) and turned into SIDs through `STD_NAMES`, which
+/// is the table of Appendix A read from the note itself.
+const EXPERT_CHARSET: [u16; 166] = [
+    0, 1, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 13, 14, 15, 99, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 27,
+    28, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 109, 110, 267, 268, 269, 270,
+    271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295,
+    296, 297, 298, 299, 300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 158, 155,
+    163, 319, 320, 321, 322, 323, 324, 325, 326, 150, 164, 169, 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338, 339,
+    340, 341, 342, 343, 344, 345, 346, 347, 348, 349, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 360, 361, 362, 363, 364,
+    365, 366, 367, 368, 369, 370, 371, 372, 373, 374, 375, 376, 377, 378,
+];
+
+/// The SIDs of the Expert Subset charset (charset id 2): 87 glyphs, from the same two sources.
+const EXPERT_SUBSET_CHARSET: [u16; 87] = [
+    0, 1, 231, 232, 235, 236, 237, 238, 13, 14, 15, 99, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 27, 28, 249, 250, 251,
+    253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 109, 110, 267, 268, 269, 270, 272, 300, 301, 302, 305,
+    314, 315, 158, 155, 163, 320, 321, 322, 323, 324, 325, 326, 150, 164, 169, 327, 328, 329, 330, 331, 332, 333, 334, 335, 336,
+    337, 338, 339, 340, 341, 342, 343, 344, 345, 346,
+];
+
+/// The names of the standard strings 0 to 390 (Appendix A of the note), the ones every font can use without carrying them.
+const STD_NAMES: [&str; 391] = [
     ".notdef", "space", "exclam", "quotedbl", "numbersign", "dollar", "percent", "ampersand", "quoteright", "parenleft", "parenright", "asterisk", "plus", "comma",
     "hyphen", "period", "slash", "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "colon", "semicolon", "less", "equal", "greater",
     "question", "at", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "bracketleft",
@@ -20,6 +42,24 @@ const STD_NAMES: [&str; 229] = [
     "Udieresis", "Ugrave", "Yacute", "Ydieresis", "Zcaron", "aacute", "acircumflex", "adieresis", "agrave", "aring", "atilde", "ccedilla", "eacute", "ecircumflex",
     "edieresis", "egrave", "iacute", "icircumflex", "idieresis", "igrave", "ntilde", "oacute", "ocircumflex", "odieresis", "ograve", "otilde", "scaron", "uacute",
     "ucircumflex", "udieresis", "ugrave", "yacute", "ydieresis", "zcaron",
+    // 229 to 390: the expert names and the version strings (Appendix A of the note)
+    "exclamsmall", "Hungarumlautsmall", "dollaroldstyle", "dollarsuperior", "ampersandsmall", "Acutesmall", "parenleftsuperior", "parenrightsuperior",
+    "twodotenleader", "onedotenleader", "zerooldstyle", "oneoldstyle", "twooldstyle", "threeoldstyle", "fouroldstyle", "fiveoldstyle", "sixoldstyle",
+    "sevenoldstyle", "eightoldstyle", "nineoldstyle", "commasuperior", "threequartersemdash", "periodsuperior", "questionsmall", "asuperior",
+    "bsuperior", "centsuperior", "dsuperior", "esuperior", "isuperior", "lsuperior", "msuperior", "nsuperior", "osuperior", "rsuperior", "ssuperior",
+    "tsuperior", "ff", "ffi", "ffl", "parenleftinferior", "parenrightinferior", "Circumflexsmall", "hyphensuperior", "Gravesmall", "Asmall", "Bsmall",
+    "Csmall", "Dsmall", "Esmall", "Fsmall", "Gsmall", "Hsmall", "Ismall", "Jsmall", "Ksmall", "Lsmall", "Msmall", "Nsmall", "Osmall", "Psmall",
+    "Qsmall", "Rsmall", "Ssmall", "Tsmall", "Usmall", "Vsmall", "Wsmall", "Xsmall", "Ysmall", "Zsmall", "colonmonetary", "onefitted", "rupiah",
+    "Tildesmall", "exclamdownsmall", "centoldstyle", "Lslashsmall", "Scaronsmall", "Zcaronsmall", "Dieresissmall", "Brevesmall", "Caronsmall",
+    "Dotaccentsmall", "Macronsmall", "figuredash", "hypheninferior", "Ogoneksmall", "Ringsmall", "Cedillasmall", "questiondownsmall", "oneeighth",
+    "threeeighths", "fiveeighths", "seveneighths", "onethird", "twothirds", "zerosuperior", "foursuperior", "fivesuperior", "sixsuperior",
+    "sevensuperior", "eightsuperior", "ninesuperior", "zeroinferior", "oneinferior", "twoinferior", "threeinferior", "fourinferior", "fiveinferior",
+    "sixinferior", "seveninferior", "eightinferior", "nineinferior", "centinferior", "dollarinferior", "periodinferior", "commainferior",
+    "Agravesmall", "Aacutesmall", "Acircumflexsmall", "Atildesmall", "Adieresissmall", "Aringsmall", "AEsmall", "Ccedillasmall", "Egravesmall",
+    "Eacutesmall", "Ecircumflexsmall", "Edieresissmall", "Igravesmall", "Iacutesmall", "Icircumflexsmall", "Idieresissmall", "Ethsmall",
+    "Ntildesmall", "Ogravesmall", "Oacutesmall", "Ocircumflexsmall", "Otildesmall", "Odieresissmall", "OEsmall", "Oslashsmall", "Ugravesmall",
+    "Uacutesmall", "Ucircumflexsmall", "Udieresissmall", "Yacutesmall", "Thornsmall", "Ydieresissmall", "001.000", "001.001", "001.002", "001.003",
+    "Black", "Bold", "Book", "Light", "Medium", "Regular", "Roman", "Semibold",
 ];
 
 /// An INDEX at `at`: the byte ranges of its objects, and the offset just past it.
@@ -126,10 +166,42 @@ pub struct Cff {
     /// The built-in encoding: for each character code the glyph number, or None. `None` altogether means the Standard encoding.
     pub encoding: Option<Vec<Option<u16>>>,
     pub cid_keyed: bool,
+    /// For a CID-keyed program the character identifier (CID) of each glyph, glyph 0 first; empty for any other program.
+    pub cids: Vec<u16>,
+    /// The Registry, Ordering and Supplement of a CID-keyed program (`ROS`), for example `Adobe`, `Japan1`, 6.
+    pub ros: Option<(String, String, i64)>,
+}
+
+/// The bytes of one table of an OpenType file (`sfnt`: the table directory right after the 12-byte header).
+pub fn sfnt_table<'a>(d: &'a [u8], tag: &[u8; 4]) -> Option<&'a [u8]> {
+    let n = u16::from_be_bytes([*d.get(4)?, *d.get(5)?]) as usize;
+    for i in 0..n.min(64) {
+        let e = 12 + i * 16;
+        if d.get(e..e + 4)? == tag {
+            let off = u32::from_be_bytes(d.get(e + 8..e + 12)?.try_into().ok()?) as usize;
+            let len = u32::from_be_bytes(d.get(e + 12..e + 16)?.try_into().ok()?) as usize;
+            return d.get(off..off.checked_add(len)?);
+        }
+    }
+    None
+}
+
+/// The Compact Font Format program inside `d`: the `CFF ` table when `d` is an OpenType file with CFF outlines (`OTTO`), else `d` itself.
+pub fn program(d: &[u8]) -> &[u8] {
+    if d.starts_with(b"OTTO") {
+        sfnt_table(d, b"CFF ").unwrap_or(&[])
+    } else {
+        d
+    }
 }
 
 impl Cff {
+    /// Read a program, bare or wrapped in an OpenType file (`OTTO`, the `CFF ` table).
     pub fn parse(d: &[u8]) -> Option<Cff> {
+        Cff::parse_program(program(d))
+    }
+
+    fn parse_program(d: &[u8]) -> Option<Cff> {
         if d.len() < 4 || d[0] != 1 {
             return None;
         }
@@ -158,9 +230,11 @@ impl Cff {
         let cs = get(15).and_then(|v| v.first().copied()).unwrap_or(0.0) as usize;
         let mut sids: Vec<usize> = vec![0];
         if cs <= 2 {
-            // the predefined charsets: ISOAdobe is SID = glyph number; the Expert sets are not listed here
-            if cs == 0 {
-                sids.extend(1..n.min(229));
+            // the predefined charsets: ISOAdobe is SID = glyph number (1 to 228), Expert and Expert Subset are the tables above
+            match cs {
+                0 => sids.extend(1..n.min(229)),
+                1 => sids.extend(EXPERT_CHARSET.iter().skip(1).take(n.saturating_sub(1)).map(|&s| s as usize)),
+                _ => sids.extend(EXPERT_SUBSET_CHARSET.iter().skip(1).take(n.saturating_sub(1)).map(|&s| s as usize)),
             }
         } else {
             let fmt = *d.get(cs)?;
@@ -240,7 +314,23 @@ impl Cff {
             }
             Some(table)
         };
-        Some(Cff { glyph_names, encoding, cid_keyed })
+        let ros = if cid_keyed {
+            get(1230).and_then(|v| Some((name_of(*v.first()? as usize)?, name_of(*v.get(1)? as usize)?, *v.get(2)? as i64)))
+        } else {
+            None
+        };
+        let cids = if cid_keyed { sids.iter().map(|&c| c as u16).collect() } else { Vec::new() };
+        Some(Cff { glyph_names, encoding, cid_keyed, cids, ros })
+    }
+
+    /// The glyph that draws a character identifier of a CID font (`CIDFontType0`): through the charset when the program is CID-keyed, else
+    /// the CID is the glyph number (PDF 32000-1, 9.7.4.2).
+    pub fn cid_to_glyph(&self, cid: u32) -> Option<usize> {
+        if self.cid_keyed {
+            self.cids.iter().position(|&c| c as u32 == cid)
+        } else {
+            ((cid as usize) < self.glyph_names.len()).then_some(cid as usize)
+        }
     }
 
     /// For each character code the glyph name, where the program's own encoding gives one. None when the program uses the Standard
@@ -334,6 +424,116 @@ pub(crate) mod build {
         out.extend(encoding);
         out
     }
+
+    /// A program whose charset is predefined (`id` 0 ISOAdobe, 1 Expert, 2 Expert Subset) with `glyphs` glyphs including .notdef, no
+    /// encoding and no strings of its own.
+    pub fn font_predefined_charset(id: i32, glyphs: usize) -> Vec<u8> {
+        let header = vec![1u8, 0, 4, 2];
+        let name_index = index(&[b"Test".to_vec()]);
+        let string_index = index(&[]);
+        let gsubr = index(&[]);
+        let charstrings = index(&vec![vec![14u8]; glyphs]);
+        let top_probe = index(&[vec![0u8; 5 + 1 + 5 + 1]]);
+        let cs_at = header.len() + name_index.len() + top_probe.len() + string_index.len() + gsubr.len();
+        let mut top = Vec::new();
+        top.extend(num(id));
+        top.push(15);
+        top.extend(num(cs_at as i32));
+        top.push(17);
+        let top_index = index(&[top]);
+        assert_eq!(top_index.len(), top_probe.len());
+        let mut out = header;
+        out.extend(name_index);
+        out.extend(top_index);
+        out.extend(string_index);
+        out.extend(gsubr);
+        out.extend(charstrings);
+        out
+    }
+
+    /// A CID-keyed program: `cids` are the CIDs of glyphs 1.. (glyph 0 is .notdef, CID 0); `ros` is (registry, ordering, supplement).
+    /// There is no FDArray or FDSelect (the reader does not use them), so this is not a program a rasteriser could draw.
+    pub fn cid_font(cids: &[u16], ros: (&str, &str, i32)) -> Vec<u8> {
+        let header = vec![1u8, 0, 4, 2];
+        let name_index = index(&[b"TestCID".to_vec()]);
+        let string_index = index(&[ros.0.as_bytes().to_vec(), ros.1.as_bytes().to_vec()]);
+        let gsubr = index(&[]);
+        let charstrings = index(&vec![vec![14u8]; cids.len() + 1]);
+        // charset format 0: a CID per glyph
+        let mut charset = vec![0u8];
+        for c in cids {
+            charset.extend_from_slice(&c.to_be_bytes());
+        }
+        let top_probe = index(&[vec![0u8; 5 * 5 + 2 + 1 + 1 + 1]]);
+        let base = header.len() + name_index.len();
+        let cs_at = base + top_probe.len() + string_index.len() + gsubr.len();
+        let charset_at = cs_at + charstrings.len();
+        let mut top = Vec::new();
+        top.extend(num(391));
+        top.extend(num(392));
+        top.extend(num(ros.2));
+        top.extend([12, 30]);
+        top.extend(num(charset_at as i32));
+        top.push(15);
+        top.extend(num(cs_at as i32));
+        top.push(17);
+        top.resize(5 * 5 + 2 + 1 + 1 + 1, 0);
+        let top_index = index(&[top]);
+        assert_eq!(top_index.len(), top_probe.len());
+        let mut out = header;
+        out.extend(name_index);
+        out.extend(top_index);
+        out.extend(string_index);
+        out.extend(gsubr);
+        out.extend(charstrings);
+        out.extend(charset);
+        out
+    }
+
+    /// An OpenType file with CFF outlines holding the program and a format 12 character map (`(code point, glyph)` pairs, sorted).
+    pub fn otto(cff: &[u8], cmap: &[(u32, u16)]) -> Vec<u8> {
+        let mut sub = Vec::new();
+        sub.extend(12u16.to_be_bytes());
+        sub.extend(0u16.to_be_bytes());
+        sub.extend((16 + 12 * cmap.len() as u32).to_be_bytes());
+        sub.extend(0u32.to_be_bytes());
+        sub.extend((cmap.len() as u32).to_be_bytes());
+        for (cp, g) in cmap {
+            sub.extend(cp.to_be_bytes());
+            sub.extend(cp.to_be_bytes());
+            sub.extend((*g as u32).to_be_bytes());
+        }
+        let mut table = Vec::new();
+        table.extend(0u16.to_be_bytes());
+        table.extend(1u16.to_be_bytes());
+        table.extend(3u16.to_be_bytes());
+        table.extend(10u16.to_be_bytes());
+        table.extend(12u32.to_be_bytes());
+        table.extend(&sub);
+        sfnt(b"OTTO", &[(*b"CFF ", cff.to_vec()), (*b"cmap", table)])
+    }
+
+    /// An sfnt file made of the given tables (checksums left zero: the reader does not use them).
+    pub fn sfnt(kind: &[u8; 4], tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut out = kind.to_vec();
+        out.extend((tables.len() as u16).to_be_bytes());
+        out.extend([0u8; 6]);
+        let mut off = 12 + 16 * tables.len();
+        for (tag, t) in tables {
+            out.extend(tag);
+            out.extend(0u32.to_be_bytes());
+            out.extend((off as u32).to_be_bytes());
+            out.extend((t.len() as u32).to_be_bytes());
+            off += t.len().div_ceil(4) * 4;
+        }
+        for (_, t) in tables {
+            out.extend(t);
+            while out.len() % 4 != 0 {
+                out.push(0);
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -367,7 +567,79 @@ mod tests {
         assert_eq!(STD_NAMES[96], "exclamdown");
         assert_eq!(STD_NAMES[149], "germandbls");
         assert_eq!(STD_NAMES[228], "zcaron");
-        assert_eq!(STD_NAMES.len(), 229);
+        assert_eq!(STD_NAMES.len(), 391);
+        assert_eq!(STD_NAMES[229], "exclamsmall");
+        assert_eq!(STD_NAMES[300], "colonmonetary");
+        assert_eq!(STD_NAMES[379], "001.000");
+        assert_eq!(STD_NAMES[390], "Semibold");
+    }
+
+
+    /// The glyph names of the two predefined Expert charsets as the two open tables list them (see `EXPERT_CHARSET`).
+    const EXPERT_NAMES: [&str; 166] = [".notdef","space","exclamsmall","Hungarumlautsmall","dollaroldstyle","dollarsuperior","ampersandsmall","Acutesmall","parenleftsuperior","parenrightsuperior","twodotenleader","onedotenleader","comma","hyphen","period","fraction","zerooldstyle","oneoldstyle","twooldstyle","threeoldstyle","fouroldstyle","fiveoldstyle","sixoldstyle","sevenoldstyle","eightoldstyle","nineoldstyle","colon","semicolon","commasuperior","threequartersemdash","periodsuperior","questionsmall","asuperior","bsuperior","centsuperior","dsuperior","esuperior","isuperior","lsuperior","msuperior","nsuperior","osuperior","rsuperior","ssuperior","tsuperior","ff","fi","fl","ffi","ffl","parenleftinferior","parenrightinferior","Circumflexsmall","hyphensuperior","Gravesmall","Asmall","Bsmall","Csmall","Dsmall","Esmall","Fsmall","Gsmall","Hsmall","Ismall","Jsmall","Ksmall","Lsmall","Msmall","Nsmall","Osmall","Psmall","Qsmall","Rsmall","Ssmall","Tsmall","Usmall","Vsmall","Wsmall","Xsmall","Ysmall","Zsmall","colonmonetary","onefitted","rupiah","Tildesmall","exclamdownsmall","centoldstyle","Lslashsmall","Scaronsmall","Zcaronsmall","Dieresissmall","Brevesmall","Caronsmall","Dotaccentsmall","Macronsmall","figuredash","hypheninferior","Ogoneksmall","Ringsmall","Cedillasmall","onequarter","onehalf","threequarters","questiondownsmall","oneeighth","threeeighths","fiveeighths","seveneighths","onethird","twothirds","zerosuperior","onesuperior","twosuperior","threesuperior","foursuperior","fivesuperior","sixsuperior","sevensuperior","eightsuperior","ninesuperior","zeroinferior","oneinferior","twoinferior","threeinferior","fourinferior","fiveinferior","sixinferior","seveninferior","eightinferior","nineinferior","centinferior","dollarinferior","periodinferior","commainferior","Agravesmall","Aacutesmall","Acircumflexsmall","Atildesmall","Adieresissmall","Aringsmall","AEsmall","Ccedillasmall","Egravesmall","Eacutesmall","Ecircumflexsmall","Edieresissmall","Igravesmall","Iacutesmall","Icircumflexsmall","Idieresissmall","Ethsmall","Ntildesmall","Ogravesmall","Oacutesmall","Ocircumflexsmall","Otildesmall","Odieresissmall","OEsmall","Oslashsmall","Ugravesmall","Uacutesmall","Ucircumflexsmall","Udieresissmall","Yacutesmall","Thornsmall","Ydieresissmall"];
+    const EXPERT_SUBSET_NAMES: [&str; 87] = [".notdef","space","dollaroldstyle","dollarsuperior","parenleftsuperior","parenrightsuperior","twodotenleader","onedotenleader","comma","hyphen","period","fraction","zerooldstyle","oneoldstyle","twooldstyle","threeoldstyle","fouroldstyle","fiveoldstyle","sixoldstyle","sevenoldstyle","eightoldstyle","nineoldstyle","colon","semicolon","commasuperior","threequartersemdash","periodsuperior","asuperior","bsuperior","centsuperior","dsuperior","esuperior","isuperior","lsuperior","msuperior","nsuperior","osuperior","rsuperior","ssuperior","tsuperior","ff","fi","fl","ffi","ffl","parenleftinferior","parenrightinferior","hyphensuperior","colonmonetary","onefitted","rupiah","centoldstyle","figuredash","hypheninferior","onequarter","onehalf","threequarters","oneeighth","threeeighths","fiveeighths","seveneighths","onethird","twothirds","zerosuperior","onesuperior","twosuperior","threesuperior","foursuperior","fivesuperior","sixsuperior","sevensuperior","eightsuperior","ninesuperior","zeroinferior","oneinferior","twoinferior","threeinferior","fourinferior","fiveinferior","sixinferior","seveninferior","eightinferior","nineinferior","centinferior","dollarinferior","periodinferior","commainferior"];
+
+    #[test]
+    fn the_expert_and_expert_subset_charsets_give_each_glyph_the_name_the_tables_list() {
+        for (id, names) in [(1, &EXPERT_NAMES[..]), (2, &EXPERT_SUBSET_NAMES[..])] {
+            let f = build::font_predefined_charset(id, names.len());
+            let c = Cff::parse(&f).unwrap();
+            let got: Vec<String> = c.glyph_names.iter().map(|n| n.clone().unwrap_or_default()).collect();
+            assert_eq!(got, names.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "charset {id}");
+        }
+        // a few entries known from the note: Expert starts with space, exclamsmall; ends with the old style and inferior figures
+        assert_eq!(EXPERT_CHARSET[1], 1);
+        assert_eq!(EXPERT_CHARSET[2], 229);
+        assert_eq!(EXPERT_CHARSET.len(), 166);
+        assert_eq!(EXPERT_SUBSET_CHARSET.len(), 87);
+        // every SID is a standard string and none is used twice
+        for t in [&EXPERT_CHARSET[..], &EXPERT_SUBSET_CHARSET[..]] {
+            assert!(t.iter().all(|&s| (s as usize) < 391));
+            let mut v = t.to_vec();
+            v.sort();
+            v.dedup();
+            assert_eq!(v.len(), t.len());
+        }
+        // a font with fewer glyphs than the charset takes the first ones; one with more has the rest unnamed
+        let f = build::font_predefined_charset(1, 5);
+        assert_eq!(Cff::parse(&f).unwrap().glyph_names.len(), 5);
+    }
+
+    #[test]
+    fn a_cid_keyed_program_gives_each_glyph_its_cid_and_its_registry() {
+        let f = build::cid_font(&[10, 11, 500, 7], ("Adobe", "Japan1", 6));
+        let c = Cff::parse(&f).unwrap();
+        assert!(c.cid_keyed);
+        assert_eq!(c.cids, vec![0, 10, 11, 500, 7]);
+        assert_eq!(c.ros, Some(("Adobe".into(), "Japan1".into(), 6)));
+        assert_eq!(c.cid_to_glyph(500), Some(3));
+        assert_eq!(c.cid_to_glyph(9), None);
+        assert!(c.glyph_names.iter().all(|n| n.is_none()), "a CID-keyed program has no glyph names");
+        assert!(c.code_names().is_none());
+    }
+
+    #[test]
+    fn a_program_that_is_not_cid_keyed_uses_the_cid_as_the_glyph_number() {
+        let c = Cff::parse(&build::font(&["alpha", "beta"], &[1, 2], &[])).unwrap();
+        assert!(c.ros.is_none() && c.cids.is_empty());
+        assert_eq!(c.cid_to_glyph(2), Some(2));
+        assert_eq!(c.cid_to_glyph(3), None);
+    }
+
+    #[test]
+    fn a_program_inside_an_opentype_file_is_read_as_the_bare_program_is() {
+        let bare = build::font(&["alpha", "beta"], &[1, 2], &[]);
+        let wrapped = build::otto(&bare, &[(0x3b1, 1), (0x3b2, 2)]);
+        let (a, b) = (Cff::parse(&bare).unwrap(), Cff::parse(&wrapped).unwrap());
+        assert_eq!(a.glyph_names, b.glyph_names);
+        assert_eq!(a.encoding, b.encoding);
+        let cid = build::otto(&build::cid_font(&[3, 4], ("Adobe", "Identity", 0)), &[]);
+        assert_eq!(Cff::parse(&cid).unwrap().cids, vec![0, 3, 4]);
+        // an OpenType file without a CFF table, or a damaged directory, is refused and never panics
+        assert!(Cff::parse(&build::sfnt(b"OTTO", &[(*b"cmap", vec![0; 8])])).is_none());
+        for cut in 0..wrapped.len() {
+            let _ = Cff::parse(&wrapped[..cut]);
+        }
     }
 
     #[test]
@@ -387,5 +659,9 @@ mod tests {
             let _ = Cff::parse(&g).map(|c| c.code_names());
         }
         assert!(Cff::parse(b"").is_none());
+        let g = build::cid_font(&[1, 2, 3], ("Adobe", "Identity", 0));
+        for cut in 0..g.len() {
+            let _ = Cff::parse(&g[..cut]);
+        }
     }
 }

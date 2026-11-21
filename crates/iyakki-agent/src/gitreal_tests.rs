@@ -109,6 +109,21 @@ fn a_real_working_copy_reads_branch_ahead_behind_every_change_kind_and_a_file_di
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// The real runner, with git told not to look above one folder (`GIT_CEILING_DIRECTORIES`): a folder that must NOT be a repository stays
+/// one even when the temp folder sits inside a checkout (the public CI sets TMPDIR to a folder inside the repository).
+struct Ceiling(PathBuf);
+
+impl Runner for Ceiling {
+    fn run(&self, cwd: &Path, argv: &[String], env: &[(String, String)], timeout: Duration, cap: usize, sink: Option<iyakki_shared::wsexec::Sink>) -> iyakki_shared::wsexec::Out {
+        let mut env = env.to_vec();
+        env.push(("GIT_CEILING_DIRECTORIES".into(), self.0.display().to_string()));
+        System.run(cwd, argv, &env, timeout, cap, sink)
+    }
+    fn has(&self, program: &str) -> bool {
+        System.has(program)
+    }
+}
+
 #[test]
 fn a_real_log_pages_newest_first_and_a_non_repository_is_a_calm_error() {
     if !have_git() {
@@ -129,7 +144,7 @@ fn a_real_log_pages_newest_first_and_a_non_repository_is_a_calm_error() {
     assert_eq!((p3.len(), more, p3[0].subject()), (1, false, "commit 0".to_string()));
     assert!(repo.commits_page("--all", 0, 2).is_err(), "a ref that could become an option is refused");
     let plain = tmp("plain");
-    let none = LocalRepo::new(Arc::new(System), &plain, &plain);
+    let none = LocalRepo::new(Arc::new(Ceiling(plain.parent().unwrap().to_path_buf())), &plain, &plain);
     assert!(none.working().is_err());
     let _ = std::fs::remove_dir_all(&base);
     let _ = std::fs::remove_dir_all(&plain);

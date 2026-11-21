@@ -44,7 +44,7 @@ pub struct Services {
     /// The online radio directory the chat's radio tools search (with an hour of memory).
     pub radio_dir: crate::radiotools::Directory,
     /// Developer tools for the chat agent: the per-person switch and the bounded buffers of failed requests, timings and console messages.
-    pub devtools: crate::devtools::DevTools,
+    pub devtools: Arc<crate::devtools::DevTools>,
     /// The assistant's web client (search, fetch, weather, quotes) and the page each person has open in the browser.
     pub web: crate::webtools::WebClient,
     pub page_snapshot: Mutex<HashMap<String, crate::webtools::PageSnapshot>>,
@@ -57,13 +57,15 @@ pub struct Services {
     /// What the last look at each external coding agent found (Settings → Agents, the model list).
     pub ext_status: Arc<crate::extagent::StatusCache>,
     /// Tokens used by each model, for the USAGE tile.
-    pub usage: crate::usage::UsageLog,
+    pub usage: Arc<crate::usage::UsageLog>,
     /// The consent gate of the cloud audio stream (F-VOICE-38): the Voice tile follows the settings through it and answers the card.
     pub(crate) cloud_gate: Mutex<crate::cloudstream::Gate>,
+    /// The listener of the cloud audio stream (F-VOICE-61), started on the first offer while the switch is on.
+    pub(crate) cloud_voice: Mutex<Option<Arc<crate::cloudvoice::CloudListener>>>,
     /// Each person's events and alarms, shared by the calendar app, the chat and the terminal.
-    pub calendar: crate::calendar::CalendarStore,
+    pub calendar: Arc<crate::calendar::CalendarStore>,
     /// Each person's study plans and quizzes, shared by the LEARN tile and the chat (`docs/STUDY.md`).
-    pub study: crate::study::StudyStore,
+    pub study: Arc<crate::study::StudyStore>,
     /// Command-line tools installed from the CLI tile (kubectl, aws, gcloud, …).
     pub clis: Arc<crate::clis::CliManager>,
     /// The container cluster (k3s) the assistant can run code in.
@@ -75,7 +77,7 @@ pub struct Services {
     /// Machines seen on the local network, and which of them are new.
     pub devwatch: Arc<crate::devwatch::DeviceWatch>,
     /// Each person's notifications and tasks (the INBOX).
-    pub inbox: crate::inbox::Inbox,
+    pub inbox: Arc<crate::inbox::Inbox>,
     /// The speech engines found on this computer (detected in the background, `docs/VOICE.md`) and the browser voice helper.
     pub host_tts: Arc<crate::hostengines::HostTts>,
     watching: std::sync::atomic::AtomicBool,
@@ -89,13 +91,13 @@ pub struct Services {
     pub packages: Arc<crate::pkg::Packages>,
     pub sessions: Arc<SessionStore>,
     /// Secrets the assistant asked the person to enter themselves (they never pass through the assistant).
-    pub secret_requests: crate::secretreq::SecretRequests,
+    pub secret_requests: Arc<crate::secretreq::SecretRequests>,
     /// The assistant's use of the person's browser: the job queue the shell services, the questions it asks, the grants and budgets.
-    pub browser: crate::browserconsent::BrowserState,
+    pub browser: Arc<crate::browserconsent::BrowserState>,
     /// The assistant's `screen_capture`: requests the shell answers with the frame it last drew.
-    pub screen: crate::screencap::ScreenCapture,
+    pub screen: Arc<crate::screencap::ScreenCapture>,
     /// The assistant's camera tools: the shell's camera, the 5-minute grants and the "in use" sign.
-    pub camera: crate::camtools::CameraHub,
+    pub camera: Arc<crate::camtools::CameraHub>,
     media_indexes: Mutex<HashMap<String, Arc<Mutex<crate::mediaindex::MediaIndex>>>>,
     media_queues: Mutex<HashMap<String, Arc<crate::mediaqueue::DownloadQueue>>>,
     quick: Arc<dyn Upstream>,
@@ -191,9 +193,10 @@ impl Services {
                     let r = crate::radio::RadioPlayer::default();
                     r.set_master_link(master_link(&settings_arc));
                     r.announce_holder();
+                    r.set_recover_source(recover_source(&settings_arc));
                     r
                 },
-                devtools: crate::devtools::DevTools::new(dir),
+                devtools: Arc::new(crate::devtools::DevTools::new(dir)),
                 radio_dir: crate::radiotools::Directory::new(Arc::new(crate::radiotools::UpstreamFetcher(quick.clone()))),
                 web: crate::webtools::WebClient::new(),
                 page_snapshot: Mutex::new(HashMap::new()),
@@ -201,16 +204,17 @@ impl Services {
                 jobs: crate::jobs::Jobs::new(&dir.join("jobs")),
                 ext_sessions: crate::extagent::run::SessionMap::open(&dir.join("ext-sessions.json")),
                 ext_status: Arc::new(crate::extagent::StatusCache::open(&dir.join("ext-models.json"))),
-                usage: crate::usage::UsageLog::open(&dir.join("usage.jsonl")),
-                calendar: crate::calendar::CalendarStore::new(&dir.join("calendar")),
-                study: crate::study::StudyStore::new(&dir.join("study")),
+                usage: Arc::new(crate::usage::UsageLog::open(&dir.join("usage.jsonl"))),
+                calendar: Arc::new(crate::calendar::CalendarStore::new(&dir.join("calendar"))),
+                study: Arc::new(crate::study::StudyStore::new(&dir.join("study"))),
                 clis: clis.clone(),
                 cluster: Arc::new(crate::cluster::Cluster::new(&dir.join("cluster"), clis.clone())),
                 k3sdev: crate::k3sdev::K3sDev::new(dir, clis.clone(), Arc::new(crate::wsexec::System)),
                 cloud_gate: Mutex::new(crate::cloudstream::Gate::new(false, "")),
+                cloud_voice: Mutex::new(None),
                 fleet: std::sync::OnceLock::new(),
                 devwatch: Arc::new(crate::devwatch::DeviceWatch::open(&dir.join("devices.json"))),
-                inbox: crate::inbox::Inbox::new(&dir.join("inbox")),
+                inbox: Arc::new(crate::inbox::Inbox::new(&dir.join("inbox"))),
                 host_tts: Arc::new(crate::hostengines::HostTts::new(&[dir.join("voices")])),
                 watching: std::sync::atomic::AtomicBool::new(false),
                 ollama: {
@@ -228,10 +232,10 @@ impl Services {
                 utcp: crate::utcp::UtcpStore::new(&dir.join("utcp-manuals.json")),
                 sessions: Arc::new(SessionStore::new(&dir.join("sessions"), kb.clone())),
                 kb,
-                secret_requests: crate::secretreq::SecretRequests::new(),
-                browser: crate::browserconsent::BrowserState::new(),
-                screen: crate::screencap::ScreenCapture::new(),
-                camera: crate::camtools::CameraHub::new(),
+                secret_requests: Arc::new(crate::secretreq::SecretRequests::new()),
+                browser: Arc::new(crate::browserconsent::BrowserState::new()),
+                screen: Arc::new(crate::screencap::ScreenCapture::new()),
+                camera: Arc::new(crate::camtools::CameraHub::new()),
                 media_indexes: Mutex::new(HashMap::new()),
                 media_queues: Mutex::new(HashMap::new()),
                 runs: Arc::new(RunStore::new(&dir.join("runs"))),
@@ -261,7 +265,7 @@ impl Services {
             // a lost and reconnected boot drive: the cluster keeps files open on it, so it is stopped before and started after
             if !cfg!(test) {
                 let (a, b, c) = (svc.k3sdev.clone(), svc.k3sdev.clone(), svc.k3sdev.clone());
-                iyakki_storage::loss::register_component(
+                iyakki_core_local::keptlog::register_drive_component(
                     "k3s",
                     move || matches!(a.state(), crate::k3sdev::Svc::Running | crate::k3sdev::Svc::Starting),
                     move || {
@@ -602,7 +606,7 @@ impl Services {
 
     /// Start reading the network neighbour table every half minute for new devices (once; a second call does nothing).
     pub fn start_device_watch(self: &Arc<Self>) {
-        self.start_device_watch_from(std::path::PathBuf::from("/proc/net/arp"), std::time::Duration::from_secs(30));
+        self.start_device_watch_from(std::path::PathBuf::from(iyakki_core_local::net::ARP_TABLE), std::time::Duration::from_secs(30));
     }
 
     pub fn start_device_watch_from(self: &Arc<Self>, arp: std::path::PathBuf, every: std::time::Duration) {
@@ -821,12 +825,17 @@ impl Services {
             }
             p.insert(key.clone(), PullStatus { provider: provider.into(), model: model.into(), status: "starting".into(), completed: 0, total: 0, done: false, error: None });
         }
-        let (me, provider, model) = (self.clone(), provider.to_string(), model.to_string());
+        let (me, provider, model, user_owned) = (self.clone(), provider.to_string(), model.to_string(), user.to_string());
         let guard = (!user.is_empty()).then(|| crate::pendingplus::WorkGuard::start(&crate::pending::Ledger::open(&self.dir().join("pending"), user), crate::pending::Source::Pull, &key, &format!("download of {model}"), ""));
         std::thread::Builder::new()
             .name("iyakki-pull".into())
             .spawn(move || {
                 me.run_pull(&key, &provider, &model, &*streamer, &url, &headers, &body);
+                // the person's apps may hear that the download ended, with the model's name only (F-SDK-207)
+                if !user_owned.is_empty() {
+                    let ok = me.pulls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key).is_some_and(|s| s.done && s.error.is_none());
+                    crate::appevent_more::transfer_finished(&*me.app_events, &user_owned, "download", &model, ok);
+                }
                 if let Some(g) = guard {
                     let st = me.pulls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key).cloned();
                     match st {
@@ -991,6 +1000,10 @@ impl Services {
         let sys_state = if is_admin { self.admin_login_system(&slot, password) } else { VaultState::NotApplicable };
         // an encrypted home folder (F-STORE-05) opens with the same, just verified, password; a failure leaves a banner, never blocks sign-in
         let _ = crate::enchome::EncHome::on_login_if_any(&self.dir, user, password);
+        // an unlock of the vault from a network the person has not used before is counted (counts only; F-SDK-205)
+        if matches!(user_state, VaultState::Unlocked) {
+            crate::unlockplaces::note_unlock(&self.dir, user, &crate::unlockplaces::place_now());
+        }
         // the person's home and vault are known now: what was found for the agents before (HOME=/, nobody signed in) is void
         self.ext_status.invalidate();
         if self.agents_cfg().claude.enabled || self.agents_cfg().copilot.enabled {
@@ -1107,6 +1120,8 @@ impl Services {
         // the encrypted home folder closes with the sign-in (F-STORE-05)
         let _ = crate::enchome::EncHome::on_logout_if_any(&self.dir, user);
         self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(user);
+        // the vault is locked: the notification hub's push sender no longer reaches this person's browsers
+        crate::webpush::OpenVaults::global().forget(&self.dir, user);
         {
             let mut au = self.agent_user.lock().unwrap_or_else(|e| e.into_inner());
             if *au == user {
@@ -1374,6 +1389,43 @@ impl Services {
 
     // ------------------------------------------------------------ voice
 
+    /// The environment variable that names where devices reach the cloud audio listener (`host:port`; the port is bound on every interface).
+    pub const CLOUD_VOICE_ADDR: &'static str = "IYAKKI_VOICE_AUDIO_ADDR";
+
+    /// The reply to a connector's call for the audio address and certificate (F-VOICE-38, F-VOICE-61): the listener is started on the first
+    /// call (fail closed: nothing listens while the switch is off or no address is set) and offers the certificate it made for this link.
+    pub fn cloud_voice_offer(&self) -> Result<(String, String), String> {
+        if !self.voice_settings().my_cloud_stream {
+            return Err("My IYAKKI's cloud audio stream is off on this machine (Settings, Voice)".into());
+        }
+        self.cloud_voice_offer_at(&std::env::var(Self::CLOUD_VOICE_ADDR).unwrap_or_default())
+    }
+
+    /// [`Services::cloud_voice_offer`] with the address given (a port of 0 binds any port and advertises the bound address: tests).
+    pub(crate) fn cloud_voice_offer_at(&self, adv: &str) -> Result<(String, String), String> {
+        let port = adv.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok()).ok_or("no audio address is set for this machine")?;
+        let mut slot = self.cloud_voice.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_none() {
+            let me = self.arc();
+            let on = Arc::new(move || me.voice_settings().my_cloud_stream);
+            *slot = Some(Arc::new(crate::cloudvoice::CloudListener::start(&format!("{}:{port}", if port == 0 { "127.0.0.1" } else { "0.0.0.0" }), if port == 0 { "" } else { adv }, &crate::devname::label(self.dir()), on)?));
+        }
+        slot.as_ref().map(|l| l.offer()).unwrap_or_else(|| Err("not listening".into()))
+    }
+
+    /// The listener of a cloud session, when one was started by an offer and the switch is on.
+    pub(crate) fn cloud_voice_listener(&self) -> Option<Arc<crate::cloudvoice::CloudListener>> {
+        if !self.voice_settings().my_cloud_stream {
+            return None;
+        }
+        self.cloud_voice.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    /// The device's offer for the answer's sound (its address and certificate) inside the authenticated session; the listener must exist.
+    pub fn cloud_voice_return(&self, device_addr: &str, offer_json: &str) -> Result<(), String> {
+        self.cloud_voice_listener().ok_or("no cloud voice session is listening on this machine")?.set_return(device_addr, offer_json)
+    }
+
     pub fn voice_settings(&self) -> VoiceSettings {
         self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().voice.clone()
     }
@@ -1461,7 +1513,7 @@ impl Services {
     /// The volume is remembered for the output in use (restored when that output is used again, see `audioout`); the
     /// settings returned are the ones in effect afterwards (another output chosen brings its own volume).
     pub fn update_sound(&self, f: impl FnOnce(&mut crate::audioout::SoundSettings)) -> Result<crate::audioout::SoundSettings, String> {
-        update_sound_in(&self.settings, f)
+        update_sound_in(&iyakki_shared::settings_ref::SettingsRef::of_store(&self.settings), f)
     }
 
     /// The master volume (percent, mute, change counter): the one value every volume control and every view shows.
@@ -1517,6 +1569,7 @@ impl Services {
             }
         });
         crate::audioout::install(self.sound_settings());
+        crate::linuxsound::install();
     }
 
     /// Like [`start_sound_output`](Self::start_sound_output), but the sound card may not exist yet: the selector is installed
@@ -2330,10 +2383,12 @@ mod tests {
 }
 
 /// Change Settings -> Sound in `settings`, remembering the volume of the output in use, and tell the selector.
-pub(crate) fn update_sound_in(settings: &Arc<Mutex<SettingsStore>>, f: impl FnOnce(&mut crate::audioout::SoundSettings)) -> Result<crate::audioout::SoundSettings, String> {
+pub(crate) fn update_sound_in(settings: &iyakki_shared::settings_ref::SettingsRef, f: impl FnOnce(&mut crate::audioout::SoundSettings)) -> Result<crate::audioout::SoundSettings, String> {
     let in_use = crate::audioout::global().current_key();
+    let offset_before;
     let now = {
         let mut st = settings.lock().unwrap();
+        offset_before = st.get().sound.highlight_offset_ms;
         st.update(|s| {
             f(&mut s.sound);
             if let Some(k) = &in_use {
@@ -2345,7 +2400,21 @@ pub(crate) fn update_sound_in(settings: &Arc<Mutex<SettingsStore>>, f: impl FnOn
     };
     // the settings lock is released: the selector may save a restored volume through `start_sound_output`'s hook
     crate::audioout::apply_prefs(now.clone());
+    // the highlight offset is one value for the whole process: only a change of it is applied (a change of the volume must not write the
+    // value of whichever settings store it came from over the offset another one has set; boot applies the saved one in `audioout::install`)
+    if now.highlight_offset_ms != offset_before {
+        crate::audiosink::set_highlight_offset_ms(now.highlight_offset_ms);
+    }
     Ok(now)
+}
+
+/// The radio's view of Settings -> Radio: reconnect tries and moving on to the next station.
+fn recover_source(settings: &Arc<Mutex<SettingsStore>>) -> crate::radio::RecoverSource {
+    let weak = Arc::downgrade(settings);
+    Arc::new(move || {
+        let Some(st) = weak.upgrade() else { return (iyakki_shared::radiorecover::DEFAULT_RETRIES, true) };
+        st.lock().map(|g| (g.get().radio.retries(), g.get().radio.auto_switch())).unwrap_or((iyakki_shared::radiorecover::DEFAULT_RETRIES, true))
+    })
 }
 
 /// The radio's view of the master volume.
@@ -2355,7 +2424,7 @@ fn master_link(settings: &Arc<Mutex<SettingsStore>>) -> crate::radio::MasterLink
         let Some(st) = weak.upgrade() else { return 100 };
         match set {
             None => st.lock().map(|g| g.get().sound.volume_pct.min(100) as u8).unwrap_or(100),
-            Some(v) => update_sound_in(&st, |s| {
+            Some(v) => update_sound_in(&iyakki_shared::settings_ref::SettingsRef::of_store(&st), |s| {
                 s.volume_pct = v.min(100) as u32;
                 s.muted = false;
             })

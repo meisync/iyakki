@@ -81,9 +81,8 @@ impl<U: FnMut(&Drive) -> Result<(), String>> Steps for RealSteps<U> {
         writer::write_image(image, Path::new(&drive.path), Some(drive.size_bytes), patcher, progress)
     }
     fn wipe_tail(&mut self, drive: &Drive, len: u64) -> Result<(), String> {
-        use std::os::unix::fs::FileTypeExt;
         // only a real block device has a stale backup table at its end; a file the tests write to is left alone
-        if std::fs::metadata(&drive.path).is_ok_and(|m| m.file_type().is_block_device()) {
+        if crate::posix::is_block_device(Path::new(&drive.path)) {
             writer::zero_tail(Path::new(&drive.path), drive.size_bytes, len)
         } else {
             Ok(())
@@ -92,6 +91,53 @@ impl<U: FnMut(&Drive) -> Result<(), String>> Steps for RealSteps<U> {
     fn verify(&mut self, drive: &Drive, bytes: u64, sha256: &str, progress: &mut dyn FnMut(Progress)) -> Result<(), String> {
         writer::verify(Path::new(&drive.path), bytes, sha256, progress)
     }
+}
+
+/// Free the stick before the write, per system: Linux unmounts each mount, macOS asks `diskutil`, Windows locks the volumes inside the write.
+pub fn unmount_drive(d: &Drive) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        if d.mounts.is_empty() {
+            return Ok(());
+        }
+        crate::macos::unmount_disk(&d.name)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use iyakki_storage::Mounter as _;
+        for (_, mp) in d.mounts.iter().rev() {
+            iyakki_storage::SysMounter.unmount(Path::new(mp)).map_err(|e| format!("could not unmount {mp}: {e} (close anything using it and try again)"))?;
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = d;
+        Ok(())
+    }
+}
+
+/// The real steps of this system for the writer window: the terminal writer's functions on Linux and macOS, the Win32 steps on Windows
+/// (F-PKG-08). `signature` is the new disk label's four bytes.
+pub fn platform_steps(signature: [u8; 4]) -> Result<Box<dyn Steps + Send>, String> {
+    #[cfg(windows)]
+    {
+        let _ = signature;
+        Ok(Box::new(crate::windows_cli::real_steps()?))
+    }
+    #[cfg(not(windows))]
+    Ok(Box::new(RealSteps { unmount_fn: unmount_drive, signature }))
+}
+
+/// The administrator prompt for the window program: true when the program was started again through it (the caller exits). Linux and
+/// macOS programs are started with rights by the person (`sudo`/the desktop's prompt), so there it is always false.
+pub fn ensure_admin() -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        crate::windows_cli::elevate_self()
+    }
+    #[cfg(not(windows))]
+    Ok(false)
 }
 
 #[cfg(test)]

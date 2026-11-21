@@ -4,7 +4,7 @@ Everything is read-only except: Test sound (once per row), the screen saver Prev
 files:system; no secret file is ever read, only names and non-secret settings). PASS only on matched observed text; every PASS
 prints its NOT COVERED list. Rows whose recipe ends in NEEDS-HUMAN say what a person must judge."""
 import json, os, re, subprocess, time
-from hwcheck import recipe, fail, human, dev, Ctx
+from hwcheck import require_hardware, recipe, fail, human, dev, Ctx
 
 DATA = "/var/lib/iyakki"
 
@@ -54,9 +54,7 @@ def walk(c, steps=14):
 
 
 def info(c):
-    rc, out = c.run("info", name="info")
-    if "Macmini7,1" not in out: fail("this is not the Mac mini 2014 (device line is not Macmini7,1)")
-    return out
+    return require_hardware(c, "macmini2014")
 
 
 # ---------------------------------------------------------------- This computer, first-boot style

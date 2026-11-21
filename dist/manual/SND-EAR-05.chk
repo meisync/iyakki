@@ -1,0 +1,19 @@
+scenario: SND-EAR-05
+title: Web page sound reaches the speakers
+area: Sound
+rows: F-SND-06
+machines: macbookpro, mac mini, lenovo, any
+needs: person
+prereq: Internet connection. The Browser tile opens.
+step: Open the Browser tile and go to a page that plays a short sound or video (a public video site).
+expect: The page loads and shows its player.
+clause: web
+step: Press play on the page's video.
+expect: You hear the page's sound through the chosen output and the picture and sound stay together.
+clause: sound
+step: Change the volume with the keys while the page plays.
+expect: The page's loudness follows the keys.
+clause: volume
+step: Leave the Browser tile (press Esc) while the video plays.
+expect: The sound stops or goes on as the Browser tile says in its hint; it never keeps playing with nothing on screen to stop it.
+clause: leave

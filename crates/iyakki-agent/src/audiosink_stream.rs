@@ -118,7 +118,7 @@ pub struct Piece {
 /// Queue a WAV in the current session (starting the player if there is none, or if the format or command changed).
 pub fn queue(wav: &[u8], play_cmd: &str) -> Result<Piece, String> {
     let out = crate::audioout::global();
-    let args = crate::audioout::route_args(crate::voice::split_command(play_cmd)?, out.device().as_deref());
+    let args = crate::audioout::route_args(crate::voice::split_command(play_cmd)?, crate::audioout::output_state().device().as_deref());
     // the same preparation as the one-player-per-WAV path: 16-bit, low rates to 48 kHz, IYAKKI's volume
     let wav16 = crate::audioout::to_pcm16_wav(wav);
     let base = wav16.as_deref().unwrap_or(wav);

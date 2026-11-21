@@ -94,6 +94,7 @@ fn pump(v: &mut WebView, d: Duration, frames: &mut u64) {
                 Event::NavigationBlocked(u) => println!("  navigation blocked by the site scope: {u}"),
                 Event::KeySystem(k) => println!("  key system asked for: {k}"),
                 Event::PageMeta { manifest_url, icon, .. } => println!("  page meta: manifest {manifest_url}, icon {icon}"),
+                Event::PageAccess(j) => println!("  page access list: {} bytes", j.len()),
                 Event::Cursor(_) => {}
             }
         }

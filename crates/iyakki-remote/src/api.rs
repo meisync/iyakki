@@ -4,11 +4,11 @@
 
 use iyakki_agent::webservice::embed::Embedded;
 use iyakki_core_api::{ApiError, ApiResult, AuditSink, Authenticator, Principal};
-use iyakki_shell::accounts::{AccountError, AuditLog, UserStore};
+use iyakki_shell::accounts::{AccountError, UsersRef};
 use iyakki_shell::shell::ShellEnv;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-pub struct ShellAuth(pub Arc<Mutex<UserStore>>);
+pub struct ShellAuth(pub UsersRef);
 
 fn principal(name: &str, role: iyakki_sec::policy::Role, policy: iyakki_sec::policy::Policy) -> Principal {
     Principal { user: name.to_string(), role: role.name().to_string(), admin: role == iyakki_sec::policy::Role::Admin, policy }
@@ -31,17 +31,17 @@ impl Authenticator for ShellAuth {
     }
 }
 
-pub struct ShellAudit(pub Arc<AuditLog>);
+pub struct ShellAudit(pub Arc<dyn Fn(&str, &str, &str) + Send + Sync>);
 
 impl AuditSink for ShellAudit {
     fn record(&self, user: &str, event: &str, detail: &str) {
-        self.0.record(user, event, detail);
+        (self.0)(user, event, detail);
     }
 }
 
 /// The API for this machine's shell environment (none when it cannot be set up; the page then gets 404 for `/api/v1/`).
 pub fn embedded(env: &ShellEnv) -> Option<Embedded> {
-    let deps = iyakki_agent::webservice::real::assemble(Arc::new(ShellAuth(env.store.clone())), Arc::new(ShellAudit(env.audit.clone())), iyakki_agent::services::Services::from_handle(&env.services), env.host.clone());
+    let deps = iyakki_agent::webservice::real::assemble(Arc::new(ShellAuth(env.store.clone())), Arc::new(ShellAudit({ let a = env.audit.clone(); Arc::new(move |u: &str, e: &str, d: &str| a.record(u, e, d)) })), iyakki_agent::services::Services::from_handle(&env.services), env.host.clone());
     match Embedded::new(deps) {
         Ok(e) => Some(e),
         Err(e) => {

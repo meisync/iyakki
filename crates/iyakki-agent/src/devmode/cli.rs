@@ -206,7 +206,7 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
         "pair" => {
             let (host, port) = client::split_host(arg1.ok_or("usage: iyakki dev pair <address[:port] | name.local> [--code CODE]")?, DEFAULT_PORT)?;
             // a name like iyakki-0a1b2c.local is looked up on the local network with our own resolver
-            let ip = if iyakki_netscan::mdns::is_local_name(&host) { client::resolve_local(&host).into_iter().next().ok_or_else(|| format!("cannot find {host} on the local network (is the device on, on the same network, and announcing its name?)"))? } else { host.clone() };
+            let ip = if iyakki_core_local::devscan::is_local_name(&host) { client::resolve_local(&host).into_iter().next().ok_or_else(|| format!("cannot find {host} on the local network (is the device on, on the same network, and announcing its name?)"))? } else { host.clone() };
             let (fp, info) = client::hello(&ip, port)?;
             out(&format!("Device {} (IYAKKI {}) at {host}:{port}{}", info["name"].as_str().unwrap_or("?"), info["version"].as_str().unwrap_or("?"), if ip != host { format!(" ({ip})") } else { String::new() }));
             out(&format!("Its certificate fingerprint: {fp}\nCheck that the device's screen shows the same fingerprint."));
@@ -226,7 +226,7 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
             }
         }
         "scan" => {
-            for l in scan_report(&iyakki_netscan::mdns::net::scan(&iyakki_netscan::mdns::net::Ask::new(SCAN_WAIT))) {
+            for l in scan_report(&iyakki_core_local::devscan::scan(SCAN_WAIT)) {
                 out(&l);
             }
         }
@@ -391,7 +391,7 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
 pub const SCAN_WAIT: Duration = Duration::from_secs(2);
 
 /// The lines `iyakki dev scan` prints: one per device with its name, its addresses and its services, or the help line when none answered.
-pub fn scan_report(found: &[iyakki_netscan::mdns::net::Found]) -> Vec<String> {
+pub fn scan_report(found: &[iyakki_core_local::devscan::Found]) -> Vec<String> {
     if found.is_empty() {
         return vec!["No IYAKKI device answered. It must be on this network with \"Announce this device on the local network\" on (Settings, Network); some Wi-Fi access points block this kind of message between devices.".to_string()];
     }
@@ -407,7 +407,7 @@ pub fn scan_report(found: &[iyakki_netscan::mdns::net::Found]) -> Vec<String> {
 #[cfg(test)]
 mod scan_tests {
     use super::*;
-    use iyakki_netscan::mdns::net::Found;
+    use iyakki_core_local::devscan::Found;
 
     #[test]
     fn the_scan_lists_name_addresses_and_services_and_says_what_to_check_when_nobody_answers() {
@@ -430,7 +430,7 @@ mod scan_tests {
         assert_eq!(super::super::client::RESOLVE_WAIT, Duration::from_secs(2));
         // and a scan against a responder that is not there returns with nothing instead of waiting for ever
         let dead = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-        let ask = iyakki_netscan::mdns::net::Ask { timeout: Duration::from_millis(300), dests: vec![dead], allow_loopback: true };
-        assert!(iyakki_netscan::mdns::net::scan(&ask).is_empty());
+        let ask = iyakki_core_local::devscan::Ask { timeout: Duration::from_millis(300), dests: vec![dead], allow_loopback: true };
+        assert!(iyakki_core_local::devscan::scan_with(&ask).is_empty());
     }
 }

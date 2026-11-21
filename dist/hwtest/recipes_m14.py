@@ -7,7 +7,7 @@ Page checks match the page's one-line blurb (crates/iyakki-apps/src/apps/setting
 a FAIL; where a recipe cannot tell, it ends NEEDS-HUMAN rather than guessing. Pure logic lives in recipes_m14_parse.py and is unit
 tested with canned output (dist/hwtest/test_m14.py). Part 2 (kernel options, files, domains, tiles; recipes_m14_hw.py) uses the same helpers.
 """
-import re
+import os, re, time
 from hwcheck import recipe, fail, human, dev, Ctx
 import recipes as _r1  # gives Ctx.notcovered
 from recipes6 import _shell
@@ -61,7 +61,31 @@ def shell_out(c, script, name):
 
 
 def dmesg(c, word, n=400):
-    return c.run("dmesg", "--grep", word, "-n", n, name="dmesg-" + re.sub(r"\W+", "_", word))[1]
+    """Lines with WORD from the kernel ring (`dev dmesg`) and, because the ring rolls over (the shell's frame lines fill it within
+    hours), from this boot's kmsg file in the data folder (`dev files`, scope files:system), so boot-time lines are not lost."""
+    ring = c.run("dmesg", "--grep", word, "-n", n, name="dmesg-" + re.sub(r"\W+", "_", word))[1]
+    return ring + "\n" + boot_log_lines(c, word)
+
+
+def boot_log_lines(c, word):
+    """Lines of the current boot's kmsg-<8 hex>.log that contain WORD (case-insensitive); empty when the file cannot be read."""
+    cache = getattr(c, "_kmsg_text", None)
+    if cache is None:
+        c._kmsg_text = cache = ""
+        rc, ls = dev("files", "ls", "/var/lib/iyakki/log")
+        names = re.findall(r"\s(kmsg-[0-9a-f]{8}\.log)\b", ls) if rc == 0 else []
+        if len(names) > 1:   # older boots keep their file too: session.json names the running boot
+            sj = os.path.join(c.dir, "session.json")
+            rc2, _o = dev("files", "pull", "/var/lib/iyakki/log/session.json", sj)
+            m = re.search(r'"boot_id":"([0-9a-f]{8})"', open(sj).read()) if rc2 == 0 and os.path.exists(sj) else None
+            names = ["kmsg-%s.log" % m.group(1)] if m and "kmsg-%s.log" % m.group(1) in names else []
+        if len(names) == 1:
+            local = os.path.join(c.dir, "kmsg-current.log")
+            rc, out = dev("files", "pull", "/var/lib/iyakki/log/" + names[0], local)
+            c.log("PULL kmsg %s rc=%d (boot-time kernel lines for the grep)" % (names[0], rc))
+            if rc == 0 and os.path.exists(local):
+                c._kmsg_text = cache = open(local, errors="replace").read()
+    return "\n".join(l for l in cache.splitlines() if word.lower() in l.lower())[:200000]
 
 
 # ------------------------------------------------------------------ network
@@ -169,6 +193,14 @@ def snd20(c):
     model = P.model_of(info(c))
     st = tab(c, "sound", "Sound", "Where sound plays (HDMI/DP, USB, speakers), a test chime, volume and mute.")
     seen = c.has(st, r"Use the Mac's built-in microphone \(experimental\)")
+    if not seen and P.is_t2(model):
+        # the Microphone section is below the fold; Down moves the list (a swipe does not), 2026-11-20 Mac mini 2018
+        st = c.click("Sound", wait=1.0) or st
+        for _ in range(20):
+            dev("input", "key", "Down")
+        time.sleep(1.0)
+        st = c.state("scrolled")
+        seen = c.has(st, r"Use the Mac's built-in microphone \(experimental\)")
     c.log("model %s, T2: %s, switch shown: %s" % (model, P.is_t2(model), bool(seen)))
     if P.is_t2(model) and not seen:
         # the row may sit under a Microphone section further down the page
@@ -226,6 +258,9 @@ def disp07(c):
     maps = [l for l in dm.splitlines() if re.search(r"touch: [0-9a-f]{4}:[0-9a-f]{4} .* -> \S+", l)]
     for l in maps[:6]:
         c.log("MAP " + l)
+    if not maps and re.search(r"mouse-like touch interface", boot_log_lines(c, "mouse-like")):
+        c.log("the shell logged: %s is a mouse-like touch interface (it is driven through the mouse path, not mapped by touchmap)" % ts[0]["name"])
+        human("%s is a mouse-like touch interface (not mapped per display by touchmap): this row's mapping is not observable on this panel" % ts[0]["name"])
     if not maps:
         fail("a touch screen is attached (%s) but the kernel log has no 'touch: ... -> display' line" % ts[0]["name"])
     tab(c, "displays", "Displays", "Several displays: resolution, which is the main one, where the others sit, mirror or extend, and whether layouts are used.")

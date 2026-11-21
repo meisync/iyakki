@@ -10,6 +10,7 @@ serial line with the wall clock. The markers:
   init       "Run /init as init process" (the kernel hands over to IYAKKI)
   supervisor "supervisor up" (IYAKKI is running)
   login      "shell: first picture on screen" (the sign-in screen is drawn: the end of the measurement)
+  ram        "shell: memory in use at the sign-in screen: N MiB of M MiB" (logged right after the first picture; read, not timed)
 
 Prints, for each run, the wall time since QEMU started and the kernel's own clock at each marker, then the median of the runs.
 Real hardware adds its firmware time (often 5 to 20 seconds on a PC), which this cannot see.
@@ -26,6 +27,7 @@ if initrd is None or not os.path.exists(os.path.join(images, "bzImage")):
 
 MARKS = [("kernel", "Linux version"), ("init", "Run /init as init process"), ("supervisor", "supervisor up"), ("login", "shell: first picture on screen")]
 KCLOCK = re.compile(r"\[\s*(\d+\.\d+)\]")
+RAM = re.compile(r"memory in use at the sign-in screen: (\d+) MiB of (\d+) MiB")
 
 
 def one_run():
@@ -45,7 +47,11 @@ def one_run():
                 if name not in seen and pat in line:
                     k = KCLOCK.search(line)
                     seen[name] = (now, float(k.group(1)) if k else None)
-            if "login" in seen:
+            m = RAM.search(line)
+            if m and "ram" not in seen:
+                seen["ram"] = (now, int(m.group(1)))
+            # the memory line follows the first picture at once; wait for it, the 90 s timer ends a run that never prints it
+            if "login" in seen and "ram" in seen:
                 break
     finally:
         timer.cancel()
@@ -58,6 +64,8 @@ results = []
 for i in range(runs):
     r = one_run()
     results.append(r)
+    if "ram" in r:
+        print(f"run {i + 1}: RAM in use at the sign-in screen {r['ram'][1]} MiB")
     row = "  ".join(f"{n} {r[n][0]:5.2f}s" + (f" (kernel clock {r[n][1]:.2f}s)" if r[n][1] is not None else "") for n, _ in MARKS if n in r)
     print(f"run {i + 1}: {row if row else 'no markers seen'}")
     if "login" not in r:
@@ -75,4 +83,8 @@ if done:
     out_json = os.environ.get("BOOT_TIME_JSON")
     if out_json:
         import json
-        json.dump({"timings": {"login_wall_s": round(statistics.median([r["login"][0] for r in done]), 2)}, "runs": len(done)}, open(out_json, "w"))
+        res = {"timings": {"login_wall_s": round(statistics.median([r["login"][0] for r in done]), 2)}, "runs": len(done)}
+        rams = [r["ram"][1] for r in done if "ram" in r]
+        if rams:
+            res["memory"] = {"idle_ram_mib": int(statistics.median(rams))}
+        json.dump(res, open(out_json, "w"))

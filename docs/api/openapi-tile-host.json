@@ -721,6 +721,149 @@
         ],
         "type": "object"
       },
+      "HookCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "content_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "flow": {
+            "type": "string"
+          },
+          "max_body": {
+            "type": "integer"
+          },
+          "methods": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "rate_per_min": {
+            "type": "integer"
+          },
+          "signed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "flow"
+        ],
+        "type": "object"
+      },
+      "HookList": {
+        "additionalProperties": false,
+        "properties": {
+          "hooks": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "hooks"
+        ],
+        "type": "object"
+      },
+      "HookPublic": {
+        "additionalProperties": false,
+        "properties": {
+          "minutes": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "minutes"
+        ],
+        "type": "object"
+      },
+      "HookReveal": {
+        "additionalProperties": false,
+        "properties": {
+          "flow": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "secret": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "shown_once": {
+            "type": "boolean"
+          },
+          "waiting": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "waiting"
+        ],
+        "type": "object"
+      },
+      "HookSecret": {
+        "additionalProperties": false,
+        "properties": {
+          "flow": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "secret": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "shown_once": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "shown_once"
+        ],
+        "type": "object"
+      },
+      "HookState": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "open_to_public": {
+            "type": "boolean"
+          },
+          "public_until": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "Html": {
+        "type": "string"
+      },
       "LoginRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1355,6 +1498,128 @@
       "Text": {
         "type": "string"
       },
+      "TileBundle": {
+        "additionalProperties": false,
+        "properties": {
+          "bridge": {
+            "type": "string"
+          },
+          "caps": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "frame": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "page": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "type": "object"
+      },
+      "TileBundleCall": {
+        "additionalProperties": false,
+        "properties": {
+          "args": {
+            "type": "object"
+          },
+          "call": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "call"
+        ],
+        "type": "object"
+      },
+      "TileBundleInstall": {
+        "additionalProperties": false,
+        "properties": {
+          "caps": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "files": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "base64": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "base64"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "files"
+        ],
+        "type": "object"
+      },
+      "TileBundleResult": {
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "value": {}
+        },
+        "required": [
+          "ok"
+        ],
+        "type": "object"
+      },
+      "TileBundles": {
+        "additionalProperties": false,
+        "properties": {
+          "bundles": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "bundles"
+        ],
+        "type": "object"
+      },
       "TileEvents": {
         "additionalProperties": false,
         "properties": {
@@ -1533,6 +1798,38 @@
         ],
         "type": "object"
       },
+      "VoiceOffer": {
+        "additionalProperties": false,
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "offer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "addr",
+          "offer"
+        ],
+        "type": "object"
+      },
+      "VoiceReturn": {
+        "additionalProperties": false,
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "offer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "addr",
+          "offer"
+        ],
+        "type": "object"
+      },
       "WebAccess": {
         "additionalProperties": false,
         "properties": {
@@ -1706,7 +2003,7 @@
             "bearer": []
           }
         ],
-        "summary": "WebSocket (Upgrade; the upgrade itself is answered before the ordinary sign-in, because a browser cannot send a header, and signs in by its first message). The first message is {\"type\":\"auth\",\"token\":...}; the token is never in the address. Then the caller's own `notification`, `count` and `approval` events and `changed` (an area name, after any change made through the API), a ping every 25 seconds. Capped per person and per tenant.",
+        "summary": "WebSocket (Upgrade; the upgrade itself is answered before the ordinary sign-in, because a browser cannot send a header, and signs in by its first message). The first message is {\"type\":\"auth\",\"token\":...}; the token is never in the address. Then the caller's own `notification`, `count` and `approval` events, `data_import` (`id`, `tool`, `status`: denied, done or failed; never rows or arguments), `tile` (`call`, `tile`, `tool`, `verdict`: the answer to a tile's question) and `changed` (an area name, after any change made through the API), a ping every 25 seconds. Capped per person and per tenant.",
         "x-access": "user"
       }
     },
@@ -1878,6 +2175,303 @@
         ],
         "summary": "This API, as an OpenAPI 3.1 document (only the routes of the running profile).",
         "x-access": "user"
+      }
+    },
+    "/api/v1/tile-bundles": {
+      "get": {
+        "operationId": "tile_bundle_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TileBundles"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The installed web-bundle tiles: id, title, calls it may make, files, the address of its page and of its bridge.",
+        "x-access": "user"
+      },
+      "post": {
+        "operationId": "tile_bundle_install",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TileBundleInstall"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TileBundle"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Install an HTML web-bundle tile (administrators): `id`, `title`, `caps` (service calls its page may make through the bridge, from the same short list as a WASM tile; never tools), `files` (a flat list of `{name, base64}`: `index.html`, scripts, style sheets, pictures; at most 48 files, 1 MiB a file, 4 MiB in all; plain names; no inline script). Served at `/tiles/{id}/b/{file}`; at most 32 bundles.",
+        "x-access": "admin",
+        "x-audited": true
+      }
+    },
+    "/api/v1/tile-bundles/{id}": {
+      "delete": {
+        "operationId": "tile_bundle_remove",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Remove an installed web-bundle tile (administrators).",
+        "x-access": "admin",
+        "x-audited": true
+      }
+    },
+    "/api/v1/tile-bundles/{id}/call": {
+      "post": {
+        "operationId": "tile_bundle_call",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TileBundleCall"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TileBundleResult"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "One service call of a web-bundle tile as the caller (`call` like `clipboard.paste`, `args`), only if the bundle lists it; the bridge makes every call through here. Audited with the call name, never the arguments.",
+        "x-access": "user",
+        "x-audited": true
       }
     },
     "/api/v1/tiles": {
@@ -2394,6 +2988,294 @@
         },
         "security": [],
         "summary": "Readiness: 200 when the data directory is writable and the services started, else 503.",
+        "x-access": "public"
+      }
+    },
+    "/tiles/app.css": {
+      "get": {
+        "operationId": "tile_page_css",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Html"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          }
+        },
+        "security": [],
+        "summary": "The style sheet of a tile's page.",
+        "x-access": "public"
+      }
+    },
+    "/tiles/app.js": {
+      "get": {
+        "operationId": "tile_page_js",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Html"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          }
+        },
+        "security": [],
+        "summary": "The script of a tile's page (same origin only, no eval, the token kept in memory).",
+        "x-access": "public"
+      }
+    },
+    "/tiles/bridge.js": {
+      "get": {
+        "operationId": "tile_bridge_js",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Html"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          }
+        },
+        "security": [],
+        "summary": "The script a web-bundle page loads to get `window.iyakki`: a sign-in form, then the WebSocket bridge.",
+        "x-access": "public"
+      }
+    },
+    "/tiles/wrapper.js": {
+      "get": {
+        "operationId": "tile_wrapper_js",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Html"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          }
+        },
+        "security": [],
+        "summary": "The script of the wrapper page of a web-bundle tile.",
+        "x-access": "public"
+      }
+    },
+    "/tiles/{id}/app": {
+      "get": {
+        "operationId": "tile_page",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Html"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          }
+        },
+        "security": [],
+        "summary": "A tile's own page (static HTML with a canvas; signs in itself and drives the tile over the events route). No data of anyone is in it; strict content policy; `window.iyakki` is its bridge.",
+        "x-access": "public"
+      }
+    },
+    "/tiles/{id}/b/{file}": {
+      "get": {
+        "operationId": "tile_bundle_file",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "file",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Html"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          }
+        },
+        "security": [],
+        "summary": "One file of an installed web-bundle tile (static, the same bytes for everyone; strict policy: same-origin scripts and styles only, no inline code, no framing).",
+        "x-access": "public"
+      }
+    },
+    "/tiles/{id}/bridge": {
+      "get": {
+        "operationId": "tile_bridge",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Html"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          }
+        },
+        "security": [],
+        "summary": "WebSocket (Upgrade) of a web-bundle tile: the first message is `{\"type\":\"auth\",\"token\":...}`, then `{\"type\":\"call\",\"id\",\"call\",\"args\"}` is answered by `{\"type\":\"result\",\"id\",\"ok\",\"value\"|\"error\"}`. Only the calls the bundle lists are made.",
+        "x-access": "public"
+      }
+    },
+    "/tiles/{id}/w": {
+      "get": {
+        "operationId": "tile_wrapper",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Html"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          }
+        },
+        "security": [],
+        "summary": "The page a person opens for a web-bundle tile: a sign-in form that keeps the token in memory, the WebSocket bridge, and the bundle in a sandboxed frame with no same-origin rights that reaches the service only by postMessage to this page (static, the same bytes for everyone).",
         "x-access": "public"
       }
     }

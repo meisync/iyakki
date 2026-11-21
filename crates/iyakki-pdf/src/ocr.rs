@@ -8,7 +8,7 @@
 //! never a font file. A shape is described by a 12 x 16 grey bitmap of the letter (only its own pixels), and by where the letter
 //! sits against the line's baseline and its tallest letters, so `o` and `O`, `,` and `.` are told apart by size and place.
 //!
-//! Accents on the vowels, n and y (grave, acute, circumflex, diaeresis, tilde) are told apart from the letter under them by their own shape ([`accents`]), no other script is read. Limits (the row's remainder): Latin letters, digits and common punctuation of ASCII,
+//! Accents on the vowels, n and y (grave, acute, circumflex, diaeresis, tilde), the hacek and the cedilla (c, s, t, d, r, z, e, n) and the acute of c n s z l r are told apart from the letter under them by their own shape ([`accents`]), no other script is read. Limits (the row's remainder): Latin letters, digits and common punctuation of ASCII,
 //! upright text in one or more columns read line by line, black on white or white on black; handwriting, tables and pictures of text
 //! are not read. Touching letters are split at the thinnest column, which is wrong now and then. Skew up to about 3 degrees is
 //! corrected. Hostile pictures are capped in size and in the number of pieces.
@@ -474,11 +474,39 @@ pub enum Accent {
     Circumflex,
     Diaeresis,
     Tilde,
+    /// The hook (hacek) above a letter, as in Czech and Slovak: a roof turned upside down.
+    Caron,
+    /// The hook below a letter (c with cedilla, s and t with comma or cedilla): a mark under the letter, or a tail on its foot.
+    Cedilla,
 }
 
-/// The letter with the mark on it, for the letters that carry one in the languages of western Europe.
+/// The letter with the mark on it: the letters of western Europe (Latin-1) and the Latin Extended-A ones that need no new shape (the acute on
+/// c n s z l r, the caron of Czech and Slovak, the cedilla of c s t). No model is retrained: a mark is found by its own place and shape.
 pub fn compose(base: char, a: Accent) -> Option<char> {
-    // grave, acute, circumflex, diaeresis, tilde
+    // the extended ones first: (letter, acute, caron, cedilla, circumflex)
+    let ext = |lower: [char; 4], upper: [char; 4]| -> Option<char> {
+        let t = if base.is_ascii_uppercase() { upper } else { lower };
+        let i = match a {
+            Accent::Acute => 0,
+            Accent::Caron => 1,
+            Accent::Cedilla => 2,
+            Accent::Circumflex => 3,
+            _ => return None,
+        };
+        (t[i] != '\0').then_some(t[i])
+    };
+    match base.to_ascii_lowercase() {
+        'c' => return ext(['\u{107}', '\u{10d}', '\u{e7}', '\u{109}'], ['\u{106}', '\u{10c}', '\u{c7}', '\u{108}']),
+        's' => return ext(['\u{15b}', '\u{161}', '\u{15f}', '\u{15d}'], ['\u{15a}', '\u{160}', '\u{15e}', '\u{15c}']),
+        'z' => return ext(['\u{17a}', '\u{17e}', '\0', '\0'], ['\u{179}', '\u{17d}', '\0', '\0']),
+        'r' => return ext(['\u{155}', '\u{159}', '\0', '\0'], ['\u{154}', '\u{158}', '\0', '\0']),
+        't' => return ext(['\0', '\u{165}', '\u{163}', '\0'], ['\0', '\u{164}', '\u{162}', '\0']),
+        'd' => return ext(['\0', '\u{10f}', '\0', '\0'], ['\0', '\u{10e}', '\0', '\0']),
+        'l' => return ext(['\u{13a}', '\0', '\0', '\0'], ['\u{139}', '\0', '\0', '\0']),
+        'n' if matches!(a, Accent::Acute | Accent::Caron) => return ext(['\u{144}', '\u{148}', '\0', '\0'], ['\u{143}', '\u{147}', '\0', '\0']),
+        'e' if a == Accent::Caron => return Some(if base == 'E' { '\u{11a}' } else { '\u{11b}' }),
+        _ => {}
+    }
     let row: [Option<char>; 5] = match base {
         'a' => [Some('\u{e0}'), Some('\u{e1}'), Some('\u{e2}'), Some('\u{e4}'), Some('\u{e3}')],
         'e' => [Some('\u{e8}'), Some('\u{e9}'), Some('\u{ea}'), Some('\u{eb}'), None],
@@ -496,7 +524,7 @@ pub fn compose(base: char, a: Accent) -> Option<char> {
         'N' => [None, None, None, None, Some('\u{d1}')],
         _ => return None,
     };
-    row[a as usize]
+    row.get(a as usize).copied().flatten()
 }
 
 /// The mark made of the given pieces (one, or the two dots of a diaeresis), read from its shape. `None` for a plain dot (the dot of an
@@ -546,6 +574,9 @@ pub fn accent_of(marks: &[&Piece], labels: &[u32], w: usize, tall: f32) -> Optio
                 let (_, ym3) = centre(m.x0 + t, m.x1 - t, m.y0, m.y1)?;
                 let (_, yr) = centre(m.x1 - t + 1, m.x1, m.y0, m.y1)?;
                 let rise = mh * 0.12;
+                if ym3 > yl + rise && ym3 > yr + rise {
+                    return Some(Accent::Caron);
+                }
                 return Some(if ym3 + rise < yl && ym3 + rise < yr { Accent::Circumflex } else { Accent::Tilde });
             }
             // narrow and slanted: the top of an acute leans to the right of its foot, a grave's to the left
@@ -572,6 +603,21 @@ pub fn peel_accent(g: &Piece, comps: &std::collections::HashMap<u32, Piece>, lab
     let parts: Vec<&Piece> = g.ids.iter().filter_map(|i| comps.get(i)).collect();
     let main = parts.iter().copied().max_by_key(|p| p.area)?;
     let marks: Vec<&Piece> = parts.iter().copied().filter(|p| !std::ptr::eq(*p, main) && p.y1 < main.y0 + (main.h() as f32 * 0.12) as i32 && p.area * 2 < main.area).collect();
+    // a small piece under the letter's foot, apart from the letter: a cedilla (the ones that touch the letter are told in `read`)
+    let below: Vec<&Piece> = parts.iter().copied().filter(|p| !std::ptr::eq(*p, main) && p.y1 > main.y1 && p.y0 + (main.h() as f32 * 0.25) as i32 >= main.y1 && p.area * 3 < main.area && (p.w() as f32) <= main.w() as f32 * 0.9 && (p.h() as f32) <= tall * 0.4).collect();
+    if marks.is_empty() && below.len() == 1 {
+        let keep: Vec<u32> = g.ids.iter().copied().filter(|i| !below[0].ids.contains(i)).collect();
+        let (mut x0, mut y0, mut x1, mut y1, mut area) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN, 0);
+        for i in &keep {
+            let p = comps.get(i)?;
+            x0 = x0.min(p.x0);
+            y0 = y0.min(p.y0);
+            x1 = x1.max(p.x1);
+            y1 = y1.max(p.y1);
+            area += p.area;
+        }
+        return (area > 0).then(|| (Piece { x0, y0, x1, y1, area, ids: keep }, Accent::Cedilla));
+    }
     if marks.is_empty() || marks.len() > 2 {
         return None;
     }
@@ -879,6 +925,12 @@ fn read(img: &Gray, page: &mut OcrPage) {
             };
             let g = &g;
             let mut parts = classify(m, &ink, &labels, w, g, r.baseline, tall);
+            // a cedilla that touches its letter: a c, s or t whose foot reaches well under the baseline (a real descender is another letter)
+            let accent = accent.or_else(|| {
+                let l = parts.last()?;
+                let below = l.y1 as f32 - r.baseline;
+                (parts.len() == 1 && matches!(l.ch, 'c' | 'C' | 's' | 'S' | 't' | 'T') && below > 0.1 * tall && below < 0.4 * tall).then_some(Accent::Cedilla)
+            });
             if let (Some(a), Some(l)) = (accent, parts.last_mut()) {
                 // the stem of an i without its dot reads as l, I or a bar
                 let base = if matches!(l.ch, 'l' | 'I' | '|' | '1') { 'i' } else { l.ch };

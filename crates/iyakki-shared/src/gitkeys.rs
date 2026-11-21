@@ -229,6 +229,11 @@ impl GitKeys {
         GitKeys { dir: dir.into(), store, audit, session }
     }
 
+    /// `<services>/ssh/<user>`: where `git.json` and the known hosts are.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     fn table_path(&self) -> PathBuf {
         self.dir.join("git.json")
     }

@@ -51,6 +51,8 @@ pub enum Icon {
     Browser,
     Camera,
     Mesh,
+    /// The K8S tile: a ship's wheel (a rim, a hub and seven spokes).
+    K8s,
     Radio,
     Scan,
     Skills,
@@ -99,8 +101,25 @@ pub struct TextMask {
 }
 
 
+/// Write a drawing call down instead of drawing it while the recording layer is on (see `par`).
+macro_rules! rec_leaf {
+    ($self:ident, $y0:expr, $y1:expr, |$g:ident| $body:expr) => {
+        if $self.rec.is_some() {
+            $self.rec_push($y0, $y1, move |$g: &mut Gfx| {
+                $body;
+            });
+            return;
+        }
+    };
+}
+
+mod par;
+pub use par::BandPool;
+
 pub struct Gfx {
-    pub pm: Pixmap,
+    /// The picture. Outside this crate use [`Gfx::pm_ref`] and [`Gfx::pm_mut`]: the second one first draws what the recording layer has
+    /// written down (see `par`), so direct pixel work is always in order.
+    pub(crate) pm: Pixmap,
     /// Everything drawn, registered as clickable or asked about with `hovered` is moved down by this many pixels (see [`Gfx::set_origin_y`]).
     oy: f32,
     /// Clickable regions registered during this frame (later = on top).
@@ -134,6 +153,12 @@ pub struct Gfx {
     /// clip it was drawn in, and every opaque fill, both in drawing order (`seq`).
     #[cfg(any(test, feature = "testing"))]
     pub layout_log: LayoutLog,
+    /// While `Some`, drawing calls are written down instead of drawn (see `par`): the opt-in recording layer of F-SHELL-64.
+    rec: Option<Vec<par::RecOp>>,
+    /// Only in a band buffer of the parallel replay: the screen row its first row stands for.
+    band_y: i32,
+    /// Only in a band buffer: the saved outsides of the clips running now.
+    clip_stack: Vec<(R, Vec<u8>)>,
 }
 
 /// See [`Gfx::layout_log`].
@@ -283,6 +308,9 @@ impl Gfx {
             text_cap: None,
             #[cfg(any(test, feature = "testing"))]
             layout_log: LayoutLog::default(),
+            rec: None,
+            band_y: 0,
+            clip_stack: Vec::new(),
         }
     }
 
@@ -297,7 +325,8 @@ impl Gfx {
     }
 
     fn ts(&self) -> Transform {
-        Transform::from_translate(0.0, self.oy)
+        // `band_y` is 0 except in a band buffer of the parallel replay (see `par`)
+        Transform::from_translate(0.0, self.oy - self.band_y as f32)
     }
 
     /// Register a clickable region. `ev` is delivered to the screen on click.
@@ -312,6 +341,9 @@ impl Gfx {
     /// list) whose items are taller than the pane or start above it.
     pub fn clipped<T>(&mut self, clip: R, f: impl FnOnce(&mut Gfx) -> T) -> T {
         let clip = R::new(clip.x, clip.y + self.oy, clip.w, clip.h);
+        if self.rec.is_some() {
+            return self.clipped_recorded(clip, f);
+        }
         let (w, h) = (self.pm.width() as usize, self.pm.height() as usize);
         let x0 = (clip.x.floor().max(0.0) as usize).min(w);
         let x1 = ((clip.x + clip.w).ceil().max(0.0) as usize).min(w).max(x0);
@@ -373,6 +405,8 @@ impl Gfx {
     /// around the rectangle is saved and put back, so a small repaint costs the size of the repaint, not of the screen. What `f`
     /// draws farther away than `margin` stays (the caller promises there is nothing).
     pub fn clipped_near<T>(&mut self, clip: R, margin: f32, f: impl FnOnce(&mut Gfx) -> T) -> T {
+        self.record_sync();
+        let rec = self.rec.take();
         let clip = R::new(clip.x, clip.y + self.oy, clip.w, clip.h);
         let (w, h) = (self.pm.width() as i32, self.pm.height() as i32);
         let cx0 = (clip.x.floor() as i32).clamp_safe(0, w);
@@ -401,6 +435,7 @@ impl Gfx {
         for &(x0, y0, x1, y1) in &rings {
             at += self.copy_in(x0, y0, x1, y1, &saved[at..]);
         }
+        self.rec = rec;
         self.clip_buf = saved;
         if self.hits.len() >= start {
             let mut kept = Vec::with_capacity(self.hits.len() - start);
@@ -448,7 +483,8 @@ impl Gfx {
     }
 
     /// The pixels of a rectangle (integer pixels, clamped to the screen), row by row.
-    pub fn grab(&self, rect: (i32, i32, i32, i32)) -> Vec<u8> {
+    pub fn grab(&mut self, rect: (i32, i32, i32, i32)) -> Vec<u8> {
+        self.record_sync();
         let _p = crate::prof::scope("gfx.grab");
         let mut v = Vec::new();
         self.copy_out(rect.0, rect.1, rect.0 + rect.2, rect.1 + rect.3, &mut v);
@@ -456,13 +492,15 @@ impl Gfx {
     }
 
     /// As [`Gfx::grab`] into a buffer the caller keeps (cleared first), so a frame does not allocate for it.
-    pub fn grab_into(&self, rect: (i32, i32, i32, i32), out: &mut Vec<u8>) {
+    pub fn grab_into(&mut self, rect: (i32, i32, i32, i32), out: &mut Vec<u8>) {
+        self.record_sync();
         out.clear();
         self.copy_out(rect.0, rect.1, rect.0 + rect.2, rect.1 + rect.3, out);
     }
 
     /// Put pixels taken with [`Gfx::grab`] back (same rectangle).
     pub fn put(&mut self, rect: (i32, i32, i32, i32), px: &[u8]) {
+        self.record_sync();
         let _p = crate::prof::scope("gfx.put");
         self.copy_in(rect.0, rect.1, rect.0 + rect.2, rect.1 + rect.3, px);
     }
@@ -473,11 +511,16 @@ impl Gfx {
     /// The pointer position is shifted too, so hover tests keep working; hit regions are not kept.
     pub fn in_region(&mut self, rect: (i32, i32, i32, i32), seed: Option<&[u8]>, f: impl FnOnce(&mut Gfx, f32, f32)) {
         let _p = crate::prof::scope("gfx.in_region");
+        self.record_sync();
+        let rec = self.rec.take();
         let (w, h) = (self.pm.width() as i32, self.pm.height() as i32);
         let (x0, y0) = (rect.0.clamp_safe(0, w), rect.1.clamp_safe(0, h));
         let (x1, y1) = ((rect.0 + rect.2).clamp_safe(x0, w), (rect.1 + rect.3).clamp_safe(y0, h));
         let (rw, rh) = ((x1 - x0) as u32, (y1 - y0) as u32);
-        let Some(mut scratch) = (if rw > 0 && rh > 0 { Pixmap::new(rw, rh) } else { None }) else { return };
+        let Some(mut scratch) = (if rw > 0 && rh > 0 { Pixmap::new(rw, rh) } else { None }) else {
+            self.rec = rec;
+            return;
+        };
         match seed.filter(|p| p.len() == (rw * rh * 4) as usize) {
             Some(p) => scratch.data_mut().copy_from_slice(p),
             None => {
@@ -493,6 +536,7 @@ impl Gfx {
         self.hits.truncate(nhits);
         std::mem::swap(&mut self.pm, &mut scratch);
         self.put((x0, y0, x1 - x0, y1 - y0), scratch.data());
+        self.rec = rec;
     }
 
     /// Drop every region registered so far (a modal calls this so the dimmed UI behind it can't be clicked).
@@ -611,20 +655,31 @@ impl Gfx {
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
+        self.record_cancel();
         if (w, h) != (self.width(), self.height()) {
             self.pm = Pixmap::new(w.max(1), h.max(1)).expect("pixmap");
         }
     }
 
     pub fn clear(&mut self, c: [u8; 4]) {
+        rec_leaf!(self, f32::NEG_INFINITY, f32::INFINITY, |g| g.clear(c));
         self.pm.fill(col(c));
     }
 
     /// Vertical gradient background.
     pub fn gradient(&mut self, top: [u8; 4], bottom: [u8; 4]) {
+        if self.rec.is_some() {
+            let h = self.height() as f32;
+            self.rec_push(f32::NEG_INFINITY, f32::INFINITY, move |g: &mut Gfx| g.gradient_h(top, bottom, h));
+            return;
+        }
+        let h = self.height() as f32;
+        self.gradient_h(top, bottom, h);
+    }
+
+    fn gradient_h(&mut self, top: [u8; 4], bottom: [u8; 4], h: f32) {
         let ts = self.ts();
         let _p = crate::prof::scope("gfx.gradient");
-        let h = self.height() as f32;
         let shader = LinearGradient::new(
             Point::from_xy(0.0, 0.0),
             Point::from_xy(0.0, h),
@@ -642,6 +697,11 @@ impl Gfx {
     /// A squircle (superellipse, the rounded square of an app icon) in the box `x, y, w, h`, filled with a vertical gradient
     /// (`stops` are (0..1 from top, colour); one stop is a flat fill).
     pub fn squircle_gradient(&mut self, x: f32, y: f32, w: f32, h: f32, stops: &[(f32, [u8; 4])]) {
+        if self.rec.is_some() {
+            let stops = stops.to_vec();
+            self.rec_push(y - 1.0, y + h + 1.0, move |g: &mut Gfx| g.squircle_gradient(x, y, w, h, &stops));
+            return;
+        }
         let ts = self.ts();
         let _p = crate::prof::scope("gfx.squircle_gradient");
         let Some(path) = squircle_path(x, y, w, h) else { return };
@@ -663,6 +723,11 @@ impl Gfx {
 
     /// A rounded rectangle filled with a vertical gradient (`stops`: 0..1 from the top, colour).
     pub fn rrect_gradient(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, stops: &[(f32, [u8; 4])]) {
+        if self.rec.is_some() {
+            let stops = stops.to_vec();
+            self.rec_push(y - 1.0, y + h + 1.0, move |g: &mut Gfx| g.rrect_gradient(x, y, w, h, r, &stops));
+            return;
+        }
         let ts = self.ts();
         let _p = crate::prof::scope("gfx.rrect_gradient");
         let Some(path) = rrect_path(x, y, w, h, r) else { return };
@@ -676,6 +741,12 @@ impl Gfx {
 
     /// Any path filled with a vertical gradient from `y0` to `y1` (`stops`: 0..1, colour); one stop is a flat fill.
     pub fn path_gradient(&mut self, path: &Path, y0: f32, y1: f32, stops: &[(f32, [u8; 4])]) {
+        if self.rec.is_some() {
+            let (stops, path) = (stops.to_vec(), path.clone());
+            let b = path.bounds();
+            self.rec_push(b.top() - 1.0, b.bottom() + 1.0, move |g: &mut Gfx| g.path_gradient(&path, y0, y1, &stops));
+            return;
+        }
         let ts = self.ts();
         let _p = crate::prof::scope("gfx.path_gradient");
         let mut p = Paint::default();
@@ -696,6 +767,12 @@ impl Gfx {
 
     /// Any path's outline.
     pub fn path_outline(&mut self, path: &Path, width: f32, c: [u8; 4]) {
+        if self.rec.is_some() {
+            let path = path.clone();
+            let b = path.bounds();
+            self.rec_push(b.top() - width - 1.0, b.bottom() + width + 1.0, move |g: &mut Gfx| g.path_outline(&path, width, c));
+            return;
+        }
         let ts = self.ts();
         let _p = crate::prof::scope("gfx.path_outline");
         self.pm.stroke_path(path, &paint(c), &stroke(width), ts, None);
@@ -703,6 +780,7 @@ impl Gfx {
 
     /// A squircle's outline.
     pub fn squircle_outline(&mut self, x: f32, y: f32, w: f32, h: f32, width: f32, c: [u8; 4]) {
+        rec_leaf!(self, y - width - 1.0, y + h + width + 1.0, |g| g.squircle_outline(x, y, w, h, width, c));
         let ts = self.ts();
         let _p = crate::prof::scope("gfx.squircle_outline");
         if let Some(path) = squircle_path(x, y, w, h) {
@@ -712,6 +790,11 @@ impl Gfx {
 
     /// A rectangle filled with a gradient from (x0, y0) to (x1, y1); `stops` are (position 0..1, colour).
     pub fn gradient_rect(&mut self, x: f32, y: f32, w: f32, h: f32, from: (f32, f32), to: (f32, f32), stops: &[(f32, [u8; 4])]) {
+        if self.rec.is_some() {
+            let stops = stops.to_vec();
+            self.rec_push(y - 1.0, y + h.max(1.0) + 1.0, move |g: &mut Gfx| g.gradient_rect(x, y, w, h, from, to, &stops));
+            return;
+        }
         let ts = self.ts();
         let _p = crate::prof::scope("gfx.gradient_rect");
         let stops: Vec<GradientStop> = stops.iter().map(|(p, c)| GradientStop::new(*p, col(*c))).collect();
@@ -725,6 +808,7 @@ impl Gfx {
 
     /// A soft round glow: `c` at its own alpha in the middle, fading to nothing at `radius`.
     pub fn radial_glow(&mut self, cx: f32, cy: f32, radius: f32, c: [u8; 4]) {
+        rec_leaf!(self, cy - radius - 1.0, cy + radius + 1.0, |g| g.radial_glow(cx, cy, radius, c));
         let ts = self.ts();
         let _p = crate::prof::scope("gfx.radial_glow");
         let faded = [c[0], c[1], c[2], 0];
@@ -752,7 +836,14 @@ impl Gfx {
         let _p = crate::prof::scope("gfx.rect");
         #[cfg(any(test, feature = "testing"))]
         self.layout_log.fill(x, y, w, h, c);
-        if let Some(r) = Rect::from_xywh(x.round(), y.round(), w.round().max(1.0), h.round().max(1.0)) {
+        rec_leaf!(self, y - 1.0, y + h + 1.0, |g| g.rect(x, y, w, h, c));
+        if self.band_y != 0 && self.oy == 0.0 {
+            // a band buffer of the parallel replay: tiny-skia fills a rectangle with the identity transform on a fast path with no edge
+            // smoothing, and any other transform through a smoothed path; the direct frame took the fast path, so this does too
+            if let Some(r) = Rect::from_xywh(x.round(), y.round() - self.band_y as f32, w.round().max(1.0), h.round().max(1.0)) {
+                self.pm.fill_rect(r, &paint(c), Transform::identity(), None);
+            }
+        } else if let Some(r) = Rect::from_xywh(x.round(), y.round(), w.round().max(1.0), h.round().max(1.0)) {
             self.pm.fill_rect(r, &paint(c), ts, None);
         }
     }
@@ -762,6 +853,7 @@ impl Gfx {
         let _p = crate::prof::scope("gfx.rrect");
         #[cfg(any(test, feature = "testing"))]
         self.layout_log.fill(x, y, w, h, c);
+        rec_leaf!(self, y - 1.0, y + h + 1.0, |g| g.rrect(x, y, w, h, r, c));
         if let Some(p) = rrect_path(x, y, w, h, r) {
             self.pm.fill_path(&p, &paint(c), FillRule::Winding, ts, None);
         }
@@ -770,6 +862,11 @@ impl Gfx {
     /// A rounded rectangle filled with a picture that covers the whole screen at `factor` times its size (the blurred frost of the island):
     /// the picture is stretched with smoothing, so a frame costs one fill.
     pub fn rrect_picture(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, pic: &Pixmap, factor: u32) {
+        if self.rec.is_some() {
+            let pic = pic.clone();
+            self.rec_push(y - 1.0, y + h + 1.0, move |g: &mut Gfx| g.rrect_picture(x, y, w, h, r, &pic, factor));
+            return;
+        }
         let ts = self.ts();
         let _p = crate::prof::scope("gfx.rrect_picture");
         let Some(path) = rrect_path(x, y, w, h, r) else { return };
@@ -783,6 +880,11 @@ impl Gfx {
     /// A picture of `pw` x `ph` pixels (straight RGBA) stretched into the rectangle, smoothed (a camera or video frame). Nothing is drawn
     /// for bytes that do not make that picture.
     pub fn rgba_picture(&mut self, x: f32, y: f32, w: f32, h: f32, pw: u32, ph: u32, rgba: &[u8]) {
+        if self.rec.is_some() {
+            let rgba = rgba.to_vec();
+            self.rec_push_abs(y - 1.0, y + h + 1.0, move |g: &mut Gfx| g.rgba_picture(x, y, w, h, pw, ph, &rgba));
+            return;
+        }
         let _p = crate::prof::scope("gfx.rgba_picture");
         let (Some(size), true) = (tiny_skia::IntSize::from_wh(pw, ph), rgba.len() == pw as usize * ph as usize * 4) else { return };
         let mut v = rgba.to_vec();
@@ -798,10 +900,11 @@ impl Gfx {
         let Some(rect) = tiny_skia::Rect::from_xywh(x, y, w, h) else { return };
         let mut p = Paint::default();
         p.shader = tiny_skia::Pattern::new(pic.as_ref(), SpreadMode::Pad, tiny_skia::FilterQuality::Bilinear, 1.0, Transform::from_row(w / pw as f32, 0.0, 0.0, h / ph as f32, x, y));
-        self.pm.fill_rect(rect, &p, Transform::identity(), None);
+        self.pm.fill_rect(rect, &p, Transform::from_translate(0.0, -(self.band_y as f32)), None);
     }
 
     pub fn rrect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, width: f32, c: [u8; 4]) {
+        rec_leaf!(self, y - width - 1.0, y + h + width + 1.0, |g| g.rrect_outline(x, y, w, h, r, width, c));
         let ts = self.ts();
         let _p = crate::prof::scope("gfx.rrect_outline");
         if let Some(p) = rrect_path(x, y, w, h, r) {
@@ -810,6 +913,7 @@ impl Gfx {
     }
 
     pub fn circle(&mut self, cx: f32, cy: f32, r: f32, c: [u8; 4]) {
+        rec_leaf!(self, cy - r - 1.0, cy + r + 1.0, |g| g.circle(cx, cy, r, c));
         let ts = self.ts();
         let _p = crate::prof::scope("gfx.circle");
         if let Some(p) = PathBuilder::from_circle(cx, cy, r) {
@@ -819,6 +923,7 @@ impl Gfx {
 
     /// A circle's outline.
     pub fn ring(&mut self, cx: f32, cy: f32, r: f32, width: f32, c: [u8; 4]) {
+        rec_leaf!(self, cy - r - width - 1.0, cy + r + width + 1.0, |g| g.ring(cx, cy, r, width, c));
         let ts = self.ts();
         let _p = crate::prof::scope("gfx.ring");
         if let Some(p) = PathBuilder::from_circle(cx, cy, r) {
@@ -828,6 +933,7 @@ impl Gfx {
 
     /// A straight line with round ends.
     pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, c: [u8; 4]) {
+        rec_leaf!(self, y0.min(y1) - width - 1.0, y0.max(y1) + width + 1.0, |g| g.line(x0, y0, x1, y1, width, c));
         let ts = self.ts();
         let _p = crate::prof::scope("gfx.line");
         let mut pb = PathBuilder::new();
@@ -842,6 +948,11 @@ impl Gfx {
 
     /// A filled polygon (a play arrow, a skip mark).
     pub fn polygon(&mut self, pts: &[(f32, f32)], c: [u8; 4]) {
+        if self.rec.is_some() {
+            let pts = pts.to_vec();
+            self.rec_push(f32::NEG_INFINITY, f32::INFINITY, move |g: &mut Gfx| g.polygon(&pts, c));
+            return;
+        }
         let ts = self.ts();
         let _p = crate::prof::scope("gfx.polygon");
         let mut pb = PathBuilder::new();
@@ -861,6 +972,11 @@ impl Gfx {
     /// Several closed outlines filled together (non-zero winding, so one wound the other way is a hole) and/or stroked: a path flattened
     /// by the UI SDK. `closed` says which outlines are closed for the stroke.
     pub fn polys(&mut self, outlines: &[(Vec<(f32, f32)>, bool)], fill: Option<[u8; 4]>, stroke_with: Option<(f32, [u8; 4])>) {
+        if self.rec.is_some() {
+            let outlines = outlines.to_vec();
+            self.rec_push(f32::NEG_INFINITY, f32::INFINITY, move |g: &mut Gfx| g.polys(&outlines, fill, stroke_with));
+            return;
+        }
         let ts = self.ts();
         let mut pb = PathBuilder::new();
         for (pts, closed) in outlines {
@@ -920,13 +1036,22 @@ impl Gfx {
                 v.push((x, y + self.oy, s.to_string()));
             }
         }
+        let raw_color = color;
         let color = crate::theme::themed(color);
         let px = size.round().max(MIN_TEXT_PX);
         let ascent = self.font(face).horizontal_line_metrics(px).map_or(px, |m| m.ascent);
         let base = y + self.oy + ascent;
         let (w, h) = (self.width() as i32, self.height() as i32);
+        // recording: the letters are still measured here (the answer is the advance), but drawn later, by the replay
+        let recording = self.rec.is_some();
+        if recording {
+            let s2 = s.to_string();
+            self.rec_push(y - 2.0, y + size * 1.6 + 2.0, move |g: &mut Gfx| {
+                g.text(x, y, size, raw_color, &s2, face);
+            });
+        }
         if crate::shaping::needs_shaping(s) {
-            return self.shaped_text(x, base, px, color, s);
+            return self.shaped_text(x, base, px, color, s, recording);
         }
         let mut pen = x;
         if self.cache_fonts != crate::fonts::generation() {
@@ -943,8 +1068,10 @@ impl Gfx {
                 self.cache.insert(key, (m, bmp));
             }
             let (m, bmp) = &self.cache[&key];
-            let (gx, gy) = ((pen + m.xmin as f32).round() as i32, (base - m.height as f32 - m.ymin as f32).round() as i32);
-            blit(self.pm.data_mut(), (w, h), gx, gy, m, bmp, color);
+            let (gx, gy) = ((pen + m.xmin as f32).round() as i32, (base - m.height as f32 - m.ymin as f32).round() as i32 - self.band_y);
+            if !recording {
+                blit(self.pm.data_mut(), (w, h), gx, gy, m, bmp, color);
+            }
             pen += m.advance_width;
         }
         pen - x
@@ -966,7 +1093,9 @@ impl Gfx {
         let Some(scratch) = Pixmap::new(w, h) else { return TextMask::default() };
         let old = std::mem::replace(&mut self.pm, scratch);
         let oy = std::mem::replace(&mut self.oy, 0.0);
+        let rec = self.rec.take();
         self.text(pad, pad, px, [255, 255, 255, 255], s, face);
+        self.rec = rec;
         self.oy = oy;
         let drawn = std::mem::replace(&mut self.pm, old);
         let alpha: Vec<u8> = drawn.data().chunks_exact(4).map(|p| p[3]).collect();
@@ -974,7 +1103,7 @@ impl Gfx {
     }
 
     /// Draw a line in a script that needs shaping (see [`crate::shaping`]); `base` is the baseline.
-    fn shaped_text(&mut self, x: f32, base: f32, px: f32, color: [u8; 4], s: &str) -> f32 {
+    fn shaped_text(&mut self, x: f32, base: f32, px: f32, color: [u8; 4], s: &str, recording: bool) -> f32 {
         let (w, h) = (self.width() as i32, self.height() as i32);
         let sh = self.shaper.get_or_insert_with(shared_shaper);
         let (glyphs, total) = sh.layout(s, px);
@@ -986,8 +1115,10 @@ impl Gfx {
             }
             let (m, bmp) = &self.shaped_cache[&key];
             let gx = (x + g.x + m.xmin as f32).round() as i32;
-            let gy = (base - g.y - m.height as f32 - m.ymin as f32).round() as i32;
-            blit(self.pm.data_mut(), (w, h), gx, gy, m, bmp, color);
+            let gy = (base - g.y - m.height as f32 - m.ymin as f32).round() as i32 - self.band_y;
+            if !recording {
+                blit(self.pm.data_mut(), (w, h), gx, gy, m, bmp, color);
+            }
         }
         total
     }
@@ -1030,22 +1161,22 @@ impl Gfx {
                 let cand = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
                 if self.text_width(size, &cand, face) <= max_w || cur.is_empty() {
                     cur = cand;
-                    // a single over-long word: hard-break it
-                    while self.text_width(size, &cur, face) > max_w && cur.chars().count() > 1 {
-                        let mut head = String::new();
-                        for ch in cur.chars() {
-                            if self.text_width(size, &format!("{head}{ch}"), face) > max_w && !head.is_empty() {
-                                break;
-                            }
-                            head.push(ch);
-                        }
-                        let rest: String = cur.chars().skip(head.chars().count()).collect();
-                        lines.push(head);
-                        cur = rest;
-                    }
                 } else {
                     lines.push(std::mem::take(&mut cur));
                     cur = word.to_string();
+                }
+                // a single over-long word: hard-break it (also the one that starts a new line: it used to be left whole and ran out of its box)
+                while self.text_width(size, &cur, face) > max_w && cur.chars().count() > 1 {
+                    let mut head = String::new();
+                    for ch in cur.chars() {
+                        if self.text_width(size, &format!("{head}{ch}"), face) > max_w && !head.is_empty() {
+                            break;
+                        }
+                        head.push(ch);
+                    }
+                    let rest: String = cur.chars().skip(head.chars().count()).collect();
+                    lines.push(head);
+                    cur = rest;
                 }
             }
             lines.push(cur);
@@ -1055,6 +1186,7 @@ impl Gfx {
 
     /// Draw an icon centred at (cx, cy) fitting a `size` square.
     pub fn icon(&mut self, icon: Icon, cx: f32, cy: f32, size: f32, c: [u8; 4]) {
+        rec_leaf!(self, cy - size - 2.0, cy + size + 2.0, |g| g.icon(icon, cx, cy, size, c));
         let ts = self.ts();
         let _p = crate::prof::scope("gfx.icon");
         let s = size;
@@ -1945,6 +2077,41 @@ impl Gfx {
                     }
                 }
             }
+            Icon::K8s => {
+                // a ship's wheel: a seven-sided rim, a hub, a spoke to every corner
+                let (cx, cy, r) = (x0 + s * 0.5, y0 + s * 0.5, s * 0.40);
+                let corner = |k: usize| {
+                    let a = -std::f32::consts::FRAC_PI_2 + k as f32 * std::f32::consts::TAU / 7.0;
+                    (cx + r * a.cos(), cy + r * a.sin())
+                };
+                let mut rim = PathBuilder::new();
+                for k in 0..7 {
+                    let (px, py) = corner(k);
+                    if k == 0 {
+                        rim.move_to(px, py);
+                    } else {
+                        rim.line_to(px, py);
+                    }
+                }
+                rim.close();
+                if let Some(l) = rim.finish() {
+                    self.pm.stroke_path(&l, &p, &st, id, None);
+                }
+                let mut spokes = PathBuilder::new();
+                for k in 0..7 {
+                    let (px, py) = corner(k);
+                    spokes.move_to(cx, cy);
+                    spokes.line_to(px, py);
+                }
+                if let Some(l) = spokes.finish() {
+                    self.pm.stroke_path(&l, &p, &st, id, None);
+                }
+                let mut hub = PathBuilder::new();
+                hub.push_circle(cx, cy, s * 0.09);
+                if let Some(d) = hub.finish() {
+                    self.pm.fill_path(&d, &p, FillRule::Winding, id, None);
+                }
+            }
             Icon::Home => {
                 let mut house = PathBuilder::new();
                 house.move_to(x0 + s * 0.10, y0 + s * 0.50);
@@ -1981,6 +2148,18 @@ impl Gfx {
     }
 
     /// RGBA8 (premultiplied) bytes.
+    /// The picture, to read. Do not call while a frame is being recorded (use [`Gfx::record_sync`] first).
+    pub fn pm_ref(&self) -> &Pixmap {
+        debug_assert!(self.rec.as_ref().is_none_or(|v| v.is_empty()), "pixels read while calls are still written down: call record_sync first");
+        &self.pm
+    }
+
+    /// The picture, to draw into or change directly: first draws what the recording layer holds, so the order is kept.
+    pub fn pm_mut(&mut self) -> &mut Pixmap {
+        self.record_sync();
+        &mut self.pm
+    }
+
     pub fn rgba(&self) -> &[u8] {
         self.pm.data()
     }
@@ -2019,7 +2198,7 @@ mod tests {
 
     #[test]
     fn every_icon_draws_something() {
-        for icon in [Icon::Chat, Icon::Rag, Icon::Mcp, Icon::Cli, Icon::Users, Icon::Settings, Icon::Clipboard, Icon::Mic, Icon::Speaker, Icon::Runs, Icon::Edit, Icon::Browser, Icon::Camera, Icon::Mesh, Icon::Radio, Icon::Scan, Icon::Skills, Icon::Usage, Icon::Calendar, Icon::System, Icon::Media, Icon::Ide, Icon::Data, Icon::Tales, Icon::Bell, Icon::Lock, Icon::Power, Icon::Logout, Icon::Store, Icon::Dash, Icon::Flows, Icon::Devices, Icon::Disks, Icon::Lab, Icon::Git, Icon::Doctor, Icon::Checkup, Icon::Learn, Icon::Volume(0), Icon::Volume(1), Icon::Volume(2), Icon::Volume(3), Icon::Volume(4), Icon::Home] {
+        for icon in [Icon::Chat, Icon::Rag, Icon::Mcp, Icon::Cli, Icon::Users, Icon::Settings, Icon::Clipboard, Icon::Mic, Icon::Speaker, Icon::Runs, Icon::Edit, Icon::Browser, Icon::Camera, Icon::Mesh, Icon::K8s, Icon::Radio, Icon::Scan, Icon::Skills, Icon::Usage, Icon::Calendar, Icon::System, Icon::Media, Icon::Ide, Icon::Data, Icon::Tales, Icon::Bell, Icon::Lock, Icon::Power, Icon::Logout, Icon::Store, Icon::Dash, Icon::Flows, Icon::Devices, Icon::Disks, Icon::Lab, Icon::Git, Icon::Doctor, Icon::Checkup, Icon::Learn, Icon::Volume(0), Icon::Volume(1), Icon::Volume(2), Icon::Volume(3), Icon::Volume(4), Icon::Home] {
             let mut g = Gfx::new(96, 96);
             g.clear(rgb(0, 0, 0));
             g.icon(icon, 48.0, 48.0, 80.0, rgb(255, 255, 255));
@@ -2040,6 +2219,10 @@ mod tests {
         let long = g.wrap(16.0, &"w".repeat(80), Face::Sans, 100.0);
         assert!(long.len() > 3 && long.iter().all(|l| g.text_width(16.0, l, Face::Sans) <= 100.5));
         assert_eq!(g.wrap(16.0, "a\n\nb", Face::Sans, 100.0), vec!["a", "", "b"]);
+        // a long word that comes after other words starts a new line and is broken there too, never left to run out of its box
+        let after = g.wrap(14.0, "Scaffold: tool app_scaffold {kind: tile|skill|mcp-python|mcp-node|wasm-tool, name, dir}", Face::Sans, 120.0);
+        assert!(after.len() > 3 && after.iter().all(|l| g.text_width(14.0, l, Face::Sans) <= 120.5), "{after:?}");
+        assert_eq!(after.join(" ").replace(' ', "").len(), "Scaffold: tool app_scaffold {kind: tile|skill|mcp-python|mcp-node|wasm-tool, name, dir}".replace(' ', "").len(), "no letter is lost");
         let f = g.fit(16.0, "a very long label that cannot fit", Face::Sans, 80.0);
         assert!(f.ends_with('…') && g.text_width(16.0, &f, Face::Sans) <= 80.5);
         assert_eq!(g.fit(16.0, "ok", Face::Sans, 80.0), "ok");

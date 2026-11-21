@@ -131,6 +131,22 @@ pub fn scan_adts(b: &[u8], eof: bool) -> Scan {
     Scan::Junk(i.min(b.len()))
 }
 
+/// A LOAS/LATM frame (AAC in the stream form some stations and the MP4A-LATM content type use): the 11-bit sync 0x2B7, a 13-bit length,
+/// and, when the next bytes have arrived, the next frame's sync after that length.
+fn is_loas_sync(b: &[u8]) -> bool {
+    if b.len() < 3 || b[0] != 0x56 || b[1] & 0xE0 != 0xE0 {
+        return false;
+    }
+    let len = ((b[1] as usize & 0x1F) << 8) | b[2] as usize;
+    if len == 0 {
+        return false;
+    }
+    match b.get(3 + len..3 + len + 2) {
+        Some(n) => n[0] == 0x56 && n[1] & 0xE0 == 0xE0,
+        None => true,
+    }
+}
+
 /// MPEG audio frame sync (layer I-III, not the reserved version).
 fn is_mp3_sync(b: &[u8]) -> bool {
     b.len() >= 2 && b[0] == 0xFF && b[1] & 0xE0 == 0xE0 && (b[1] >> 3) & 3 != 1 && (b[1] >> 1) & 3 != 0
@@ -144,6 +160,9 @@ pub fn sniff(b: &[u8]) -> Option<Codec> {
     }
     let b = skip_id3(b)?;
     if b.len() >= 2 && b[0] == 0xFF && b[1] & 0xF6 == 0xF0 {
+        return Some(Codec::Aac);
+    }
+    if is_loas_sync(b) {
         return Some(Codec::Aac);
     }
     is_mp3_sync(b).then_some(Codec::Mp3)
@@ -226,6 +245,18 @@ pub(crate) mod tests {
         assert_eq!(id3_len(b"ID3\x04\x00\x10\x00\x00\x00\x05"), Some(25), "a footer adds ten bytes");
         assert!(id3_len(b"ID3\x04\x00\x00\x80\x00\x00\x05").is_none(), "size bytes are 7-bit");
         assert!(content_type_is_aac("audio/aacp") && content_type_is_aac("audio/mp4a-latm") && !content_type_is_aac("audio/mpeg"));
+    }
+
+    #[test]
+    fn a_latm_loas_stream_is_told_as_aac_and_chance_bytes_are_not() {
+        let mut f = vec![0x56, 0xE0, 5, 1, 2, 3, 4, 5];
+        assert_eq!(sniff(&f), Some(Codec::Aac), "the next frame has not arrived");
+        f.extend_from_slice(&[0x56, 0xE0, 5, 9, 9, 9, 9, 9]);
+        assert_eq!(sniff(&f), Some(Codec::Aac));
+        f[8] = 0x11;
+        assert_eq!(sniff(&f), None, "no sync where the length says the next frame starts");
+        assert_eq!(sniff(&[0x56, 0xE0, 0]), None);
+        assert_eq!(sniff(b"Vorbis text"), None);
     }
 
     #[test]

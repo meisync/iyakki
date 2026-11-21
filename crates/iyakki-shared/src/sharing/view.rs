@@ -39,6 +39,15 @@ pub fn choices(ifs: &[IfaceInfo], wifi_ap: bool) -> Choices {
 
 /// [`choices`] with the reason the Wi-Fi hotspot is not offered (what the radios said, see `iyakki_hotspot::caps::hotspot_unavailable`).
 pub fn choices_with(ifs: &[IfaceInfo], wifi_ap: bool, wifi_why: Option<&str>) -> Choices {
+    choices_full(ifs, wifi_ap, wifi_why, Some(NAP_NOT_BUILT))
+}
+
+/// What the Bluetooth entry says when the backend cannot tell why (it is not built into it).
+pub const NAP_NOT_BUILT: &str = "Letting phones connect to this computer is not built yet (use the Wi-Fi hotspot).";
+
+/// [`choices_with`] with the state of the Bluetooth access point: `nap_why` is `None` when phones may connect (the entry can be
+/// chosen) and the reason in words when not (F-HOTSPOT-15).
+pub fn choices_full(ifs: &[IfaceInfo], wifi_ap: bool, wifi_why: Option<&str>, nap_why: Option<&str>) -> Choices {
     let mut c = Choices::default();
     for i in ifs {
         if i.default_route && i.up {
@@ -71,7 +80,15 @@ pub fn choices_with(ifs: &[IfaceInfo], wifi_ap: bool, wifi_why: Option<&str>) ->
         if phone_is_up && kind == LinkKind::BluetoothPanu {
             continue; // the connected phone is listed above like any uplink
         }
-        let ch = Choice { name: name.into(), label: kind.label().into(), usable: false, why: bluetooth_why(kind) };
+        let ch = if up {
+            Choice { name: name.into(), label: kind.label().into(), usable: false, why: bluetooth_why(kind) }
+        } else {
+            // this computer's own access point: chosen by the interface name, made by the service when sharing starts
+            match nap_why.map(str::trim).filter(|w| !w.is_empty()) {
+                None => Choice { name: iyakki_devctl::BT_NAP_IFACE.into(), label: "Bluetooth - phones connect to this computer and use its internet".into(), usable: true, why: String::new() },
+                Some(why) => Choice { name: name.into(), label: kind.label().into(), usable: false, why: why.into() },
+            }
+        };
         if up {
             c.uplinks.push(ch);
         } else {

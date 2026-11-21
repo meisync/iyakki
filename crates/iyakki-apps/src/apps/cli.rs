@@ -12,7 +12,7 @@ use super::{blink, App, AppCx, Flow, ScrollLog};
 use crate::gfx::{rgb, Face, Gfx, Icon};
 use crate::ui::{Event, Key, TextField, DIM, ERR, MUTED, OK, R, TEXT};
 
-const ACCENT: [u8; 4] = rgb(255, 184, 77);
+pub(super) const ACCENT: [u8; 4] = rgb(255, 184, 77);
 
 /// The confirmation for an install that runs a command (npm, pip): the whole command in plain words, wrapped, nothing cut.
 fn render_plan(g: &mut Gfx, area: R, s: f32, name: &str, plan: &str) {
@@ -968,7 +968,7 @@ mod tests {
         draw(&mut app, &cx, 1100, 650);
         app.handle(&Event::Key(Key::Char('y')), &cx);
         assert!(cx.clis().installed().is_empty());
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("cli.install") && log.contains("cli.remove"), "{log}");
         // other sizes draw, and the rest of the catalogue can be browsed
         for _ in 0..8 {
@@ -1015,7 +1015,7 @@ mod tests {
         assert!(matches!(app.mode, Mode::ConfirmStop));
         app.handle(&Event::Key(Key::Char('y')), &cx);
         assert_eq!(cx.sandbox_cluster().state(), iyakki_shared::cluster::ClusterState::Stopped);
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("cluster.start") && log.contains("cluster.stop"), "{log}");
         // the s key does nothing on other tools
         app.handle(&Event::Key(Key::Down), &cx);
@@ -1142,7 +1142,7 @@ mod tests {
         assert!(matches!(app.mode, Mode::ConfirmStopOllama));
         app.handle(&Event::Key(Key::Char('y')), &cx);
         assert_eq!(cx.ollama().state(), iyakki_shared::ollama::OllamaState::Stopped);
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("ollama.start") && log.contains("ollama.stop"), "{log}");
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
     }

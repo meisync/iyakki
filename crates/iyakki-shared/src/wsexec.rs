@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Out {
     /// None when the program could not be started or was killed.
     pub code: Option<i32>,
@@ -33,31 +33,8 @@ impl Out {
 /// Where a running program's output is copied as it arrives (for a live view); capped.
 pub type Sink = Arc<Mutex<String>>;
 
-/// Split `cargo test -p "my crate"` into words (single and double quotes group; no expansion of any kind).
-pub fn split_command(s: &str) -> Vec<String> {
-    let (mut out, mut cur, mut q, mut any) = (Vec::new(), String::new(), None::<char>, false);
-    for c in s.chars() {
-        match (q, c) {
-            (Some(x), c) if c == x => q = None,
-            (Some(_), c) => cur.push(c),
-            (None, '"' | '\'') => {
-                q = Some(c);
-                any = true;
-            }
-            (None, c) if c.is_whitespace() => {
-                if any || !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                    any = false;
-                }
-            }
-            (None, c) => cur.push(c),
-        }
-    }
-    if any || !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
+/// Moved to `iyakki-board-model` (the coverage runner there needs it); the old path stays.
+pub use iyakki_board_model::split_command;
 
 /// The one way the dev-cluster code starts programs (`kubectl`, `podman`, `docker`, `k3s`, `curl`): argument arrays, a
 /// cut-down environment plus the `env` given, a timeout and an output cap. Tests use [`FakeRunner`].

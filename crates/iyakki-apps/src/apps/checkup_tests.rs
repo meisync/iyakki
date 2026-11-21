@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use iyakki_shared::checkup::{Outcome, ScreenOut};
+use iyakki_shared::checkup::{Outcome, Said, ScreenOut};
 use iyakki_shared::checkup::{Adapter, Inventory, PowerFacts, StepId};
 use iyakki_shared::voicedesk::{Mic};
 use iyakki_shared::voicedesk::{Capture, Recorders};
@@ -249,7 +249,7 @@ impl Fx {
         self.spy.signs.lock().unwrap().clone()
     }
     fn audit(&self) -> String {
-        std::fs::read_to_string(self.cx.audit.path()).unwrap_or_default()
+        std::fs::read_to_string(self.cx.audit.path_buf()).unwrap_or_default()
     }
 }
 
@@ -746,7 +746,7 @@ fn the_real_readers_run_on_this_computer_without_panicking() {
     // the steps that only read: no sound, no picture, nothing opened
     for id in [StepId::Monitor, StepId::Network, StepId::Wifi, StepId::Bluetooth, StepId::Power] {
         let i = StepId::ALL.iter().position(|s| *s == id).unwrap();
-        a.begin(i, &cx);
+        a.begin(i, &super::checkup_port::CxPort(&cx));
         assert_ne!(a.results[i].outcome, Outcome::Pending, "{id:?}");
     }
 }
@@ -778,4 +778,141 @@ fn a_finished_check_up_leaves_a_signed_result_that_maps_to_the_matrix_and_a_half
     let b = iyakki_shared::checkup_result::verify(&std::fs::read_to_string(&file).unwrap()).unwrap();
     let c = b.cells.iter().find(|c| c.capability == "GPU for k3s").unwrap();
     assert!(c.status == "verified" && c.note.contains("sees 1 GPU"), "{c:?}");
+}
+
+// ---- the tile on a fake port: no shell context, no real machine ----------------------------------------------------------------------------
+
+use super::checkup_port::CheckupPort;
+
+struct FakePort {
+    inv: Inventory,
+    play_err: Option<String>,
+    played: AtomicUsize,
+    audit: Mutex<Vec<(String, String)>>,
+    k3s: Arc<dyn iyakki_agent_api::DevCluster>,
+    dir: std::path::PathBuf,
+    mic: String,
+}
+
+impl FakePort {
+    fn new(tag: &str) -> FakePort {
+        let cx = cx_with_admin_store(&format!("checkup-fp-{tag}"));
+        FakePort { inv: inv(), play_err: None, played: AtomicUsize::new(0), audit: Mutex::new(vec![]), k3s: cx.k3sdev(), dir: cx.data_dir().to_path_buf(), mic: "plughw:1,0".into() }
+    }
+    fn audit_text(&self) -> String {
+        self.audit.lock().unwrap().iter().map(|(a, s)| format!("{a} {s}")).collect::<Vec<_>>().join("\n")
+    }
+}
+
+impl CheckupPort for FakePort {
+    fn inventory(&self) -> Inventory {
+        self.inv.clone()
+    }
+    fn play_tone(&self) -> Result<Box<dyn Any + Send>, String> {
+        self.played.fetch_add(1, Ordering::SeqCst);
+        match &self.play_err {
+            Some(e) => Err(e.clone()),
+            None => Ok(Box::new(())),
+        }
+    }
+    fn camera_job(&self) -> Box<dyn FnOnce() -> Shot + Send> {
+        Box::new(|| probe::grab(&[device("video0", "USB Camera")], "", &FakeOpener::default(), "No camera found. Connect a USB camera.", Duration::from_secs(3)))
+    }
+    fn voice_settings(&self) -> iyakki_shared::voice::VoiceSettings {
+        iyakki_shared::voice::VoiceSettings { mic: self.mic.clone(), ..Default::default() }
+    }
+    fn data_dir(&self) -> std::path::PathBuf {
+        self.dir.clone()
+    }
+    fn k3s(&self) -> Arc<dyn iyakki_agent_api::DevCluster> {
+        self.k3s.clone()
+    }
+    fn audit(&self, action: &str, subject: &str) {
+        self.audit.lock().unwrap().push((action.into(), subject.into()));
+    }
+}
+
+fn fake_parts() -> (Parts, Arc<Recs>, Arc<Mutex<Vec<u8>>>) {
+    let recs = Arc::new(Recs { mics: vec![usb("plughw:1,0")], product: "Mac mini".into(), pcm: iyakki_shared::voice::tone(300.0, 1200), ms: Arc::new(AtomicU64::new(0)), started: Mutex::new(vec![]) });
+    let signs = Arc::new(Mutex::new(Vec::new()));
+    let s2 = signs.clone();
+    let parts = Parts { inventory: Arc::new(|p| p.inventory()), recorders: recs.clone(), play: Arc::new(|p| p.play_tone()), camera: Arc::new(|p| p.camera_job()), sign: Arc::new(move |b| s2.lock().unwrap().push(b)), stop_asked: Arc::new(|| false) };
+    (parts, recs, signs)
+}
+
+fn step(id: StepId) -> usize {
+    StepId::ALL.iter().position(|s| *s == id).unwrap()
+}
+
+#[test]
+fn fake_port_the_steps_that_only_read_finish_from_the_ports_inventory_and_audit_nothing() {
+    let _t = take_turn();
+    let port = FakePort::new("read");
+    let (parts, _, signs) = fake_parts();
+    let mut app = CheckupApp::with_port(&port, parts);
+    for id in [StepId::Monitor, StepId::Network, StepId::Wifi, StepId::Bluetooth] {
+        app.begin(step(id), &port);
+        assert_ne!(app.results[step(id)].outcome, Outcome::Pending, "{id:?}");
+    }
+    assert_eq!(app.results[step(StepId::Network)].outcome, Outcome::Pass, "the port says the route is up");
+    assert!(port.audit.lock().unwrap().is_empty());
+    assert!(signs.lock().unwrap().is_empty());
+}
+
+#[test]
+fn fake_port_the_speaker_step_plays_through_the_port_and_a_refusal_is_said_in_words() {
+    let _t = take_turn();
+    let mut port = FakePort::new("tone");
+    port.play_err = Some("No sound card answered.".into());
+    let (parts, _, _) = fake_parts();
+    let mut app = CheckupApp::with_port(&port, parts);
+    app.begin(step(StepId::Speaker), &port);
+    assert_eq!(port.played.load(Ordering::SeqCst), 1);
+    match &app.active {
+        Some(Active::Tone { played, .. }) => assert_eq!(played, &Err("No sound card answered.".to_string())),
+        _ => panic!("the tone step is not open"),
+    }
+}
+
+#[test]
+fn fake_port_the_microphone_step_uses_the_ports_voice_settings_audits_and_lights_the_sign() {
+    let _t = take_turn();
+    let port = FakePort::new("mic");
+    let (parts, recs, signs) = fake_parts();
+    let mut app = CheckupApp::with_port(&port, parts);
+    app.begin(step(StepId::Microphone), &port);
+    assert!(matches!(app.active, Some(Active::Record { .. })));
+    assert_eq!(recs.started.lock().unwrap().len(), 1, "one recording started");
+    assert_eq!(port.audit_text(), "checkup.microphone ");
+    assert_eq!(signs.lock().unwrap().as_slice(), [MIC]);
+}
+
+#[test]
+fn fake_port_the_camera_step_audits_and_lights_the_sign() {
+    let _t = take_turn();
+    let port = FakePort::new("cam");
+    let (parts, _, signs) = fake_parts();
+    let mut app = CheckupApp::with_port(&port, parts);
+    app.begin(step(StepId::Camera), &port);
+    assert!(matches!(app.active, Some(Active::Grab(_))));
+    assert!(port.audit_text().contains("checkup.camera"));
+    assert_eq!(signs.lock().unwrap().as_slice(), [CAM]);
+    app.end_active();
+}
+
+#[test]
+fn fake_port_a_failed_step_offers_its_fix_and_the_fix_is_audited_by_step_name() {
+    let _t = take_turn();
+    let port = FakePort::new("fix");
+    let (parts, _, _) = fake_parts();
+    let mut app = CheckupApp::with_port(&port, parts);
+    let i = step(StepId::Display);
+    app.begin(i, &port);
+    assert!(matches!(app.active, Some(Active::Bars)));
+    app.answer(Said::No);
+    assert_eq!(app.results[i].outcome, Outcome::Fail);
+    app.sel = i;
+    app.do_fix(&port);
+    assert_eq!(app.take_request(), Some(("settings".into(), "tab:display".into())));
+    assert_eq!(port.audit_text(), "checkup.fix display");
 }

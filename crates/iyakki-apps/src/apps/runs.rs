@@ -7,6 +7,7 @@ use iyakki_shared::runs::{Integrity, RunMeta};
 use iyakki_shared::runs::RunLog;
 
 use super::widgets::render_confirm;
+use super::runs_port::{CxPort, RunsPort};
 use super::{App, AppCx, Flow};
 use crate::gfx::{rgb, Face, Gfx, Icon};
 use crate::ui::{Event, Key, DIM, ERR, MUTED, OK, R, TEXT};
@@ -132,8 +133,13 @@ impl RunsApp {
     }
 
     pub fn new(cx: &AppCx) -> RunsApp {
+        RunsApp::with_port(&CxPort(cx))
+    }
+
+    /// The tile over any port (a fake in tests).
+    pub fn with_port(port: &dyn RunsPort) -> RunsApp {
         let mut a = RunsApp { runs: vec![], all: vec![], filter: None, request: None, sel: 0, detail: None, scroll: 0, confirm: false, status: None, pane: crate::textsel::Pane::new(61_200), jobs: super::jobs_ui::JobsUi::new(None), jobs_mode: false };
-        a.reload(cx);
+        a.reload(port);
         a
     }
 
@@ -161,11 +167,11 @@ impl RunsApp {
         &self.jobs
     }
 
-    fn reload(&mut self, cx: &AppCx) {
-        self.all = cx.runs().list(&cx.session.user);
+    fn reload(&mut self, port: &dyn RunsPort) {
+        self.all = port.list();
         self.apply_filter();
         self.sel = self.sel.min(self.runs.len().saturating_sub(1));
-        self.open_selected(cx);
+        self.open_selected(port);
     }
 
     fn apply_filter(&mut self) {
@@ -189,7 +195,7 @@ impl RunsApp {
         v
     }
 
-    fn cycle_filter(&mut self, cx: &AppCx) {
+    fn cycle_filter(&mut self, port: &dyn RunsPort) {
         let vals = self.filter_values();
         self.filter = match &self.filter {
             None => vals.first().cloned(),
@@ -197,14 +203,28 @@ impl RunsApp {
         };
         self.apply_filter();
         self.sel = 0;
-        self.open_selected(cx);
+        self.open_selected(port);
     }
 
-    fn open_selected(&mut self, cx: &AppCx) {
+    fn open_selected(&mut self, port: &dyn RunsPort) {
         self.scroll = 0;
-        self.detail = self.runs.get(self.sel).and_then(|m| cx.runs().load(&cx.session.user, &m.id).ok());
+        self.detail = self.runs.get(self.sel).and_then(|m| port.load(&m.id));
         if let Some((_, Integrity::Tampered(why))) = &self.detail {
-            cx.audit.record(&cx.session.user, "runs.tampered", &format!("{}: {why}", self.runs[self.sel].id));
+            port.audit("runs.tampered", &format!("{}: {why}", self.runs[self.sel].id));
+        }
+    }
+
+    /// Delete the chosen run (the person confirmed), say so, and read the list again.
+    fn delete_selected(&mut self, port: &dyn RunsPort) {
+        if let Some(m) = self.runs.get(self.sel).cloned() {
+            match port.delete(&m.id) {
+                Ok(()) => {
+                    port.audit("runs.delete", &m.id);
+                    self.status = Some(("Run deleted.".into(), true));
+                }
+                Err(e) => self.status = Some((e, false)),
+            }
+            self.reload(port);
         }
     }
 
@@ -245,10 +265,11 @@ impl App for RunsApp {
             // a task's run, opened from the board's agent panel
             self.jobs_mode = false;
             self.filter = None;
-            self.reload(cx);
+            let port = CxPort(cx);
+            self.reload(&port);
             if let Some(i) = self.runs.iter().position(|m| m.id == id) {
                 self.sel = i;
-                self.open_selected(cx);
+                self.open_selected(&port);
             } else {
                 self.status = Some(("That run is not recorded (yet).".into(), false));
             }
@@ -267,6 +288,7 @@ impl App for RunsApp {
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        let port = CxPort(cx);
         match ev {
             Event::Tab(super::jobs_ui::TAB_JOBS) => {
                 self.show_jobs(cx);
@@ -325,16 +347,7 @@ impl App for RunsApp {
         if self.confirm {
             if let Event::Key(k) = ev {
                 if *k == Key::Char('y') {
-                    if let Some(m) = self.runs.get(self.sel).cloned() {
-                        match cx.runs().delete(&cx.session.user, &m.id) {
-                            Ok(()) => {
-                                cx.audit.record(&cx.session.user, "runs.delete", &m.id);
-                                self.status = Some(("Run deleted.".into(), true));
-                            }
-                            Err(e) => self.status = Some((e, false)),
-                        }
-                        self.reload(cx);
-                    }
+                    self.delete_selected(&port);
                 }
                 self.confirm = false;
             }
@@ -343,23 +356,23 @@ impl App for RunsApp {
         match ev {
             Event::Row(i) => {
                 self.sel = (*i).min(self.runs.len().saturating_sub(1));
-                self.open_selected(cx);
+                self.open_selected(&port);
             }
             Event::Scroll(d) => self.scroll = (self.scroll as i32 - d * 3).max(0) as usize,
             Event::Key(k) => match k {
                 Key::Esc => return Flow::Back,
                 Key::Up => {
                     self.sel = self.sel.saturating_sub(1);
-                    self.open_selected(cx);
+                    self.open_selected(&port);
                 }
                 Key::Down => {
                     self.sel = (self.sel + 1).min(self.runs.len().saturating_sub(1));
-                    self.open_selected(cx);
+                    self.open_selected(&port);
                 }
                 Key::PageDown => self.scroll += 12,
                 Key::PageUp => self.scroll = self.scroll.saturating_sub(12),
-                Key::Char('r') => self.reload(cx),
-                Key::Char('f') => self.cycle_filter(cx),
+                Key::Char('r') => self.reload(&port),
+                Key::Char('f') => self.cycle_filter(&port),
                 Key::Char('g') | Key::Char('b') => {
                     // from a task's run back to its task or its row on the board
                     if let Some(m) = self.runs.get(self.sel) {
@@ -668,5 +681,105 @@ mod tests {
                 assert!(g.hits.iter().any(|x| x.label == want || x.label.starts_with(want)), "{w}x{h}: {want}");
             }
         }
+    }
+
+    /// A run store in memory: the fake port of the tile.
+    struct FakePort {
+        logs: std::cell::RefCell<Vec<(RunLog, Integrity)>>,
+        audit: std::cell::RefCell<Vec<(String, String)>>,
+        refuse_delete: bool,
+    }
+
+    impl FakePort {
+        fn new(logs: Vec<(RunLog, Integrity)>) -> FakePort {
+            FakePort { logs: std::cell::RefCell::new(logs), audit: Default::default(), refuse_delete: false }
+        }
+        fn meta(l: &RunLog) -> RunMeta {
+            RunMeta { id: l.id.clone(), started: l.started, prompt: l.prompt.clone(), status: l.status.clone(), tool_calls: 1, model_ms: 0, tools_ms: 0, overhead_ms: 0, first_token_ms: 0, total_ms: 0, task_id: l.task_id.clone(), row: l.row.clone(), agent: l.agent.clone() }
+        }
+    }
+
+    impl RunsPort for FakePort {
+        fn list(&self) -> Vec<RunMeta> {
+            let mut v: Vec<RunMeta> = self.logs.borrow().iter().map(|(l, _)| FakePort::meta(l)).collect();
+            v.sort_by(|a, b| b.started.cmp(&a.started));
+            v
+        }
+        fn load(&self, id: &str) -> Option<(RunLog, Integrity)> {
+            self.logs.borrow().iter().find(|(l, _)| l.id == id).cloned()
+        }
+        fn delete(&self, id: &str) -> Result<(), String> {
+            if self.refuse_delete {
+                return Err("The record is read-only.".into());
+            }
+            self.logs.borrow_mut().retain(|(l, _)| l.id != id);
+            Ok(())
+        }
+        fn audit(&self, action: &str, subject: &str) {
+            self.audit.borrow_mut().push((action.into(), subject.into()));
+        }
+    }
+
+    #[test]
+    fn fake_port_the_tile_lists_newest_first_opens_the_first_run_and_says_nothing_to_the_audit_log() {
+        let port = FakePort::new(vec![(log("amy", "aaaaaaaaaaaa", 100), Integrity::Verified), (log("amy", "bbbbbbbbbbbb", 200), Integrity::Verified)]);
+        let app = RunsApp::with_port(&port);
+        assert_eq!(app.runs().iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["bbbbbbbbbbbb", "aaaaaaaaaaaa"]);
+        assert_eq!(app.integrity(), Some(&Integrity::Verified));
+        assert!(port.audit.borrow().is_empty());
+    }
+
+    #[test]
+    fn fake_port_a_broken_chain_is_audited_once_per_opening() {
+        let port = FakePort::new(vec![(log("amy", "aaaaaaaaaaaa", 100), Integrity::Tampered("line 3 does not follow line 2".into()))]);
+        let app = RunsApp::with_port(&port);
+        assert!(matches!(app.integrity(), Some(Integrity::Tampered(_))));
+        let a = port.audit.borrow();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].0, "runs.tampered");
+        assert!(a[0].1.starts_with("aaaaaaaaaaaa: line 3"));
+    }
+
+    #[test]
+    fn fake_port_delete_asks_the_port_audits_and_reads_the_list_again() {
+        let port = FakePort::new(vec![(log("amy", "aaaaaaaaaaaa", 100), Integrity::Verified), (log("amy", "bbbbbbbbbbbb", 200), Integrity::Verified)]);
+        let mut app = RunsApp::with_port(&port);
+        app.delete_selected(&port);
+        assert_eq!(app.runs().len(), 1);
+        assert_eq!(app.runs()[0].id, "aaaaaaaaaaaa");
+        assert_eq!(app.status(), Some(&("Run deleted.".to_string(), true)));
+        assert_eq!(port.audit.borrow().as_slice(), [("runs.delete".to_string(), "bbbbbbbbbbbb".to_string())]);
+    }
+
+    #[test]
+    fn fake_port_a_refused_delete_says_why_and_changes_nothing() {
+        let mut port = FakePort::new(vec![(log("amy", "aaaaaaaaaaaa", 100), Integrity::Verified)]);
+        port.refuse_delete = true;
+        let mut app = RunsApp::with_port(&port);
+        app.delete_selected(&port);
+        assert_eq!(app.runs().len(), 1);
+        assert_eq!(app.status(), Some(&("The record is read-only.".to_string(), false)));
+        assert!(port.audit.borrow().is_empty());
+    }
+
+    #[test]
+    fn fake_port_the_filter_cycles_through_agents_and_tasks_and_back_to_all() {
+        let port = FakePort::new(vec![
+            (task_log("amy", "aaaaaaaaaaaa", 100, "t1", "Agent 1", "F-APP-01"), Integrity::Verified),
+            (task_log("amy", "bbbbbbbbbbbb", 200, "t2", "Agent 2", "F-APP-02"), Integrity::Verified),
+            (log("amy", "cccccccccccc", 300), Integrity::Verified),
+        ]);
+        let mut app = RunsApp::with_port(&port);
+        assert_eq!(app.runs().len(), 3);
+        app.cycle_filter(&port);
+        assert_eq!(app.runs().len(), 1, "first value: Agent 1");
+        assert_eq!(app.runs()[0].id, "aaaaaaaaaaaa");
+        let mut seen = 1;
+        while app.filter.is_some() && seen < 10 {
+            app.cycle_filter(&port);
+            seen += 1;
+        }
+        assert!(app.filter.is_none(), "the cycle ends on all runs");
+        assert_eq!(app.runs().len(), 3);
     }
 }

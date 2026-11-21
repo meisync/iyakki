@@ -24,6 +24,8 @@ while IFS= read -r pat; do
   case "$pat" in ''|'#'*) continue;; esac
   ( cd "$OUT" && shopt -s nullglob globstar && for f in $pat; do rm -rf -- "$f"; done )
 done < dist/release/public-exclude.txt
+# the marker the tests read: this tree is the public export, so the internal documents of public-exclude.txt are missing by design
+echo "Written by dist/release/export-public.sh: this tree is the public export; the files named in dist/release/public-exclude.txt are left out on purpose." > "$OUT/dist/release/PUBLIC-EXPORT"
 echo "export-public: $(find "$OUT" -type f | wc -l) files after exclusions"
 
 # 3. checks on the result

@@ -72,6 +72,11 @@ const FULL_TREE_SCRIPT: &str = "(function(){/*iy-tree*/var N=0,MAX=1500,KEEP={id
 #[cfg(test)]
 pub(super) const FULL_TREE_SCRIPT_FOR_TESTS: &str = FULL_TREE_SCRIPT;
 
+#[cfg(test)]
+pub(super) fn full_console_script_for_tests(expr: &str) -> String {
+    full_console_script(expr)
+}
+
 /// The most nodes of the full engine's tree that are taken in, and the most bytes of its answer.
 const FULL_TREE_NODES: usize = 1500;
 const FULL_TREE_BYTES: usize = 512 * 1024;

@@ -58,6 +58,14 @@ Public fields:
 - `pub action: u32`
 - `pub name: String`
 - `pub role: Role`
+- `pub state: u8`: What the region is now for a screen reader: the `Hit::SELECTED` ... `Hit::SECRET` bits (same values as the tile ABI's access flags). Not part of the text form of a display list; it travels with the list in the process and into the tile ABI's `Access` operation.
+- `pub value: String`: The text a field holds (cut by the tile ABI); empty for anything else. A `Hit::SECRET` field has none, only a length is said.
+
+Methods:
+
+- `pub fn new(action: u32, name: impl Into<String>, role: Role) -> Hit`: A region with no state: what every `Hit` was before state existed.
+- `pub fn with_state(mut self, state: u8) -> Hit`
+- `pub fn with_value(mut self, value: impl Into<String>) -> Hit`
 
 ### enum `ImageFormat`
 
@@ -637,3 +645,13 @@ Methods:
 - `pub fn left(&self) -> bool`: The app answered `Back`: the person left it.
 - `pub fn frame(&mut self) -> String`: The current frame as display list text.
 - `pub fn apply(&mut self, batch: &str) -> Result<String, String>`: Apply a batch of input lines and return the new frame. A bad batch applies nothing and says why.
+
+### fn `apply_batch`
+
+Apply a batch of input lines to a host and return the new frame as display list text and whether the app answered `Back` (the person left
+it). A bad batch applies nothing and says why. The one rule of [`Session::apply`], for a shell that owns the host itself (a client's
+display-list mode, F-SDK-29).
+
+```rust
+pub fn apply_batch<A: UiApp>(host: &mut Host<A>, batch: &str) -> Result<(String, bool), String>
+```

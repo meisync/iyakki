@@ -1,0 +1,18 @@
+# autotest pilot, batch A (2026-11-21). Written against the Feature text with sha 55bb69598dc623c7; honest subset only: everything not checked is under not-covered.
+row: F-LAUNCH-22
+targets: qemu
+profile: ram
+feature-sha: 55bb69598dc623c7
+doc: the Appearance page offers the wallpaper choice (the shipped drawing is one of the wallpapers)
+clause: 1 the Appearance page offers the wallpaper choice (the shipped drawing is one of the wallpapers)
+not-covered: wallpaper = picture draws the shipped picture when the person has none of their own
+not-covered: a file of their own wins and a bad file is reported
+key s
+wait app=Settings
+skip-unless-button Appearance
+click-sidebar Appearance
+wait app=Settings page=Appearance
+shot page
+expect-not-blank
+expect-text Wallpaper
+expect-page Appearance

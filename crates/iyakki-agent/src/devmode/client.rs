@@ -178,7 +178,7 @@ impl Home {
     pub fn set_moved(&self, name: &str, ip: &str) -> Result<(), String> {
         let mut f = self.file();
         let d = f.devices.iter_mut().find(|d| d.name == name).ok_or_else(|| format!("no paired device called {name}"))?;
-        if iyakki_netscan::mdns::is_local_name(&d.host) {
+        if iyakki_core_local::devscan::is_local_name(&d.host) {
             d.addr = ip.to_string();
         } else {
             d.host = ip.to_string();
@@ -324,7 +324,7 @@ pub const RESOLVE_WAIT: Duration = Duration::from_secs(2);
 
 /// The addresses of `name.local` asked on the local network by our own resolver (no system resolver is involved).
 pub fn resolve_local(name: &str) -> Vec<String> {
-    iyakki_netscan::mdns::net::resolve(name, &iyakki_netscan::mdns::net::Ask::new(RESOLVE_WAIT)).iter().map(|a| a.to_string()).collect()
+    iyakki_core_local::devscan::resolve(name, RESOLVE_WAIT).iter().map(|a| a.to_string()).collect()
 }
 
 /// Do `attempt` against the device's address. A device paired by name is tried at its saved address first; when that fails (no answer,
@@ -340,7 +340,7 @@ pub fn reach<T>(d: &Device, home: Option<&Home>, resolver: &dyn Fn(&str) -> Vec<
 /// answer, for a device paired by address as well as by name. Nothing an announcement says is trusted: every address it gives goes
 /// through `attempt`, the pinned-certificate check, and a device whose certificate differs is refused.
 pub fn reach_by_key<T>(d: &Device, home: Option<&Home>, resolver: &dyn Fn(&str) -> Vec<String>, by_key: &dyn Fn(&str) -> Vec<String>, attempt: &mut dyn FnMut(&str) -> Result<T, String>, note: &mut dyn FnMut(&str)) -> Result<T, String> {
-    let named = iyakki_netscan::mdns::is_local_name(&d.host);
+    let named = iyakki_core_local::devscan::is_local_name(&d.host);
     // only an IP address can be replaced by one found in an announcement; a DNS name is the person's own choice
     let is_ip = d.host.parse::<std::net::IpAddr>().is_ok();
     if !named && !is_ip {
@@ -394,19 +394,18 @@ pub fn reach_by_key<T>(d: &Device, home: Option<&Home>, resolver: &dyn Fn(&str) 
 /// The addresses of the devices that announce the short key id `key_id` (`fp=` in the `_iyakki-dev._tcp` TXT data), asked on the local
 /// network by our own resolver. Link-local IPv6 addresses are left out (they need a scope).
 pub fn find_by_key(key_id: &str) -> Vec<String> {
-    use iyakki_netscan::mdns::net::{scan, Ask};
-    addresses_for_key(&scan(&Ask::new(RESOLVE_WAIT)), key_id)
+    addresses_for_key(&iyakki_core_local::devscan::scan(RESOLVE_WAIT), key_id)
 }
 
 /// The part of [`find_by_key`] that does not need the network: which of the announcements carry this key id.
-pub fn addresses_for_key(found: &[iyakki_netscan::mdns::net::Found], key_id: &str) -> Vec<String> {
+pub fn addresses_for_key(found: &[iyakki_core_local::devscan::Found], key_id: &str) -> Vec<String> {
     let want = auth::norm_fp(key_id);
     if want.len() < 16 {
         return vec![];
     }
     found
         .iter()
-        .filter(|f| f.services.iter().any(|(k, _)| k == iyakki_netscan::mdns::DEV_SERVICE))
+        .filter(|f| f.services.iter().any(|(k, _)| k == iyakki_core_local::devscan::DEV_SERVICE))
         .filter(|f| f.txt_value("fp").is_some_and(|v| auth::norm_fp(v) == want))
         .flat_map(|f| f.addrs.iter())
         .filter(|a| !matches!(a, std::net::IpAddr::V6(v) if v.segments()[0] & 0xffc0 == 0xfe80))
@@ -785,7 +784,7 @@ pub fn pair(home: &Home, host: &str, port: u16, name: &str, code: &str, expect_f
     let key = home.key()?;
     let pubhex = crate::pkg::public_key_hex(&key);
     // a name (`iyakki-0a1b2c.local`) is looked up now; the device keeps the name and the address it was found at
-    let by_name = iyakki_netscan::mdns::is_local_name(host);
+    let by_name = iyakki_core_local::devscan::is_local_name(host);
     let (name_host, host) = if by_name {
         let ip = resolve_local(host).into_iter().next().ok_or_else(|| format!("cannot find {host} on the local network (is the device on, on the same network, and announcing its name?)"))?;
         (Some(host.to_string()), ip)

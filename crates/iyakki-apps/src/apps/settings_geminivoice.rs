@@ -9,6 +9,7 @@
 //!   phrase hand-off, the status with the delay log and the limit meter, and a Stop button that closes the microphone at once.
 //! * Everything here is also a chat tool (`gemini_voice_status`, `gemini_voice_set`, `gemini_voice_stop`).
 
+use crate::safeclamp::SafeClamp;
 use super::*;
 use iyakki_shared::gemini::{ConsentState};
 use iyakki_shared::gemini::{self};
@@ -31,12 +32,13 @@ pub(super) enum GvRow {
     Quiet,
     DayCap,
     SpokenCap,
+    Language,
     Shortcut,
     Wake,
     Stop,
 }
 
-pub(super) const ROWS: [GvRow; 11] = [GvRow::Status, GvRow::Switch, GvRow::Consent, GvRow::VoiceOut, GvRow::SessionLen, GvRow::Quiet, GvRow::DayCap, GvRow::SpokenCap, GvRow::Shortcut, GvRow::Wake, GvRow::Stop];
+pub(super) const ROWS: [GvRow; 12] = [GvRow::Status, GvRow::Switch, GvRow::Consent, GvRow::VoiceOut, GvRow::SessionLen, GvRow::Quiet, GvRow::DayCap, GvRow::SpokenCap, GvRow::Language, GvRow::Shortcut, GvRow::Wake, GvRow::Stop];
 
 fn step(v: u32, up: bool, steps: &[u32]) -> u32 {
     if up { steps.iter().copied().find(|s| *s > v).unwrap_or(*steps.last().unwrap_or(&v)) } else { steps.iter().rev().copied().find(|s| *s < v).unwrap_or(steps[0]) }
@@ -128,6 +130,14 @@ impl SettingsApp {
                 let v = step(c.spoken_cap_chars, up, &SPOKEN_STEPS);
                 self.gv_apply(cx, LiveChange { spoken_cap_chars: Some(v), ..Default::default() }, format!("At most {v} characters of a reply are read aloud."));
             }
+            GvRow::Language => {
+                // automatic first, then the list (English first); the ends do not wrap
+                let at = geminilive::LANGUAGES.iter().position(|(code, _)| *code == c.language).map_or(0, |i| i + 1) as i32;
+                let n = (at + if up { 1 } else { -1 }).clamp_safe(0, geminilive::LANGUAGES.len() as i32) as usize;
+                let code = if n == 0 { "auto" } else { geminilive::LANGUAGES[n - 1].0 };
+                let said = if n == 0 { "The language is automatic: Gemini decides from the speech.".to_string() } else { format!("The language is {}.", geminilive::language_name(code)) };
+                self.gv_apply(cx, LiveChange { language: Some(code.to_string()), ..Default::default() }, said);
+            }
             GvRow::Shortcut => {
                 let i = KEYS.iter().position(|k| *k == c.key).map_or(0, |i| if up { (i + 1) % KEYS.len() } else { (i + KEYS.len() - 1) % KEYS.len() });
                 self.gv_apply(cx, LiveChange { key: Some(KEYS[i].to_string()), ..Default::default() }, format!("The start key is {}.", KEYS[i]));
@@ -161,6 +171,7 @@ impl SettingsApp {
             Key::Char('C') | Key::Char('c') => self.gv_consent_key(cx),
             Key::Char('v') => self.gv_act(cx, GvRow::VoiceOut, 1),
             Key::Char('k') => self.gv_act(cx, GvRow::Shortcut, 1),
+            Key::Char('l') => self.gv_act(cx, GvRow::Language, 1),
             Key::Char('w') => self.gv_act(cx, GvRow::Wake, 1),
             Key::Char('o') => self.gv_act(cx, GvRow::Switch, 1),
             Key::Char('x') | Key::Char('X') => self.gv_stop(cx),
@@ -174,6 +185,7 @@ impl SettingsApp {
             GvRow::Switch => vec![("On / off", ACCENT, 'o')],
             GvRow::Consent => vec![("Consent card", ACCENT, 'C')],
             GvRow::VoiceOut => vec![("Who speaks", ACCENT, 'v')],
+            GvRow::Language => vec![("Next language", ACCENT, 'l'), ("Previous (-)", MUTED, '-')],
             GvRow::Shortcut => vec![("Next key", ACCENT, 'k')],
             GvRow::Wake => vec![("Wake hand-off on / off", ACCENT, 'w')],
             GvRow::SessionLen | GvRow::Quiet | GvRow::DayCap | GvRow::SpokenCap => vec![("More (+)", ACCENT, '+'), ("Less (-)", MUTED, '-')],
@@ -186,7 +198,7 @@ impl SettingsApp {
     pub(super) fn gv_row_text(&self, cx: &AppCx, row: GvRow) -> (String, String) {
         let c = Self::gv_cfg(cx);
         let today = iyakki_clock::today();
-        let key_present = cx.secrets().resolve(gemini::KEY_REF, None).is_ok();
+        let key_present = cx.secrets_api().has_ref(gemini::KEY_REF);
         match row {
             GvRow::Status => {
                 let live = if geminilive::mic_open() { "A session is open: the microphone is open (red sign)." } else { "No session is open." };
@@ -203,6 +215,7 @@ impl SettingsApp {
             GvRow::Quiet => ("Quiet time".into(), format!("The microphone closes after {} seconds without speech.", c.idle_secs)),
             GvRow::DayCap => ("Daily cap of microphone time".into(), format!("{} seconds a day sent to Google (your own cap; Google's free limit is told plainly when reached).", c.day_cap_secs)),
             GvRow::SpokenCap => ("Spoken reply".into(), format!("At most {} characters are read aloud; the rest stays on the screen.", c.spoken_cap_chars)),
+            GvRow::Language => ("Language".into(), format!("{}. Press L for the next language, - for the previous; the first choice is automatic. Sent to Gemini as the speech language and told to it in words. The cost guide (tokens Google reported today, a rough guide) is in the status row.", geminilive::language_name(&c.language))),
             GvRow::Shortcut => ("Start key".into(), format!("{} starts a session; Esc ends it. Press K for the next name.", c.key)),
             GvRow::Wake => ("Wake phrase hand-off (experimental, opt-in)".into(), if c.wake_handoff { "On: the local wake phrase may open a session. Nothing is sent before it is heard.".into() } else { "Off (the default).".into() }),
             GvRow::Stop => ("Stop now".into(), "Closes the microphone at once and ends any open session.".into()),

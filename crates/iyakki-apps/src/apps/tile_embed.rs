@@ -30,6 +30,15 @@ fn target_rect(target_json: &str, element: &dyn Fn(&str) -> Option<R>) -> Option
     }
 }
 
+/// The element ids the mounted viewers name as their target (sorted, no repeats, at most 64): the page is built with these marked.
+pub fn element_ids(embeds: &[TileEmbed]) -> Vec<String> {
+    let mut ids: Vec<String> = embeds.iter().filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.target_json).ok().and_then(|v| v.as_str().map(str::to_string))).collect();
+    ids.sort();
+    ids.dedup();
+    ids.truncate(64);
+    ids
+}
+
 fn clip(r: R, to: R) -> Option<R> {
     let (x0, y0) = (r.x.max(to.x), r.y.max(to.y));
     let (x1, y1) = ((r.x + r.w).min(to.x + to.w), (r.y + r.h).min(to.y + to.h));
@@ -60,7 +69,7 @@ mod tests {
     use super::*;
 
     fn e(id: u32, target: &str) -> TileEmbed {
-        TileEmbed { id, kind: "markdown".into(), target_json: target.into(), text: String::new(), hosts: vec![], profile: String::new() }
+        TileEmbed { id, kind: "markdown".into(), target_json: target.into(), text: String::new(), hosts: vec![], profile: String::new(), options_json: "{}".into() }
     }
 
     fn none(_: &str) -> Option<R> {
@@ -79,6 +88,13 @@ mod tests {
         assert_eq!(p[0].visible, R::new(0.0, 40.0, 300.0, 60.0));
         // wholly off screen, an unknown element, and junk are left out
         assert!(place(&[e(1, r#"{"x":0,"y":900,"w":300,"h":100}"#), e(2, r#""nothing""#), e(3, "17"), e(4, r#"{"x":-1,"y":0,"w":3,"h":3}"#)], (0.0, 0.0), 1.0, view, &none).is_empty());
+    }
+
+    #[test]
+    fn the_element_ids_are_the_string_targets_sorted_once_each() {
+        let list = [e(1, r#""chart""#), e(2, r#"{"x":0,"y":0,"w":3,"h":3}"#), e(3, r#""a""#), e(4, r#""chart""#), e(5, "17")];
+        assert_eq!(element_ids(&list), ["a", "chart"]);
+        assert!(element_ids(&[]).is_empty());
     }
 
     #[test]

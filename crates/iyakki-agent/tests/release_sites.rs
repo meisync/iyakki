@@ -70,3 +70,78 @@ fn one_site_can_be_picked_and_a_missing_list_or_option_is_refused() {
     assert_eq!(run(&["--dry-run", "--list", "/nonexistent/list.tsv"]).status.code(), Some(2));
     let _ = std::fs::remove_dir_all(d);
 }
+
+fn signed_in_dir(tag: &str) -> PathBuf {
+    let d = out_dir(tag).join("signed-in");
+    std::fs::create_dir_all(&d).unwrap();
+    // a fixture of what the owner supplies for one site: the steps after the goto, secrets by variable name, and a text only a signed-in page shows
+    std::fs::write(
+        d.join("slack.json"),
+        r#"{"steps":[{"fill":{"label":"Email","value_env":"IYAKKI_TEST_SLACK_USER"}},{"fill":{"label":"Password","value_env":"IYAKKI_TEST_SLACK_PASSWORD"}},{"click":{"role":"button","name":"Sign in"}}],"ok_text":"All unreads"}"#,
+    )
+    .unwrap();
+    std::fs::write(d.join("notion.json"), r#"{"steps":[],"ok_text":""}"#).unwrap();
+    d
+}
+
+#[test]
+fn the_signed_in_pass_builds_specs_the_real_parser_accepts_with_secrets_by_variable_name_and_skips_what_it_cannot_run() {
+    if !have("python3") {
+        return;
+    }
+    let d = out_dir("signed");
+    let sd = signed_in_dir("signed-dir");
+    let o = run(&["--dry-run", "--signed-in", sd.to_str().unwrap(), "--out", d.to_str().unwrap()]);
+    let out = String::from_utf8_lossy(&o.stdout).to_string();
+    assert!(o.status.success(), "{out} {}", String::from_utf8_lossy(&o.stderr));
+    let text = std::fs::read_to_string(d.join("slack-signed-in.json")).unwrap();
+    let spec = iyakki_agent::browserrun::parse_spec(&text).unwrap();
+    // goto, two secret fills, a click, the signed-in text, the wall check, the screenshot
+    assert_eq!(spec.steps.len(), 7, "{text}");
+    assert!(text.contains("IYAKKI_TEST_SLACK_PASSWORD") && text.contains("All unreads") && !text.to_ascii_lowercase().contains("hunter"));
+    // a site with no steps file is skipped, and so is a steps file that says nothing
+    assert!(out.contains("Gmail") && out.contains("skip") && out.contains("no "), "{out}");
+    assert!(out.contains("Notion") && out.contains("needs steps and ok_text"), "{out}");
+    assert!(!d.join("gmail-signed-in.json").exists() && !d.join("notion-signed-in.json").exists());
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn a_signed_in_run_without_its_secrets_is_skipped_naming_the_variables_and_with_them_runs_without_the_values_in_any_file_or_line() {
+    if !have("python3") {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let d = out_dir("signedrun");
+    let sd = signed_in_dir("signedrun-dir");
+    // a stand-in `iyakki` that records the spec it was given and passes
+    let bin = d.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let fake = bin.join("iyakki");
+    std::fs::write(&fake, "#!/bin/sh\ncp \"$2\" \"$(dirname \"$0\")/seen.json\"\nexit 0\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let go = |secrets: bool| {
+        let mut c = std::process::Command::new("sh");
+        c.arg(root().join("dist/webview/release-sites.sh")).args(["--only", "Slack", "--signed-in", sd.to_str().unwrap(), "--out", d.join("out").to_str().unwrap()]).env("PATH", &path).env_remove("IYAKKI_TEST_SLACK_USER").env_remove("IYAKKI_TEST_SLACK_PASSWORD");
+        if secrets {
+            c.env("IYAKKI_TEST_SLACK_USER", "tester@example.org").env("IYAKKI_TEST_SLACK_PASSWORD", "correct-horse-battery");
+        }
+        c.output().unwrap()
+    };
+    let o = go(false);
+    let out = String::from_utf8_lossy(&o.stdout).to_string();
+    assert!(o.status.success() && out.contains("skip") && out.contains("IYAKKI_TEST_SLACK_PASSWORD") && out.contains("IYAKKI_TEST_SLACK_USER") && !bin.join("seen.json").exists(), "{out}");
+    let o = go(true);
+    let out = String::from_utf8_lossy(&o.stdout).to_string();
+    assert!(o.status.success() && out.contains("Slack") && out.contains("pass"), "{out} {}", String::from_utf8_lossy(&o.stderr));
+    assert!(bin.join("seen.json").exists(), "the runner got the spec");
+    for f in std::fs::read_dir(d.join("out")).unwrap().flatten() {
+        if f.path().is_file() {
+            let t = std::fs::read_to_string(f.path()).unwrap_or_default();
+            assert!(!t.contains("correct-horse") && !t.contains("tester@example.org"), "a secret reached {}", f.path().display());
+        }
+    }
+    assert!(!out.contains("correct-horse") && !out.contains("tester@example.org"));
+    let _ = std::fs::remove_dir_all(d);
+}

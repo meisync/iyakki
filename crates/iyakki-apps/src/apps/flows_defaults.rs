@@ -9,7 +9,6 @@
 //! `flow.outside_messages`, `flow.outside_messages.policy`). Nothing on this page shows an input value or a secret.
 
 use iyakki_shared::flows_channel_policy::Policy;
-use iyakki_flow::assist_activity;
 use iyakki_flow::assist_profile::{ProfileModel, MAX_MODELS, MAX_TIMEOUT_SECS, MIN_TIMEOUT_SECS};
 use iyakki_flow::assist_run::WholeTrial;
 
@@ -132,7 +131,7 @@ impl FlowsApp {
     }
 
     fn def_rows(&self, tab: DefTab) -> Vec<Row> {
-        let book = self.env.assist_store();
+        let book = super::flows_remote::assist(&*self.env);
         let g = book.global();
         let mut r = vec![];
         match tab {
@@ -158,7 +157,7 @@ impl FlowsApp {
                 r.push(row("Add a model", "name it", "Enter, then type provider/model and press Enter.", RowKind::Text, RowKey::ModelAdd));
             }
             DefTab::Messages => {
-                let p = self.env.msg_policy().policy();
+                let p = super::flows_remote::msg(&*self.env).policy();
                 r.push(row("Quiet hours", match p.quiet { Some((s, e)) => format!("{} to {}", hm(s), hm(e)), None => "off".into() }, "A message in these hours waits and is sent when they end; an error always goes through; the INBOX note is made at once.", RowKind::Toggle, RowKey::QuietOn));
                 if let Some((s, e)) = p.quiet {
                     r.push(row("  quiet hours start", hm(s), "Left and Right: 30 minutes.", RowKind::Step, RowKey::QuietStart));
@@ -166,8 +165,8 @@ impl FlowsApp {
                 }
                 r.push(row("Ask again when nobody answers", match p.escalate_after_secs { Some(n) => format!("after {} min", n / 60), None => "off".into() }, "A message that needs you and is not acknowledged in time is sent once more, to the room below. Left and Right: off, 15, 30, 60, 120, 480 minutes.", RowKind::Step, RowKey::EscAfter));
                 r.push(row("  room for the second message", if p.escalate_room.is_empty() { "the main room".to_string() } else { p.escalate_room.clone() }, "Enter edits the saved room name.", RowKind::Text, RowKey::EscRoom));
-                r.push(row("Waiting", format!("{} held for quiet hours, {} waiting for an answer", self.env.msg_policy().held().len(), self.env.msg_policy().watching().len()), "Held messages leave by themselves when the quiet hours end.", RowKind::Info, RowKey::Info));
-                for w in self.env.msg_policy().watching() {
+                r.push(row("Waiting", format!("{} held for quiet hours, {} waiting for an answer", super::flows_remote::msg(&*self.env).held().len(), super::flows_remote::msg(&*self.env).watching().len()), "Held messages leave by themselves when the quiet hours end.", RowKind::Info, RowKey::Info));
+                for w in super::flows_remote::msg(&*self.env).watching() {
                     r.push(row(&format!("  answered: {}", w.flow), "I saw it", "Enter stops the second message for this flow.", RowKind::Action, RowKey::Ack(w.flow)));
                 }
                 for f in &self.flows {
@@ -185,11 +184,11 @@ impl FlowsApp {
     /// The Activity lines of the chosen flow: its state, its counters and what the agent did, newest first.
     fn def_activity(&self, flow_i: usize) -> Vec<(String, [u8; 4])> {
         let Some(f) = self.flows.get(flow_i) else { return vec![("No flow yet.".into(), MUTED)] };
-        let book = self.env.assist_store();
+        let book = super::flows_remote::assist(&*self.env);
         let now = self.now();
-        let ro = assist_activity::readout(&book, &f.id, now, 30);
+        let ro = book.readout(&f.id, now, 30);
         let n = |k: &str| ro["counters"][k].as_u64().unwrap_or(0);
-        let mode = self.env.store().get_draft(&f.id).map_or("off".to_string(), |d| format!("{:?}", d.defaults.assist.mode).to_ascii_lowercase());
+        let mode = self.env.get_draft(&f.id).map_or("off".to_string(), |d| format!("{:?}", d.defaults.assist.mode).to_ascii_lowercase());
         let mut out = vec![(format!("{} · assist {}{}{}", f.name, mode, if ro["paused"] == true { " · PAUSED" } else { "" }, if ro["cooling"] == true { " · cooling down" } else { "" }), TEXT)];
         out.push((format!("{} waiting · {} approved · {} published by itself · {} rejected · {} rolled back", ro["waiting"].as_array().map_or(0, Vec::len), n("approved"), n("auto_published"), n("rejected"), n("rolled_back")), MUTED));
         out.push((format!("today: {} publishes · {} drafts · {}.{:02} spent", n("publishes_today"), n("drafts_today"), n("cents_today") / 100, n("cents_today") % 100), MUTED));
@@ -262,11 +261,11 @@ impl FlowsApp {
     }
 
     fn def_audit(&self, action: &str, detail: &str) {
-        iyakki_flow::host::Host::audit(self.env.host(), action, &format!("{detail} (by {})", self.env.who()));
+        self.env.audit(action, &format!("{detail} (by {})", self.env.who()));
     }
 
     fn def_profile(&self, v: &mut DefView, f: impl FnOnce(&mut iyakki_flow::assist_profile::AgentProfile)) {
-        let book = self.env.assist_store();
+        let book = super::flows_remote::assist(&*self.env);
         let mut p = book.global().profile;
         f(&mut p);
         match book.set_profile(p) {
@@ -283,7 +282,7 @@ impl FlowsApp {
     }
 
     fn def_policy(&self, v: &mut DefView, f: impl FnOnce(&mut Policy)) {
-        let book = &self.env.msg_policy();
+        let book = super::flows_remote::msg(&*self.env);
         let mut p = book.policy();
         f(&mut p);
         match book.set_policy(p) {
@@ -302,7 +301,7 @@ impl FlowsApp {
     /// Change the selected row: `dir` is -1 or +1 for a step, 0 for Enter.
     fn def_apply(&mut self, v: &mut DefView, dir: i32) {
         let Some(r) = v.rows.get(v.sel).cloned() else { return };
-        let book = self.env.assist_store();
+        let book = super::flows_remote::assist(&*self.env);
         let g = book.global();
         match (r.key.clone(), dir) {
             (RowKey::Enabled, 0) => {
@@ -362,7 +361,7 @@ impl FlowsApp {
                 }
             }
             (RowKey::QuietOn, 0) => {
-                let off = self.env.msg_policy().policy().quiet.is_none();
+                let off = super::flows_remote::msg(&*self.env).policy().quiet.is_none();
                 let offset = iyakki_clock::Zone::system().local(iyakki_clock::now_unix()).offset / 60;
                 self.def_policy(v, |p| {
                     if off {
@@ -385,13 +384,13 @@ impl FlowsApp {
             }),
             (RowKey::EscAfter, d) if d != 0 => {
                 const STEPS: [u64; 6] = [0, 15, 30, 60, 120, 480];
-                let now = self.env.msg_policy().policy().escalate_after_secs.map_or(0, |s| s / 60);
+                let now = super::flows_remote::msg(&*self.env).policy().escalate_after_secs.map_or(0, |s| s / 60);
                 let i = STEPS.iter().position(|m| *m >= now).unwrap_or(0) as i32;
                 let n = STEPS[(i + d).clamp(0, 5) as usize];
                 self.def_policy(v, |p| p.escalate_after_secs = if n == 0 { None } else { Some(n * 60) });
             }
             (RowKey::EscRoom, 0) => {
-                let room = self.env.msg_policy().policy().escalate_room;
+                let room = super::flows_remote::msg(&*self.env).policy().escalate_room;
                 self.def_edit(v, RowKey::EscRoom, &room, "saved room name");
             }
             (RowKey::FlowSwitch(id), 0) => {
@@ -409,7 +408,7 @@ impl FlowsApp {
                 }
             }
             (RowKey::Ack(flow), 0) => {
-                let n = self.env.msg_policy().ack(&flow);
+                let n = super::flows_remote::msg(&*self.env).ack(&flow);
                 self.def_audit("flow.outside_messages.ack", &format!("{flow}: {n} acknowledged"));
                 v.note = format!("{n} message(s) of this flow will not be asked about again.");
                 v.note_ok = true;
@@ -430,7 +429,7 @@ impl FlowsApp {
     fn def_commit(&mut self, v: &mut DefView) {
         let Some((key, t)) = v.edit.take() else { return };
         let text = t.value.trim().to_string();
-        let book = self.env.assist_store();
+        let book = super::flows_remote::assist(&*self.env);
         match key {
             RowKey::MatrixRoom => {
                 let g = book.global();

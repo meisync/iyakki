@@ -240,7 +240,7 @@ pub fn card(svc: &Services, user: &str, dir: &Path, src: &SourceCfg, key: &(Sign
             files,
             store_has,
             token_present: token_present(svc, user, &src.id),
-            yank_note: YANK_NOTE,
+            yank_note: YANK_NOTE.to_string(),
         },
         text,
     ))

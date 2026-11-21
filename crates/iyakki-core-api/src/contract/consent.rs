@@ -18,6 +18,9 @@ pub enum ConsentKind {
     /// A new remote client asking to be paired.
     Pairing,
     Other,
+    /// A kind a newer release added; it is shown like `Other` and, because nobody knows what it is, only the machine's own screen may answer it.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

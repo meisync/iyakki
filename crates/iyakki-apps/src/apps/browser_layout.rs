@@ -75,6 +75,16 @@ pub struct Layout {
     pub rev: u32,
     /// The page's own background, for the whole view.
     pub canvas: Option<[u8; 4]>,
+    /// The boxes of the elements the page was built to mark (`Block::Mark`), by `id`, in layout pixels.
+    pub elements: Vec<(String, R)>,
+}
+
+impl Layout {
+    /// The box of the marked element `id` in page pixels (layout pixels over the scale `s`): where a viewer the app mounted on it goes.
+    pub fn element(&self, id: &str, s: f32) -> Option<R> {
+        let s = if s.is_finite() && s > 0.0 { s } else { 1.0 };
+        self.elements.iter().find(|(i, _)| i == id).map(|(_, r)| R::new(r.x / s, r.y / s, r.w / s, r.h / s))
+    }
 }
 
 /// What text and rules are drawn on, which decides their default colours.
@@ -172,6 +182,10 @@ struct Sink<'a> {
     layers: Vec<Layer>,
     /// The nearest positioned ancestors, innermost last; the first is the page.
     anc: Vec<Anc>,
+    /// Elements whose start mark was met and whose end has not: `(id, left, top, width, height the page asked)`.
+    open: Vec<(String, f32, f32, f32, f32)>,
+    /// The boxes of the marked elements that ended (F-SDK-14).
+    elements: Vec<(String, R)>,
 }
 
 /// The margin box of a float.
@@ -723,7 +737,7 @@ pub fn layout_text(g: &mut Gfx, doc: &Doc, width: f32, s: f32, ts: f32, infos: &
         None => Ctx::on(THEME_BG, true),
     };
     let base = 16.0 * s;
-    let mut sink = Sink { prims: &mut prims, links: &mut links, controls: &mut controls, focus: &mut focus, ox: 0.0, floats: Vec::new(), float_top: 0.0, layers: Vec::new(), anc: vec![Anc { x: 0.0, y: 0.0, w: width, hanging: Vec::new() }] };
+    let mut sink = Sink { prims: &mut prims, links: &mut links, controls: &mut controls, focus: &mut focus, ox: 0.0, floats: Vec::new(), float_top: 0.0, layers: Vec::new(), anc: vec![Anc { x: 0.0, y: 0.0, w: width, hanging: Vec::new() }], open: Vec::new(), elements: Vec::new() };
     let mut prev_margin = 0.0;
     let y = blocks(g, &doc.blocks, &env, 0.0, width, 0.0, &ctx, &mut prev_margin, &mut sink);
     // floats may hang below the last line
@@ -737,11 +751,12 @@ pub fn layout_text(g: &mut Gfx, doc: &Doc, width: f32, s: f32, ts: f32, infos: &
     let (under, over_flow): (Vec<Layer>, Vec<Layer>) = layers.into_iter().partition(|l| l.z < 0);
     let mut below: Vec<Prim> = under.into_iter().flat_map(|l| l.prims).collect();
     let above: Vec<Prim> = over_flow.into_iter().flat_map(|l| l.prims).collect();
+    let elements = std::mem::take(&mut sink.elements);
     drop(sink);
     below.append(&mut prims);
     prims = below;
     prims.extend(above);
-    Layout { prims, height: y + base, links, controls, focus, key: key_of(width, s), rev, canvas }
+    Layout { prims, height: y + base, links, controls, focus, key: key_of(width, s), rev, canvas, elements }
 }
 
 /// Lay blocks one under the other in a column `width` wide whose left edge is at `ox`. Returns where the next one starts.
@@ -783,6 +798,16 @@ fn blocks(g: &mut Gfx, list: &[Block], env: &Env, ox: f32, width: f32, y: f32, c
                 sink.prims.insert(first, Prim { x: ox, y, w: width, h, kind: Kind::Rect { color: pre_bg, radius: 8.0 * s } });
                 y += h + base * 0.8;
                 *prev_margin = 0.0;
+            }
+            Block::Mark { id, end, height } => {
+                if !*end {
+                    sink.open.push((id.clone(), ox, y, width, *height * s));
+                } else if let Some(i) = sink.open.iter().rposition(|o| &o.0 == id) {
+                    // the element keeps the room the page gave it, so what follows starts below the viewer
+                    let (id, x, y0, w, want) = sink.open.remove(i);
+                    y = y.max(y0 + want);
+                    sink.elements.push((id, R::new(x, y0, w, (y - y0).max(0.0))));
+                }
             }
             Block::Rule => {
                 y += base * 0.4;
@@ -1293,7 +1318,7 @@ fn intrinsic(g: &mut Gfx, list: &[Block], env: &Env, ctx: &Ctx, cap: f32) -> f32
                 f32::max(w, line) + t.indent as f32 * 24.0 * s + if t.marker.is_empty() { 0.0 } else { 30.0 * s }
             }
             Block::Pre(text) => text.lines().map(|l| l.chars().count()).max().unwrap_or(0) as f32 * 14.0 * s * 0.6 + 20.0 * s,
-            Block::Rule => 0.0,
+            Block::Rule | Block::Mark { .. } => 0.0,
             Block::Table(t) => match px(t.width, s, cap) {
                 Some(w) if matches!(t.width, Length::Px(_)) => w,
                 _ => {
@@ -1559,7 +1584,7 @@ fn text_block(g: &mut Gfx, t: &TextBlock, env: &Env, width: f32, y: f32, base: f
 /// A scratch sink for measuring: what is laid out in it is thrown away.
 fn with_scratch<T>(w: f32, f: impl FnOnce(&mut Sink) -> T) -> T {
     let (mut prims, mut links, mut controls, mut focus) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut sink = Sink { prims: &mut prims, links: &mut links, controls: &mut controls, focus: &mut focus, ox: 0.0, floats: Vec::new(), float_top: 0.0, layers: Vec::new(), anc: vec![Anc { x: 0.0, y: 0.0, w, hanging: Vec::new() }] };
+    let mut sink = Sink { prims: &mut prims, links: &mut links, controls: &mut controls, focus: &mut focus, ox: 0.0, floats: Vec::new(), float_top: 0.0, layers: Vec::new(), anc: vec![Anc { x: 0.0, y: 0.0, w, hanging: Vec::new() }], open: Vec::new(), elements: Vec::new() };
     f(&mut sink)
 }
 
@@ -1926,6 +1951,36 @@ mod tests {
         let infos = vec![ImgInfo { size: Some((100, 100)), failed: false }; doc.images.len()];
         let mut g = Gfx::new(100, 100);
         layout(&mut g, &doc, width, 1.0, &infos, 0)
+    }
+
+    fn lay_marked(html: &str, css: &str, width: f32, ids: &[&str]) -> Layout {
+        let tree = iyakki_web::html::parse(html);
+        let vp = Viewport::default();
+        let mut n = 0;
+        let sheet = parse_sheet(css, &vp, &mut n);
+        let wanted: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+        let doc = iyakki_web::doc::build_styled_marked(&tree, &StyleSheets::new(&[sheet]), &vp, &wanted);
+        let mut g = Gfx::new(100, 100);
+        layout(&mut g, &doc, width, 1.0, &[], 0)
+    }
+
+    #[test]
+    fn a_marked_element_has_a_box_by_id_that_keeps_the_room_the_page_gave_it() {
+        let html = "<p>before</p><div id=\"chart\"></div><p>after</p><div id=\"other\">words in a box</div>";
+        // a page nobody marked has no boxes by id
+        assert!(lay_marked(html, "#chart{height:120px}", 400.0, &[]).elements.is_empty());
+        let l = lay_marked(html, "#chart{height:120px}", 400.0, &["chart", "missing"]);
+        let r = l.element("chart", 1.0).expect("the placeholder has a box");
+        assert!((r.h - 120.0).abs() < 0.5 && r.w > 300.0, "{r:?}");
+        assert!(l.element("other", 1.0).is_none() && l.element("missing", 1.0).is_none(), "only the asked ids are marked");
+        // what follows starts below the viewer, not under it
+        let after = word(&l, "after");
+        assert!(after.1 >= r.y + r.h - 0.5, "after {after:?} chart {r:?}");
+        // an element with words in it has the box of its words; the scale divides the layout pixels
+        let l2 = lay_marked(html, "", 400.0, &["other"]);
+        let o = l2.element("other", 1.0).expect("a box of words");
+        assert!(o.h > 8.0, "{o:?}");
+        assert_eq!(l2.element("other", 2.0).map(|b| b.h), Some(o.h / 2.0));
     }
 
     /// Every word, as (text, x, y, width).

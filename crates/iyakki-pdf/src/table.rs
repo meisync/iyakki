@@ -103,24 +103,39 @@ pub fn find_tables(lines: &[TextLine]) -> Vec<Table> {
             i += 1;
             continue;
         }
-        // a block of neighbouring lines with two or more fields each
+        // a block of neighbouring lines with two or more fields each; once the row spacing is known, a line much closer to the one
+        // above than a row is (a wrapped cell) belongs to the row above, whatever its number of fields
         let mut j = i;
-        while j + 1 < lines.len() && all[j + 1].len() >= 2 {
+        let mut row_gap: Option<f64> = None;
+        let mut cont = vec![false; lines.len()];
+        while j + 1 < lines.len() {
             let gap = lines[j].y - lines[j + 1].y;
             let size = lines[j].size.max(lines[j + 1].size);
             if gap <= 0.0 || gap > ROW_GAP * size {
                 break;
             }
-            j += 1;
+            let wrapped = row_gap.is_some_and(|g| gap < 0.75 * g) && !all[j + 1].is_empty();
+            if all[j + 1].len() >= 2 || wrapped {
+                if wrapped {
+                    cont[j + 1] = true;
+                } else if row_gap.is_none() {
+                    row_gap = Some(gap);
+                }
+                j += 1;
+            } else {
+                break;
+            }
         }
-        if j + 1 - i >= MIN_ROWS {
+        let real_rows = (i..=j).filter(|&k| !cont[k]).count();
+        if real_rows >= MIN_ROWS {
             let size = lines[i..=j].iter().map(|l| l.size).fold(0.0, f64::max);
             let block = &all[i..=j];
             let cols = columns(block, size);
             if cols.len() >= 2 && cols.len() <= MAX_COLUMNS {
                 let mut rows: Vec<Vec<String>> = Vec::new();
                 let mut multi = 0usize;
-                for r in block {
+                for (k, r) in block.iter().enumerate() {
+                    let wrapped = cont[i + k] && !rows.is_empty();
                     let mut cells = vec![String::new(); cols.len()];
                     let mut filled = 0;
                     for f in r {
@@ -131,6 +146,18 @@ pub fn find_tables(lines: &[TextLine]) -> Vec<Table> {
                             cells[c].push(' ');
                         }
                         cells[c].push_str(&f.text);
+                    }
+                    if wrapped {
+                        let last: &mut Vec<String> = rows.last_mut().unwrap();
+                        for (c, t) in cells.iter().enumerate() {
+                            if !t.is_empty() {
+                                if !last[c].is_empty() {
+                                    last[c].push(' ');
+                                }
+                                last[c].push_str(t);
+                            }
+                        }
+                        continue;
                     }
                     if filled >= 2 {
                         multi += 1;

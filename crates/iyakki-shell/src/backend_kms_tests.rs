@@ -1,5 +1,6 @@
 use super::*;
 use crate::display::kms::FakeDrm;
+use iyakki_core_api::screenfacts::ScreenFacts as _;
 use crate::display::outputs::Placement;
 use crate::memgate::{features_with, DisplayMode, MemFacts, Switch, GIB};
 
@@ -230,8 +231,9 @@ fn one_screen_is_enough_for_the_card_when_the_shell_was_asked_to_drive_it() {
     std::fs::create_dir_all(&p).unwrap();
     std::fs::write(p.join("status"), "connected\n").unwrap();
     std::fs::write(p.join("modes"), "1920x1080\n1280x720\n").unwrap();
-    assert_eq!(pick_card(&d), None, "two are needed for several displays");
-    assert_eq!(pick_card_with(&d, 1), Some("/dev/dri/card0".into()), "one is enough for one screen");
+    let facts = iyakki_core_local::LocalScreenFacts::at(&d, &d);
+    assert_eq!(facts.card_with(2), None, "two are needed for several displays");
+    assert_eq!(facts.card_with(1), Some("/dev/dri/card0".into()), "one is enough for one screen");
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -264,13 +266,14 @@ fn the_card_is_the_one_whose_sysfs_has_two_connected_connectors() {
     mk("card0-eDP-1", "connected");
     mk("card0-HDMI-A-1", "disconnected");
     mk("card1-DP-1", "connected");
-    assert_eq!(pick_card(&d), None, "one connected per card");
+    let card = |n: usize| iyakki_core_local::LocalScreenFacts::at(&d, &d).card_with(n);
+    assert_eq!(card(2), None, "one connected per card");
     mk("card1-DP-2", "connected");
-    assert_eq!(pick_card(&d), Some("/dev/dri/card1".into()));
+    assert_eq!(card(2), Some("/dev/dri/card1".into()));
     mk("card0-HDMI-A-1", "connected");
-    assert_eq!(pick_card(&d), Some("/dev/dri/card0".into()), "the first card");
+    assert_eq!(card(2), Some("/dev/dri/card0".into()), "the first card");
     // the fallback status lists the connected outputs and why
-    publish_fallback(&d, "tests");
+    publish_fallback(&iyakki_core_local::LocalScreenFacts::at(&d, &d), "tests");
     let st = hub().status();
     assert!(!st.kms && st.why_not == "tests" && st.outputs.len() == 4, "{st:?}");
     let _ = std::fs::remove_dir_all(&d);
@@ -282,4 +285,22 @@ fn the_shell_takes_the_real_loop_only_where_the_real_card_exists() {
     let (mut sh, _) = crate::shell::tests::shell_with_users("kms-no");
     let stop = AtomicBool::new(true);
     assert!(matches!(maybe_run(&mut sh, &stop), Outcome::NotUsed));
+}
+
+#[test]
+fn the_fallback_status_and_the_card_come_from_the_facts_the_shell_was_given_and_not_from_sysfs() {
+    let facts = iyakki_core_fake::FakeScreenFacts::default();
+    facts.connector("/dev/dri/card0", "eDP-1", true, &[(2560, 1600), (1280, 800)]);
+    facts.connector("/dev/dri/card0", "HDMI-A-1", false, &[(1920, 1080)]);
+    facts.connector("/dev/dri/card1", "DP-1", true, &[(1920, 1080)]);
+    publish_fallback(&facts, "made up");
+    let st = hub().status();
+    assert!(!st.kms && st.why_not == "made up" && st.outputs.len() == 2, "{st:?}");
+    assert_eq!(st.outputs[0].name, "eDP-1");
+    assert_eq!(st.outputs[0].current, Some((2560, 1600)));
+    assert_eq!(facts.card_with(1), Some("/dev/dri/card0".into()));
+    assert_eq!(facts.card_with(2), None);
+    // the shell asks its own core: a shell on a made-up machine sees no screens through it
+    let (sh, _) = crate::shell::tests::shell_with_users("kms-facts");
+    let _ = sh.screen_facts().connectors();
 }

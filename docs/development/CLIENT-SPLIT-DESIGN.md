@@ -217,6 +217,37 @@ Audio, microphone and camera exist on two sides: the **client device** (the brow
 Tests (fake devices): two holders of one exclusive device are refused and the local one wins; a lease is released on disconnect; audio routing never opens both
 sinks by accident; several clients and tenants get separate virtual device names; a cloud profile offers no instance device. Status: built and tested with fakes, see "The media half" in section 6; rule 7's red band on the instance screen is drawn (the existing REC sign) from the client sources that are streaming; the page shows its own.
 
+## 7c. Display-list mode (additive, 2026-11-19, D-CLIENT-PROTO-DISPLAYLIST)
+
+A client that offers `display.list` in `hello` (the instance always offers it) may show an SDK app of the instance as a display list instead of
+(beside) the machine's picture. Client to instance: `app_open {app, w, h}` (`app` is an id of `LIST_APPS`: `sample`, `markdown`; w and h are
+the pane in logical units, 100 to 4096), `app_input {lines}` (the SDK's text input lines, one batch, answered by the next frame), `app_close`.
+Instance to client (`iyakki_core_api::client::AppMsg`, a text message with its own tags): `app_list {app, text}` (a frame, at most 512 KB),
+`app_closed {app, reason}` (`closed`, `left`, `too_big`), `app_err {code, message}` (`unsupported`, `not_found`, `denied`, `bad_request`,
+`not_open`, `too_big`, `failed`). One app per session; the role, the cloud mode's hidden apps and the audit log apply as when the app is opened on
+the machine; the input lines are never audited. The existing messages and the picture stream are unchanged; a client that does not offer the
+capability agrees on exactly what it did before. The page draws the list with the engine's `ui_*` commands (`js/uidisplay.js`) in a window or,
+on a narrow or upright touch page, filling the page.
+
+## 7d. File transfer through the page (additive, 2026-11-19, F-CLIENT-01)
+
+Capability `files.transfer` (offered in `hello` by an instance whose media half is wired; never needed). Client to instance: `file_list {dir}`, `file_get {id, path}`,
+`file_put {id, path, size}`, `file_end {id}`, `file_cancel {id}`; the bytes travel as binary chunks of at most 32 KB, `[id: u32 big endian][bytes]`, stream 6 to the
+client and stream 7 from it. Instance to client (`iyakki_core_api::client::FileMsg`, texts with `file_` tags that the engine passes on and the page reads):
+`file_list`, `file_get_ok`, `file_done`, `file_put_ok`, `file_saved`, `file_err {id, code, message}` (codes: `unsupported`, `capability_missing`, `role_denied`,
+the broker's denial codes such as `not_granted` and `card_declined`, `bad_request`, `too_big`, `not_found`, `busy`, `failed`). Everything goes through the core's files
+facet (the home folder only, no links, no hidden names, 8 MB at most, `Files::read_bytes` and the change `SaveBytes` through the change book). The device must have
+been given `files.client` (Settings or the chat tool `client_device_permission`, role `full`); the machine then asks on its own screen once for browsing and for every
+file that goes either way, and nothing is read or saved before the yes. One upload and one download at a time; the audit lines carry sizes, never names.
+
+## 7e. Sound for each person (2026-11-19, F-CLIENT-03)
+
+By default one sound per machine goes to the client of the person the machine's sound belongs to (decision D-CLIENT-03). With the setting `sound-per-person` (the
+chat tool `client_sound_mode`, which asks every time) the mixer builds one bus per owner of a sound (`SourceWriter::set_owner`; the embedded player and the sound of
+an app set it), and each client hears only its own person's bus; the machine's own sounds (no owner) go to the person the machine's sound belongs to. Opus is not
+written: an in-house encoder (the CELT and SILK analysis, the range coder, the pulse search) is several thousand lines and has no encoder in the repository to
+check it against; PCM stays the only coding (about 190 KB/s a client).
+
 ## 8. Open questions for the owner
 
 1. Window program: installed web engine first (small, as the connector decision says), or our own renderer from the start?

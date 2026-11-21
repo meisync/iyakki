@@ -251,13 +251,7 @@ pub fn arecord_dump(card: u32, device: u32) -> Result<String, String> {
 
 fn dump(program: &str, args: &[&str]) -> Result<String, String> {
     use std::io::Read;
-    let mut child = std::process::Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("{program}: {e}"))?;
+    let mut child = iyakki_core_local::starters::spawn_capture(program, args).map_err(|e| format!("{program}: {e}"))?;
     let (so, se) = (child.stdout.take(), child.stderr.take());
     let end = Instant::now() + Duration::from_secs(3);
     let status = loop {

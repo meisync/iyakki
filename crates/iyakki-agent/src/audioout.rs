@@ -34,6 +34,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use iyakki_core_api::AudioRoute;
+use iyakki_core_local::LocalAudioRoute;
+
 pub use iyakki_shared::audioout::{Master, MASTER_GEN, Kind, NO_OUTPUT, STARTING_LINE, VolumeMode, SoundSettings, Output, Choice, choose, output_key_ok, DEFAULT_VOLUME_PCT, DEFAULT_BOOST_DB, MAX_LEVELS, SYSTEM_DEFAULT_ID};
 
 
@@ -96,6 +99,7 @@ pub fn sharing_for(plan: Option<&crate::softvol::Plan>, mixer_on: bool) -> Shari
 
 
 
+#[cfg(test)]
 fn read(p: impl AsRef<Path>) -> String {
     std::fs::read_to_string(p).unwrap_or_default()
 }
@@ -208,15 +212,13 @@ struct ProcEld {
     sads: usize,
 }
 
-fn proc_elds(card_dir: &Path) -> Vec<ProcEld> {
-    let mut v: Vec<ProcEld> = std::fs::read_dir(card_dir)
+fn proc_elds(route: &dyn AudioRoute, card: &str) -> Vec<ProcEld> {
+    let mut v: Vec<ProcEld> = route
+        .asound_dir(card)
         .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let n = e.file_name().to_string_lossy().to_string();
+        .filter_map(|n| {
             let (c, p) = n.strip_prefix("eld#")?.split_once('.')?;
-            let t = read(e.path());
+            let t = route.asound_text(&format!("{card}/{n}")).unwrap_or_default();
             let present = field(&t, "monitor_present").as_deref() == Some("1") && field(&t, "eld_valid").as_deref() != Some("0");
             let name = field(&t, "monitor_name").filter(|s| !s.is_empty());
             let sads = field(&t, "sad_count").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -262,30 +264,32 @@ fn is_output_jack(name: &str) -> bool {
 
 /// The kernel's list of sound cards (`asound/cards` under `proc_root`), empty when it cannot be read: the one reader of that file.
 pub fn cards_text(proc_root: &Path) -> String {
-    std::fs::read_to_string(proc_root.join("asound").join("cards")).unwrap_or_default()
+    LocalAudioRoute::for_proc(proc_root).cards_text()
 }
 
 /// Every playback device of the machine. `mixer(card)` gives `amixer -c card contents` (None when there is no `amixer`).
 pub fn scan(proc_root: &Path, mixer: &dyn Fn(u32) -> Option<String>) -> Vec<Output> {
-    let asound = proc_root.join("asound");
+    scan_via(&LocalAudioRoute::for_proc(proc_root), mixer)
+}
+
+/// [`scan`] over the kernel facts of an [`AudioRoute`] (the machine's, or a made-up one).
+pub fn scan_via(route: &dyn AudioRoute, mixer: &dyn Fn(u32) -> Option<String>) -> Vec<Output> {
     let mut out = Vec::new();
-    for (card, card_id, driver, card_name) in parse_cards(&read(asound.join("cards"))) {
+    for (card, card_id, driver, card_name) in parse_cards(&route.cards_text()) {
         let low = format!("{driver} {card_name}").to_ascii_lowercase();
         if low.contains("loopback") || low.contains("dummy") {
             continue; // virtual cards nobody hears
         }
-        let dir = asound.join(format!("card{card}"));
-        let usb = dir.join("usbid").exists() || low.contains("usb-audio") || low.contains("usb audio");
+        let dir = format!("card{card}");
+        let usb = route.asound_has(&format!("{dir}/usbid")) || low.contains("usb-audio") || low.contains("usb audio");
         let t2 = is_t2_card(&driver, &card_name);
         let bt = low.contains("bluetooth") || low.contains("bluealsa");
-        let mut pcms: Vec<(u32, String, String)> = std::fs::read_dir(&dir)
+        let mut pcms: Vec<(u32, String, String)> = route
+            .asound_dir(&dir)
             .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| {
-                let n = e.file_name().to_string_lossy().to_string();
+            .filter_map(|n| {
                 let dev: u32 = n.strip_prefix("pcm")?.strip_suffix('p')?.parse().ok()?;
-                let info = read(e.path().join("info"));
+                let info = route.asound_text(&format!("{dir}/{n}/info")).unwrap_or_default();
                 let id = field(&info, "id").unwrap_or_default();
                 let name = field(&info, "name").unwrap_or_else(|| id.clone());
                 Some((dev, id, name))
@@ -313,7 +317,7 @@ pub fn scan(proc_root: &Path, mixer: &dyn Fn(u32) -> Option<String>) -> Vec<Outp
             let builtin_speaker = t2 && kind == Kind::Analog && pcm_name.eq_ignore_ascii_case("speaker");
             // the card's Master/PCM/... drive its analog codec, never the HDMI or S/PDIF stream
             let hw_volume = if matches!(kind, Kind::Hdmi | Kind::Digital) { None } else { crate::softvol::hw_control(&ctl.volumes) };
-            let dummy = hw_volume.is_some() && hw_volume_is_dummy(proc_root, card);
+            let dummy = hw_volume.is_some() && hw_volume_is_dummy_via(route, card);
             let mut o = Output { card, device, card_id: card_id.clone(), card_name: card_name.clone(), pcm_name, kind, connected: None, monitor: None, speakers: None, hdmi_no: 0, digital_off: false, builtin_speaker, hw_volume, dummy_volume: dummy };
             match kind {
                 Kind::Hdmi => {
@@ -335,7 +339,7 @@ pub fn scan(proc_root: &Path, mixer: &dyn Fn(u32) -> Option<String>) -> Vec<Outp
             }
             outs.push(o);
         }
-        fill_from_proc_eld(&mut outs, &proc_elds(&dir));
+        fill_from_proc_eld(&mut outs, &proc_elds(route, &dir));
         out.extend(outs);
     }
     out
@@ -591,13 +595,18 @@ pub fn test_tone_wav() -> Vec<u8> {
 /// 8 s): it shows its HDMI devices already but not yet the `CS8409/CS42L83 Analog` one. Its number, if that is the state.
 /// The model comes from the DMI name under `sys`; the codec from `/proc/asound/cardN/codec#*`.
 pub fn card_starting(proc_root: &Path, sys: &Path) -> Option<u32> {
-    let product = read(sys.join("class/dmi/id/product_name"));
-    if !iyakki_drivers::cs8409::MODELS.contains(&product.trim()) {
+    card_starting_via(&LocalAudioRoute::at(proc_root, sys))
+}
+
+/// [`card_starting`] over an [`AudioRoute`].
+pub fn card_starting_via(route: &dyn AudioRoute) -> Option<u32> {
+    let product = route.product_name().unwrap_or_default();
+    if !iyakki_core_local::kmodpack::is_cs8409_model(&product) {
         return None;
     }
-    let outs = scan(proc_root, &|_| None);
-    for (card, _, _, _) in parse_cards(&read(proc_root.join("asound/cards"))) {
-        let cs8409 = is_cs8409_card(proc_root, card);
+    let outs = scan_via(route, &|_| None);
+    for (card, _, _, _) in parse_cards(&route.cards_text()) {
+        let cs8409 = is_cs8409_card(route, card);
         if cs8409 && !outs.iter().any(|o| o.card == card && o.kind == Kind::Analog) {
             return Some(card);
         }
@@ -607,21 +616,16 @@ pub fn card_starting(proc_root: &Path, sys: &Path) -> Option<u32> {
 
 /// The programs that have this playback device open (`/proc/<pid>/fd` links to `/dev/snd/pcmCcDdp`), by name.
 pub fn pcm_holders(proc_root: &Path, card: u32, device: u32) -> Vec<String> {
-    let want = format!("/dev/snd/pcmC{card}D{device}p");
-    let me = std::process::id().to_string();
+    pcm_holders_via(&LocalAudioRoute::for_proc(proc_root), card, device)
+}
+
+/// [`pcm_holders`] over an [`AudioRoute`].
+pub fn pcm_holders_via(route: &dyn AudioRoute, card: u32, device: u32) -> Vec<String> {
     let mut names = Vec::new();
-    for e in std::fs::read_dir(proc_root).into_iter().flatten().flatten() {
-        let pid = e.file_name().to_string_lossy().into_owned();
-        if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) || pid == me {
-            continue;
-        }
-        let holds = std::fs::read_dir(e.path().join("fd")).into_iter().flatten().flatten().any(|f| std::fs::read_link(f.path()).is_ok_and(|l| l.as_os_str() == want.as_str()));
-        if holds {
-            let name = read(e.path().join("comm")).trim().to_string();
-            let name = if name.is_empty() { format!("process {pid}") } else { format!("{name} ({pid})") };
-            if !names.contains(&name) {
-                names.push(name);
-            }
+    for h in route.pcm_holders(card, device) {
+        let name = if h.name.is_empty() { format!("process {}", h.pid) } else { format!("{} ({})", h.name, h.pid) };
+        if !names.contains(&name) {
+            names.push(name);
         }
     }
     names.truncate(4);
@@ -633,37 +637,29 @@ pub fn pcm_holders(proc_root: &Path, card: u32, device: u32) -> Vec<String> {
 /// device that cannot be shared (the T2 Mac's: `dmix` underruns on it) that blocks the radio, the voice, and the sound test.
 /// A holder is idle when the device's state is not RUNNING or PAUSED (a page that is playing is never touched).
 pub fn idle_web_holders(proc_root: &Path, card: u32, device: u32) -> Vec<u32> {
-    let status = read(proc_root.join(format!("asound/card{card}/pcm{device}p/sub0/status")));
+    idle_web_holders_via(&LocalAudioRoute::for_proc(proc_root), card, device)
+}
+
+/// [`idle_web_holders`] over an [`AudioRoute`].
+pub fn idle_web_holders_via(route: &dyn AudioRoute, card: u32, device: u32) -> Vec<u32> {
+    let status = route.asound_text(&format!("card{card}/pcm{device}p/sub0/status")).unwrap_or_default();
     let state = status.lines().next().unwrap_or("").trim();
     let state = state.strip_prefix("state:").unwrap_or(state).trim();
     if matches!(state, "RUNNING" | "PAUSED" | "DRAINING") {
         return Vec::new();
     }
-    let want = format!("/dev/snd/pcmC{card}D{device}p");
-    let me = std::process::id().to_string();
-    let mut pids = Vec::new();
-    for e in std::fs::read_dir(proc_root).into_iter().flatten().flatten() {
-        let pid = e.file_name().to_string_lossy().into_owned();
-        if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) || pid == me {
-            continue;
-        }
-        if !read(e.path().join("comm")).trim().starts_with("WPEWebProcess") {
-            continue;
-        }
-        let holds = std::fs::read_dir(e.path().join("fd")).into_iter().flatten().flatten().any(|f| std::fs::read_link(f.path()).is_ok_and(|l| l.as_os_str() == want.as_str()));
-        if holds {
-            if let Ok(n) = pid.parse() {
-                pids.push(n);
-            }
-        }
-    }
-    pids
+    route.pcm_holders(card, device).into_iter().filter(|h| h.name.starts_with("WPEWebProcess")).map(|h| h.pid).collect()
 }
 
 /// Ask the idle web processes holding the device to let go (SIGTERM: the helper starts a new web process for the page, which
 /// reloads; a page that plays is never touched). How many were asked. Called when something else needs the device.
 pub fn release_idle_web(proc_root: &Path, card: u32, device: u32) -> usize {
-    let pids = idle_web_holders(proc_root, card, device);
+    release_idle_web_via(&LocalAudioRoute::for_proc(proc_root), card, device)
+}
+
+/// [`release_idle_web`] over an [`AudioRoute`] (the signal itself stays here: it is an action, not a read).
+pub fn release_idle_web_via(route: &dyn AudioRoute, card: u32, device: u32) -> usize {
+    let pids = idle_web_holders_via(route, card, device);
     for p in &pids {
         // SAFETY: a plain signal to a process found just now
         unsafe { libc::kill(*p as i32, libc::SIGTERM) };
@@ -672,17 +668,17 @@ pub fn release_idle_web(proc_root: &Path, card: u32, device: u32) -> usize {
 }
 
 /// "sound card is in use by <process>: stop it, then press Look again".
-fn busy_line(proc_root: &Path, o: &Output) -> String {
-    let who = pcm_holders(proc_root, o.card, o.device);
+fn busy_line(route: &dyn AudioRoute, o: &Output) -> String {
+    let who = pcm_holders_via(route, o.card, o.device);
     let who = if who.is_empty() { "another program".to_string() } else { who.join(", ") };
     format!("sound card is in use by {who}: stop it, then press Look again")
 }
 
 /// Is the codec of this card a Cirrus Logic CS8409 (`/proc/asound/cardN/codec#*` says `Codec: Cirrus Logic CS8409`)?
-fn is_cs8409_card(proc_root: &Path, card: u32) -> bool {
-    let dir = proc_root.join("asound").join(format!("card{card}"));
-    std::fs::read_dir(&dir).into_iter().flatten().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("codec#")).any(|e| {
-        let t = read(e.path());
+fn is_cs8409_card(route: &dyn AudioRoute, card: u32) -> bool {
+    let dir = format!("card{card}");
+    route.asound_dir(&dir).into_iter().filter(|n| n.starts_with("codec#")).any(|n| {
+        let t = route.asound_text(&format!("{dir}/{n}")).unwrap_or_default();
         t.lines().any(|l| l.starts_with("Codec:") && l.to_ascii_uppercase().contains("CS8409"))
     })
 }
@@ -692,19 +688,27 @@ fn is_cs8409_card(proc_root: &Path, card: u32) -> bool {
 /// straight to `hw:0,0` and all four sounded the same: the amplifiers have a fixed gain. IYAKKI then uses its software volume
 /// there, unless Settings -> Sound -> Advanced says otherwise for that card ([`VolumeMode`]).
 pub fn hw_volume_is_dummy(proc_root: &Path, card: u32) -> bool {
-    is_cs8409_card(proc_root, card)
+    hw_volume_is_dummy_via(&LocalAudioRoute::for_proc(proc_root), card)
+}
+
+/// [`hw_volume_is_dummy`] over an [`AudioRoute`].
+pub fn hw_volume_is_dummy_via(route: &dyn AudioRoute, card: u32) -> bool {
+    is_cs8409_card(route, card)
 }
 
 /// What changes when a card or a PCM appears or goes: `/proc/asound/cards` and `/proc/asound/pcm`, and per card which `eld#*`
 /// pins report a monitor (the kernel changes them when an HDMI/DP monitor comes or goes).
 pub fn sound_signature(proc_root: &Path) -> String {
-    let asound = proc_root.join("asound");
-    let mut s = format!("{}\n--\n{}", read(asound.join("cards")), read(asound.join("pcm")));
-    let mut cards: Vec<PathBuf> = std::fs::read_dir(&asound).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("card"))).collect();
-    cards.sort();
-    for dir in cards {
-        let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        for e in proc_elds(&dir) {
+    sound_signature_via(&LocalAudioRoute::for_proc(proc_root))
+}
+
+/// [`sound_signature`] over an [`AudioRoute`].
+pub fn sound_signature_via(route: &dyn AudioRoute) -> String {
+    let mut s = format!("{}\n--\n{}", route.cards_text(), route.asound_text("pcm").unwrap_or_default());
+    // `asound_dir` is sorted
+    let cards: Vec<String> = route.asound_dir("").into_iter().filter(|n| n.starts_with("card")).collect();
+    for name in cards {
+        for e in proc_elds(route, &name) {
             s += &format!("\n{name}:{}.{}={}:{}", e.order.0, e.order.1, e.present, e.name.as_deref().unwrap_or(""));
         }
     }
@@ -832,8 +836,7 @@ pub fn play_wav_on(device: &str, wav: &[u8], secs: u64) -> Result<(), String> {
 /// [`hw_volume_check`] with the real `amixer` and `aplay`.
 pub fn hw_volume_check_system(card: u32, device: u32, control: &str) -> Result<String, String> {
     let amixer = |args: &[String]| -> Result<String, String> {
-        let o = std::process::Command::new("amixer").args(args).stdin(std::process::Stdio::null()).output().map_err(|e| format!("amixer: {e}"))?;
-        if o.status.success() { Ok(String::from_utf8_lossy(&o.stdout).into_owned()) } else { Err(format!("amixer: {}", String::from_utf8_lossy(&o.stderr).trim())) }
+        iyakki_core_local::starters::amixer_text(args).map_err(|f| format!("amixer: {}", f.text))
     };
     hw_volume_check(&amixer, &|d, w| play_wav_on(d, w, 6), card, device, control)
 }
@@ -907,6 +910,8 @@ type PrefsHook = Box<dyn Fn(&SoundSettings) + Send + Sync>;
 /// Keeps which output to use, re-read on demand (and every few seconds by [`start_watch`] for the global one).
 pub struct Selector {
     root: PathBuf,
+    /// The kernel facts (`/proc/asound`, who holds a device): the machine's under `root` unless a test or the core gives its own.
+    route: std::sync::Arc<dyn AudioRoute>,
     mixer: MixerFn,
     server: ServerFn,
     state: Mutex<State>,
@@ -932,8 +937,10 @@ impl Selector {
     /// `server()` says whether a sound server runs.
     pub fn new(proc_root: impl Into<PathBuf>, mixer: impl Fn(u32) -> Option<String> + Send + Sync + 'static, server: impl Fn() -> bool + Send + Sync + 'static) -> Selector {
         let prefs = SoundSettings::default();
+        let root: PathBuf = proc_root.into();
         Selector {
-            root: proc_root.into(),
+            route: std::sync::Arc::new(LocalAudioRoute::for_proc(&root)),
+            root,
             mixer: Box::new(mixer),
             server: Box::new(server),
             state: Mutex::new(State { prefs, outputs: vec![], choice: choose(&[], ""), server: false, target: None, device: None, softvol: None, mix: None, hw_ignored: None, busy: None, sharing: Sharing::OneAtATime, seen_keys: vec![], starting_since: None, starting_over: false, level_key: None, at: None }),
@@ -955,9 +962,17 @@ impl Selector {
         self
     }
 
+    /// Read the sound facts through this handle (the core's, or a made-up one) instead of the machine under the root. Call it after [`with_sys`](Selector::with_sys), which sets the machine's own.
+    pub fn with_route(mut self, route: std::sync::Arc<dyn AudioRoute>) -> Selector {
+        self.route = route;
+        self
+    }
+
     /// Look at the model name under this `/sys` to tell a slow-starting sound card from a missing one.
     pub fn with_sys(mut self, sys: impl Into<PathBuf>) -> Selector {
-        self.sys = Some(sys.into());
+        let sys: PathBuf = sys.into();
+        self.route = std::sync::Arc::new(LocalAudioRoute::at(&self.root, &sys));
+        self.sys = Some(sys);
         self
     }
 
@@ -1006,12 +1021,12 @@ impl Selector {
         let mut default = mix_for(o);
         // a T2 speaker with more channels than the one the table assumes (`AppleT2x4`: four, the only count its device takes)
         if o.builtin_speaker {
-            if let Some(n) = t2_channels(&read(self.root.join("asound/cards")), o.card).filter(|n| *n > default.channels) {
+            if let Some(n) = t2_channels(&self.route.cards_text(), o.card).filter(|n| *n > default.channels) {
                 default.channels = n;
             }
         }
         let Some(p) = self.prober.as_ref().filter(|_| o.kind == Kind::Analog && !o.card_name.contains("Apple T2")) else { return default };
-        let cs8409 = is_cs8409_card(&self.root, o.card);
+        let cs8409 = is_cs8409_card(&*self.route, o.card);
         match (p.constraints(o.card, o.device), cs8409) {
             // the CS8409 of the Apple path: all four speakers get the sound (two channels would reach only a pair of them)
             (Some(c), true) => {
@@ -1089,10 +1104,10 @@ impl Selector {
         };
         if let (true, Some(o)) = (synced.busy, st.choice.output.as_ref()) {
             // an idle web page holds the device: let it go, the next look finds the device free
-            release_idle_web(&self.root, o.card, o.device);
+            release_idle_web_via(&*self.route, o.card, o.device);
         }
         st.busy = match (synced.busy, st.choice.output.as_ref()) {
-            (true, Some(o)) => Some(busy_line(&self.root, o)),
+            (true, Some(o)) => Some(busy_line(&*self.route, o)),
             _ => None,
         };
         st.softvol = synced.soft_card;
@@ -1122,8 +1137,10 @@ impl Selector {
 
     /// Keep the 30 s window of a starting card.
     fn note_starting(&self, st: &mut State) {
-        let Some(sys) = &self.sys else { return };
-        if card_starting(&self.root, sys).is_none() {
+        if self.sys.is_none() {
+            return;
+        }
+        if card_starting_via(&*self.route).is_none() {
             st.starting_since = None;
             st.starting_over = false;
         } else if st.starting_over {
@@ -1161,7 +1178,7 @@ impl Selector {
 
     /// Look at the hardware now.
     pub fn refresh(&self) -> Status {
-        let outputs = scan(&self.root, &*self.mixer);
+        let outputs = scan_via(&*self.route, &*self.mixer);
         let server = (self.server)();
         let (status, restored) = {
             let mut st = self.lock();
@@ -1256,7 +1273,7 @@ impl Selector {
 /// The outputs under `proc_root` for a page that shows them: the watched picture for the real `/proc` once [`install`]ed,
 /// else a fresh look (with `amixer` only for the real `/proc`, so a test's made-up tree never meets the real mixer).
 pub fn outputs_at(proc_root: &Path) -> Vec<Output> {
-    let real = proc_root == Path::new("/proc");
+    let real = proc_root == Path::new(iyakki_core_local::kernelfacts::PROC);
     // no ALSA outside Linux: the one output is the system's default (the mixer's AudioQueue plays on it)
     #[cfg(not(target_os = "linux"))]
     if real {
@@ -1268,9 +1285,23 @@ pub fn outputs_at(proc_root: &Path) -> Vec<Output> {
     if real { scan(proc_root, &amixer_contents) } else { scan(proc_root, &|_| None) }
 }
 
+/// [`outputs_at`] over the kernel facts of an [`AudioRoute`]: the watched picture when the route is the running machine's and the
+/// selector is installed, else a fresh look (the mixer only through a route that has one).
+pub fn outputs_via(route: &dyn AudioRoute) -> Vec<Output> {
+    let real = route.is_machine();
+    #[cfg(not(target_os = "linux"))]
+    if real {
+        return vec![Output::system_default()];
+    }
+    if real && global().is_active() {
+        return global().status().outputs;
+    }
+    scan_via(route, &|c| route.mixer_contents(c))
+}
+
 /// One line about the sound output for the SYSTEM tile: where sound plays and why, or why it cannot.
 pub fn summary_at(proc_root: &Path) -> String {
-    if proc_root == Path::new("/proc") && global().is_active() {
+    if proc_root == Path::new(iyakki_core_local::kernelfacts::PROC) && global().is_active() {
         return global().status().summary();
     }
     let outputs = outputs_at(proc_root);
@@ -1281,8 +1312,7 @@ pub fn summary_at(proc_root: &Path) -> String {
 
 /// `amixer -c N contents` (alsa-utils), or None when it is missing or fails.
 pub fn amixer_contents(card: u32) -> Option<String> {
-    let out = std::process::Command::new("amixer").args(["-c", &card.to_string(), "contents"]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    LocalAudioRoute::system().mixer_contents(card)
 }
 
 /// Is a sound server (PulseAudio or PipeWire) running for this user? Then its `default` device already follows the person's
@@ -1294,13 +1324,52 @@ pub fn sound_server_running() -> bool {
     std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).is_some_and(|d| d.join("pulse/native").exists() || d.join("pipewire-0").exists())
 }
 
+/// The part of the selector's state the players on the tile side read (the core's seam, `iyakki_core_api::OutputState`): which device, how loud,
+/// and a number that changes when the device changes. The decisions (choose, learned format, softvol) stay in the [`Selector`].
+pub use iyakki_core_api::soundctl::OutputState;
+
+/// The state of this computer's sound output as the core serves it (`Os::output_state`): the players, the radio and the sinks read it here
+/// and never name the process-wide selector. The selector is the source ([`GlobalOutput`]), put there the first time anybody asks.
+pub fn output_state() -> std::sync::Arc<dyn OutputState> {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| iyakki_core_local::outputstate::set_source(std::sync::Arc::new(GlobalOutput)));
+    iyakki_core_local::outputstate::current()
+}
+
+impl OutputState for Selector {
+    fn device(&self) -> Option<String> {
+        Selector::device(self)
+    }
+    fn generation(&self) -> u64 {
+        Selector::generation(self)
+    }
+    fn gain(&self) -> u32 {
+        Selector::gain(self)
+    }
+}
+
+/// The state of the process-wide selector, as the seam.
+pub struct GlobalOutput;
+
+impl OutputState for GlobalOutput {
+    fn device(&self) -> Option<String> {
+        global().device()
+    }
+    fn generation(&self) -> u64 {
+        global().generation()
+    }
+    fn gain(&self) -> u32 {
+        global().gain()
+    }
+}
+
 static GLOBAL: OnceLock<Selector> = OnceLock::new();
 static WATCHING: AtomicBool = AtomicBool::new(false);
 
 /// The selector IYAKKI's players ask. Inactive (no `-D`, full volume) until [`install`].
 pub fn global() -> &'static Selector {
     GLOBAL.get_or_init(|| {
-        let s = Selector::new("/proc", amixer_contents, sound_server_running).with_softvol(crate::softvol::Softvol::system()).with_prober(crate::soundprobe::Prober::system()).with_sys("/sys");
+        let s = Selector::new(iyakki_core_local::kernelfacts::PROC, amixer_contents, sound_server_running).with_softvol(crate::softvol::Softvol::system()).with_prober(crate::soundprobe::Prober::system()).with_sys(iyakki_core_local::kernelfacts::SYS);
         s.active.store(false, Ordering::SeqCst);
         s
     })
@@ -1328,12 +1397,11 @@ pub fn master_generation() -> u64 {
     MASTER_GEN.load(Ordering::SeqCst)
 }
 
-/// Settings -> Sound changed (only reaches the selector once it is installed).
+/// Settings -> Sound changed (only reaches the selector once it is installed). The highlight offset is applied by the caller when it changed.
 pub fn apply_prefs(prefs: SoundSettings) {
     MASTER_GEN.fetch_add(1, Ordering::SeqCst);
     crate::mixer::set_enabled(prefs.mixer);
     crate::webmix::set_wanted(prefs.web_mix);
-    crate::audiosink::set_highlight_offset_ms(prefs.highlight_offset_ms);
     crate::mixer::set_source_levels(&prefs.source_levels);
     let g = global();
     if g.is_active() {
@@ -1343,7 +1411,12 @@ pub fn apply_prefs(prefs: SoundSettings) {
 
 /// Is there a sound card in `proc_root/asound/cards` yet?
 pub fn has_card(proc_root: &Path) -> bool {
-    !parse_cards(&read(proc_root.join("asound/cards"))).is_empty()
+    has_card_via(&LocalAudioRoute::for_proc(proc_root))
+}
+
+/// [`has_card`] over an [`AudioRoute`].
+pub fn has_card_via(route: &dyn AudioRoute) -> bool {
+    !parse_cards(&route.cards_text()).is_empty()
 }
 
 /// Wait in the background for the first sound card (it may appear long after the shell started: the MacBookPro14,1's card
@@ -1363,7 +1436,7 @@ pub fn when_card_appears(proc_root: PathBuf, wait: impl Fn() -> Duration + Send 
 
 /// Like [`when_card_appears`] for the real machine and the global selector: [`install`] it when the card is there.
 pub fn install_when_card_appears(prefs: impl Fn() -> SoundSettings + Send + 'static) {
-    when_card_appears(PathBuf::from("/proc"), || watch_wait(uptime()), move || install(prefs()));
+    when_card_appears(PathBuf::from(iyakki_core_local::kernelfacts::PROC), || watch_wait(uptime()), move || install(prefs()));
 }
 
 /// How often the watcher reads the card, PCM and ELD files (cheap: a few small files). A full look follows at once when they
@@ -1438,7 +1511,7 @@ pub fn start_watch() {
         let mut w = Watch::new();
         loop {
             // the files are read often so a monitor plugged in or out is noticed within a second; a full look is taken then
-            if w.step(global(), Path::new("/proc")).is_some() {
+            if w.step(global(), Path::new(iyakki_core_local::kernelfacts::PROC)).is_some() {
                 // a microphone that records something from the first start: capture controls get their default once per card
                 crate::micdefaults::run();
             }
@@ -1477,6 +1550,41 @@ mod tests {
 
     use super::*;
     use std::sync::Arc;
+
+    /// The decisions run over a made-up route (`iyakki_core_fake::FakeAudioRoute`) with no directory on this computer.
+    #[test]
+    fn the_outputs_the_holders_the_signature_and_the_starting_card_come_from_the_route_not_the_machine() {
+        use iyakki_core_api::PcmHolder;
+        let r = iyakki_core_fake::FakeAudioRoute::default();
+        r.put("cards", " 0 [PCH            ]: HDA-Intel - HDA Intel PCH\n");
+        r.put("pcm", "00-00: ALC : ALC : playback 1\n");
+        r.put("card0/pcm0p/info", "card: 0\ndevice: 0\nstream: PLAYBACK\nid: ALC\nname: ALC Analog\n");
+        r.put("card0/pcm3p/info", "card: 0\ndevice: 3\nstream: PLAYBACK\nid: HDMI 0\nname: HDMI 0\n");
+        r.put("card0/eld#0.0", "monitor_present\t\t1\neld_valid\t\t1\nmonitor_name\t\tDELL\nsad_count\t\t1\n");
+        r.put("card0/pcm0p/sub0/status", "state: PREPARED\n");
+        r.set_holders(0, 0, vec![PcmHolder { pid: 77, name: "WPEWebProcess".into() }, PcmHolder { pid: 78, name: String::new() }]);
+        let outs = scan_via(&r, &|_| None);
+        assert_eq!(outs.len(), 2);
+        assert!(outs.iter().any(|o| o.kind == Kind::Hdmi && o.monitor.as_deref() == Some("DELL")), "{outs:?}");
+        assert!(has_card_via(&r));
+        assert_eq!(pcm_holders_via(&r, 0, 0), vec!["WPEWebProcess (77)", "process 78"]);
+        assert_eq!(idle_web_holders_via(&r, 0, 0), vec![77]);
+        r.put("card0/pcm0p/sub0/status", "state: RUNNING\n");
+        assert!(idle_web_holders_via(&r, 0, 0).is_empty(), "a page that plays is never touched");
+        let sig = sound_signature_via(&r);
+        assert!(sig.contains("card0:0.0=true:DELL"), "{sig}");
+        assert_eq!(card_starting_via(&r), None, "not a CS8409 model");
+        let mac = iyakki_core_fake::FakeAudioRoute::default();
+        mac.put("cards", " 0 [PCH            ]: HDA-Intel - HDA Intel PCH\n");
+        mac.put("card0/pcm3p/info", "id: HDMI 0\nname: HDMI 0\n");
+        mac.set_product(Some("MacBookPro14,1"));
+        mac.put("card0/codec#0", "Codec: Cirrus Logic CS8409\n");
+        assert_eq!(card_starting_via(&mac), Some(0), "HDMI devices but no analog one yet on a CS8409 Mac");
+        assert!(hw_volume_is_dummy_via(&mac, 0) && !hw_volume_is_dummy_via(&r, 0));
+        // the selector reads through the route it is given
+        let sel = Selector::new("/nonexistent", |_| None, || false).with_route(Arc::new(r));
+        assert_eq!(sel.refresh().outputs.len(), 2);
+    }
 
     struct Tree(PathBuf);
     impl Drop for Tree {

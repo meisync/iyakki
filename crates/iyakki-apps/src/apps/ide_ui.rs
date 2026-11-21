@@ -755,8 +755,14 @@ impl IdeApp {
             }
             Modal::Lock(i) => {
                 let who = self.ws.get(*i).and_then(|w| w.ro.clone());
-                let p = fx::modal(g, area, s, 640.0 * s, 230.0 * s, AMBER, false);
-                g.text(p.x + 26.0 * s, p.y + 24.0 * s, 20.0 * s, TEXT, "This workspace is open elsewhere", Face::Bold);
+                // three buttons side by side need about 400 px at the normal size: in a narrow window or at a big text size they wrap
+                // to a second row and the box grows by one row
+                let labels = ["Open read-only  r", "Take over  t", "Cancel"];
+                let need: f32 = labels.iter().map(|l| g.text_width(14.0 * s, l, Face::Bold) + 14.0 * s * 1.7 + 12.0 * s).sum();
+                let two_rows = need + 52.0 * s > (640.0 * s).min(area.w - 24.0 * s);
+                let p = fx::modal(g, area, s, 640.0 * s, 230.0 * s + if two_rows { 40.0 * s } else { 0.0 }, AMBER, false);
+                let title = g.fit(20.0 * s, "This workspace is open elsewhere", Face::Bold, p.w - 52.0 * s);
+                g.text(p.x + 26.0 * s, p.y + 24.0 * s, 20.0 * s, TEXT, &title, Face::Bold);
                 let msg = match who {
                     Some(l) => l.describe(&self.user),
                     None => "Another session has this workspace open.".to_string(),
@@ -764,10 +770,8 @@ impl IdeApp {
                 for (j, l) in g.wrap(14.0 * s, &msg, Face::Sans, p.w - 52.0 * s).iter().take(5).enumerate() {
                     g.text(p.x + 26.0 * s, p.y + 62.0 * s + j as f32 * 20.0 * s, 14.0 * s, MUTED, l, Face::Sans);
                 }
-                let by = p.y + p.h - 58.0 * s;
-                let w1 = g.button(p.x + 26.0 * s, by, 14.0 * s, "Open read-only  r", CYAN, Event::Sub(SUB, Key::Char('r')));
-                let w2 = g.button(p.x + 26.0 * s + w1 + 12.0 * s, by, 14.0 * s, "Take over  t", AMBER, Event::Sub(SUB, Key::Char('t')));
-                g.button(p.x + 26.0 * s + w1 + w2 + 24.0 * s, by, 14.0 * s, "Cancel", MUTED, Event::Sub(SUB, Key::Esc));
+                let by = p.y + p.h - 58.0 * s - if two_rows { 40.0 * s } else { 0.0 };
+                g.button_flow(p.x + 26.0 * s, by, p.w - 52.0 * s, 14.0 * s, 12.0 * s, &[("Open read-only  r".to_string(), CYAN, Event::Sub(SUB, Key::Char('r'))), ("Take over  t".to_string(), AMBER, Event::Sub(SUB, Key::Char('t'))), ("Cancel".to_string(), MUTED, Event::Sub(SUB, Key::Esc))]);
             }
             Modal::Quick(q) => {
                 let p = fx::modal(g, area, s, 640.0 * s, 460.0 * s, accent, false);

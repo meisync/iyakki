@@ -739,9 +739,43 @@ fn the_network_and_apps_items_of_a_look_are_buttons_that_open_settings_and_go_ho
     press(&mut sh, super::header_button(w, s, at));
     assert!(!sh.devpop.open, "the panel was put away");
     assert_eq!(sh.screen_name(), "launcher");
-    // Network opens Settings
+    // Network opens the network panel of its own (only the network rows); its Wi-Fi row leads to Settings
     sh.render(&mut g);
     let at = sh.bar_order().iter().position(|b| *b == B::Network).unwrap();
     press(&mut sh, super::header_button(w, s, at));
+    assert!(sh.devpop.is_network_panel());
+    sh.devpop.set_snapshot(crate::devpop::Snapshot {
+        items: vec![
+            crate::devpop::Item { title: "Sound".into(), detail: "speakers".into(), level: crate::devpop::Level::Ok, jump: crate::devpop::Jump::Settings("sound"), acts: Vec::new() },
+            crate::devpop::Item { title: "Wi-Fi".into(), detail: "wlan0 · connected".into(), level: crate::devpop::Level::Ok, jump: crate::devpop::Jump::Settings("network"), acts: Vec::new() },
+        ],
+        driver_help: Vec::new(),
+        at: 1,
+    });
+    assert_eq!(sh.devpop.snapshot().unwrap().items.len(), 2, "the reading itself is whole");
+    key(&mut sh, Key::Enter);
     assert_eq!(sh.screen_name(), "app:settings");
+    assert!(!sh.devpop.open);
+}
+
+#[test]
+fn the_network_button_stands_in_an_open_apps_header_and_opens_the_same_panel() {
+    use super::volbar_impl::{Extra, NET_TAB};
+    let (mut sh, mut g) = fresh("lk-net-app");
+    sign_in(&mut sh, &mut g, "alice", "alicepass1");
+    assert!(!sh.wanted_extras(true).contains(&Extra::Network), "the default Look lists no network item");
+    key(&mut sh, Key::Char('o'));
+    with_look(&sh, "alice", |l| l.topbar.items = vec![look::BarItem::Clock, look::BarItem::Network, look::BarItem::Settings, look::BarItem::Bell]);
+    sign_in(&mut sh, &mut g, "alice", "alicepass1");
+    sh.open(PApp::Chat);
+    assert!(matches!(sh.screen, Screen::App(..)));
+    let want = sh.wanted_extras(true);
+    assert_eq!(want.iter().position(|e| *e == Extra::Network).map(|i| i + 1), want.iter().position(|e| *e == Extra::Settings), "left of Settings");
+    sh.render(&mut g);
+    assert!(sh.hits().iter().any(|h| h.ev == Event::Tab(NET_TAB)), "the icon is registered in the app header");
+    sh.dispatch(&Event::Tab(NET_TAB));
+    assert!(sh.devpop.is_network_panel());
+    assert!(matches!(sh.screen, Screen::App(..)), "the app stays open under the panel");
+    sh.dispatch(&Event::Tab(NET_TAB));
+    assert!(!sh.devpop.open, "the icon again puts it away");
 }

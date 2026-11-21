@@ -110,6 +110,31 @@ pub trait Win32 {
     fn flush(&mut self, disk: u32) -> Result<(), String>;
 }
 
+/// A borrowed implementation is an implementation (so the steps can hold `&mut dyn Win32` or an owned one).
+impl<T: Win32 + ?Sized> Win32 for &mut T {
+    fn is_elevated(&self) -> bool {
+        (**self).is_elevated()
+    }
+    fn lock_and_dismount(&mut self, volume: &str) -> Result<(), String> {
+        (**self).lock_and_dismount(volume)
+    }
+    fn unlock(&mut self, volume: &str) {
+        (**self).unlock(volume)
+    }
+    fn set_offline(&mut self, disk: u32, offline: bool) -> Result<(), String> {
+        (**self).set_offline(disk, offline)
+    }
+    fn write_at(&mut self, disk: u32, offset: u64, buf: &[u8]) -> Result<(), String> {
+        (**self).write_at(disk, offset, buf)
+    }
+    fn read_at(&mut self, disk: u32, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        (**self).read_at(disk, offset, buf)
+    }
+    fn flush(&mut self, disk: u32) -> Result<(), String> {
+        (**self).flush(disk)
+    }
+}
+
 /// Write `image` (already in memory: small images and tests) with [`write_stream`].
 pub fn write_raw(w: &mut dyn Win32, drive: &Drive, sector: u32, image: &[u8], block: usize) -> Result<u64, String> {
     write_stream(w, drive, sector, &mut std::io::Cursor::new(image), image.len() as u64, block, None, &mut |_, _| {})
@@ -250,6 +275,64 @@ pub fn elevate_command(exe: &str, args: &[String]) -> Result<Vec<String>, String
     Ok(vec!["powershell.exe".into(), "-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), ps])
 }
 
+/// The disks of a Windows machine as the planner reads them (the disk reader side of F-INST-12): `list_json` is the output of
+/// [`LIST_COMMAND`], `open` opens `\\.\PhysicalDriveN` for reading. The disk that holds Windows is skipped (never a target), a disk of
+/// size 0 is skipped, and one that cannot be opened (administrator rights are needed) is skipped with a plain note.
+pub fn discover_with(
+    list_json: &str,
+    system_drive: &str,
+    open: &dyn Fn(&str) -> std::io::Result<std::fs::File>,
+    boot_media: Option<&str>,
+    skipped: &mut Vec<String>,
+) -> (Vec<crate::planner::DiskModel>, Vec<crate::install::DiskInfo>) {
+    let drives = match parse_disks(list_json, system_drive) {
+        Ok(d) => d,
+        Err(e) => {
+            skipped.push(e);
+            return (vec![], vec![]);
+        }
+    };
+    let (mut models, mut infos) = (Vec::new(), Vec::new());
+    for d in drives {
+        let number = parse_physical(&d.path).unwrap_or(0);
+        if d.mounts.iter().any(|(_, mp)| is_system_mount(mp)) {
+            skipped.push(format!("{}: the disk that holds Windows is never a target", d.name));
+            continue;
+        }
+        if d.size_bytes == 0 {
+            skipped.push(format!("{}: its size is not known", d.name));
+            continue;
+        }
+        let sector = sector_size(list_json, number);
+        let meta = crate::planner::DiskMeta { name: d.name.clone(), path: d.path.clone(), model: d.model.clone(), serial: String::new(), removable: d.removable, usb: d.usb, read_only: d.read_only, swap_parts: vec![] };
+        match open(&d.path) {
+            Ok(mut f) => {
+                models.push(crate::planner::read_model(&mut f, &meta, d.size_bytes, sector, &d.mounts, boot_media));
+                infos.push(crate::install::DiskInfo { drive: d, serial: String::new(), logical_sector: sector, partitions: vec![], gpt: false, table: String::new() });
+            }
+            Err(e) => skipped.push(format!("{}: cannot read ({e}); run as administrator", d.path)),
+        }
+    }
+    (models, infos)
+}
+
+/// The real thing: PowerShell's disk list and the physical drives opened read-only.
+#[cfg(windows)]
+pub fn discover_real(boot_media: Option<&str>, skipped: &mut Vec<String>) -> (Vec<crate::planner::DiskModel>, Vec<crate::install::DiskInfo>) {
+    let o = std::process::Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", LIST_COMMAND]).output();
+    match o {
+        Ok(o) if o.status.success() => discover_with(&String::from_utf8_lossy(&o.stdout), &std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into()), &|p| std::fs::File::open(p), boot_media, skipped),
+        Ok(o) => {
+            skipped.push(format!("powershell failed: {}", String::from_utf8_lossy(&o.stderr).trim()));
+            (vec![], vec![])
+        }
+        Err(e) => {
+            skipped.push(format!("powershell: {e}"));
+            (vec![], vec![])
+        }
+    }
+}
+
 /// Run [`LIST_COMMAND`] with the system's PowerShell and read the disks. Uses only `std::process`; on other systems it says so.
 pub fn list_drives() -> Result<Vec<Drive>, String> {
     #[cfg(windows)]
@@ -273,6 +356,32 @@ mod tests {
     use std::path::Path;
 
     const TWO: &str = "\u{feff}[{\"Number\":0,\"Name\":\"Samsung SSD 970\",\"Size\":1000204886016,\"Bus\":\"NVMe\",\"System\":true,\"Boot\":true,\"ReadOnly\":false,\"Sector\":512,\"Letters\":[\"C\",\"D\"]},{\"Number\":2,\"Name\":\"SanDisk Cruzer\",\"Size\":31000000000,\"Bus\":\"USB\",\"System\":false,\"Boot\":false,\"ReadOnly\":false,\"Sector\":512,\"Letters\":\"E\"}]";
+
+    #[test]
+    fn the_planner_reads_the_usb_disks_of_a_windows_machine_and_never_the_one_holding_windows() {
+        let dir = std::env::temp_dir().join(format!("iyakki-windisc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::File::create(dir.join("d2")).unwrap().set_len(1 << 20).unwrap();
+        let open = |p: &str| match parse_physical(p) {
+            Some(2) => std::fs::File::open(dir.join("d2")),
+            _ => Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied")),
+        };
+        let mut skipped = Vec::new();
+        let (models, infos) = discover_with(TWO, "C:", &open, None, &mut skipped);
+        assert_eq!((models.len(), infos.len()), (1, 1), "{skipped:?}");
+        assert_eq!((models[0].name.as_str(), models[0].sector, models[0].size_bytes), ("PhysicalDrive2", 512, 31_000_000_000));
+        assert_eq!(infos[0].drive.path, "\\\\.\\PhysicalDrive2");
+        assert!(skipped.iter().any(|s| s.starts_with("PhysicalDrive0") && s.contains("holds Windows")), "{skipped:?}");
+        // a 4096-byte-sector stick keeps its sector size; a disk that cannot be opened is said, not hidden
+        let k = TWO.replace("\"Sector\":512,\"Letters\":\"E\"", "\"Sector\":4096,\"Letters\":\"E\"");
+        assert_eq!(discover_with(&k, "C:", &open, None, &mut Vec::new()).0[0].sector, 4096);
+        let mut sk = Vec::new();
+        assert!(discover_with(TWO, "C:", &|_| Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied")), None, &mut sk).0.is_empty());
+        assert!(sk.iter().any(|s| s.contains("administrator")), "{sk:?}");
+        assert!(discover_with("not json", "C:", &open, None, &mut Vec::new()).0.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn paths_are_exactly_physical_drives_and_letters() {

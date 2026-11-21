@@ -74,8 +74,16 @@ fn role_rank(name: &str) -> i32 {
 /// Callers: `webservice/handlers.rs` `runs_start` when the request names a team entry, and [`call_local`].
 #[allow(clippy::too_many_arguments)]
 pub fn provider_gate(env: &Env, kind: &str, team: Option<&str>, name: &str, user: &str, user_rank: i32, model: &str, now: u64) -> AgentUse {
+    provider_gate_for(env, kind, team, name, user, user_rank, Some(model), now)
+}
+
+/// [`provider_gate`] for a use that names no model (a git host, a search service: `model` is `None` and only the entry, the role and the
+/// counters decide).
+#[allow(clippy::too_many_arguments)]
+pub fn provider_gate_for(env: &Env, kind: &str, team: Option<&str>, name: &str, user: &str, user_rank: i32, model: Option<&str>, now: u64) -> AgentUse {
+    let model_text = model.unwrap_or("-");
     let refuse = |why: &str| {
-        emit(env, user, "tenant.provider.refused", &format!("kind={kind} name={name} model={model} reason={why}"));
+        emit(env, user, "tenant.provider.refused", &format!("kind={kind} name={name} model={model_text} reason={why}"));
         AgentUse::Refused(why.to_string())
     };
     if !matches!(kind, "models.provider" | "integration.apikey" | "models.local") {
@@ -103,7 +111,7 @@ pub fn provider_gate(env: &Env, kind: &str, team: Option<&str>, name: &str, user
     } else {
         eff.values.get("allowed_models").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
     };
-    if !allowed.iter().any(|a| covers(a, model)) {
+    if model.is_some_and(|m| !allowed.iter().any(|a| covers(a, m))) {
         return refuse("this model is not allowed for the provider");
     }
     if let Some(r) = eff.values.get("use_role").and_then(|v| v.as_str()) {
@@ -121,11 +129,47 @@ pub fn provider_gate(env: &Env, kind: &str, team: Option<&str>, name: &str, user
     }
     match Store::new(env.dir).count_use(kind, &format!("{scope}:{name}"), user, now, num("daily_requests_per_person"), None, num("monthly_requests_team")) {
         Ok((p, _, mo)) => {
-            emit(env, user, "tenant.provider.use", &format!("kind={kind} name={name} team={scope} model={model} person_today={p} team_period={mo}"));
+            emit(env, user, "tenant.provider.use", &format!("kind={kind} name={name} team={scope} model={model_text} person_today={p} team_period={mo}"));
             AgentUse::Allowed { shared: true }
         }
         Err(_) => refuse("the daily or monthly request limit of this provider is reached"),
     }
+}
+
+/// What a use of a team's API-key integration (`integration.apikey`) is handed: the entry's fields and the key for this call only.
+pub struct IntegrationTarget<'a> {
+    /// The provider of the catalog (`github`, `openai`, ...).
+    pub provider: &'a str,
+    /// The entry's base URL as written; empty when the provider's own address is used.
+    pub base_url: &'a str,
+    pub deployment: &'a str,
+    pub api_version: &'a str,
+    pub key: &'a str,
+}
+
+/// A team's API-key integration used by anything other than a run start (a flow step, a tool, a git host call): the gate of
+/// [`provider_gate_for`] (entry ready and not blocked, the model on the list when the use names one, the person's daily and the team's
+/// monthly counters, audit `tenant.provider.use` per person), then the vault hands the key to `f` for this call only (named action
+/// `action`; the vault's audit line names the action and the reference, never the value). The person must belong to the team: the caller
+/// passes the rank from the roles (`user_rank`, 0 for a stranger is refused by the team check of the caller).
+#[allow(clippy::too_many_arguments)]
+pub fn with_integration_key<T>(env: &Env, team: &str, name: &str, user: &str, user_rank: i32, model: Option<&str>, action: &str, now: u64, f: &mut dyn FnMut(&IntegrationTarget) -> Result<T, String>) -> Result<T, String> {
+    if let AgentUse::Refused(why) = provider_gate_for(env, "integration.apikey", Some(team), name, user, user_rank, model, now) {
+        return Err(why);
+    }
+    let spec = schema::kind("integration.apikey").ok_or("unknown kind")?;
+    let cfg = Store::new(env.dir).load().map_err(|_| "the tenant configuration cannot be read")?;
+    let entries = cfg.entries();
+    let eff = resolve(spec, &cfg.layers(&entries, "integration.apikey", Some(team), name));
+    let text = |k: &str| eff.values.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let (provider, base, deployment, version) = (text("provider"), text("base_url"), text("deployment"), text("api_version"));
+    let r = eff.values.get("api_key").and_then(|v| v.as_str()).and_then(schema::SecretRef::parse).ok_or("this integration has no key")?;
+    let mut slot: Option<T> = None;
+    env.vault.use_secret(&r, action, &mut |k: &str| {
+        slot = Some(f(&IntegrationTarget { provider: &provider, base_url: &base, deployment: &deployment, api_version: &version, key: k })?);
+        Ok(String::new())
+    })?;
+    slot.take().ok_or_else(|| "the call produced no result".to_string())
 }
 
 /// Adds the tokens an answer cost to the person's count for today on the entry (`daily_tokens_per_person` is checked by [`provider_gate`]

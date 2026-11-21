@@ -1217,7 +1217,7 @@ impl SampleApp {
             let shown = fit(c, size, label, TextStyle::Bold, (r.w - m.gap(Space::Sm)).max(0.0));
             let tw = c.measure(size, &shown, TextStyle::Bold);
             c.text(r.x + ((r.w - tw) / 2.0).max(0.0), r.y + ((r.h - size) / 2.0).max(0.0), size, ink, &shown, TextStyle::Bold);
-            c.hit(r, Hit { action, name: label.to_string(), role: Role::Tab });
+            c.hit(r, Hit { action, name: label.to_string(), role: Role::Tab, ..Default::default() });
         }
     }
 
@@ -1248,7 +1248,7 @@ impl SampleApp {
             let size = m.size(TypeRole::Body);
             let shown = fit(c, size, &label, TextStyle::Regular, (r.w - 2.0 * m.gap(Space::Md)).max(0.0));
             c.text(r.x + m.gap(Space::Md), r.y + ((r.h - size) / 2.0).max(0.0), size, th.text, &shown, TextStyle::Regular);
-            c.hit(r, Hit { action: A_B_VIEW + i as u32, name: label, role: Role::Tab });
+            c.hit(r, Hit { action: A_B_VIEW + i as u32, name: label, role: Role::Tab, ..Default::default() });
         }
         // row 3: reload, find, next match
         let r3y = r2y + t + m.gap(Space::Sm);

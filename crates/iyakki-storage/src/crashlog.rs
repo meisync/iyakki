@@ -318,7 +318,6 @@ pub const COPY_BYTES: u64 = 2 * 1024 * 1024;
 /// that exists; nothing is ever overwritten), is private to its owner (mode 0600) and holds the same text the viewer shows. Returns the
 /// new path. `now_unix` only names the file.
 pub fn copy_to_folder(log_dir: &Path, name: &str, dest_dir: &Path, now_unix: i64) -> Result<PathBuf, String> {
-    use std::os::unix::fs::OpenOptionsExt;
     if name.is_empty() || name.contains('/') || name.contains("..") || !is_log_file(name) {
         return Err("that is not a kept kernel log".into());
     }
@@ -338,7 +337,14 @@ pub fn copy_to_folder(log_dir: &Path, name: &str, dest_dir: &Path, now_unix: i64
     for n in 0..100u32 {
         let file = if n == 0 { format!("iyakki-session-log-{stamp}.log") } else { format!("iyakki-session-log-{stamp}-{n}.log") };
         let path = dest_dir.join(&file);
-        match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&path) {
             Ok(mut f) => {
                 f.write_all(text.as_bytes()).and_then(|_| f.sync_all()).map_err(|e| format!("{file}: {e}"))?;
                 return Ok(path);

@@ -623,12 +623,15 @@ mod tests {
     fn stop_ends_the_job_without_blocking_and_a_second_click_does_nothing() {
         let cx = cx_with_admin_store("jobsui-stop");
         let mut ui = JobsUi::new(Some(""));
-        let id = start(&cx, "", "stubborn", "trap '' TERM; while true; do sleep 0.1; done");
-        std::thread::sleep(Duration::from_millis(300));
+        // the job says when it ignores TERM (a gate file), instead of the test sleeping and hoping the trap is set
+        let gate = std::env::temp_dir().join(format!("iyakki-jobsui-stop-{}", std::process::id()));
+        let _ = std::fs::remove_file(&gate);
+        let id = start(&cx, "", "stubborn", &format!("trap '' TERM; touch {}; while true; do sleep 0.1; done", gate.display()));
+        iyakki_testkit::wait_for_file(&gate);
         ui.poll(&cx, true);
-        let t0 = Instant::now();
         assert!(ui.handle(&ev_act(0), &cx));
-        assert!(t0.elapsed() < Duration::from_millis(500), "the click returns at once (stopping takes its grace on a thread)");
+        // the click came back while the job, which ignores TERM, is still there: stopping (TERM, grace, KILL) runs on its own thread
+        assert!(cx.jobs().get(&cx.session.user, &id).unwrap().running(), "the click did not wait for the stop");
         assert!(ui.handle(&ev_act(0), &cx), "a second click is harmless");
         let end = Instant::now() + Duration::from_secs(10);
         while cx.jobs().get(&cx.session.user, &id).unwrap().running() {

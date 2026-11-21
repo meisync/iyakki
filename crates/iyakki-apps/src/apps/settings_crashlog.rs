@@ -1,4 +1,4 @@
-//! Settings -> Last session log: the kernel log that IYAKKI keeps on the data volume across crashes (`iyakki_storage::crashlog`,
+//! Settings -> Last session log: the kernel log that IYAKKI keeps on the data volume across crashes (`iyakki_core_api::device_types::storage::crashlog`,
 //! docs/TROUBLESHOOTING.md). Read-only: the last 200 lines of the log of the session that ended unexpectedly (or of the previous or the
 //! current boot), scrollable, and "I have seen it", which clears the "ended unexpectedly" note on the Overview page.
 

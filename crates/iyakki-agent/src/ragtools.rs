@@ -47,6 +47,9 @@ pub const ENTITIES_SET: &str = "rag_graph_entities_set";
 pub const ENTITIES_BUILD: &str = "rag_graph_entities_build";
 /// Web retrieval feeding documents (F-RAG-16): a page is read like `web_fetch` reads it and kept as a document the searches find.
 pub const ADD_PAGE: &str = "rag_add_page";
+/// Reading a collection's kept pages again by itself on a timer (F-RAG-17): never by default, chosen per collection, asks every time.
+pub const REFRESH_SET: &str = "rag_refresh_schedule";
+pub const REFRESH_STATUS: &str = "rag_refresh_status";
 /// The most kept pages one refresh reads again.
 pub const MAX_REFRESH_PAGES: usize = 20;
 /// The most pages one crawl keeps, and the deepest it follows links from the first page (F-RAG-17).
@@ -101,7 +104,7 @@ pub fn page_url_ok(u: &str) -> Result<String, String> {
 }
 
 pub fn is_rag_tool(n: &str) -> bool {
-    READ_TOOLS.contains(&n) || n == ASK_TOOL || n == ADD_PAGE || n == RERANK_SET || n == RERANK_STATUS || n == GRAPH_SET || n == GRAPH_STATUS || n == GRAPH_RELATED || n == ENTITIES_SET || n == ENTITIES_BUILD
+    READ_TOOLS.contains(&n) || n == ASK_TOOL || n == ADD_PAGE || n == REFRESH_SET || n == REFRESH_STATUS || n == RERANK_SET || n == RERANK_STATUS || n == GRAPH_SET || n == GRAPH_STATUS || n == GRAPH_RELATED || n == ENTITIES_SET || n == ENTITIES_BUILD
 }
 
 /// Passages in one `rag_search` result, characters per passage, characters in a whole result, characters of a `rag_read`.
@@ -474,8 +477,63 @@ pub struct RagToolsEnv {
 }
 
 impl RagToolsEnv {
+    /// Read a page and keep it in `ns`; an older copy of the same address with other text is replaced. `(added, replaced older copies, characters)`.
+    fn keep_page(&self, url: &str, ns: &str, public: &str) -> Result<(bool, usize, usize), String> {
+        let src = self.pages.as_ref().ok_or("this account has no web access")?;
+        let body = src.page(url)?;
+        if body.trim().chars().count() < 40 {
+            return Err("the page has no readable text to keep".into());
+        }
+        let title = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(url).trim_start_matches(|c: char| !c.is_alphanumeric()).chars().take(120).collect::<String>();
+        let meta: BTreeMap<String, String> = [("url".to_string(), url.to_string()), ("kept".to_string(), crate::clock::now_unix().to_string())].into();
+        let mut kb = self.access.kb.lock().unwrap_or_else(|e| e.into_inner());
+        let older: Vec<String> = kb.docs(ns).into_iter().filter(|d| d.source == url).map(|d| d.id).collect();
+        let (id, added) = kb.add_document(ns, &title, url, &body, meta).map_err(|e| e.to_string())?;
+        let mut replaced = 0;
+        if added {
+            for old in older.iter().filter(|o| **o != id) {
+                if kb.remove_document(ns, old).is_ok() {
+                    replaced += 1;
+                }
+            }
+        }
+        drop(kb);
+        (self.audit)("rag.add_page", &format!("{} -> {public}{}", host_of_url(url), if replaced > 0 { " (refreshed)" } else { "" }));
+        Ok((added, replaced, body.chars().count()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn keep_page_for_test(&self, url: &str, ns: &str, public: &str) {
+        self.keep_page(url, ns, public).unwrap();
+    }
+
+    /// Read every web page kept in `ns` again (at most [`MAX_REFRESH_PAGES`]) and replace the ones whose text changed.
+    /// `(pages read, changed, unchanged, failed notes)`. One audit line with the counts, no address.
+    pub fn refresh_pages(&self, ns: &str, public: &str) -> (usize, usize, usize, Vec<String>) {
+        let urls: Vec<String> = self.access.kb.lock().unwrap_or_else(|e| e.into_inner()).docs(ns).into_iter().map(|d| d.source).filter(|u| u.starts_with("http://") || u.starts_with("https://")).collect::<BTreeSet<_>>().into_iter().take(MAX_REFRESH_PAGES).collect();
+        let (mut changed, mut same, mut failed) = (0, 0, vec![]);
+        for u in &urls {
+            match self.keep_page(u, ns, public) {
+                Ok((true, replaced, _)) if replaced > 0 => changed += 1,
+                Ok((true, _, _)) | Ok((false, _, _)) => same += 1,
+                Err(e) => failed.push(format!("{} ({})", host_of_url(u), e.chars().take(60).collect::<String>())),
+            }
+        }
+        if !urls.is_empty() {
+            (self.audit)("rag.refresh_pages", &format!("{public}: {changed} changed, {same} unchanged, {} failed", failed.len()));
+        }
+        (urls.len(), changed, same, failed)
+    }
+
     pub fn for_services(svc: &Arc<crate::services::Services>, user: &str, policy: &iyakki_sec::policy::Policy, model: Arc<dyn ChatBackend>, audit: AuditFn) -> RagToolsEnv {
         RagToolsEnv { access: Arc::new(RagAccess::for_services(svc, user)), model: Some(model), policy: policy.clone(), home: crate::scope::home_root(user, svc.dir()), audit, ledgers: Arc::new(LedgerStore::open(svc.dir(), user)), manage_shared: policy.manage_settings, pages: Some(Arc::new(ServicesPages { svc: svc.clone(), user: user.to_string(), policy: policy.clone() })) }
+    }
+}
+
+impl RagToolsEnv {
+    /// The environment of the timed refresh: no model, the account's own web access and request budget.
+    pub fn for_refresh(svc: &Arc<crate::services::Services>, user: &str, policy: &iyakki_sec::policy::Policy, audit: AuditFn) -> RagToolsEnv {
+        RagToolsEnv { access: Arc::new(RagAccess::for_services(svc, user)), model: None, policy: policy.clone(), home: crate::scope::home_root(user, svc.dir()), audit, ledgers: Arc::new(LedgerStore::open(svc.dir(), user)), manage_shared: policy.manage_settings, pages: Some(Arc::new(ServicesPages { svc: svc.clone(), user: user.to_string(), policy: policy.clone() })) }
     }
 }
 
@@ -546,30 +604,9 @@ impl RagTools {
         Ok(Folder { dir, ns, public, files })
     }
 
-    /// What `rag_add_page` is asked to do: the address, the namespace and the public collection name.
-    /// Read a page and keep it in `ns`; an older copy of the same address with other text is replaced. `(added, replaced older copies, characters)`.
+    /// Read a page and keep it in `ns` (see [`RagToolsEnv::keep_page`]).
     fn keep_page(&self, url: &str, ns: &str, public: &str) -> Result<(bool, usize, usize), String> {
-        let src = self.env.pages.as_ref().ok_or("this account has no web access")?;
-        let body = src.page(url)?;
-        if body.trim().chars().count() < 40 {
-            return Err("the page has no readable text to keep".into());
-        }
-        let title = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(url).trim_start_matches(|c: char| !c.is_alphanumeric()).chars().take(120).collect::<String>();
-        let meta: BTreeMap<String, String> = [("url".to_string(), url.to_string()), ("kept".to_string(), crate::clock::now_unix().to_string())].into();
-        let mut kb = self.env.access.kb.lock().unwrap_or_else(|e| e.into_inner());
-        let older: Vec<String> = kb.docs(ns).into_iter().filter(|d| d.source == url).map(|d| d.id).collect();
-        let (id, added) = kb.add_document(ns, &title, url, &body, meta).map_err(|e| e.to_string())?;
-        let mut replaced = 0;
-        if added {
-            for old in older.iter().filter(|o| **o != id) {
-                if kb.remove_document(ns, old).is_ok() {
-                    replaced += 1;
-                }
-            }
-        }
-        drop(kb);
-        (self.env.audit)("rag.add_page", &format!("{} -> {public}{}", host_of_url(url), if replaced > 0 { " (refreshed)" } else { "" }));
-        Ok((added, replaced, body.chars().count()))
+        self.env.keep_page(url, ns, public)
     }
 
     /// Keep `start` and then the pages it links to on the same site, breadth first, at most `depth` links deep and `max` pages in all.
@@ -613,6 +650,27 @@ impl RagTools {
             return Err("only an administrator adds to the shared collections; use a collection under `mine`".into());
         }
         Ok((url, ns, public))
+    }
+
+    /// The collection and the interval of `rag_refresh_schedule`.
+    fn refresh_target(&self, args: &Value) -> Result<(String, String, u64), String> {
+        let hours = args.get("every_hours").and_then(Value::as_u64).ok_or("every_hours is a whole number: 0 for never, or 1 to 720")?;
+        if hours != 0 && !(crate::ragrefresh::MIN_HOURS..=crate::ragrefresh::MAX_HOURS).contains(&hours) {
+            return Err(format!("every_hours is 0 (never) or between {} and {}", crate::ragrefresh::MIN_HOURS, crate::ragrefresh::MAX_HOURS));
+        }
+        let (_, ns, public) = self.page_target(&json!({"refresh": true, "collection": args.get("collection").cloned().unwrap_or(Value::Null)}))?;
+        Ok((ns, public, hours))
+    }
+
+    fn refresh_status(&self) -> String {
+        let Some(dir) = self.env.access.rerank_dir.as_deref() else { return "This assistant has no data folder, so no collection refreshes by itself.".into() };
+        let now = crate::ragrefresh::now_secs();
+        let lines: Vec<String> = crate::ragrefresh::all(dir).into_iter().filter_map(|(ns, e)| {
+            let public = self.env.access.public(&ns)?;
+            let left = (e.last + e.every_hours * 3600).saturating_sub(now) / 3600;
+            Some(format!("{public}: every {} hour(s), next run in about {left} hour(s)", e.every_hours))
+        }).collect();
+        if lines.is_empty() { "No collection reads its kept pages again by itself (the default). rag_refresh_schedule chooses one; it asks first.".into() } else { lines.join("\n") }
     }
 
     fn visible_namespaces(&self, args: &Value) -> Vec<String> {
@@ -799,6 +857,8 @@ impl Tools for RagTools {
         v.push(tool("rag_rerank_status", "Say how found passages are ordered before they reach the answer: off (the search order), lexical (an in-house scorer) or a reranking model of the local Lemonade server. Read-only.", json!({}), &[], Risk::Safe, false));
         v.push(tool(RERANK_SET, "Choose how found passages are ordered: mode off, lexical, or model with the name of a reranking model of the local Lemonade server. Only the order of passages that were already found changes. Asks the person first.", json!({"mode": {"type": "string", "enum": ["off", "lexical", "model"]}, "model": {"type": "string", "description": "mode model: the reranking model's name."}}), &["mode"], Risk::Ask, false));
         v.push(tool(ADD_PAGE, "Read one web page the way web_fetch reads it and keep its text as a document in the person's collection (default mine/web), so rag_search and rag_research find it later. Asks the person first, showing the address and the collection. Pages that need a sign-in cannot be read.", json!({"url": {"type": "string"}, "crawl": {"type": "boolean", "description": "true with a url: also keep the pages it links to on the same site (see depth and max_pages)."}, "depth": {"type": "integer", "description": "crawl only: how many links deep (default 1, at most 2)."}, "max_pages": {"type": "integer", "description": "crawl only: most pages kept (default and limit 10)."}, "refresh": {"type": "boolean", "description": "true without a url: read every web page kept in the collection again and replace the ones that changed (at most 20 pages)."}, "collection": {"type": "string", "description": "mine/web (default) or another mine/<name>; shared only for an administrator."}}), &[], Risk::Ask, false));
+        v.push(tool(REFRESH_STATUS, "Say which collections read their kept web pages again by themselves, how often and when the next run is due. Nothing is on by default. Read-only.", json!({}), &[], Risk::Safe, false));
+        v.push(tool(REFRESH_SET, "Choose how often the kept web pages of ONE collection are read again by themselves while the person is signed in: every_hours 1 to 720, or 0 for never (the default). Each run reads at most 20 kept pages with the account's web access and request budget and replaces the ones that changed; it crawls nothing and adds nothing. Asks every time.", json!({"collection": {"type": "string", "description": "mine/web (default) or another mine/<name>; shared only for an administrator."}, "every_hours": {"type": "integer", "description": "0 = never; 1 to 720 hours between runs."}}), &["every_hours"], Risk::Ask, false));
         v.push(tool(GRAPH_STATUS, "Say whether Graph RAG is on (passages found through links between names the documents mention) and how many names and links the person's collections hold. Read-only.", json!({}), &[], Risk::Safe, false));
         v.push(tool(GRAPH_RELATED, "List what the documents link to a name (a person, place, product or term): the names that appear in the same sentences with it and the documents that mention it. Read-only; the names come from untrusted documents.", json!({"entity": {"type": "string"}, "collections": cols}), &["entity"], Risk::Safe, true));
         v.push(tool(GRAPH_SET, "Switch Graph RAG on or off: searches then add passages that mention names linked to the names in the question, after the usual result, each marked as found through a link. Asks the person first.", json!({"on": {"type": "boolean"}}), &["on"], Risk::Ask, false));
@@ -825,20 +885,11 @@ impl Tools for RagTools {
             })),
             ADD_PAGE if args.get("refresh").and_then(Value::as_bool).unwrap_or(false) && text(args, "url").is_empty() => {
                 let (_, ns, public) = self.page_target(args)?;
-                let urls: Vec<String> = self.env.access.kb.lock().unwrap_or_else(|e| e.into_inner()).docs(&ns).into_iter().map(|d| d.source).filter(|u| u.starts_with("http://") || u.starts_with("https://")).collect::<BTreeSet<_>>().into_iter().take(MAX_REFRESH_PAGES).collect();
-                if urls.is_empty() {
+                let (n, changed, same, failed) = self.env.refresh_pages(&ns, &public);
+                if n == 0 {
                     return Ok(format!("No web page is kept in “{public}”: nothing to read again."));
                 }
-                let (mut changed, mut same, mut failed) = (0, 0, vec![]);
-                for u in &urls {
-                    match self.keep_page(u, &ns, &public) {
-                        Ok((true, replaced, _)) if replaced > 0 => changed += 1,
-                        Ok((true, _, _)) | Ok((false, _, _)) => same += 1,
-                        Err(e) => failed.push(format!("{} ({})", host_of_url(u), e.chars().take(60).collect::<String>())),
-                    }
-                }
-                (self.env.audit)("rag.refresh_pages", &format!("{public}: {changed} changed, {same} unchanged, {} failed", failed.len()));
-                Ok(format!("Read {} kept page(s) of “{public}” again: {changed} had changed and are replaced, {same} are the same{}.", urls.len(), if failed.is_empty() { String::new() } else { format!(", {} could not be read: {}", failed.len(), failed.join("; ")) }))
+                Ok(format!("Read {n} kept page(s) of “{public}” again: {changed} had changed and are replaced, {same} are the same{}.", if failed.is_empty() { String::new() } else { format!(", {} could not be read: {}", failed.len(), failed.join("; ")) }))
             }
             ADD_PAGE if args.get("crawl").and_then(Value::as_bool).unwrap_or(false) => {
                 let (url, ns, public) = self.page_target(args)?;
@@ -852,6 +903,14 @@ impl Tools for RagTools {
                 let (url, ns, public) = self.page_target(args)?;
                 let (added, replaced, chars) = self.keep_page(&url, &ns, &public)?;
                 Ok(if added && replaced > 0 { format!("The page {url} had changed: its text in “{public}” is replaced by the new one ({chars} characters).") } else if added { format!("Kept the page {url} in “{public}” ({chars} characters). rag_search finds it now.") } else { format!("The page {url} was already kept in “{public}”; nothing changed.") })
+            }
+            REFRESH_STATUS => Ok(self.refresh_status()),
+            REFRESH_SET => {
+                let (ns, public, hours) = self.refresh_target(args)?;
+                let dir = self.env.access.rerank_dir.as_deref().ok_or("this assistant has no data folder to keep the choice in")?;
+                crate::ragrefresh::set(dir, &ns, hours, crate::ragrefresh::now_secs())?;
+                (self.env.audit)("rag.refresh_schedule", &format!("{public}: {}", if hours == 0 { "never".to_string() } else { format!("every {hours} h") }));
+                Ok(if hours == 0 { format!("“{public}” is no longer read again by itself.") } else { format!("The kept web pages of “{public}” will be read again about every {hours} hour(s) while someone is signed in, starting one interval from now.") })
             }
             GRAPH_STATUS => Ok(self.graph_status()),
             GRAPH_RELATED => self.graph_related(args),
@@ -898,6 +957,8 @@ impl Tools for RagTools {
             ASK_TOOL => format!("Add the folder {} to the documents", q("path")),
             "rag_rerank_status" => "Say how found passages are ordered".into(),
             GRAPH_STATUS => "Say whether Graph RAG is on".into(),
+            REFRESH_STATUS => "Say which collections refresh their web pages by themselves".into(),
+            REFRESH_SET => if args.get("every_hours").and_then(Value::as_u64) == Some(0) { format!("Stop reading the pages of {} again by itself", { let c = q("collection"); if c.is_empty() { "mine/web".to_string() } else { c } }) } else { format!("Read the pages of {} again every {} hour(s)", { let c = q("collection"); if c.is_empty() { "mine/web".to_string() } else { c } }, args.get("every_hours").and_then(Value::as_u64).unwrap_or(0)) },
             ADD_PAGE if args.get("refresh").and_then(Value::as_bool).unwrap_or(false) && q("url").is_empty() => "Read the kept web pages again".into(),
             ADD_PAGE if args.get("crawl").and_then(Value::as_bool).unwrap_or(false) => format!("Crawl the site from {} into the documents", q("url")),
             ADD_PAGE => format!("Keep the web page {} as a document", q("url")),
@@ -924,6 +985,10 @@ impl Tools for RagTools {
                 return self.page_target(args).ok().map(|(u, _, public)| format!("Crawl from\n{u}\nand keep what it finds in “{public}”.\nThe page and the pages it links to on the same site (at most {max} pages, {depth} link(s) deep) are read now, with the account's web access and its request budget, and their text is stored on this computer. Other sites are not followed."));
             }
             return self.page_target(args).ok().map(|(u, _, public)| format!("Keep the page\n{u}\nas a document in “{public}”.\nThe page is read now, with the account's web access and its request budget, and its text is stored on this computer. Pages that need a sign-in cannot be read."));
+        }
+        if name == REFRESH_SET {
+            let (_, public, hours) = self.refresh_target(args).ok()?;
+            return Some(if hours == 0 { format!("Stop reading the kept web pages of “{public}” again by itself.") } else { format!("Read the kept web pages of “{public}” again about every {hours} hour(s), by itself, while someone is signed in.\nEach run fetches at most {MAX_REFRESH_PAGES} kept pages with the account's web access and its request budget and replaces the ones whose text changed. Nothing is crawled and no new page is added. You can stop it any time with 0.") });
         }
         if name == ENTITIES_SET {
             let m = text(args, "model");

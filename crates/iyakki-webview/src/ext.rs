@@ -24,6 +24,10 @@ pub const MAX_RULES: usize = 50;
 pub const MAX_PATTERNS: usize = 50;
 pub const MAX_SEGMENTS: usize = 32;
 pub const MAX_STR: usize = 4096;
+/// The longest script or style sheet of one `content.script` entry.
+pub const MAX_BODY: usize = 32 * 1024;
+/// The most scripts and style sheets in one `content.script` hook.
+pub const MAX_SCRIPTS: usize = 16;
 /// The most headers added to one request.
 pub const MAX_PER_REQUEST: usize = 16;
 
@@ -34,6 +38,7 @@ pub mod hook {
     pub const REQUEST_BLOCK: u32 = 3;
     pub const CONTENT_SCRIPT: u32 = 4;
     pub const PAGE_ACTION: u32 = 5;
+    pub const USER_AGENT: u32 = 6;
 
     pub fn name(kind: u32) -> Option<&'static str> {
         Some(match kind {
@@ -42,6 +47,7 @@ pub mod hook {
             REQUEST_BLOCK => "request.block",
             CONTENT_SCRIPT => "content.script",
             PAGE_ACTION => "page.action",
+            USER_AGENT => "user.agent",
             _ => return None,
         })
     }
@@ -53,6 +59,7 @@ pub mod hook {
             REQUEST_BLOCK => "web.request.block",
             CONTENT_SCRIPT => "web.content.script",
             PAGE_ACTION => "web.page.action",
+            USER_AGENT => "web.user.agent",
             _ => return None,
         })
     }
@@ -158,7 +165,10 @@ impl W {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
     fn str(&mut self, s: &str) {
-        let mut end = s.len().min(MAX_STR);
+        self.str_max(s, MAX_STR);
+    }
+    fn str_max(&mut self, s: &str, max: usize) {
+        let mut end = s.len().min(max);
         while !s.is_char_boundary(end) {
             end -= 1;
         }
@@ -282,8 +292,11 @@ impl<'a> Rd<'a> {
         Ok(n)
     }
     fn str(&mut self) -> Result<String, ExtError> {
+        self.str_max(MAX_STR)
+    }
+    fn str_max(&mut self, max: usize) -> Result<String, ExtError> {
         let n = self.u32()? as usize;
-        if n > MAX_STR {
+        if n > max {
             return Err(ExtError::TooLong);
         }
         String::from_utf8(self.take(n)?.to_vec()).map_err(|_| ExtError::BadUtf8)
@@ -321,6 +334,62 @@ pub fn decode_header_rules(b: &[u8]) -> Result<Vec<HeaderRule>, ExtError> {
         out.push(HeaderRule { header, value, replace, domains, prefix });
     }
     Ok(out)
+}
+
+/// One script or style sheet of a `content.script` hook: put into the page at the start or the end of the document on the sites named
+/// (never a catch-all: `domains` is not empty). `Debug` shows the size only.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ContentScript {
+    /// A style sheet when true, otherwise a script.
+    pub style: bool,
+    /// Run at the end of the document when true, at the start otherwise.
+    pub at_end: bool,
+    pub domains: Vec<Pat>,
+    pub body: String,
+}
+
+impl std::fmt::Debug for ContentScript {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ContentScript({}, {} bytes, hidden)", if self.style { "style" } else { "script" }, self.body.len())
+    }
+}
+
+/// The payload of a `content.script` hook: `u32 n`, per entry `u8 style`, `u8 at_end`, patterns, `str body` (up to `MAX_BODY`).
+pub fn encode_content_scripts(list: &[ContentScript]) -> Vec<u8> {
+    let mut w = W(Vec::new());
+    w.u32(list.len().min(MAX_SCRIPTS) as u32);
+    for c in list.iter().take(MAX_SCRIPTS) {
+        w.u8(c.style as u8);
+        w.u8(c.at_end as u8);
+        put_pats(&mut w, &c.domains);
+        w.str_max(&c.body, MAX_BODY);
+    }
+    w.0
+}
+
+pub fn decode_content_scripts(b: &[u8]) -> Result<Vec<ContentScript>, ExtError> {
+    let mut r = Rd(b);
+    let n = r.count(MAX_SCRIPTS)?;
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let style = r.u8()? != 0;
+        let at_end = r.u8()? != 0;
+        let domains = get_pats(&mut r)?;
+        let body = r.str_max(MAX_BODY)?;
+        out.push(ContentScript { style, at_end, domains, body });
+    }
+    Ok(out)
+}
+
+/// The payload of a `user.agent` hook: one `str` (empty means the engine's own).
+pub fn encode_user_agent(ua: &str) -> Vec<u8> {
+    let mut w = W(Vec::new());
+    w.str(ua);
+    w.0
+}
+
+pub fn decode_user_agent(b: &[u8]) -> Result<String, ExtError> {
+    Rd(b).str()
 }
 
 // ---- dispatch --------------------------------------------------------------------------------------------------------------
@@ -425,6 +494,22 @@ pub fn headers_for<'a>(rules: &'a [HeaderRule], t: &Target) -> Vec<(&'a str, &'a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_scripts_and_the_user_agent_round_trip_and_are_cut_to_their_caps() {
+        let list = vec![ContentScript { style: true, at_end: true, domains: vec![pat("example.com", true)], body: "a { color: red }".into() }, ContentScript { style: false, at_end: false, domains: vec![pat("example.org", false)], body: "x".repeat(MAX_BODY + 50) }];
+        let got = decode_content_scripts(&encode_content_scripts(&list)).unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(got[0].style && got[0].at_end && got[0].body == "a { color: red }" && got[0].domains[0].suffix);
+        assert_eq!(got[1].body.len(), MAX_BODY, "a longer body is cut, never refused by the reader");
+        assert!(format!("{:?}", got[0]).contains("hidden") && !format!("{:?}", got[0]).contains("color"));
+        let many: Vec<ContentScript> = (0..MAX_SCRIPTS + 5).map(|_| list[0].clone()).collect();
+        assert_eq!(decode_content_scripts(&encode_content_scripts(&many)).unwrap().len(), MAX_SCRIPTS);
+        assert!(decode_content_scripts(&[1, 0, 0, 0, 0]).is_err(), "cut short");
+        assert_eq!(decode_user_agent(&encode_user_agent("Mozilla/5.0 Test")).unwrap(), "Mozilla/5.0 Test");
+        assert_eq!(hook::name(hook::USER_AGENT), Some("user.agent"));
+        assert_eq!(hook::capability(hook::USER_AGENT), Some("web.user.agent"));
+    }
 
     fn pat(host: &str, suffix: bool) -> Pat {
         Pat { scheme: 0, suffix, host: host.into(), port: 0, segs: vec![] }

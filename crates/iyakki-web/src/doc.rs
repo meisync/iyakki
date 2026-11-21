@@ -7,7 +7,7 @@ use crate::domtree::PseudoEl;
 use crate::html::{self, NodeKind, Tree};
 use crate::style::{self, Align, Computed, Display, Fit, Float, Fx, Justify, StyleSheets, Transform, VAlign};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Style {
     pub bold: bool,
     pub italic: bool,
@@ -26,7 +26,7 @@ pub struct Style {
     pub gap: i16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     pub text: String,
     pub style: Style,
@@ -41,7 +41,7 @@ pub struct Span {
 }
 
 /// An `inline-block`: a box with blocks inside that sits in a line of text like one big word.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InlineBox {
     pub style: BoxStyle,
     pub height: Length,
@@ -51,7 +51,7 @@ pub struct InlineBox {
 }
 
 /// An `<img>` on the page.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImageRef {
     /// As written (resolve against the page's address); may be a `data:` address.
     pub src: String,
@@ -66,7 +66,7 @@ pub struct ImageRef {
     pub lazy: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ControlKind {
     Text,
     Password,
@@ -81,14 +81,14 @@ pub enum ControlKind {
     File,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SelectOption {
     pub value: String,
     pub label: String,
     pub selected: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Control {
     pub kind: ControlKind,
     /// Index into [`Doc::forms`].
@@ -115,7 +115,7 @@ pub struct Control {
     pub node: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Form {
     /// As written on the page (resolve against the page's address); empty means the page itself.
     pub action: String,
@@ -124,7 +124,7 @@ pub struct Form {
 }
 
 /// A box from style sheets around some blocks: margins, padding, border, background and width.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BoxStyle {
     /// top, right, bottom, left (pixels)
     pub margin: [f32; 4],
@@ -142,14 +142,15 @@ pub struct BoxStyle {
     pub fx: Fx,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BoxBlock {
-    pub style: BoxStyle,
+    /// Boxed: a block is moved around a lot while a page is built, and the style is most of its size.
+    pub style: Box<BoxStyle>,
     pub children: Vec<Block>,
 }
 
 /// One column of a row: what a flex item or grid cell holds.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Column {
     pub style: BoxStyle,
     /// `flex-grow`, and the width asked for (`flex-basis`, else `width`).
@@ -159,7 +160,7 @@ pub struct Column {
 }
 
 /// Blocks side by side (`display:flex` in a row, or a grid).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RowBlock {
     pub style: BoxStyle,
     pub gap: f32,
@@ -173,7 +174,7 @@ pub struct RowBlock {
     pub cols: Vec<Column>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TextBlock {
     /// 0 = text, 1..=6 = heading.
     pub level: u8,
@@ -187,7 +188,7 @@ pub struct TextBlock {
     pub align: Align,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Block {
     Text(TextBlock),
     Box(BoxBlock),
@@ -195,10 +196,13 @@ pub enum Block {
     Pre(String),
     Rule,
     Table(Table),
+    /// The start or the end of an element the caller asked the box of (`build_styled_marked`): nothing is drawn; the layout notes where it is
+    /// so a viewer can be placed on it. `height` is the pixel height the page gave the element (0: none); the layout keeps that much room.
+    Mark { id: String, end: bool, height: f32 },
 }
 
 /// A `<table>`: rows of cells, each holding blocks.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Table {
     pub rows: Vec<Vec<Cell>>,
     /// The `width` attribute or style (auto: as wide as the content needs).
@@ -212,7 +216,7 @@ pub struct Table {
     pub lines: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Cell {
     pub blocks: Vec<Block>,
     pub colspan: u32,
@@ -236,7 +240,7 @@ impl Cell {
                     Block::Box(k) => walk(&k.children, out),
                     Block::Row(r) => r.cols.iter().for_each(|c| walk(&c.blocks, out)),
                     Block::Table(t) => t.rows.iter().for_each(|r| r.iter().for_each(|c| out.push(c.text()))),
-                    Block::Rule => {}
+                    Block::Rule | Block::Mark { .. } => {}
                 }
             }
         }
@@ -247,7 +251,7 @@ impl Cell {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Doc {
     pub title: String,
     /// The background the page asked for (on `html` or `body`); the whole view is painted with it.
@@ -301,7 +305,7 @@ fn box_style(c: &Computed, drop_bg: bool) -> BoxStyle {
 
 fn wrap_box(c: &Computed, tag: &str, children: Vec<Block>) -> Block {
     // the page's background lives on `body`/`html` is the whole view's (see `Doc::canvas`), not a box
-    Block::Box(BoxBlock { style: box_style(c, matches!(tag, "body" | "html")), children })
+    Block::Box(BoxBlock { style: Box::new(box_style(c, matches!(tag, "body" | "html"))), children })
 }
 
 pub fn build(tree: &Tree) -> Doc {
@@ -315,8 +319,19 @@ pub fn build_styled(tree: &Tree, sheets: &StyleSheets, vp: &crate::css::Viewport
     build_with(tree, Some(&computed), pseudo)
 }
 
-fn build_with(tree: &Tree, cs: Option<&[Option<Computed>]>, pseudo: HashMap<(usize, PseudoEl), (String, Computed)>) -> Doc {
-    let mut b = Builder { tree, cs, pseudo, doc: Doc::default(), cur: None, style: Style::default(), link: None, lists: vec![], quote: 0, text_len: 0, pre: None, form: None, align: Align::Left, transform: Transform::None, col_child: usize::MAX, shadow_hosts: Vec::new() };
+/// [`build_styled`] with the elements of these `id`s marked (`Block::Mark`) so their boxes can be found after layout.
+pub fn build_styled_marked(tree: &Tree, sheets: &StyleSheets, vp: &crate::css::Viewport, wanted: &[String]) -> Doc {
+    let computed = style::compute(tree, sheets, vp);
+    let pseudo = style::compute_pseudo(tree, sheets, vp, &computed);
+    build_with_marks(tree, Some(&computed), pseudo, wanted)
+}
+
+fn build_with(tree: &Tree, cs: Option<&[Option<style::Shared>]>, pseudo: HashMap<(usize, PseudoEl), (String, Computed)>) -> Doc {
+    build_with_marks(tree, cs, pseudo, &[])
+}
+
+fn build_with_marks(tree: &Tree, cs: Option<&[Option<style::Shared>]>, pseudo: HashMap<(usize, PseudoEl), (String, Computed)>, wanted: &[String]) -> Doc {
+    let mut b = Builder { tree, cs, pseudo, doc: Doc::default(), cur: None, style: Style::default(), link: None, lists: vec![], quote: 0, text_len: 0, pre: None, form: None, align: Align::Left, transform: Transform::None, col_child: usize::MAX, shadow_hosts: Vec::new(), wanted: wanted.iter().take(64).cloned().collect() };
     if let Some(t) = tree.find("title") {
         b.doc.title = collapse(&tree.text_of(t)).trim().to_string();
     }
@@ -349,7 +364,7 @@ pub fn from_text(src: &str) -> Doc {
 struct Builder<'a> {
     tree: &'a Tree,
     /// Computed styles, when style sheets are in use.
-    cs: Option<&'a [Option<Computed>]>,
+    cs: Option<&'a [Option<style::Shared>]>,
     /// Generated `::before` / `::after` content: text and style.
     pseudo: HashMap<(usize, PseudoEl), (String, Computed)>,
     doc: Doc,
@@ -369,6 +384,8 @@ struct Builder<'a> {
     col_child: usize,
     /// Elements whose shadow root is being walked (their own children fill its `<slot>`s).
     shadow_hosts: Vec<usize>,
+    /// The `id`s of the elements the caller wants the box of: each one is wrapped in a start and an end `Block::Mark`.
+    wanted: Vec<String>,
 }
 
 fn collapse(s: &str) -> String {
@@ -437,7 +454,17 @@ impl<'a> Builder<'a> {
             Some(cur) => cur.spans.iter().rev().find(|s| s.style.gap == 0).is_none_or(|s| s.text.ends_with(' ') || s.text.ends_with('\n')),
             None => true,
         };
-        let t = if at_start { t.trim_start_matches(' ').to_string() } else { t };
+        let t = if at_start && t.starts_with(' ') {
+            let mut t = t;
+            let cut = t.len() - t.trim_start_matches(' ').len();
+            t.drain(..cut);
+            t
+        } else {
+            t
+        };
+        if t.is_empty() {
+            return;
+        }
         let t = match self.transform {
             Transform::None => t,
             Transform::Upper => t.to_uppercase(),
@@ -496,11 +523,29 @@ impl<'a> Builder<'a> {
     }
 
     fn computed(&self, n: usize) -> Option<&'a Computed> {
-        self.cs.and_then(|c| c.get(n)).and_then(|c| c.as_ref())
+        self.cs.and_then(|c| c.get(n)).and_then(|c| c.as_deref())
     }
 
     /// An element, with what style sheets say about it: hidden, a box, a row of columns, or just different colours.
     fn walk_element(&mut self, n: usize, tag: &str, depth: usize, allow_box: bool) {
+        let id = if self.wanted.is_empty() { None } else { self.tree.attr(n, "id").filter(|i| self.wanted.iter().any(|w| w == i)).map(str::to_string) };
+        let Some(id) = id else { return self.walk_element_inner(n, tag, depth, allow_box) };
+        let height = match self.computed(n) {
+            Some(c) if c.display == Display::None || c.hidden => return self.walk_element_inner(n, tag, depth, allow_box),
+            Some(c) => match (c.height, c.min_height) {
+                (Length::Px(h), _) | (_, Length::Px(h)) if h.is_finite() && h > 0.0 => h.min(10_000.0),
+                _ => 0.0,
+            },
+            None => 0.0,
+        };
+        self.flush();
+        self.doc.blocks.push(Block::Mark { id: id.clone(), end: false, height });
+        self.walk_element_inner(n, tag, depth, allow_box);
+        self.flush();
+        self.doc.blocks.push(Block::Mark { id, end: true, height });
+    }
+
+    fn walk_element_inner(&mut self, n: usize, tag: &str, depth: usize, allow_box: bool) {
         let Some(cs) = self.computed(n) else {
             self.element(n, tag, depth);
             return;
@@ -891,7 +936,7 @@ impl<'a> Builder<'a> {
                 if !self.full() {
                     let mut st = plain_box();
                     st.fx.clear = clear;
-                    self.doc.blocks.push(Block::Box(BoxBlock { style: st, children: Vec::new() }));
+                    self.doc.blocks.push(Block::Box(BoxBlock { style: Box::new(st), children: Vec::new() }));
                 }
             }
             "br" => {
@@ -1307,11 +1352,16 @@ fn trim_spans(spans: &mut Vec<Span>) {
     while spans.last().is_some_and(blank) {
         spans.pop();
     }
+    // in place: most spans have nothing to trim, and a new string for each would be an allocation per text block
     if let Some(f) = spans.first_mut() {
-        f.text = f.text.trim_start().to_string();
+        let cut = f.text.len() - f.text.trim_start().len();
+        if cut > 0 {
+            f.text.drain(..cut);
+        }
     }
     if let Some(l) = spans.last_mut() {
-        l.text = l.text.trim_end().to_string();
+        let keep = l.text.trim_end().len();
+        l.text.truncate(keep);
     }
 }
 
@@ -1376,6 +1426,7 @@ mod tests {
             Block::Text(t) => format!("{}{}{}{}", if t.level > 0 { format!("h{} ", t.level) } else { String::new() }, "  ".repeat(t.indent as usize), if t.marker.is_empty() { String::new() } else { format!("{} ", t.marker) }, t.spans.iter().map(|s| s.text.as_str()).collect::<String>()),
             Block::Pre(p) => format!("pre:{p}"),
             Block::Rule => "---".into(),
+            Block::Mark { .. } => "mark".into(),
             Block::Box(_) | Block::Row(_) => "box".into(),
             Block::Table(t) => format!("table:{}", t.rows.iter().map(|r| r.iter().map(Cell::text).collect::<Vec<_>>().join("|")).collect::<Vec<_>>().join(";")),
         }
@@ -1521,6 +1572,19 @@ mod tests {
         assert_eq!(d.controls[1].value, "x");
         assert_eq!(d.controls[2].options.iter().map(|o| (o.value.as_str(), o.selected)).collect::<Vec<_>>(), vec![("One", true), ("Two", false)], "no value attribute: the label is the value");
         assert!(d.controls[3].options.is_empty());
+    }
+
+    #[test]
+    fn only_the_asked_ids_are_marked_with_a_start_an_end_and_the_height_the_page_gave() {
+        let tree = html::parse("<p>a</p><div id=chart></div><div id=other>x</div>");
+        let vp = crate::css::Viewport::default();
+        let mut n = 0;
+        let sheet = crate::css::parse_sheet("#chart{height:90px}", &vp, &mut n);
+        let plain = build_styled(&tree, &StyleSheets::new(std::slice::from_ref(&sheet)), &vp);
+        assert!(!plain.blocks.iter().any(|b| matches!(b, Block::Mark { .. })), "no marks unless asked");
+        let d = build_styled_marked(&tree, &StyleSheets::new(&[sheet]), &vp, &["chart".to_string()]);
+        let marks: Vec<(String, bool, f32)> = d.blocks.iter().filter_map(|b| if let Block::Mark { id, end, height } = b { Some((id.clone(), *end, *height)) } else { None }).collect();
+        assert_eq!(marks, [("chart".to_string(), false, 90.0), ("chart".to_string(), true, 90.0)]);
     }
 
     fn styled(html: &str, css: &str) -> Doc {

@@ -17,6 +17,8 @@ pub enum Page {
     Choose,
     /// Custom sizes.
     Sizes,
+    /// Make free space by shrinking a partition of another system first (F-INST-27, F-INST-30): the boot-time pages' own step.
+    Shrink,
     Plan,
     Confirm,
     Progress,
@@ -111,6 +113,29 @@ pub enum Row {
     Part { index: u32, text: String, bytes: u64, usable: bool },
 }
 
+/// Opens the shrink step for a drive (the real one finds the computer's disk and its own file system tools; tests bring files).
+pub type ShrinkOpener = std::sync::Arc<dyn Fn(&DiskModel) -> Result<crate::resize_step::ShrinkFlow, String> + Send + Sync>;
+/// Reads the computer's drives again (after a shrink changed the table).
+pub type Rereader = std::sync::Arc<dyn Fn() -> Vec<DiskModel> + Send + Sync>;
+
+/// What the Shrink page has focus on once there is a plan: the drive's name, the box, the button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShrinkFocus {
+    Name,
+    Ack,
+    Run,
+}
+
+/// The state of the Shrink page: the shared flow of F-INST-30 and what the person typed.
+pub struct ShrinkPage {
+    pub flow: crate::resize_step::ShrinkFlow,
+    pub sel: usize,
+    pub mib: String,
+    pub typed: String,
+    pub ack: bool,
+    pub focus: ShrinkFocus,
+}
+
 pub struct Wizard {
     pub page: Page,
     pub disks: Vec<DiskModel>,
@@ -132,12 +157,32 @@ pub struct Wizard {
     pub size_room_mib: u64,
     pub progress: (String, u64, u64),
     pub result: String,
+    /// Where the save file of legacy BIOS boot on a shared disk goes (F-INST-13): sector 0 and the area GRUB takes are saved there first
+    /// so that `--bios-restore` can put them back. The caller sets it to a folder on another disk; see [`default_bios_save_dir`].
+    pub bios_save_dir: std::path::PathBuf,
+    /// The shrink step: `None` opener means this front end has none (the window installer has its own panel).
+    pub shrink_opener: Option<ShrinkOpener>,
+    pub rereader: Option<Rereader>,
+    pub shrink: Option<ShrinkPage>,
+}
+
+/// The folder for the BIOS save file when the caller names none: `IYAKKI_BIOS_SAVE_DIR`, else the data folder of a running IYAKKI
+/// (`/var/lib/iyakki`), else the folder the installer was started in.
+pub fn default_bios_save_dir() -> std::path::PathBuf {
+    if let Some(d) = std::env::var_os("IYAKKI_BIOS_SAVE_DIR").map(std::path::PathBuf::from).filter(|d| d.is_dir()) {
+        return d;
+    }
+    let data = std::path::PathBuf::from("/var/lib/iyakki");
+    if data.is_dir() {
+        return data;
+    }
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
 impl Wizard {
     pub fn new(disks: Vec<DiskModel>, source: SourceSpec, uefi: bool) -> Wizard {
         let disk_sel = disks.iter().position(|d| Wizard::disk_reason_of(d).is_none()).unwrap_or(0);
-        Wizard { page: Page::Drive, disks, source, uefi, disk_sel, mode_sel: 1, row_sel: 0, req: Request::default(), plan: None, error: None, erase_ack: false, cfocus: CFocus::Install, focus: 0, sizes: [String::new(), String::new()], size_room_mib: 0, progress: (String::new(), 0, 0), result: String::new() }
+        Wizard { page: Page::Drive, disks, source, uefi, disk_sel, mode_sel: 1, row_sel: 0, req: Request::default(), plan: None, error: None, erase_ack: false, cfocus: CFocus::Install, focus: 0, sizes: [String::new(), String::new()], size_room_mib: 0, progress: (String::new(), 0, 0), result: String::new(), bios_save_dir: default_bios_save_dir(), shrink_opener: None, rereader: None, shrink: None }
     }
 
     /// Why a disk cannot be used in any mode.
@@ -245,6 +290,7 @@ impl Wizard {
             Page::Mode => self.page = Page::Drive,
             Page::Choose => self.page = Page::Mode,
             Page::Sizes => self.page = Page::Choose,
+            Page::Shrink => self.shrink_back(),
             Page::Plan => self.page = if matches!(self.mode(), Mode::WholeDisk) { Page::Mode } else { Page::Choose },
             Page::Confirm => self.page = Page::Plan,
             Page::Done | Page::Failed => return Next::Quit,
@@ -254,8 +300,130 @@ impl Wizard {
     }
 
     pub fn start_mode(&mut self) {
-        self.req = Request { mode: self.mode(), zram: self.req.zram.clone(), swapfile: self.req.swapfile.clone(), hostname: self.req.hostname.clone(), keep_esp: self.req.keep_esp, ..Request::default() };
+        self.req = Request { mode: self.mode(), zram: self.req.zram.clone(), swapfile: self.req.swapfile.clone(), hostname: self.req.hostname.clone(), keep_esp: self.req.keep_esp, bios: self.req.bios, bios_replace: self.req.bios_replace, ..Request::default() };
         self.row_sel = self.first_choice();
+    }
+
+    /// Open the Shrink page for the chosen drive (Mode page, key `s`).
+    pub fn open_shrink(&mut self) {
+        let Some(open) = self.shrink_opener.clone() else {
+            self.error = Some("Shrinking a partition is not offered here. Use `iyakki-usb --shrink` (docs/INSTALLER.md).".into());
+            return;
+        };
+        match open(self.disk()) {
+            Ok(flow) => {
+                self.error = None;
+                self.shrink = Some(ShrinkPage { flow, sel: 0, mib: String::new(), typed: String::new(), ack: false, focus: ShrinkFocus::Name });
+                self.page = Page::Shrink;
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// Esc on the Shrink page: from the plan back to the list, from the list (or a result) back to the Mode page; after a shrink the
+    /// drives are read again, because the table changed.
+    fn shrink_back(&mut self) {
+        use crate::resize_step::Stage;
+        let Some(sp) = self.shrink.as_mut() else {
+            self.page = Page::Mode;
+            return;
+        };
+        match sp.flow.stage {
+            Stage::Plan(_) => {
+                sp.flow.back();
+                sp.typed.clear();
+                sp.ack = false;
+            }
+            _ => {
+                let changed = matches!(sp.flow.stage, Stage::Done(..) | Stage::Failed(_));
+                self.shrink = None;
+                self.page = Page::Mode;
+                if changed {
+                    if let Some(read) = self.rereader.clone() {
+                        let name = self.disk().name.clone();
+                        let fresh = read();
+                        if let Some(i) = fresh.iter().position(|d| d.name == name) {
+                            self.disk_sel = i;
+                            self.disks = fresh;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_shrink(&mut self, k: WKey) {
+        use crate::resize_step::Stage;
+        let Some(sp) = self.shrink.as_mut() else { return };
+        match (&sp.flow.stage, k) {
+            (Stage::Pick, WKey::Up) => sp.sel = sp.sel.saturating_sub(1),
+            (Stage::Pick, WKey::Down) => sp.sel = (sp.sel + 1).min(sp.flow.candidates().len().saturating_sub(1)),
+            (Stage::Pick, WKey::Char(c)) if c.is_ascii_digit() && sp.mib.len() < 9 => sp.mib.push(c),
+            (Stage::Pick, WKey::Backspace) => {
+                sp.mib.pop();
+            }
+            (Stage::Pick, WKey::Enter) => {
+                let cands = sp.flow.candidates();
+                let Some(c) = cands.get(sp.sel) else { return };
+                if let Some(why) = &c.refused {
+                    self.error = Some(format!("{} cannot be shrunk: {why}", c.name));
+                    return;
+                }
+                let Some(mib) = sp.mib.parse::<u64>().ok().filter(|m| *m > 0) else {
+                    self.error = Some("Type the new size of the partition in MiB (a whole number).".into());
+                    return;
+                };
+                match sp.flow.choose(c.part, mib) {
+                    Ok(_) => {
+                        self.error = None;
+                        sp.focus = ShrinkFocus::Name;
+                        sp.typed.clear();
+                        sp.ack = false;
+                    }
+                    Err(e) => self.error = Some(e),
+                }
+            }
+            (Stage::Plan(_), WKey::Tab | WKey::Down) => {
+                sp.focus = match sp.focus {
+                    ShrinkFocus::Name => ShrinkFocus::Ack,
+                    ShrinkFocus::Ack => ShrinkFocus::Run,
+                    ShrinkFocus::Run => ShrinkFocus::Name,
+                }
+            }
+            (Stage::Plan(_), WKey::Up) => {
+                sp.focus = match sp.focus {
+                    ShrinkFocus::Name => ShrinkFocus::Run,
+                    ShrinkFocus::Ack => ShrinkFocus::Name,
+                    ShrinkFocus::Run => ShrinkFocus::Ack,
+                }
+            }
+            (Stage::Plan(_), WKey::Char(c)) if sp.focus == ShrinkFocus::Name && !c.is_control() && sp.typed.len() < 40 => sp.typed.push(c),
+            (Stage::Plan(_), WKey::Backspace) if sp.focus == ShrinkFocus::Name => {
+                sp.typed.pop();
+            }
+            (Stage::Plan(_), WKey::Char(' ')) if sp.focus == ShrinkFocus::Ack => sp.ack = !sp.ack,
+            (Stage::Plan(_), WKey::Enter) => match sp.focus {
+                ShrinkFocus::Name => sp.focus = ShrinkFocus::Ack,
+                ShrinkFocus::Ack => sp.focus = ShrinkFocus::Run,
+                ShrinkFocus::Run => {
+                    let (typed, ack) = (sp.typed.clone(), sp.ack);
+                    self.error = sp.flow.confirm(&typed, ack).err();
+                }
+            },
+            (Stage::Done(..) | Stage::Failed(_), WKey::Enter) => self.shrink_back(),
+            _ => {}
+        }
+    }
+
+    /// A save file name for this drive in [`Wizard::bios_save_dir`] that does not exist yet.
+    pub fn fresh_bios_save(&self) -> String {
+        let disk: String = self.disk().name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        (0u32..)
+            .map(|n| self.bios_save_dir.join(format!("iyakki-bios-save-{disk}-{stamp}{}.bin", if n == 0 { String::new() } else { format!("-{n}") })))
+            .find(|p| !p.exists())
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
     }
 
     /// Build the plan for the current choices and go to the Plan page; on refusal stay and show why.
@@ -264,6 +432,8 @@ impl Wizard {
         r.mode = self.mode();
         // a disk that holds the running system is changed only after the extra warning on the Confirm page
         r.confirm_running_disk = r.confirm_running_disk || self.disk().running_system;
+        // legacy BIOS boot of a shared disk: a fresh save file name in the chosen folder (never an existing one)
+        r.bios_save = if r.bios && r.mode != Mode::WholeDisk { self.fresh_bios_save() } else { String::new() };
         let first = build_plan(self.disk(), &r, &self.source, self.uefi);
         // "keep the existing EFI System Partition" does not fit (the fast start puts the whole system on the boot volume, about 0.5 GB or more):
         // boot moves to a boot partition of IYAKKI's own in the free space, the other system's EFI partition stays as it is
@@ -322,6 +492,14 @@ impl Wizard {
                 WKey::Up => Self::move_sel(&mut self.mode_sel, Mode::ALL.len(), true),
                 WKey::Down => Self::move_sel(&mut self.mode_sel, Mode::ALL.len(), false),
                 WKey::Char('e') => self.req.keep_esp = !self.req.keep_esp,
+                WKey::Char('s') => self.open_shrink(),
+                WKey::Char('l') if self.mode() != Mode::WholeDisk => {
+                    self.req.bios = !self.req.bios;
+                    if !self.req.bios {
+                        self.req.bios_replace = false;
+                    }
+                }
+                WKey::Char('r') if self.req.bios && self.mode() != Mode::WholeDisk => self.req.bios_replace = !self.req.bios_replace,
                 WKey::Enter => match self.mode_available(self.mode()) {
                     Err(e) => self.error = Some(e),
                     Ok(()) => {
@@ -342,6 +520,13 @@ impl Wizard {
                     WKey::Up => Self::move_sel(&mut self.row_sel, n, true),
                     WKey::Down => Self::move_sel(&mut self.row_sel, n, false),
                     WKey::Char('e') if self.mode() == Mode::Reuse => self.req.keep_esp = !self.req.keep_esp,
+                    WKey::Char('l') => {
+                        self.req.bios = !self.req.bios;
+                        if !self.req.bios {
+                            self.req.bios_replace = false;
+                        }
+                    }
+                    WKey::Char('r') if self.req.bios => self.req.bios_replace = !self.req.bios_replace,
                     WKey::Char('b') if self.mode() == Mode::Reuse => {
                         if let Some(Row::Part { index, .. }) = self.rows().get(self.row_sel) {
                             self.req.boot_part = if self.req.boot_part == Some(*index) { None } else { Some(*index) };
@@ -389,6 +574,7 @@ impl Wizard {
                     _ => {}
                 }
             }
+            Page::Shrink => self.handle_shrink(k),
             Page::Sizes => match k {
                 WKey::Tab | WKey::Up | WKey::Down => self.focus = 1 - self.focus,
                 WKey::Backspace => {
@@ -579,6 +765,7 @@ impl Wizard {
                 }
                 s.push_str(&format!("\n{BOLD}To delete a partition: choose Free space only or Custom, then press x on the partition.\nTo format a partition: choose Use existing partitions, then press b (BOOT) or d (DATA) on it.{RESET}\nNothing is changed before the last page, where you confirm.\n"));
                 s.push_str(&format!("\n{DIM}Dual boot with another system: free-space or reuse mode, and e = keep the existing EFI System Partition ({}){RESET}\n", if self.req.keep_esp { "ON" } else { "off" }));
+                s.push_str(&format!("{DIM}No free space? s = make some by shrinking a partition of the other system first (asks for the drive's name again){RESET}\n{DIM}Also start this shared disk through legacy BIOS (older PCs): l ({}), r = allow replacing another system's boot code ({}); the old boot sectors are saved first and `iyakki-usb --bios-restore` puts them back{RESET}\n", if self.req.bios { "ON" } else { "off" }, if self.req.bios_replace { "ON" } else { "off" }));
                 s.push_str(&format!("{DIM}Up/Down: move   Enter: choose   Esc: back{RESET}\n"));
             }
             Page::Choose => {
@@ -613,6 +800,44 @@ impl Wizard {
                 s.push_str(&format!("{}Boot partition (MiB, image needs at least {}): {}{}\n", if self.focus == 0 { "> " } else { "  " }, self.source.boot_required(self.disk().sector) >> 20, self.sizes[0], if self.focus == 0 { "_" } else { "" }));
                 s.push_str(&format!("{}Data partition (MiB):                          {}{}\n", if self.focus == 1 { "> " } else { "  " }, self.sizes[1], if self.focus == 1 { "_" } else { "" }));
                 s.push_str(&format!("\n{DIM}Tab: next field   Enter: show the plan   Esc: back{RESET}\n"));
+            }
+            Page::Shrink => {
+                use crate::resize_step::Stage;
+                title(&mut s, 2, "make free space by shrinking a partition");
+                if let Some(sp) = &self.shrink {
+                    match &sp.flow.stage {
+                        Stage::Pick => {
+                            s.push_str(&format!("{} ({}): pick a partition, type its new size in MiB\n\n", self.disk().path, human_size(self.disk().size_bytes)));
+                            for (i, c) in sp.flow.candidates().iter().enumerate() {
+                                let state = c.refused.as_ref().map(|r| format!("  {RED}cannot: {r}{RESET}")).unwrap_or_default();
+                                let line = format!("{:<10} {:<8} {:>9}{state}", c.name, if c.fs.is_empty() { "?" } else { &c.fs }, human_size(c.bytes));
+                                if i == sp.sel { s.push_str(&format!("{REVERSE} > {line} {RESET}\n")) } else { s.push_str(&format!("   {line}\n")) }
+                            }
+                            s.push_str(&format!("\nNew size (MiB): {}_\n", sp.mib));
+                            s.push_str(&format!("\n{BOLD}Back up first: a fault or a power cut while a file system is shrunk can damage it.{RESET}\n{DIM}Up/Down: move   digits: new size   Enter: show the plan   Esc: back (nothing changed){RESET}\n"));
+                        }
+                        Stage::Plan(_) => {
+                            for l in sp.flow.plan_text().unwrap_or_default().lines() {
+                                s.push_str(&format!("{l}\n"));
+                            }
+                            let mark = |f: ShrinkFocus| if sp.focus == f { "> " } else { "  " };
+                            s.push_str(&format!("\n{}Type the drive's name again: {}{}\n", mark(ShrinkFocus::Name), sp.typed, if sp.focus == ShrinkFocus::Name { "_" } else { "" }));
+                            s.push_str(&format!("{}[{}] I understand the file system is changed and I have a backup\n", mark(ShrinkFocus::Ack), if sp.ack { "x" } else { " " }));
+                            s.push_str(&format!("{}[ Shrink ]\n", mark(ShrinkFocus::Run)));
+                            s.push_str(&format!("\n{DIM}Tab: next   Space: tick the box   Enter: next / run   Esc: back to the list (nothing changed){RESET}\n"));
+                        }
+                        Stage::Done(notes, freed) => {
+                            s.push_str(&format!("{GREEN}Done.{RESET} {} are free now.\n", human_size(*freed)));
+                            for n in notes {
+                                s.push_str(&format!("{n}\n"));
+                            }
+                            s.push_str(&format!("\n{DIM}Enter or Esc: back to the drive's pages (the drives are read again){RESET}\n"));
+                        }
+                        Stage::Failed(e) => {
+                            s.push_str(&format!("{RED}The shrink stopped:{RESET} {e}\n\n{DIM}Enter or Esc: back{RESET}\n"));
+                        }
+                    }
+                }
             }
             Page::Plan => {
                 title(&mut s, 4, "the plan (nothing is written yet)");

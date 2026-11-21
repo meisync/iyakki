@@ -1,0 +1,19 @@
+scenario: NET-WIFI-01
+title: Wi-Fi and Ethernet
+area: Network
+rows: F-NET-01, F-NET-02, F-NET-06
+machines: any
+needs: person
+prereq: A Wi-Fi network you may join and its password.
+step: Open Settings, Network.
+expect: Ethernet and Wi-Fi are shown with their state, address and speed.
+clause: F-NET-06.shown
+step: Choose your Wi-Fi network, type the password and press Connect.
+expect: The page says connected and shows an address.
+clause: F-NET-02.connect
+step: Open a web page in the Browser tile.
+expect: The page loads.
+clause: F-NET-02.internet
+step: Plug in an Ethernet cable.
+expect: Ethernet shows an address within fifteen seconds and the page still loads.
+clause: F-NET-01.cable

@@ -7,6 +7,9 @@
 //! * Repeated failed logins are throttled per account.
 //! * Security-relevant events go to a hash-chained audit log (edits/truncation are detectable).
 
+mod users_ref;
+pub use users_ref::{UserSource, UsersGuard, UsersRef};
+
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,7 +20,7 @@ use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, Pass
 use argon2::Argon2;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccountError {
     #[error("invalid username (lowercase letters, digits, - and _; must start with a letter; max 32)")]
     BadUsername,
@@ -52,13 +55,20 @@ pub struct UserRecord {
 }
 
 impl UserRecord {
+    /// A copy with the password hash blanked (what is shown or sent, never the hash itself): `*` where there is a password (the mark
+    /// `/etc/shadow` uses for "no password can match"; a screen that asks "can this person sign in with a password" still gets its answer),
+    /// empty where there is none.
+    pub fn without_hash(&self) -> UserRecord {
+        UserRecord { hash: if self.hash.is_empty() { String::new() } else { "*".into() }, ..self.clone() }
+    }
+
     pub fn policy(&self) -> Policy {
         Policy::resolve(self.role, &self.overrides)
     }
 }
 
 /// An authenticated login.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub user: String,
     pub role: Role,
@@ -181,6 +191,16 @@ impl UserStore {
 
     pub fn get(&self, name: &str) -> Option<&UserRecord> {
         self.users.iter().find(|u| u.name == name)
+    }
+
+    /// The accounts as a screen or a connection may see them: the password hash blanked (the one place a hash leaves this type).
+    pub fn list_public(&self) -> Vec<UserRecord> {
+        self.users.iter().map(UserRecord::without_hash).collect()
+    }
+
+    /// One account with the password hash blanked.
+    pub fn get_public(&self, name: &str) -> Option<UserRecord> {
+        self.get(name).map(UserRecord::without_hash)
     }
 
     fn admin_count(&self) -> usize {
@@ -355,11 +375,16 @@ impl AuditLog {
         std::fs::read_to_string(&self.path).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
     }
 
-    /// Best effort: auditing must never take the system down.
+    /// [`path`](Self::path) as an owned value (what a call over the core socket carries).
+    pub fn path_buf(&self) -> PathBuf {
+        self.path.to_path_buf()
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Best effort: auditing must never take the system down.
     pub fn record(&self, user: &str, event: &str, detail: &str) {
         // One writer at a time: reading the last hash and appending must be atomic,
         // or two events in the same second share a `prev` and the chain reads as broken.

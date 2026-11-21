@@ -1,0 +1,8 @@
+# OPTIONAL for the web and macweb variants (WEB_SCREEN=1, with WEB_MEDIA=1): screen share in the full engine (F-BROW-71).
+# The engine reads a shared screen only through the desktop portal and a PipeWire node; iyakki-screenportal (dist/webview/wpe-helper/screenportal.c, built by
+# package/iyakki-webview-helper when it can) is that portal and starts its own private session bus and PipeWire daemon, so the image needs PipeWire (MIT) with its
+# GStreamer plug-in (pipewiresink) and the bus daemon. Not part of a release image until it has been booted and run (docs/development/BROWSER-MEDIA-DEVICES.md,
+# section 5); the helper starts the portal only with IYAKKI_WEBVIEW_SCREEN=1, so an image with this fragment behaves as before until that is set.
+BR2_PACKAGE_PIPEWIRE=y
+BR2_PACKAGE_PIPEWIRE_GSTREAMER=y
+BR2_PACKAGE_DBUS=y

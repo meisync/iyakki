@@ -14,6 +14,7 @@ use iyakki_shared::wsexec::FakeRunner;
 use iyakki_rfb::keysyms as ks;
 
 use super::linuxwin::*;
+use super::linuxwin_port::LinuxWinPort;
 use super::tests::cx_with_admin_store;
 use super::{App, AppCx, Flow};
 use crate::gfx::Gfx;
@@ -744,4 +745,115 @@ fn the_alt_key_reaches_the_program_as_alt_and_only_a_running_window_asks_for_it(
     assert_eq!(keys, vec![(true, ks::ALT_L), (true, 0x66), (false, 0x66), (false, ks::ALT_L)]);
     r.app.handle(&Event::Tab(3), &r.cx);
     assert!(!r.app.wants_alt());
+}
+
+// ---- the tile on a fake port: no shell context, no jobs, no quick-install service --------------------------------------------------------
+
+struct FakePort {
+    can_install: bool,
+    full_cli: bool,
+    job_running: Mutex<bool>,
+    install_answer: Result<(), String>,
+    installs: Mutex<usize>,
+}
+
+impl FakePort {
+    fn admin() -> FakePort {
+        FakePort { can_install: true, full_cli: true, job_running: Mutex::new(false), install_answer: Ok(()), installs: Mutex::new(0) }
+    }
+}
+
+impl LinuxWinPort for FakePort {
+    fn user(&self) -> String {
+        "amy".into()
+    }
+    fn can_install(&self) -> bool {
+        self.can_install
+    }
+    fn full_cli(&self) -> bool {
+        self.full_cli
+    }
+    fn all_hosts(&self) -> bool {
+        false
+    }
+    fn base_install_running(&self) -> bool {
+        *self.job_running.lock().unwrap()
+    }
+    fn start_base_install(&self) -> Result<(), String> {
+        *self.installs.lock().unwrap() += 1;
+        self.install_answer.clone()
+    }
+}
+
+/// A rig over an empty data folder: nothing is installed, nothing is spawned (the spawner and the process table are never reached).
+fn empty_rig(tag: &str) -> (Rig, Arc<Mutex<usize>>) {
+    let dir = tmp(tag);
+    let asked = Arc::new(Mutex::new(0usize));
+    let a2 = asked.clone();
+    let rig = Rig {
+        la: Arc::new(move || {
+            *a2.lock().unwrap() += 1;
+            let mut la = LinuxApps::new(&dir, "amy", Path::new("/usr/bin/iyakki"), Arc::new(FakeRunner::new(&[])));
+            la.assume(false, Some(50 << 30));
+            Ok(la)
+        }),
+        spawn: Arc::new(lw::System),
+        proc_root: PathBuf::from("/nonexistent"),
+    };
+    (rig, asked)
+}
+
+#[test]
+fn fake_port_without_the_full_command_line_permission_the_tile_says_so_and_touches_no_sandbox() {
+    let mut port = FakePort::admin();
+    port.full_cli = false;
+    let (rig, asked) = empty_rig("fp-nocli");
+    let a = LinuxWinApp::with_port(&port, rig);
+    assert!(matches!(a.phase, Phase::NoAccess(_)), "{:?}", a.phase);
+    assert_eq!(*asked.lock().unwrap(), 0, "the sandbox manager was never asked");
+}
+
+#[test]
+fn fake_port_nothing_installed_offers_the_install_and_an_administrator_starts_it_once_through_the_port() {
+    let port = FakePort::admin();
+    let (rig, _) = empty_rig("fp-install");
+    let mut a = LinuxWinApp::with_port(&port, rig);
+    assert_eq!(a.phase, Phase::NotInstalled);
+    a.install_base(&port);
+    assert_eq!(*port.installs.lock().unwrap(), 1);
+    assert!(a.job_running);
+    assert_eq!(a.note.as_ref().map(|n| n.1), Some(true));
+}
+
+#[test]
+fn fake_port_an_ordinary_account_cannot_start_the_install_and_the_port_is_not_asked() {
+    let mut port = FakePort::admin();
+    port.can_install = false;
+    let (rig, _) = empty_rig("fp-user");
+    let mut a = LinuxWinApp::with_port(&port, rig);
+    a.install_base(&port);
+    assert_eq!(*port.installs.lock().unwrap(), 0);
+    assert_eq!(a.note, Some(("Only an administrator can install it.".to_string(), false)));
+}
+
+#[test]
+fn fake_port_a_refused_install_says_why_and_the_job_is_not_shown_as_running() {
+    let mut port = FakePort::admin();
+    port.install_answer = Err("another install is running".into());
+    let (rig, _) = empty_rig("fp-refused");
+    let mut a = LinuxWinApp::with_port(&port, rig);
+    a.install_base(&port);
+    assert!(!a.job_running);
+    assert_eq!(a.note, Some(("another install is running".to_string(), false)));
+}
+
+#[test]
+fn fake_port_the_running_install_job_is_read_from_the_port_on_every_refresh() {
+    let port = FakePort::admin();
+    let (rig, _) = empty_rig("fp-job");
+    let mut a = LinuxWinApp::with_port(&port, rig);
+    assert!(!a.job_running);
+    *port.job_running.lock().unwrap() = true;
+    a.refresh(&port);
+    assert!(a.job_running);
 }

@@ -81,10 +81,13 @@ pub const CATALOGUE: &[CapabilityDef] = &[
     def("notify", "leave notes in the inbox", P::None, B::Yes, false),
     def("notify.receive", "receive the notes that match its filter", P::Filter, B::Yes, false),
     def("schedule.use", "be started or told at a set time", P::Schedule, B::Yes, false),
-    // browser extensions (docs/development/BROWSER-EXTENSIONS-PLAN.md); the other web.* hook capabilities are proposed names only
+    // browser extensions (docs/development/BROWSER-EXTENSIONS-PLAN.md); web.content.script and web.user.agent are the browser plug-ins (F-BROW-90); the other web.* hook capabilities are proposed names only
     def("web.request.headers", "add request headers to the sites its rules name", P::Filter, B::TableOnly, false),
+    def("web.content.script", "run the person's own scripts and style sheets in the pages of the sites each one names (the person approved each plug-in when adding and switching it on)", P::Filter, B::TableOnly, false),
+    def("web.user.agent", "change the User-Agent the browser sends", P::None, B::TableOnly, false),
     // the client's own devices and clipboard (docs/development/CLIENT-SPLIT-DESIGN.md 7b); meant for client devices (an app may not meaningfully ask for them: they act on a client, not on this machine)
     def("clipboard.client", "copy text between this machine and the clipboard of a connected client device", P::None, B::No, true),
+    def("files.client", "send files between a person's home folder and a connected client device (every use asks)", P::None, B::No, true),
     def("client.camera.offer", "offer the camera of a connected client device to this machine as a source of its own", P::None, B::No, true),
     def("client.microphone.offer", "offer the microphone of a connected client device to this machine as a source of its own", P::None, B::No, true),
     // the machine itself (docs/development/CORE-ACCESS-MODEL.md 6c): the guarded Os (guarded.rs) asks for these before it reaches a device
@@ -92,9 +95,15 @@ pub const CATALOGUE: &[CapabilityDef] = &[
     def("system.radio.set", "switch a radio (Wi-Fi, Bluetooth) on or off", P::None, B::TableOnly, false),
     def("system.brightness.set", "change the screen brightness", P::None, B::TableOnly, false),
     def("system.volume.set", "change the sound volume", P::None, B::TableOnly, false),
+    def("system.link.set", "switch a network connection (Ethernet, Wi-Fi) on or off and ask for its address", P::None, B::TableOnly, false),
+    def("system.startup.set", "change what the firmware starts: make IYAKKI's own boot entry, put it first, start it at the next restart only, or put the old order back (administrators only; the card always comes first)", P::None, B::TableOnly, false),
     def("system.memory.set", "change compressed memory and swap (every use asks)", P::None, B::TableOnly, true),
     def("system.crashlog.write", "mark the last crash note as seen and copy a kept kernel log into a folder of the person's", P::None, B::TableOnly, false),
     def("net.scan", "scan the local network for machines and the services they run (every use asks)", P::None, B::TableOnly, true),
+    def("system.disk.install", "erase a disk and install IYAKKI on it (every use asks)", P::None, B::TableOnly, true),
+    def("system.disk.partition", "make a new partition table, add, delete, format, rename or resize the partitions of a drive (administrators only, a typed drive name and a second confirmation always come first)", P::None, B::TableOnly, false),
+    def("system.disk.unlock", "unlock, lock and reopen for writing an encrypted drive (LUKS, BitLocker) with the key the person types", P::None, B::TableOnly, false),
+    def("system.disk.mount", "open, close and eject the drives (USB sticks, SD cards, disks) of the signed-in person, within what their role allows", P::None, B::TableOnly, false),
     def("system.hostname.set", "change the computer's name (every use asks)", P::None, B::TableOnly, true),
     def("router.use", "start a model router run: a bigger model plans and lighter models do the steps (every use asks)", P::None, B::TableOnly, true),
     def("router.strategy.set", "choose or add the strategy that decides which model takes each step of a router run (every use asks)", P::None, B::TableOnly, true),
@@ -321,6 +330,25 @@ impl Approval {
         self.holds(name, param) && self.ends().get(name).is_none_or(|end| *end > now)
     }
 
+    /// Give a held capability an end (Unix seconds), or take the end away with `None`. Returns false when the app does not hold it now or an end
+    /// in the past was asked for (`now`): a limit never gives anything back, it only shortens what was granted (F-SDK-217).
+    pub fn set_end(&mut self, name: &str, end: Option<i64>, now: i64) -> bool {
+        if !self.grants.iter().any(|g| g.name == name) || self.revoked.iter().any(|g| g.name == name && g.param.is_none()) || end.is_some_and(|e| e <= now) {
+            return false;
+        }
+        let mut ends = self.extra.get("ends").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+        match end {
+            Some(e) => ends.insert(name.into(), e.into()),
+            None => ends.remove(name),
+        };
+        if ends.is_empty() {
+            self.extra.remove("ends");
+        } else {
+            self.extra.insert("ends".into(), serde_json::Value::Object(ends));
+        }
+        true
+    }
+
     /// Take a capability away (all its parameters). The broker refuses it from the next call; an update that asks for it again asks the person again.
     /// Returns false when nothing changed (it was not granted, or already revoked).
     pub fn revoke(&mut self, name: &str) -> bool {
@@ -395,7 +423,7 @@ impl ApprovalBook for MemoryBook {
 
 /// What the built-in apps hold without an install card: a static table compiled into the image, so it is covered by the image's signature.
 /// App ids are those of `iyakki_sec::policy::App::id()`. Capabilities with `BuiltinDefault::Yes` are held by every built-in app and are not listed.
-pub const BUILTIN_TABLE: &[(&str, &[&str])] = &[("settings", &["bluetooth.use", "system.radio.set", "system.brightness.set", "system.volume.set", "system.memory.set", "system.hostname.set", "system.crashlog.write", "fleet.read", "fleet.join", "fleet.manage", "fleet.assign", "fleet.receive"]), ("scan", &["net.scan"]), ("chat", &["router.use", "router.strategy.set", "microphone.listen", "fleet.read", "fleet.join", "fleet.manage", "fleet.assign", "fleet.receive"]), ("shell", &["system.brightness.set", "system.volume.set"]), ("cameras", &["camera.view", "camera.record"]), ("camera", &["camera.view", "camera.record"]), ("checkup", &["camera.view", "microphone.listen"]), ("voice", &["microphone.listen"]), ("browser-headers", &["web.request.headers"]), ("sample", &["flows.start", "tools.request", "events.network", "events.power", "events.session", "events.apps", "events.flows", "events.updates", "events.settings", "events.display", "events.locale", "events.clock", "events.files", "events.storage", "events.devices"])];
+pub const BUILTIN_TABLE: &[(&str, &[&str])] = &[("settings", &["bluetooth.use", "system.radio.set", "system.link.set", "system.startup.set", "system.brightness.set", "system.volume.set", "system.memory.set", "system.disk.install", "system.hostname.set", "system.crashlog.write", "fleet.read", "fleet.join", "fleet.manage", "fleet.assign", "fleet.receive"]), ("scan", &["net.scan"]), ("disks", &["system.disk.mount", "system.disk.partition", "system.disk.unlock"]), ("chat", &["router.use", "router.strategy.set", "microphone.listen", "fleet.read", "fleet.join", "fleet.manage", "fleet.assign", "fleet.receive"]), ("shell", &["system.brightness.set", "system.volume.set", "system.disk.mount"]), ("cameras", &["camera.view", "camera.record"]), ("camera", &["camera.view", "camera.record"]), ("checkup", &["camera.view", "microphone.listen"]), ("voice", &["microphone.listen"]), ("browser-headers", &["web.request.headers"]), ("browser-plugins", &["web.content.script", "web.user.agent"]), ("client.ui", &["events.network", "events.power", "events.session", "events.apps", "events.flows", "events.updates", "events.settings", "events.display", "events.locale", "events.clock", "events.storage", "events.devices"]), ("sample", &["flows.start", "tools.request", "events.network", "events.power", "events.session", "events.apps", "events.flows", "events.updates", "events.settings", "events.display", "events.locale", "events.clock", "events.files", "events.storage", "events.devices"])];
 
 /// Whether a built-in app (the caller has already established that it is one) holds `cap` by default. Hard asks are never "held" in the sense of skipping the per-use card: this only says the app
 /// may request them without an install card. Store and third-party apps are never here.

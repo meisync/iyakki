@@ -101,7 +101,7 @@ fn add(a: &mut SettingsApp, cx: &AppCx, kind_idx: usize, value: &str) -> Result<
 }
 
 fn audit_text(cx: &AppCx) -> String {
-    std::fs::read_to_string(cx.audit.path()).unwrap_or_default()
+    std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default()
 }
 
 fn view(r: &Rig) -> View {

@@ -64,6 +64,9 @@ fn status_color(m: &Model) -> [u8; 4] {
     }
 }
 
+/// What a change that needs the story store says when the core does not serve it to this program (the UI over the socket, D-SPLIT-03-QUIET).
+const STORE_NOT_SERVED: &str = "The story store is not served over the UI socket yet.";
+
 impl SettingsApp {
     /// Detect: look for Ollama and Lemonade on this machine and add what answers (never changing a provider already there).
     pub(super) fn detect_servers(&mut self, cx: &AppCx) {
@@ -212,7 +215,7 @@ impl SettingsApp {
         let place = Self::lem_where(cx, provider);
         let Ok(r) = Self::svc(cx).collection_review(provider, collection) else { return self.fail(format!("{collection} is no longer listed on {provider}.")) };
         if item == UNDO_ALL {
-            let store = cx.b5().story_store(&cx.session.policy, &cx.session.user, cx.data_dir()).expect("the core serves the story store");
+            let Some(store) = cx.b5().story_store(&cx.session.policy, &cx.session.user, cx.data_dir()) else { return self.fail(STORE_NOT_SERVED.to_string()) };
             cx.audit.record(&cx.session.user, "settings.lemonade.use_all_parts_undo", &format!("{provider}/{collection}"));
             return match Self::svc(cx).undo_all_parts(&store) {
                 Ok(m) => self.ok(m),
@@ -307,15 +310,17 @@ impl SettingsApp {
                         })
                         .map_err(|e| e.to_string())
                     }
-                    USE_PICTURES => {
-                        let store = cx.b5().story_store(&cx.session.policy, &cx.session.user, cx.data_dir()).expect("the core serves the story store");
-                        let mut prefs = store.load_prefs();
-                        prefs.picture_model = Some(ModelChoice { provider: provider.clone(), model: model.clone() });
-                        store.save_prefs(&prefs).map(|_| {
-                            cx.audit.record(&cx.session.user, "story.picture_model", &format!("{provider} {model}"));
-                            format!("TALES pictures are drawn with {model} on {provider} (your choice; Lemonade loads it on the first picture, which can take a while).")
-                        })
-                    }
+                    USE_PICTURES => match cx.b5().story_store(&cx.session.policy, &cx.session.user, cx.data_dir()) {
+                        None => Err(STORE_NOT_SERVED.to_string()),
+                        Some(store) => {
+                            let mut prefs = store.load_prefs();
+                            prefs.picture_model = Some(ModelChoice { provider: provider.clone(), model: model.clone() });
+                            store.save_prefs(&prefs).map(|_| {
+                                cx.audit.record(&cx.session.user, "story.picture_model", &format!("{provider} {model}"));
+                                format!("TALES pictures are drawn with {model} on {provider} (your choice; Lemonade loads it on the first picture, which can take a while).")
+                            })
+                        }
+                    },
                     USE_STT if Self::lem_needs_yes(cx, &provider).is_some() => {
                         let (host, place) = Self::lem_needs_yes(cx, &provider).unwrap_or_default();
                         let text = format!("{provider} ({host}) is {place}. Speech-to-text with it sends what the microphone hears, and speech made for reading aloud (to time the lit word), to that machine. Send sound to {host} from now on?");
@@ -390,7 +395,7 @@ impl SettingsApp {
                     cx.audit.record(&cx.session.user, "settings.voice.remote_ok", &cx.agent.helpers_b4().speech_server_of(&base));
                     Self::svc(cx).allow_speech_server(&base)
                 };
-                let store = cx.b5().story_store(&cx.session.policy, &cx.session.user, cx.data_dir()).expect("the core serves the story store");
+                let Some(store) = cx.b5().story_store(&cx.session.policy, &cx.session.user, cx.data_dir()) else { return self.fail(STORE_NOT_SERVED.to_string()) };
                 match r.and_then(|_| Self::svc(cx).use_all_parts(&provider, &collection, &store)) {
                     Ok(m) => {
                         cx.audit.record(&cx.session.user, "settings.lemonade.use_all_parts", &format!("{provider}/{collection}"));

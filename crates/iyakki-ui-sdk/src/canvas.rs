@@ -50,6 +50,40 @@ pub struct Hit {
     pub action: u32,
     pub name: String,
     pub role: Role,
+    /// What the region is now for a screen reader: the `Hit::SELECTED` ... `Hit::SECRET` bits (same values as the tile ABI's access flags).
+    /// Not part of the text form of a display list; it travels with the list in the process and into the tile ABI's `Access` operation.
+    pub state: u8,
+    /// The text a field holds (cut by the tile ABI); empty for anything else. A `Hit::SECRET` field has none, only a length is said.
+    pub value: String,
+}
+
+impl Default for Hit {
+    fn default() -> Hit {
+        Hit { action: 0, name: String::new(), role: Role::Text, state: 0, value: String::new() }
+    }
+}
+
+impl Hit {
+    pub const SELECTED: u8 = 1;
+    pub const CHECKED: u8 = 2;
+    pub const DISABLED: u8 = 4;
+    pub const EXPANDED: u8 = 8;
+    pub const SECRET: u8 = 16;
+
+    /// A region with no state: what every `Hit` was before state existed.
+    pub fn new(action: u32, name: impl Into<String>, role: Role) -> Hit {
+        Hit { action, name: name.into(), role, state: 0, value: String::new() }
+    }
+
+    pub fn with_state(mut self, state: u8) -> Hit {
+        self.state = state & 31;
+        self
+    }
+
+    pub fn with_value(mut self, value: impl Into<String>) -> Hit {
+        self.value = value.into();
+        self
+    }
 }
 
 /// How the bytes of an [`Image`] are laid out.

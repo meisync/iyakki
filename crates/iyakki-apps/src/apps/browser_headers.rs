@@ -69,6 +69,16 @@ pub(super) fn rules_changed(prev: Option<&(PathBuf, String)>, path: &std::path::
 /// Give the transport this person's enabled rules. Cheap when nothing changed. When the rules changed since the last time, the
 /// person's page cache is emptied once, so a page already kept is requested again with the new rules (F-BROW-79).
 pub fn apply(cx: &AppCx) {
+    // tests: while a test is pinned to one person, other people's page loads leave the process-wide rules alone (held to the end:
+    // the pin cannot move in the middle of a step)
+    #[cfg(test)]
+    let _pin = {
+        let g = PIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if g.as_ref().is_some_and(|p| *p != rules_path(cx)) {
+            return;
+        }
+        g
+    };
     let path = rules_path(cx);
     let sig = std::fs::read_to_string(&path).unwrap_or_default();
     let changed = {
@@ -86,6 +96,35 @@ pub fn apply(cx: &AppCx) {
     *LOADED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = if skipped == 0 { Some((path, sig)) } else { None };
 }
 
+/// While a test reads the transport's rules, only its own person's `apply` may change them (the rules are one set per process).
+#[cfg(test)]
+static PIN: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Held by a test for one person: takes the turn (a lock across test binaries and parallel runs is not needed, the rules live in this
+/// process: `process_lock`), forgets what was loaded and makes every other person's `apply` a no-op until dropped.
+#[cfg(test)]
+pub(crate) struct Pin {
+    _turn: iyakki_testkit::ProcessLock,
+}
+
+#[cfg(test)]
+impl Pin {
+    pub(crate) fn to(cx: &AppCx) -> Pin {
+        let turn = iyakki_testkit::process_lock(iyakki_testkit::names::BROWSER_HEADERS);
+        let mut p = PIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *p = Some(rules_path(cx));
+        *LOADED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        Pin { _turn: turn }
+    }
+}
+
+#[cfg(test)]
+impl Drop for Pin {
+    fn drop(&mut self) {
+        *PIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
 /// Set by `refresh`: the next `apply` reads everything again even when the rule file is the same text (a value in the vault changed).
 static FORCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -99,7 +138,16 @@ pub fn refresh(cx: &AppCx) {
 /// snapshot (a no-op when it already does). The snapshot holds the header values: it goes only over the helper socket.
 pub fn sync_full(cx: &AppCx, f: &mut super::browser_full::Full) {
     apply(cx);
+    super::browser_plugins::apply(cx);
     f.sync_extensions();
+    // the sound doctor reads the kernel's sound facts through the core's route (a core that knows none leaves the page its default)
+    let route = cx.core.audio_route();
+    if route.is_machine() || route.card_count() > 0 {
+        f.set_audio_route(route);
+    }
     let c = super::browser_config::load(cx);
+    // the person's cache size reaches the engine's own disk cache: the same budget the reader's cache gets on this machine
+    let disk = super::browser_speed::budget_for(c.cache, &super::browser_speed::machine_os(&*cx.os, cx.data_dir())).disk;
+    f.sync_cache_limit(((disk / (1024 * 1024)).min(u64::from(u32::MAX)) as u32).max(1));
     f.sync_media(c.video_max_height, super::browser_config::effective_codecs(c.codecs, cx.agent.av_build().codecs_policy(&cx.session.user)));
 }

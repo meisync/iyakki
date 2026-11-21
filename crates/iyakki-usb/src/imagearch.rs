@@ -26,10 +26,12 @@ pub struct BootFiles {
     pub kernel: &'static str,
     pub initrd: &'static str,
     pub loader: &'static str,
+    /// The boot menu file whose first `linux` line gives the kernel arguments for an EFI-stub boot.
+    pub grub_cfg: &'static str,
 }
 
-const X86: BootFiles = BootFiles { arch: Arch::X86_64, kernel: "/boot/bzImage", initrd: "/boot/initrd", loader: "/EFI/BOOT/BOOTX64.EFI" };
-const ARM: BootFiles = BootFiles { arch: Arch::Aarch64, kernel: "/Image", initrd: "/rootfs.cpio.gz", loader: "/EFI/BOOT/BOOTAA64.EFI" };
+const X86: BootFiles = BootFiles { arch: Arch::X86_64, kernel: "/boot/bzImage", initrd: "/boot/initrd", loader: "/EFI/BOOT/BOOTX64.EFI", grub_cfg: "/boot/grub/grub.cfg" };
+const ARM: BootFiles = BootFiles { arch: Arch::Aarch64, kernel: "/Image", initrd: "/rootfs.cpio.gz", loader: "/EFI/BOOT/BOOTAA64.EFI", grub_cfg: "/EFI/BOOT/grub.cfg" };
 
 /// Decide from the paths of the files on the boot volume (case does not matter, the volume is FAT). Both layouts present, or neither,
 /// is an error: the installer does not guess which one to copy.
@@ -44,6 +46,14 @@ pub fn boot_files<'a>(paths: impl IntoIterator<Item = &'a str>) -> Result<BootFi
         (true, true) => Err("the image's boot volume holds both an x86-64 and an aarch64 kernel; it is not clear which one to install".into()),
         (false, false) => Err("the image's boot volume has no kernel and RAM disk this installer knows (/boot/bzImage and /boot/initrd, or /Image and /rootfs.cpio.gz)".into()),
     }
+}
+
+/// The files of the boot volume at `src_path`'s first partition (read from the image or the stick it is).
+pub fn of_boot_volume(src_path: &std::path::Path, p1_start_sector: u64) -> Result<BootFiles, String> {
+    let mut f = std::fs::File::open(src_path).map_err(|e| format!("{}: {e}", src_path.display()))?;
+    let mut vol = crate::fatclone::Fat32::open(&mut f, p1_start_sector * 512)?;
+    let items = vol.walk_long()?;
+    boot_files(items.iter().filter(|i| !i.dir).map(|i| i.path.as_str()))
 }
 
 /// True for the paths whose bytes count as the image's payload when the space it needs is worked out.
@@ -85,6 +95,14 @@ mod tests {
         assert!(boot_files(["/boot/bzImage"]).unwrap_err().contains("no kernel"));
         assert!(boot_files(["/Image"]).is_err());
         assert!(boot_files(Vec::<&str>::new()).is_err());
+    }
+
+    #[test]
+    fn each_image_names_its_loader_and_the_menu_file_the_kernel_arguments_come_from() {
+        let x = boot_files(["/boot/bzImage", "/boot/initrd"]).unwrap();
+        assert_eq!((x.loader, x.grub_cfg), ("/EFI/BOOT/BOOTX64.EFI", "/boot/grub/grub.cfg"));
+        let a = boot_files(["/Image", "/rootfs.cpio.gz"]).unwrap();
+        assert_eq!((a.loader, a.grub_cfg), ("/EFI/BOOT/BOOTAA64.EFI", "/EFI/BOOT/grub.cfg"));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Piper,
     MacSay,
@@ -15,7 +15,7 @@ pub enum Kind {
     Espeak,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Os {
     Linux,
     Mac,
@@ -158,7 +158,7 @@ pub fn sample_sentence(tag: &str) -> &'static str {
 }
 
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HVoice {
     /// What is passed to the engine (a voice name, a language code or the path of a piper model).
     pub id: String,
@@ -182,7 +182,7 @@ impl HVoice {
 }
 
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Engine {
     pub kind: Kind,
     pub program: PathBuf,
@@ -202,7 +202,7 @@ impl Engine {
 }
 
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Report {
     pub engines: Vec<Engine>,
     /// Engines that are not here, with why and how to get them (for this system only).
@@ -285,7 +285,7 @@ pub fn needs_player(e: &SpeechEngine) -> bool {
 }
 
 /// Where to look.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Env {
     pub path: String,
     pub os: Os,

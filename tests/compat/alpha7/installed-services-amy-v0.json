@@ -1,0 +1,15 @@
+[
+  {
+    "id": "gitea-iyakki-gitea",
+    "service": "gitea",
+    "title": "Gitea",
+    "version": "1.22.0",
+    "kind": "git",
+    "namespace": "iyakki-gitea",
+    "created_namespace": true,
+    "vault": ["svc.gitea-iyakki-gitea.admin"],
+    "installed_at": 1790000000,
+    "updated_at": 1790000500,
+    "workspaces": [{ "workspace": "demo", "repo_url": "http://gitea.local/amy/demo.git" }]
+  }
+]

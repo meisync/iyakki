@@ -104,6 +104,21 @@ pub fn machine_about() -> &'static str {
     LINE.get_or_init(|| about_line(ReleaseInfo::load(Path::new(RELEASE_FILE)).as_ref()))
 }
 
+/// Where the release image keeps the first-boot notice text (`board/iyakki/release-profile.sh`).
+pub const FIRMWARE_NOTICE_FILE: &str = "/usr/share/iyakki/firmware-notice.txt";
+/// The inbox note's link: Store, Setup, "Hardware firmware" (Quick install item `FwHardware`).
+pub const FIRMWARE_NOTICE_ITEM: &str = "setup:fw-hardware";
+
+/// The first-boot notice of a release image (F-REL-09): `(title, body)` when this image has no vendor firmware (`IMAGE_PROFILE=release`
+/// and `FIRMWARE=none`) and ships the notice text, otherwise `None` (a test image or an older image says nothing). The shell leaves it
+/// in an administrator's inbox once per unread note, linked to the Hardware firmware item.
+pub fn firmware_notice(rel: Option<&ReleaseInfo>, notice_text: Option<&str>) -> Option<(String, String)> {
+    let rel = rel.filter(|r| r.release_profile && r.firmware == "none" && !r.restricted_firmware)?;
+    let _ = rel;
+    let body = notice_text?.trim();
+    (!body.is_empty()).then(|| ("Optional hardware firmware is not included".to_string(), body.chars().take(400).collect()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +149,16 @@ mod tests {
         assert!(!ReleaseInfo::parse("VERSION=1\n").releasable(), "an old image without the stamp is not releasable");
         assert!(!ReleaseInfo::parse("IMAGE_PROFILE=release\nFIRMWARE=none\nRESTRICTED_FIRMWARE=included\n").releasable());
         assert!(!ReleaseInfo::parse("IMAGE_PROFILE=release\nFIRMWARE=bundled\n").releasable());
+    }
+
+    #[test]
+    fn only_a_release_image_with_no_firmware_and_a_notice_text_gives_the_first_boot_notice() {
+        let rel = ReleaseInfo::parse("IMAGE_PROFILE=release\nFIRMWARE=none\n");
+        let n = firmware_notice(Some(&rel), Some("Optional hardware firmware is not included (licence). Install it: Store -> Setup -> Hardware firmware.\n")).unwrap();
+        assert_eq!(n.0, "Optional hardware firmware is not included");
+        assert!(n.1.contains("Install it") && !n.1.ends_with('\n'));
+        assert!(firmware_notice(Some(&ReleaseInfo::parse("IMAGE_PROFILE=dev\nFIRMWARE=bundled\n")), Some("x")).is_none());
+        assert!(firmware_notice(Some(&ReleaseInfo::parse("")), Some("x")).is_none() && firmware_notice(None, Some("x")).is_none());
+        assert!(firmware_notice(Some(&rel), None).is_none() && firmware_notice(Some(&rel), Some("  \n")).is_none());
     }
 }

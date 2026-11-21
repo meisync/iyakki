@@ -365,6 +365,8 @@ fn pull_all_asks_before_touching_repositories_with_local_changes_and_fetch_all_r
     press(&mut app, &w.cx, Key::Char('f'));
     ticks_until(&mut app, &w.cx, "fetch done", |a| a.git.batches_finished(&id));
     assert_eq!(log(&w).matches("ARGV: fetch --all --prune").count(), 2);
+    // a finished batch makes the board stale and a real read follows: set the state the read would have found again (and drop the read on its way)
+    app.git.set_status_for_test(&id, vec![("clean".into(), Ok(RepoStatus { branch: "main".into(), behind: 1, ..Default::default() })), ("dirty".into(), Ok(RepoStatus { branch: "main".into(), changed: 2, behind: 1, ..Default::default() }))]);
     // pull all: a card names the dirty one first
     press(&mut app, &w.cx, Key::Char('p'));
     let text = match &app.modal {
@@ -671,7 +673,7 @@ impl Cw {
         ticks_until(&mut self.app, &self.w.cx, "the stage", |a| matches!(&a.modal, Some(Modal::Git(g)) if matches!(&**g, GitModal::Connect(f) if f.stage == st)));
     }
     fn audit(&self) -> String {
-        std::fs::read_to_string(self.w.cx.audit.path()).unwrap_or_default()
+        std::fs::read_to_string(self.w.cx.audit.path_buf()).unwrap_or_default()
     }
 }
 

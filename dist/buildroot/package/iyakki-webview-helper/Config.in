@@ -11,3 +11,17 @@ config BR2_PACKAGE_IYAKKI_WEBVIEW_HELPER
 	  /usr/libexec/iyakki/webview-helper.
 
 	  Source: dist/webview/wpe-helper of this repository.
+
+config BR2_PACKAGE_IYAKKI_WEBVIEW_HELPER_PACKAGE_ONLY
+	bool "ship the engine helper as a store package, not in the image"
+	depends on BR2_PACKAGE_IYAKKI_WEBVIEW_HELPER
+	help
+	  Leave /usr/libexec/iyakki/webview-helper out of the image and put
+	  it in $(BINARIES_DIR)/browser-package/ instead, where
+	  dist/webview/make-browser-package.sh turns it into the optional
+	  browser package (F-BROW-40): `iyakki browser-package build`
+	  writes the signed description next to it, the publisher puts both
+	  on the store, and a person installs it from Store, Setup. The
+	  GStreamer plug-ins and the web process extension stay in the
+	  image (they are small and the engine's own processes load them).
+	  Without this option the helper is in the image as before.

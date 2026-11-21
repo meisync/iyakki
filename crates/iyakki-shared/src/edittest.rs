@@ -4,7 +4,7 @@ use std::path::PathBuf;
 /// The longest a test run may take.
 pub const MAX_SECONDS: u64 = 600;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TestPlan {
     /// `cargo test` or `pytest`.
     pub label: String,

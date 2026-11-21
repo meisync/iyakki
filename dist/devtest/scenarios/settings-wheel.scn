@@ -1,0 +1,16 @@
+# a text scenario: Settings, a page long enough to scroll (skipped when the page fits), the mouse wheel moves it (nothing is changed)
+name: settings-wheel-scrollbar
+devices: real qemu
+restore: none (read-only)
+doc: opens the Backup page of Settings; when it shows a scrollbar the wheel must move the page, and a page that fits must show none
+key s
+wait app=Settings
+skip-unless-button Backup
+click-sidebar Backup
+wait app=Settings page=Backup
+shot before
+skip-unless-scrollbar
+scroll down
+shot after
+expect-changed
+expect-scrollbar

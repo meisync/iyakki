@@ -44,6 +44,39 @@ pub struct FleetApi {
     source: Arc<dyn HeartbeatSource>,
     /// The relay of F-CORE-17 as the fleet posts to it (F-FLEET-10); none until there is a relay to point at (the owner's, KI-725).
     relay: Option<Arc<dyn crate::fleet_hub::RelayPost>>,
+    /// Where the relay's address comes from when no relay was given: asked each time the person switches the relay on, so an address set by
+    /// chat after the door was made is used (the machine's own developer-mode relay setting; see [`relay_from_settings`]).
+    relay_source: Option<RelaySource>,
+}
+
+/// Builds the fleet's post to the relay from the person's settings at the moment it is wanted.
+pub type RelaySource = Arc<dyn Fn() -> Result<Arc<dyn crate::fleet_hub::RelayPost>, String> + Send + Sync>;
+
+const NO_RELAY: &str = "there is no relay to connect to yet: give the relay's address first (the relay_switch tool, address argument; an https relay also needs its certificate fingerprint), and nothing is sent anywhere until then";
+
+/// The relay's HTTP wire (F-CORE-33) as the fleet's mailbox post: the same address and certificate fingerprint the developer-mode relay
+/// uses, the same fail-closed rules (`relay_link::link_for`). A fetched envelope that does not decode is dropped.
+pub struct LinkPost(pub Arc<dyn crate::devmode::relay_link::RelayLink>);
+
+impl crate::fleet_hub::RelayPost for LinkPost {
+    fn post(&self, envelope: &[u8], _now_ms: u64) -> Result<(), String> {
+        self.0.post(envelope)
+    }
+    fn fetch(&self, mailbox: &str, _now_ms: u64) -> Result<Vec<crate::devmode::relay::Envelope>, String> {
+        Ok(self.0.fetch(mailbox)?.iter().filter_map(|b| crate::devmode::relay::Envelope::decode(b).ok()).collect())
+    }
+}
+
+/// The fleet's relay from the machine's relay settings in `dir`: its address and, for https, its certificate fingerprint. No address, or an
+/// https address without a fingerprint, is an error and nothing is connected to.
+pub fn relay_from_settings(dir: &std::path::Path, plain: Arc<dyn iyakki_proxy::Upstream>) -> Result<Arc<dyn crate::fleet_hub::RelayPost>, String> {
+    let dm = crate::devmode::DevMode::open(dir);
+    let url = dm.relay_url();
+    if url.is_empty() {
+        return Err(NO_RELAY.into());
+    }
+    let link = crate::devmode::relay_link::link_for(&url, &dm.relay_pin(), plain)?;
+    Ok(Arc::new(LinkPost(Arc::new(link))))
 }
 
 fn text<'a>(a: &'a Value, k: &str) -> &'a str {
@@ -64,12 +97,18 @@ impl FleetApi {
                 let _ = requeue_with(&h, g.as_ref(), false);
             }
         }));
-        FleetApi { hub, dir: None, gate, source, relay: None }
+        FleetApi { hub, dir: None, gate, source, relay: None, relay_source: None }
     }
 
     /// Give the door a relay to post to (the fake one in tests; the owner's relay when there is one).
     pub fn with_relay(mut self, post: Arc<dyn crate::fleet_hub::RelayPost>) -> FleetApi {
         self.relay = Some(post);
+        self
+    }
+
+    /// Give the door a way to build the relay's post from the person's settings when the relay is switched on.
+    pub fn with_relay_source(mut self, source: RelaySource) -> FleetApi {
+        self.relay_source = Some(source);
         self
     }
 
@@ -82,7 +121,11 @@ impl FleetApi {
             self.hub.relay_off();
             return Ok("The relay is off for the fleet; members given a relay address are not reached.".into());
         }
-        let post = self.relay.clone().ok_or("there is no relay to connect to yet: the relay is run by the owner after the beta, and nothing is sent anywhere until then")?;
+        let post = match (&self.relay, &self.relay_source) {
+            (Some(p), _) => p.clone(),
+            (None, Some(src)) => src()?,
+            (None, None) => return Err(NO_RELAY.into()),
+        };
         let mailbox = self.hub.set_relay(post, std::time::Duration::from_secs(60));
         self.hub.start_relay(std::time::Duration::from_secs(2))?;
         Ok(format!("The relay is on. Another member reaches this computer at relay://{mailbox} (give it with the address action); messages stay sealed with the group key, and the relay sees only who writes to which mailbox and when."))
@@ -590,7 +633,9 @@ impl crate::services::Services {
             s.get().providers.iter().filter(|p| p.enabled).flat_map(|p| p.models.iter().chain(p.default_model.iter()).cloned().collect::<Vec<_>>()).collect::<Vec<String>>()
         };
         let source: Arc<dyn HeartbeatSource> = Arc::new(crate::fleet::OsSource { os, data_dir: self.dir().to_path_buf(), tasks: Arc::new(|| 0), models: Arc::new(models) });
-        Ok(FleetApi::new(hub, gate, source, audit).with_dir(self.dir()))
+        let dir = self.dir().to_path_buf();
+        let relay: RelaySource = Arc::new(move || relay_from_settings(&dir, Arc::new(iyakki_proxy::https::UreqUpstream::with_timeout(std::time::Duration::from_secs(10)))));
+        Ok(FleetApi::new(hub, gate, source, audit).with_dir(self.dir()).with_relay_source(relay))
     }
 
     /// The copies of the other members' notes that wait to be settled (the ids of the copy notes), over every fleet this computer shares the

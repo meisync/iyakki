@@ -1,0 +1,19 @@
+scenario: SND-EAR-03
+title: Choose between two outputs
+area: Sound
+rows: F-SND-01, F-SND-02
+machines: any
+needs: person
+prereq: Two outputs are available, for example the built-in speakers and headphones or an HDMI screen with speakers.
+step: Open Settings, Sound and read the list of outputs.
+expect: Every output you can see on the machine is listed, each with a plain name (no raw card numbers only).
+clause: F-SND-02.list
+step: Choose the first output and press Play test tone.
+expect: The tone comes out of that output only.
+clause: F-SND-02.first
+step: Choose the second output and press Play test tone.
+expect: The tone moves to the second output and the first is silent.
+clause: F-SND-02.second
+step: Restart the computer (Power menu, Restart), sign in and play the test tone again.
+expect: The second output is still the chosen one and the tone comes out of it.
+clause: F-SND-01.remembered

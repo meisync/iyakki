@@ -6,7 +6,7 @@
 use serde_json::{json, Value};
 
 use crate::settingstools::{arg_str, no_args, Entry, Env};
-use crate::startupdisk as sd;
+use iyakki_core_api::startupdisk::{StartupAction, StartupDisk};
 pub use iyakki_shared::settingstools_startup::{PROMPT_RULE};
 
 const TAB: &str = "Computer";
@@ -14,10 +14,9 @@ const TAB: &str = "Computer";
 pub const TOOLS: [&str; 3] = ["startup_disk_status", "startup_disk_register", "startup_disk_set"];
 
 
-fn real(env: &Env) -> sd::Env {
-    let mut e = sd::Env::real();
-    e.backup = env.dir.clone();
-    e
+/// The core's handle for this computer's firmware (the old boot order is kept in the data folder of the tool's environment).
+fn real(env: &Env) -> crate::startupdisk::LocalStartupDisk {
+    crate::startupdisk::local(Some(env.dir.clone()))
 }
 
 fn setting(env: &Env) -> bool {
@@ -33,12 +32,12 @@ pub fn entries(env: &Env) -> Vec<Entry> {
     let mut v = Vec::new();
     {
         let e = env.clone();
-        v.push(Entry::read(TAB, "startup_disk_status", "Show what the firmware starts first, whether IYAKKI has its own entry in the boot menu, and whether restarts from developer mode go to IYAKKI.", no_args(), move |_| Ok(sd::status_lines(&real(&e), setting(&e)).join("\n"))));
+        v.push(Entry::read(TAB, "startup_disk_status", "Show what the firmware starts first, whether IYAKKI has its own entry in the boot menu, and whether restarts from developer mode go to IYAKKI.", no_args(), move |_| Ok(real(&e).status_lines(setting(&e)).join("\n"))));
     }
     {
         let e = env.clone();
         v.push(
-            Entry::change(TAB, "startup_disk_register", "Make IYAKKI's own entry in the computer's boot menu for the volume it is running from (appended last; the boot order does not change). Writes a firmware boot variable. The person approves a card first.", no_args(), |_| "Make IYAKKI's own entry in this computer's boot menu".into(), move |_| say(sd::register(&real(&e)), &e, "register"))
+            Entry::change(TAB, "startup_disk_register", "Make IYAKKI's own entry in the computer's boot menu for the volume it is running from (appended last; the boot order does not change). Writes a firmware boot variable. The person approves a card first.", no_args(), |_| "Make IYAKKI's own entry in this computer's boot menu".into(), move |_| say(real(&e).apply(StartupAction::Register, true), &e, "register"))
                 .admin()
                 .with_preview(|_| "Writes one firmware boot entry described \"IYAKKI\" for the volume this system started from. Other systems' entries and the boot order are not changed (the entry is added last). `startup_disk_set` revert undoes it.".into()),
         );
@@ -59,9 +58,9 @@ pub fn entries(env: &Env) -> Vec<Entry> {
                 let action = arg_str(a, "action")?;
                 let env2 = real(&e);
                 match action.as_str() {
-                    "first" => say(sd::first(&env2), &e, "first"),
-                    "next" => say(sd::next(&env2), &e, "next"),
-                    "revert" => say(sd::revert(&env2), &e, "revert"),
+                    "first" => say(env2.apply(StartupAction::First, true), &e, "first"),
+                    "next" => say(env2.apply(StartupAction::Next, true), &e, "next"),
+                    "revert" => say(env2.apply(StartupAction::Revert, true), &e, "revert"),
                     "reboot_into_iyakki" => {
                         let on = a.get("enabled").and_then(Value::as_bool).ok_or("say `enabled`: true or false")?;
                         e.settings.lock().map_err(|_| "the settings are busy".to_string())?.update(|s| s.startup_reboot_into_iyakki = on).map_err(|x| x.to_string())?;

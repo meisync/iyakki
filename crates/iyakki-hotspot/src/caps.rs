@@ -384,9 +384,8 @@ pub fn no_card_reason(wifi_hardware_seen: bool) -> &'static str {
 }
 
 /// Why this computer cannot offer a Wi-Fi hotspot, in one or two plain sentences; `None` when some radio can be an access point next to its
-/// own client connection with the card running the handshake (the only way the hotspot starts today). The words are the radios' own refusals
-/// ([`can_host_ap`]); a radio that the card would run entirely by itself without taking our passphrase, or one that needs our own handshake
-/// on a card of its own, is named as not supported yet. `hardware_seen` is for [`no_card_reason`] when there is no radio at all.
+/// own client connection with the card running the handshake or with this computer running it (`ApMode::Software`). The words are the radios' own refusals
+/// ([`can_host_ap`]); a radio that the card would run entirely by itself without taking our passphrase, is named as not supported yet. `hardware_seen` is for [`no_card_reason`] when there is no radio at all.
 pub fn hotspot_unavailable(phys: &[PhyCaps], country: &str, hardware_seen: bool) -> Option<String> {
     if phys.is_empty() {
         return Some(no_card_reason(hardware_seen).to_string());
@@ -394,10 +393,11 @@ pub fn hotspot_unavailable(phys: &[PhyCaps], country: &str, hardware_seen: bool)
     let mut reasons: Vec<String> = Vec::new();
     for p in phys {
         match can_host_ap(p, &Want { concurrent_sta: true, ..Want::new(BAND_2GHZ, country) }) {
-            Ok(plan) if plan.mode == ApMode::PskOffload => return None,
+            // a card that takes our passphrase, and a card that leaves everything to this computer (`wifi_ap_sw` runs it)
+            Ok(plan) if matches!(plan.mode, ApMode::PskOffload | ApMode::Software) => return None,
             Ok(plan) => reasons.push(match plan.mode {
                 ApMode::CardManaged => "This card runs the whole access point itself and does not take a passphrase from us; that kind of card is not supported yet.".to_string(),
-                _ => "This card needs this computer to run the access point's handshake, and the hotspot does not start that way yet.".to_string(),
+                _ => "This card cannot be started as a hotspot.".to_string(),
             }),
             Err(r) => reasons.push(r.reason),
         }

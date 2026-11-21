@@ -35,10 +35,26 @@ button.primary { width: 100%; margin-top: 1rem; border-color: transparent; backg
 @media (prefers-reduced-motion: reduce) { #bar { transition: none; } }
 
 #shared { position: fixed; left: 0; right: 0; top: 0; padding: calc(env(safe-area-inset-top) + 4px) 16px 4px; background: #c0262d; color: #fff; text-align: center; font-size: .85rem; font-weight: 600; z-index: 5; }
-#panel { position: fixed; left: 50%; top: calc(env(safe-area-inset-top) + 52px); transform: translateX(-50%); width: min(30rem, calc(100vw - 24px)); max-height: calc(100vh - 80px); overflow: auto; padding: .75rem 1rem 1rem; border-radius: 14px; background: var(--card); box-shadow: 0 8px 30px #000c; z-index: 4; }
-#panel h2 { margin: 0; font-size: 1.05rem; }
+#app { position: fixed; z-index: 2; background: #fff; touch-action: none; outline: none; user-select: none; -webkit-user-select: none; }
+#app-aria { position: fixed; z-index: 2; pointer-events: none; overflow: hidden; }
+#app-title { position: fixed; z-index: 3; display: flex; align-items: center; justify-content: space-between; gap: .5rem; height: 44px; padding: 0 .5rem 0 .9rem; background: #1e253e; color: var(--ink); font-size: .9rem; font-weight: 600; box-sizing: border-box; }
+#app-title button { min-height: 36px; padding: .1rem .8rem; border-radius: 999px; }
+#stage[data-appform="window"] #app-title { border-radius: 10px 10px 0 0; }
+#stage[data-appform="window"] #app { box-shadow: 0 10px 40px #000c; }
+#stage[data-appform="phone"] #app-title { left: 0 !important; width: 100% !important; padding-top: env(safe-area-inset-top); height: calc(44px + env(safe-area-inset-top)); }
+#stage[data-appform] #bar { display: none; }
+#panel, #apps-menu { position: fixed; left: 50%; top: calc(env(safe-area-inset-top) + 52px); transform: translateX(-50%); width: min(30rem, calc(100vw - 24px)); max-height: calc(100vh - 80px); overflow: auto; padding: .75rem 1rem 1rem; border-radius: 14px; background: var(--card); box-shadow: 0 8px 30px #000c; z-index: 4; }
+#apps-menu { left: 50%; top: calc(env(safe-area-inset-top) + 52px); transform: translateX(-50%); width: min(30rem, calc(100vw - 24px)); max-height: calc(100vh - 80px); overflow: auto; padding: .75rem 1rem 1rem; border-radius: 14px; background: var(--card); box-shadow: 0 8px 30px #000c; z-index: 4; }
+#panel h2, #apps-menu h2 { margin: 0; font-size: 1.05rem; }
+#apps-menu .phead { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
+#apps-list button { margin-top: .5rem; min-height: 44px; }
 #panel .phead { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
 #panel select, #panel input { width: 100%; padding: .55rem .6rem; border-radius: 8px; border: 1px solid var(--line); background: #121730; color: inherit; font-size: 16px; }
 #panel textarea { width: 100%; margin-top: .5rem; border-radius: 8px; border: 1px solid var(--line); background: #121730; color: inherit; font: inherit; }
 #panel button { margin-top: .5rem; }
 #panel #camview { width: 100%; margin-top: .5rem; border-radius: 8px; background: #000; }
+
+#files-list { list-style: none; margin: .25rem 0 0; padding: 0; max-height: 14rem; overflow: auto; }
+#files-list li { margin: 0; }
+#files-list button { width: 100%; margin-top: .25rem; text-align: left; }
+#files-pick { width: 100%; }

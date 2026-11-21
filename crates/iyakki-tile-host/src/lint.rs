@@ -66,6 +66,26 @@ impl AccessLint {
     }
 }
 
+/// The lint of one picture a tile drew (what [`access_lint`] reads from the first one; the shell reads the one on its screen).
+pub fn lint_of_list(l: &iyakki_tile_abi::DisplayList) -> AccessLint {
+    let nodes = l.access_tree();
+    AccessLint { hits: l.ops.iter().filter(|o| matches!(o, iyakki_tile_abi::Op::Hit { .. })).count(), empty_names: nodes.iter().filter(|n| n.name.trim().is_empty()).count(), nodes: nodes.len(), unnamed: l.unnamed_hits() }
+}
+
+impl Review {
+    /// The lines of the drawn review screen: the verdict, the counts, and when strictness begins.
+    pub fn screen_lines(&self, lint: &AccessLint) -> Vec<String> {
+        let mut v = vec![if self.warning.is_empty() { "Every clickable part has a name a screen reader can say.".to_string() } else { format!("{}.", self.warning) }];
+        v.push(format!("{} clickable parts, {} described parts.", lint.hits, lint.nodes));
+        v.push(match &self.strict_from {
+            Some(d) if self.refused => format!("Since {d} a tile with an unnamed part is refused by the store: this one would be."),
+            Some(d) => format!("From {d} the store refuses a tile with an unnamed part."),
+            None => "Today this is a warning only: no day is set on which the store refuses such a tile.".to_string(),
+        });
+        v
+    }
+}
+
 /// Run the tile at 320 by 240 and read its first picture.
 pub fn access_lint(wasm: &[u8]) -> Result<AccessLint, TileError> {
     let mut last = None;
@@ -76,14 +96,7 @@ pub fn access_lint(wasm: &[u8]) -> Result<AccessLint, TileError> {
             Ok(mut r) => {
                 let theme = Event::Theme { dark: false, accent: Color(0, 90, 200, 255), background: Color(255, 255, 255, 255), foreground: Color(0, 0, 0, 255) };
                 r.init(320, 240, 100, theme)?;
-                let l = r.frame()?;
-                let nodes = l.access_tree();
-                return Ok(AccessLint {
-                    hits: l.ops.iter().filter(|o| matches!(o, iyakki_tile_abi::Op::Hit { .. })).count(),
-                    empty_names: nodes.iter().filter(|n| n.name.trim().is_empty()).count(),
-                    nodes: nodes.len(),
-                    unnamed: l.unnamed_hits(),
-                });
+                return Ok(lint_of_list(&r.frame()?));
             }
             Err(e) => last = Some(e),
         }
@@ -97,6 +110,19 @@ mod review_tests {
 
     fn found() -> AccessLint {
         AccessLint { hits: 4, nodes: 2, unnamed: vec![1, 2], empty_names: 0 }
+    }
+
+    #[test]
+    fn the_drawn_review_says_the_verdict_the_counts_and_the_strict_day() {
+        let l = found();
+        let w = l.review(None, "2030-01-01").screen_lines(&l);
+        assert!(w[0].contains("2 of 4 clickable parts") && w[1].contains("4 clickable parts, 2 described") && w[2].contains("warning only"), "{w:?}");
+        let r = l.review(Some("2027-06-01"), "2027-06-02").screen_lines(&l);
+        assert!(r[2].contains("this one would be"), "{r:?}");
+        let before = l.review(Some("2027-06-01"), "2027-05-01").screen_lines(&l);
+        assert!(before[2].contains("From 2027-06-01"), "{before:?}");
+        let clean = AccessLint { hits: 3, nodes: 3, unnamed: vec![], empty_names: 0 };
+        assert!(clean.review(None, "2030-01-01").screen_lines(&clean)[0].starts_with("Every clickable part"));
     }
 
     #[test]

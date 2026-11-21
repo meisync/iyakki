@@ -22,7 +22,29 @@ use iyakki_shared::webgraphics::{Mode as GraphicsMode, Pending as GraphicsPendin
 const UNAVAILABLE: &str = "unavailable: this core does not serve this";
 
 /// The protection of the person's browser data (cookies, sign-ins, site storage) with a key in the vault.
+/// Where the sealed browser data of a person goes when it moves to a cloud tenant and comes back (F-VAULT-11): the tenant holds one file.
+/// The shell makes one from the signed-in tenant connection; only sealed bytes pass through it, never the key.
+pub trait ProfileCarrier: Send + Sync {
+    fn put(&self, bytes: &[u8]) -> Result<(), String>;
+    /// The sealed file the tenant holds, or `None` when it holds none.
+    fn get(&self) -> Result<Option<Vec<u8>>, String>;
+}
+
 pub trait ProfileStoreFacet: Send + Sync {
+    /// The shell tells which tenants are signed in and how to carry a sealed file to them (`None`: that tenant is closed).
+    fn set_tenant_carrier(&self, _tenant: &str, _c: Option<std::sync::Arc<dyn ProfileCarrier>>) {}
+    /// The tenants a sealed file can be carried to right now.
+    fn tenant_carriers(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Send the sealed data to `tenant`, still sealed; the number of bytes. Only while it is sealed and nobody else holds it.
+    fn send_to_tenant(&self, _data: &Path, _user: &str, _tenant: &str, _now: u64) -> Result<u64, String> {
+        Err(UNAVAILABLE.into())
+    }
+    /// Bring the sealed data `tenant` holds back as this person's protected data (checked with `key_hex`, the browser key in the vault).
+    fn fetch_from_tenant(&self, _data: &Path, _user: &str, _tenant: &str, _key_hex: &str, _now: u64) -> Result<(), String> {
+        Err(UNAVAILABLE.into())
+    }
     /// The state for `user` (`svc` is the agent's services handle).
     fn status_of(&self, _svc: &dyn Any, _user: &str) -> ProfileStatus {
         ProfileStatus::Off

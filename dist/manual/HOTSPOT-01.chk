@@ -1,0 +1,22 @@
+scenario: HOTSPOT-01
+title: Hotspot with a second device
+area: Network
+rows: F-HOTSPOT-12, F-HOTSPOT-13
+machines: any
+needs: person
+prereq: The computer has an internet connection by cable and a Wi-Fi adapter. A phone or laptop as the second device.
+step: Open Settings, Network, Share internet. Choose Wi-Fi hotspot and read the name and key.
+expect: The default name starts with IYAKKI and a key is shown.
+clause: F-HOTSPOT-12.settings
+step: Switch the hotspot on.
+expect: The page says it is on and shows no error.
+clause: F-HOTSPOT-12.on
+step: On the second device, join the hotspot with the name and key.
+expect: The second device joins and receives an address within thirty seconds.
+clause: F-HOTSPOT-13.join
+step: On the second device open a web page.
+expect: The page loads, which proves the internet is shared.
+clause: F-HOTSPOT-13.internet
+step: Switch the hotspot off.
+expect: The second device loses the network and the page says it is off.
+clause: F-HOTSPOT-12.off

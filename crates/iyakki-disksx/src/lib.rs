@@ -1,22 +1,6 @@
-//! The disk engine as a leaf crate (F-SPLIT-03): `disks` (the model, the plans, the engine), `disks_part` (partition plans), `disks_fmt` (format
-//! and resize tools), `disks_helper` (the crypt and program runners), `disks_sys` (the real machine), `disks_fake` (the made-up one) and the
-//! `oscompat` names of the Linux calls they use. The agent re-exports these under their old module names.
+//! The disk engine's names for the UI crates (F-SPLIT-03, F-ARCH-07). The engine itself (`disks`, `disks_part`, `disks_fmt`, `disks_helper`,
+//! `disks_sys`, `disks_fake`, `disks_dm`, `disks_unlock`, `disksformattools`, `oscompat`) lives in `iyakki-core-local`, the one owner of
+//! kernel access; this crate re-exports it under the old module names so the UI code keeps naming `iyakki_disksx::disks::...`.
 
-pub use iyakki_diskcrypt as disks_crypt;
-pub mod disks;
-pub mod disks_fake;
-pub mod disks_fmt;
-pub mod disks_dm;
-pub mod disks_helper;
-pub mod disks_part;
-pub mod disks_sys;
-pub mod disks_unlock;
-pub mod disksformattools;
-pub mod oscompat;
-
-#[cfg(test)]
-mod disks_fmt_tests;
-#[cfg(test)]
-mod disks_tests;
-#[cfg(test)]
-mod disks_unlock_tests;
+pub use iyakki_core_local::disks_crypt;
+pub use iyakki_core_local::{disks, disks_dm, disks_fake, disks_fmt, disks_helper, disks_part, disks_sys, disks_unlock, disksformattools, oscompat};

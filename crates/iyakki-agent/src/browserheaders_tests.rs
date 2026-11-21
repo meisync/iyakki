@@ -207,6 +207,7 @@ fn the_rule_count_is_limited() {
 
 #[test]
 fn the_provider_reads_the_active_set() {
+    let _rules = iyakki_testkit::process_lock(iyakki_testkit::names::BROWSER_HEADERS);
     let rules = vec![Compiled::new(&rule("X-Prov", "prov.example.test", ""), "dummy".into()).unwrap()];
     activate(rules);
     let p = provider();

@@ -13,11 +13,8 @@
 //! The token's trust never comes from how it arrived: only the signature, the issuer allow-list, the device, the
 //! account, the expiry and the revocation list decide (`Token::verify`).
 
-use super::license::MAX_TOKEN_BYTES;
+pub use iyakki_shared::store_licencelink::{extract_token, token_in_address, MARK, PENDING_APP, PENDING_KEY};
 use super::manifest::Pricing;
-
-/// The marker in a link, an `iyakki-licence:` line or a QR code.
-pub const MARK: &str = "iyakki-licence";
 
 fn pct(s: &str) -> String {
     let mut o = String::new();
@@ -61,61 +58,10 @@ pub fn checkout_url(pricing: &Pricing, app: &str, device_id: &str) -> Result<Str
     Ok(u)
 }
 
-fn unb64(s: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    let (mut acc, mut bits) = (0u32, 0u32);
-    for c in s.trim().trim_end_matches('=').chars() {
-        let v = match c {
-            'A'..='Z' => c as u32 - 'A' as u32,
-            'a'..='z' => c as u32 - 'a' as u32 + 26,
-            '0'..='9' => c as u32 - '0' as u32 + 52,
-            '+' | '-' => 62,
-            '/' | '_' => 63,
-            _ => return None,
-        };
-        acc = (acc << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-            acc &= (1 << bits) - 1;
-        }
-        if out.len() > MAX_TOKEN_BYTES {
-            return None;
-        }
-    }
-    Some(out)
-}
-
-/// The token JSON from what the person pasted, opened from a file or scanned. Does not verify anything.
-pub fn extract_token(input: &str) -> Result<String, String> {
-    let t = input.trim();
-    if t.len() > MAX_TOKEN_BYTES * 2 {
-        return Err("that is too long to be a licence".into());
-    }
-    if t.starts_with('{') {
-        return Ok(t.to_string());
-    }
-    let payload = if let Some(p) = t.strip_prefix(&format!("{MARK}:")) {
-        Some(p)
-    } else {
-        // a link: the token rides in the fragment or the query, never in the path
-        let (_, after) = t.split_once('#').or_else(|| t.split_once('?')).unwrap_or(("", ""));
-        after.split('&').find_map(|kv| kv.strip_prefix(&format!("{MARK}=")))
-    };
-    let p = payload.ok_or("that is not a licence: paste the token, or the link or code the seller gave you")?;
-    let bytes = unb64(p).ok_or("the licence text is damaged")?;
-    let s = String::from_utf8(bytes).map_err(|_| "the licence text is damaged".to_string())?;
-    if !s.trim_start().starts_with('{') {
-        return Err("the licence text is damaged".into());
-    }
-    Ok(s)
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::install::tests::{fx, NOW};
-    use super::super::license::{LicenseError, Token};
+    use super::super::license::{LicenseError, Token, MAX_TOKEN_BYTES};
     use super::super::manifest::PriceModel;
     use super::*;
     use crate::pkg::{new_signing_key, public_key_hex};
@@ -127,6 +73,21 @@ mod tests {
 
     fn b64(b: &[u8]) -> String {
         crate::story::base64_encode(b).replace('+', "-").replace('/', "_").trim_end_matches('=').to_string()
+    }
+
+    #[test]
+    fn a_return_page_address_hands_over_a_token_only_from_https_or_the_licence_scheme_and_only_from_the_fragment_or_query() {
+        let tok = r#"{"app":"pro-editor","serial":7}"#;
+        let code = b64(tok.as_bytes());
+        assert_eq!(token_in_address(&format!("https://pay.example.org/thanks#{MARK}={code}")).as_deref(), Some(tok));
+        assert_eq!(token_in_address(&format!("https://pay.example.org/thanks?order=1&{MARK}={code}")).as_deref(), Some(tok));
+        assert_eq!(token_in_address(&format!("{MARK}:{code}")).as_deref(), Some(tok));
+        // plain http, a token in the path, an unrelated address and a damaged code give nothing
+        assert!(token_in_address(&format!("http://pay.example.org/thanks#{MARK}={code}")).is_none());
+        assert!(token_in_address(&format!("https://pay.example.org/{MARK}={code}")).is_none());
+        assert!(token_in_address("https://pay.example.org/thanks").is_none());
+        assert!(token_in_address(&format!("https://pay.example.org/#{MARK}=!!!")).is_none());
+        assert!(token_in_address(&format!("https://pay.example.org/#{MARK}={}", "A".repeat(100_000))).is_none());
     }
 
     #[test]

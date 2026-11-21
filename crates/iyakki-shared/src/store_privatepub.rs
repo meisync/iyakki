@@ -1,7 +1,7 @@
 use crate::store_core::Probe;
 
 /// A private store the installed-services list knows.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Deployed {
     /// The instance id (`private-store-iyakki-private-store`).
     pub instance: String,
@@ -15,7 +15,7 @@ pub struct Deployed {
 
 /// What the Publish form and the assistant need to offer "add it and publish": the first deployed store that is not yet a source,
 /// with what its catalog says now (the key fingerprint) or why that could not be read.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Offer {
     pub dep: Deployed,
     pub probe: Result<Probe, String>,

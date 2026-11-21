@@ -316,6 +316,6 @@ impl HeartbeatSource for OsSource {
         let load = self.os.sysinfo().loadavg().map(|l| l.one).unwrap_or(0.0);
         let mem = self.os.sysinfo().meminfo().unwrap_or_default();
         let used = if mem.total_kb == 0 { 0 } else { (100 - (mem.available_kb.min(mem.total_kb) * 100 / mem.total_kb)) as u32 };
-        Heartbeat { disk_free_mb: mb(free), disk_total_mb: mb(total), cpu_load_pct: ((load / cpus as f64) * 100.0).round().clamp(0.0, 1000.0) as u32, cpus, mem_used_pct: used, mem_total_mb: mem.total_kb / 1024, tasks_running: (self.tasks)(), models: (self.models)() }.sanitised()
+        Heartbeat { disk_free_mb: mb(free), disk_total_mb: mb(total), cpu_load_pct: ((load / cpus as f64) * 100.0).round().clamp(0.0, 1000.0) as u32, cpus, mem_used_pct: used, mem_total_mb: mem.total_kb / 1024, tasks_running: (self.tasks)(), models: (self.models)(), battery_pct: iyakki_battery::read(&iyakki_battery::BatteryEnv::real()).percent.map(|p| p.round().max(0.0) as u32) }.sanitised()
     }
 }

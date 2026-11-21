@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 
-use iyakki_drivers::touchbar::{self as tb, Dfr, DfrError, DisplayIface, Found, Orient, Port, SwitchOutcome, Usb, UsbError};
+use iyakki_core_local::driver_packs::touchbar::{self as tb, Dfr, DfrError, DisplayIface, Found, Orient, Port, SwitchOutcome, Usb, UsbError};
 
 use crate::touchbar::{Picture, TouchEv};
 
@@ -234,7 +234,7 @@ pub struct RealBackend {
 
 impl Default for RealBackend {
     fn default() -> RealBackend {
-        RealBackend { usb_devices: "/sys/bus/usb/devices".into(), dev_root: "/dev".into() }
+        RealBackend { usb_devices: iyakki_core_local::kernelfacts::USB_DEVICES.into(), dev_root: "/dev".into() }
     }
 }
 
@@ -248,7 +248,7 @@ impl Backend for RealBackend {
     fn open(&mut self, f: &Found) -> Result<Box<dyn Usb + Send>, UsbError> {
         #[cfg(target_os = "linux")]
         {
-            Ok(Box::new(iyakki_drivers::usbfs::UsbFs::open(&f.usbfs_path(&self.dev_root))?))
+            Ok(Box::new(iyakki_core_local::driver_packs::usbfs::UsbFs::open(&f.usbfs_path(&self.dev_root))?))
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -259,7 +259,7 @@ impl Backend for RealBackend {
     fn port(&mut self, f: &Found) -> Box<dyn Port + Send> {
         #[cfg(target_os = "linux")]
         {
-            Box::new(iyakki_drivers::usbfs::SysPort::new(f.clone(), self.dev_root.clone()))
+            Box::new(iyakki_core_local::driver_packs::usbfs::SysPort::new(f.clone(), self.dev_root.clone()))
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -551,7 +551,7 @@ fn touch_loop(s: Arc<Shared>) {
 #[cfg(test)]
 pub(crate) mod fakes {
     use super::*;
-    use iyakki_drivers::touchbar::fake::FakeUsb;
+    use iyakki_core_local::driver_packs::touchbar::fake::FakeUsb;
 
     /// A fake whose log the test can read after the worker owns it.
     #[derive(Clone, Default)]
@@ -582,12 +582,12 @@ pub(crate) mod fakes {
         pub opens: u32,
         pub open_error: Option<UsbError>,
         /// The device for the switch: starts in `found[0].configured`; the fake backend moves `found` along with it.
-        pub port: Option<std::sync::Arc<Mutex<iyakki_drivers::touchbar::fake::FakeSwitchPort>>>,
+        pub port: Option<std::sync::Arc<Mutex<iyakki_core_local::driver_packs::touchbar::fake::FakeSwitchPort>>>,
         pub switches: u32,
     }
 
     /// A port that is the shared fake device.
-    pub struct SharedPort(pub std::sync::Arc<Mutex<iyakki_drivers::touchbar::fake::FakeSwitchPort>>);
+    pub struct SharedPort(pub std::sync::Arc<Mutex<iyakki_core_local::driver_packs::touchbar::fake::FakeSwitchPort>>);
 
     impl Port for SharedPort {
         fn present(&mut self) -> bool {
@@ -650,7 +650,7 @@ pub(crate) mod fakes {
 mod tests {
     use super::fakes::*;
     use super::*;
-    use iyakki_drivers::touchbar::fake::FakeUsb;
+    use iyakki_core_local::driver_packs::touchbar::fake::FakeUsb;
 
     fn rig(found_list: Vec<Found>, iface: Option<DisplayIface>) -> (Host, Worker, Dev) {
         let dev = Dev::default();
@@ -799,7 +799,7 @@ mod tests {
         assert_eq!(h.flip(), 3);
     }
 
-    use iyakki_drivers::touchbar::fake::FakeSwitchPort;
+    use iyakki_core_local::driver_packs::touchbar::fake::FakeSwitchPort;
 
     fn switch_rig(active: u8, display_in: u8, port: FakeSwitchPort, open_error: Option<UsbError>) -> (Host, Worker, std::sync::Arc<Mutex<FakeSwitchPort>>) {
         let port = std::sync::Arc::new(Mutex::new(port));

@@ -337,7 +337,7 @@ Acceptance: every device joins, gets an address, loads a page through the NAT; t
 ### Acceptance tests
 
 * P1 (automatic, no hardware): `crates/iyakki-hotspot/tools/hwsim-test.sh` prints PASS for each check; Rust: `cargo test -p iyakki-hotspot caps`, the framing tests of
-  `iyakki-agent::nl80211_os::tests`, and the `#[ignore]` tests that need the VM or a real Wi-Fi radio.
+  `iyakki-core-local::nl80211_os::tests`, and the `#[ignore]` tests that need the VM or a real Wi-Fi radio.
 * P2: the device list above on a real dongle, with the capability probe's verdict recorded beside the result.
 * P3: manager integration tests with fakes; the Settings page on a screen; reboot clean-up; country change.
 * P4: SAE client test with a WPA3-capable phone and `wpa_supplicant` on Linux; DFS only on a card whose driver reports radar detection.

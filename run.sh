@@ -42,6 +42,7 @@ IYAKKI launcher
   ./run.sh dlmanifest keygen|sign|verify|check|gen  the signed downloads manifest (versions and checksums of the download items; docs/development/DOWNLOADS-MANIFEST.md)
   ./run.sh image-programs  fails when production code starts a program the images do not ship (list: dist/buildroot/image-programs.txt)
   ./run.sh device-ui [--device NAME | --qemu BUILD_DIR] [--scenarios all|a,b] [--out DIR]  drive a paired device (or a QEMU guest) through the screen scenarios, take screenshots, write report.html (docs/development/DEVICE-UI-TESTS.md)
+  ./run.sh autotest [--profile qemu|browser|machine NAME] [--rows IDs] [--checklist] [--image BUILD_DIR] [--list|--dry-run]  the test runner: scenarios (dist/autotest/scenarios/*.scn), evidence per row and level, owner checklist (docs/development/AUTOTEST.md)
   ./run.sh test-core [--no-stamps]   tests of the core layers (base, core, agent, tools crates); a green stamp skips them when nothing they depend on changed (docs/development/FAST-LOOP.md)
   ./run.sh test-apps [--no-stamps]   tests of the apps and ui layers (tile crates, iyakki-apps, shell, UI SDK, sample app), same stamps; add `-- FILTER` for a partial run (never stamped)
   ./run.sh test-qemu [--list] [--only NAMES] [BUILD_DIR]   one QEMU boot of an existing image, named checks per row, PASS/FAIL with evidence (opt-in, docs/development/QEMU-TESTS.md)
@@ -142,7 +143,7 @@ case "${1:-help}" in
     cargo run -q --release -p iyakki-shell --example screens
     echo "Screenshots in /tmp/iyakki-screens:"; ls /tmp/iyakki-screens
     command -v xdg-open >/dev/null && xdg-open /tmp/iyakki-screens >/dev/null 2>&1 || true ;;
-  warnings)
+  warnings)  # `./run.sh warnings --mac`: the same gate on a Mac through mcargo (KI-063)
     # the warnings gate: every crate, every target (lib, bins, tests, examples) must compile with ZERO compiler warnings.
     # Same cargo cache as a normal check (no RUSTFLAGS change, so no full rebuild); fails on the first warning it finds.
     shift; exec dist/release/warnings-gate.sh "$@" ;;
@@ -201,6 +202,9 @@ case "${1:-help}" in
   device-ui)
     # screenshots + checks on a real device or a QEMU guest through developer mode; a thin wrapper, the work is in dist/devtest/run.py
     shift; exec python3 dist/devtest/run.py "$@" ;;
+  autotest)
+    # the test-automation runner (dist/autotest/run.py): evidence outside the repository, one run at a time
+    shift; exec python3 dist/autotest/run.py "$@" ;;
   test-core|test-apps)
     # one test layer with green stamps (dist/release/test-layer.sh); the crate lists come from dist/scripts/crate-layers.txt
     l="${1#test-}"; shift; exec dist/release/test-layer.sh "$l" "$@" ;;

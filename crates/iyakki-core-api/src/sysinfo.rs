@@ -45,6 +45,10 @@ pub trait Sysinfo: Send + Sync {
 pub trait Os: Send + Sync {
     fn sysinfo(&self) -> &dyn Sysinfo;
     fn audio(&self) -> &dyn crate::audio::Audio;
+    /// The kernel facts sound routing reads (`/proc/asound`, who holds a playback device, the mixer's controls). A machine that does not say otherwise knows none.
+    fn audio_route(&self) -> std::sync::Arc<dyn crate::audioroute::AudioRoute> {
+        std::sync::Arc::new(crate::audioroute::NoAudioRoute)
+    }
     fn disks(&self) -> &dyn crate::devices::Disks;
     fn net(&self) -> &dyn crate::devices::Net;
     /// Compressed memory, swap and `system.conf` (a shared handle: the Memory page runs its changes on a thread).
@@ -56,6 +60,38 @@ pub trait Os: Send + Sync {
     /// The kept kernel logs of earlier sessions.
     #[cfg(feature = "native")]
     fn crashlog(&self) -> std::sync::Arc<dyn crate::crashlog::CrashLog>;
+    /// What the kernel says about the screens (connectors, modes, the firmware framebuffer's signature, which card to drive). A machine that does not say otherwise has none.
+    fn screen_facts(&self) -> std::sync::Arc<dyn crate::screenfacts::ScreenFacts> {
+        std::sync::Arc::new(crate::screenfacts::NoScreenFacts)
+    }
+    /// Where sound plays now: the device, how loud and a change counter (read only). A machine that does not say otherwise has no selector.
+    fn output_state(&self) -> std::sync::Arc<dyn crate::soundctl::OutputState> {
+        std::sync::Arc::new(crate::soundctl::NoOutputState)
+    }
+    /// Bluetooth audio, both directions (reads, and the changes behind `bluetooth.use`). A machine that does not say otherwise has none.
+    #[cfg(feature = "native")]
+    fn bt_audio(&self) -> std::sync::Arc<dyn crate::btaudio::BtAudio> {
+        std::sync::Arc::new(crate::btaudio::NoBtAudio)
+    }
+    /// The firmware's startup entry of this computer (read, and the four changes behind `system.startup.set`). A machine that does not say otherwise has no firmware variables.
+    fn startup_disk(&self) -> std::sync::Arc<dyn crate::startupdisk::StartupDisk> {
+        std::sync::Arc::new(crate::startupdisk::NoStartupDisk)
+    }
+    /// Install to disk: the disks, the source, the writing. A machine that does not say otherwise has none (nothing to install from).
+    #[cfg(feature = "native")]
+    fn installer(&self) -> std::sync::Arc<dyn crate::installer::Installer> {
+        std::sync::Arc::new(crate::installer::NoInstaller)
+    }
+    /// The drivers of this machine (reads only). A machine that does not say otherwise has none.
+    #[cfg(feature = "native")]
+    fn drivers(&self) -> std::sync::Arc<dyn crate::drivers::Drivers> {
+        std::sync::Arc::new(crate::drivers::NoDrivers)
+    }
+    /// The drive engine: what is on each drive, and mounting, unmounting and ejecting (reads and checked changes). A machine that does not say otherwise has none.
+    #[cfg(feature = "native")]
+    fn disk_engine(&self) -> std::sync::Arc<dyn crate::diskmodel::DiskEngine> {
+        std::sync::Arc::new(crate::diskmodel::NoDiskEngine)
+    }
     /// Finding the machines on the local network.
     #[cfg(feature = "native")]
     fn netscan(&self) -> std::sync::Arc<dyn crate::netscan::NetScan>;

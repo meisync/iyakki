@@ -2,7 +2,7 @@
 
 
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ClusterState {
     Stopped,
     Starting,
@@ -26,7 +26,7 @@ impl ClusterState {
 // ---- moved from iyakki-agent (F-SPLIT-03) ----
 
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SandboxResult {
     pub ok: bool,
     pub output: String,

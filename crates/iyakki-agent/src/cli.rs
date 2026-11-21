@@ -702,14 +702,14 @@ impl Cli {
             "store" => out(self.store_cmd(rest)?),
             "scan" => {
                 // a few addresses at a time; a whole network is the NET SCAN tile's job (it shows progress and can stop)
-                let targets = if rest.is_empty() { return Err("usage: scan <address | 192.168.1.10-20>   (a whole network: use the NET SCAN tile)".into()) } else { iyakki_netscan::net::parse_targets(rest)? };
+                let targets = if rest.is_empty() { return Err("usage: scan <address | 192.168.1.10-20>   (a whole network: use the NET SCAN tile)".into()) } else { iyakki_core_local::netscan::net::parse_targets(rest)? };
                 if targets.len() > 16 {
                     return Err(format!("{} addresses is a lot for the terminal: use the NET SCAN tile", targets.len()));
                 }
                 if let Some(ip) = targets.iter().find(|ip| !self.policy.allows_host(&ip.to_string())) {
                     return Err(format!("your account may not scan {ip}"));
                 }
-                let hosts = iyakki_netscan::scan_blocking(targets, iyakki_netscan::Options { announce_wait: None, ..Default::default() });
+                let hosts = iyakki_core_local::netscan::scan_blocking(targets, iyakki_core_local::netscan::Options { announce_wait: None, ..Default::default() });
                 if hosts.is_empty() {
                     return Ok(out("nothing answered"));
                 }

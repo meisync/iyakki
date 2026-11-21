@@ -1,0 +1,8 @@
+# autotest pilot, batch A (2026-11-21). Written against the Feature text with sha adb14140c2a127f9; honest subset only: everything not checked is under not-covered.
+row: F-RADIO-13
+targets: qemu
+profile: ram
+feature-sha: adb14140c2a127f9
+doc: the search box finds and plays a station
+human: radio-search | Open RADIO, press the slash key, type a station name, press Enter on a result. Expect: The stations appear as the last entry of the list and Enter plays one (sound is for a person to judge).
+not-covered: the search box finds and plays a station

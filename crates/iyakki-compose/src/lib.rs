@@ -9,6 +9,7 @@
 //!
 //! `wire` is idempotent; the first call wins (the installers are one-shot cells).
 
+pub mod frames;
 pub mod rpc;
 
 use std::sync::Arc;

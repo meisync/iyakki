@@ -18,7 +18,9 @@ let engine = null, rec = null, ws = null, creds = null;
 let retryTimer = null, backoff = 1000, delayOverride = 0, opened = 0, everHello = false, stopped = false, lastVersion = -1, drawQueued = false;
 let toastTimer = null;
 // the media half (sound, clipboard, devices) is a separate file; a page whose host does not serve it simply has no media buttons
-let media = null, agreed = null;
+let media = null, agreed = null, files = null;
+// the display-list module (`uidisplay.js`) and the view it drew, when a session handed it a list
+let uiDisplay = null, appView = null, appLink = null, appTick = null;
 const sendBinary = (tag, bytes) => { if (!ws || ws.readyState !== 1) return; const m = new Uint8Array(bytes.length + 1); m[0] = tag; m.set(bytes, 1); ws.send(m); };
 
 // ------------------------------------------------------------------------------------------------------------------ small helpers
@@ -58,7 +60,8 @@ function onOut(o) {
       }
       break;
     case "phase": onPhase(o.phase, o.text); break;
-    case "caps": agreed = o.caps; if (media) media.setCaps(agreed); break;
+    case "caps": agreed = o.caps; if (media) media.setCaps(agreed); if (files) files.setCaps(agreed); refreshApps(); break;
+    case "app": if (files && files.onMessage(o.body)) break; if (appLink) appLink.onRecord(o); break;
     case "media": if (media) media.onMedia(o); break;
     case "frame": queueDraw(); break;
     case "event": toast(o.topic + ": " + o.body); break;
@@ -146,13 +149,16 @@ function connect() {
   sock.onopen = () => { opened = 1; engine.cmd({ c: "connected" }); pump(); };
   sock.onmessage = (m) => {
     if (sock !== ws) return;
-    if (typeof m.data === "string") engine.onText(m.data); else if (!(media && media.onBinary(m.data))) engine.onBinary(m.data);
+    if (typeof m.data === "string") engine.onText(m.data); else if (!(files && files.onBinary(m.data)) && !(media && media.onBinary(m.data))) engine.onBinary(m.data);
     pump();
   };
   sock.onclose = () => {
     if (sock !== ws) return;
     ws = null;
     if (media) media.reset(); // nothing keeps running without the connection: sound stops, the camera and microphone lights go off
+    if (files) files.reset(); // a half-done transfer is thrown away
+    if (appLink) appLink.reset();
+    hideApp(); // the machine closes the app with the session; the page shows the machine's picture again
     if (engine) { engine.cmd({ c: "closed" }); pump(); }
     const st = engine && engine.cmd({ c: "state" });
     if (stopped || (st && !st.reconnect)) return;
@@ -220,7 +226,7 @@ function sendSize() {
   engine.cmd({ c: "size", w: window.innerWidth, h: window.innerHeight }); pump();
 }
 let rs = null;
-window.addEventListener("resize", () => { clearTimeout(rs); rs = setTimeout(() => { if (!$("stage").hidden) { sendSize(); fit(); } }, 200); });
+window.addEventListener("resize", () => { clearTimeout(rs); rs = setTimeout(() => { if (!$("stage").hidden) { sendSize(); fit(); resizeApp(); } }, 200); });
 
 // ------------------------------------------------------------------------------------------------------------------ input
 
@@ -381,6 +387,88 @@ $("retry").addEventListener("click", () => {
 });
 $("forget").addEventListener("click", async () => { await keys.forgetDevice(); rec = null; problem("Device forgotten", "This browser no longer has a device key. Open a new link from Settings on the IYAKKI machine to add it again."); });
 
+// ------------------------------------------------------------------------------------------------------------------ an app's display list
+
+/** Draw an SDK app's display list in place of the machine's screen. `io.send(lines)` posts input lines and resolves with the next list; `io.frame()`
+ *  resolves with the first one. Returns the view, or null while the module or the engine is not loaded. The session carries the list in the
+ *  additive messages `app_open`, `app_input` and `app_close` (D-CLIENT-PROTO-DISPLAYLIST); `openApp` below is what the Apps menu calls. */
+async function showApp(io, scale = window.devicePixelRatio || 1) {
+  if (!uiDisplay || !engine) return null;
+  const form = $("stage").dataset.appform; // set by layoutApp just before: hideApp() below clears it, and the window's shadow and the hidden bar depend on it
+  hideApp();
+  if (form) $("stage").dataset.appform = form;
+  const canvas = $("app");
+  appView = uiDisplay.mountDisplayList({ engine, canvas, ariaHost: $("app-aria"), io, scale, onError: (m) => { if (m) toast(m); } });
+  document.addEventListener("keydown", appView.onKey);
+  $("screen").hidden = true; canvas.hidden = false; $("app-aria").hidden = false; $("app-title").hidden = false;
+  try {
+    appView.show(await io.frame());
+  } catch (e) { hideApp(); throw e; }
+  const t0 = performance.now(), view = appView;
+  appTick = setInterval(() => { if (!document.hidden && appView === view) view.tick(Math.round(performance.now() - t0)); }, 500);
+  canvas.focus({ preventScroll: true });
+  return appView;
+}
+
+/** Back to the machine's screen. */
+function hideApp() {
+  if (appView) document.removeEventListener("keydown", appView.onKey);
+  clearInterval(appTick); appTick = null;
+  const was = appView; appView = null;
+  if (was && appLink && appLink.open) appLink.close(); // the person pressed Close (or the page went): the machine lets the app go
+  $("app").hidden = true; $("app-aria").hidden = true; $("app-title").hidden = true; $("screen").hidden = false;
+  delete $("stage").dataset.appform;
+}
+
+/** Where the pane goes for this window: the window form or the phone form (`panePlan` of the shared module). */
+function layoutApp(plan) {
+  const place = (el, left, top) => { el.style.left = left + "px"; el.style.top = top + "px"; };
+  place($("app"), plan.left, plan.top); place($("app-aria"), plan.left, plan.top);
+  $("app-aria").style.width = plan.w + "px"; $("app-aria").style.height = plan.h + "px";
+  place($("app-title"), plan.left, plan.winTop); $("app-title").style.width = plan.w + "px";
+  $("stage").dataset.appform = plan.form;
+}
+const planNow = () => uiDisplay.panePlan({ width: window.innerWidth, height: window.innerHeight, touch: (navigator.maxTouchPoints || 0) > 0 });
+
+/** The window was resized or turned while an app is open: the pane follows, and the app is told its new size in units. */
+function resizeApp() {
+  if (!appView || !uiDisplay) return;
+  const plan = planNow();
+  layoutApp(plan);
+  appView.resize(plan.w, plan.h);
+}
+
+/** Open an app of the machine in the window form or the phone form. The machine answers with the first frame or says why not. */
+async function openApp(id) {
+  if (!appLink || !uiDisplay || !engine) return toast("This page cannot show apps.");
+  const plan = planNow();
+  layoutApp(plan);
+  $("app-name").textContent = (uiDisplay.LIST_APPS.find((a) => a.id === id) || { label: id }).label;
+  $("apps-menu").hidden = true;
+  try {
+    await showApp({ frame: () => appLink.openApp(id, plan.w, plan.h), send: (l) => appLink.io.send(l) });
+  } catch (e) { toast(String((e && e.message) || e), 7000); }
+}
+
+/** The Apps button is there only when this machine agreed to the display-list mode. */
+function refreshApps() {
+  const on = !!agreed && agreed.includes("display.list") && !!uiDisplay;
+  $("apps").hidden = !on;
+  const list = $("apps-list");
+  if (on && !list.childElementCount) {
+    for (const a of uiDisplay.LIST_APPS) {
+      const b = document.createElement("button");
+      b.type = "button"; b.textContent = a.label;
+      b.addEventListener("click", () => openApp(a.id));
+      list.appendChild(b);
+    }
+  }
+}
+$("apps").addEventListener("click", () => { $("apps-menu").hidden = !$("apps-menu").hidden; });
+$("apps-close").addEventListener("click", () => { $("apps-menu").hidden = true; });
+$("app-close").addEventListener("click", hideApp);
+window.addEventListener("pagehide", hideApp);
+
 // ------------------------------------------------------------------------------------------------------------------ boot
 
 async function boot() {
@@ -398,6 +486,18 @@ async function boot() {
     media = m.createMedia({ engine, pump, toast, send: { binary: sendBinary, buffered: () => (ws ? ws.bufferedAmount : 0) } });
     if (agreed) media.setCaps(agreed);
   }).catch(() => { /* no media in this host: the page works without it */ });
+  import("/connect/files.js").then((m) => {
+    const save = (name, parts) => { const u = URL.createObjectURL(new Blob(parts)), a = document.createElement("a"); a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 10000); };
+    files = m.createFiles({ send: (o) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }, sendBinary, toast, save, ui: { row: $("files-row"), dir: $("files-dir"), up: $("files-up"), refresh: $("files-refresh"), list: $("files-list"), pick: $("files-pick"), state: $("files-state") } });
+    $("files-open").addEventListener("click", () => files.list(""));
+    if (agreed) files.setCaps(agreed);
+  }).catch(() => { /* no file transfer in this host: the page works without it */ });
+  // the display-list view of an app (F-CORE-30, F-SDK-29): the one shared module, loaded now so that it is ready when a session carries a list
+  import("/connect/uidisplay.js").then((m) => {
+    uiDisplay = m;
+    appLink = m.createAppLink({ engine, pump, onClosed: (why) => { hideApp(); if (why !== "closed") toast(why === "left" ? "You left the app." : "The app ended (" + why + ")."); }, onRefused: (msg) => toast(msg, 7000) });
+    refreshApps();
+  }).catch(() => { /* no module in this host: only the machine's screen can be shown */ });
   rec = await keys.loadDevice();
   if (token) {
     // a new link: add this browser as a device (this replaces the device saved here, if any; the old one stays in the machine's list until removed)

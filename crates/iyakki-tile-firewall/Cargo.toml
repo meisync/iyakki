@@ -1,0 +1,14 @@
+[package]
+name = "iyakki-tile-firewall"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The FIREWALL tile (F-FW-10): the state of the firewall at a glance. Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on
+# `iyakki-uikit` only, never on the agent or the firewall crate; the shell hands it plain facts through `FirewallPort` (a fake in tests).
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

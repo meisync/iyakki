@@ -363,12 +363,7 @@ pub const PRIME_BYTES: usize = 48_000 / 100 * 2 * 2;
 
 impl Runner for System {
     fn amixer(&self, args: &[String]) -> Result<String, String> {
-        let out = std::process::Command::new("amixer").args(args).stdin(std::process::Stdio::null()).output().map_err(|e| format!("amixer: {e}"))?;
-        if out.status.success() {
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-        } else {
-            Err(format!("amixer {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()))
-        }
+        iyakki_core_local::starters::amixer_text(args).map_err(|f| if f.not_started { format!("amixer: {}", f.text) } else { format!("amixer {}: {}", args.join(" "), f.text) })
     }
 
     fn has_control(&self, card: u32) -> bool {
@@ -377,16 +372,7 @@ impl Runner for System {
 
     fn prime(&self, pcm: &str) -> Result<(), String> {
         use std::io::Write;
-        let mut child = {
-            let argv = crate::voice::sound_player_argv(&["aplay", "-q", "-D", pcm, "-t", "raw", "-f", "S16_LE", "-r", "48000", "-c", "2", "-"].map(String::from));
-            let mut c = std::process::Command::new(&argv[0]);
-            c.args(&argv[1..]);
-            c
-        }
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
+        let mut child = iyakki_core_local::starters::spawn_raw_player(&crate::voice::sound_player_argv(&["aplay", "-q", "-D", pcm, "-t", "raw", "-f", "S16_LE", "-r", "48000", "-c", "2", "-"].map(String::from)))
             .map_err(|e| format!("aplay: {e}"))?;
         if let Some(mut si) = child.stdin.take() {
             let _ = si.write_all(&[0u8; PRIME_BYTES]);

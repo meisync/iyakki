@@ -84,6 +84,7 @@ fn services_facet_defaults_are_unavailable() {
     impl ServicesB1 for S {}
     let s = Arc::new(S);
     assert!(!s.msg_mirror_tick("ann", Arc::new(|_, _| {})));
+    assert!(!s.rag_refresh_tick("ann", &iyakki_sec::policy::Role::User.template(), Arc::new(|_, _| {})));
     assert!(s.matrix("ann", Arc::new(|_, _| {})).accounts().is_empty());
     assert!(s.matrix("ann", Arc::new(|_, _| {})).add("a", "b", iyakki_agent_api::MatrixAuth::Token("t".into()), "").is_err());
     assert!(s.system_speaker().say("hi").is_err());

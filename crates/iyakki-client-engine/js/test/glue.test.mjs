@@ -97,6 +97,39 @@ test("the wasm module decodes the golden frame to the same pixels as the instanc
   assert.ok(!JSON.stringify(recs).includes("right"));
 });
 
+test("the wasm module speaks the display-list mode: offered in hello, asked for only when agreed and signed in, and the machine's list messages come out as app records", async () => {
+  const v = sig[0];
+  const e = await engineFor(v);
+  e.cmd({ c: "connected" });
+  const hello = sends(e.drain()).find((m) => m.t === "hello");
+  assert.ok(hello.offered.includes("display.list") && !hello.needed.includes("display.list"), "offered, never needed");
+  e.onText(JSON.stringify({ t: "hello_ok", v: 1, caps: ["picture", "input", "events", "calls", "display.list"], challenge: v.challenge, tile: 64, max_message: 65536 }));
+  e.drain();
+  assert.equal(e.cmd({ c: "app_open", app: "sample", w: 800, h: 600 }), false, "not signed in yet");
+  assert.equal(e.cmd({ c: "sign_seed", seed: v.seed, ts: v.ts, nonce: v.nonce }), true);
+  e.drain();
+  e.onText(JSON.stringify({ t: "authed", device: v.device, name: "n" }));
+  assert.equal(e.cmd({ c: "sign_in", user: "ann", password: "pw" }), true);
+  e.drain();
+  e.onText(JSON.stringify({ t: "signed_in", person: "ann" }));
+  e.drain();
+  assert.equal(e.cmd({ c: "app_open", app: "sample", w: 800, h: 600 }), true);
+  assert.equal(e.cmd({ c: "app_input", lines: "key enter" }), true);
+  assert.equal(e.cmd({ c: "app_close" }), true);
+  assert.deepEqual(sends(e.drain()).filter((m) => m.t.startsWith("app_")), [{ t: "app_open", app: "sample", w: 800, h: 600 }, { t: "app_input", lines: "key enter" }, { t: "app_close" }]);
+  const list = "iyakki-display-list 1 800 600\nrect 0 0 10 10 ff0000ff\n";
+  e.onText(JSON.stringify({ t: "app_list", app: "sample", text: list }));
+  e.onText(JSON.stringify({ t: "app_err", code: "denied", message: "no" }));
+  e.onText(JSON.stringify({ t: "app_closed", app: "sample", reason: "left" }));
+  e.onText('{"t":"app_list","app":"sample"}'); // a broken one is a notice, not a crash
+  e.onText(JSON.stringify({ t: "file_list", dir: "", entries: [{ name: "a.txt", is_dir: false, size: 3 }], truncated: false })); // file transfer's texts pass through to the page
+  const recs = e.drain();
+  assert.deepEqual(recs.filter((r) => r.k === "app").map((r) => r.ev), ["app_list", "app_err", "app_closed", "file_list"]);
+  assert.ok(hello.offered.includes("files.transfer") && !hello.needed.includes("files.transfer"));
+  assert.equal(recs.find((r) => r.k === "app").body.text, list);
+  assert.ok(recs.some((r) => r.k === "notice"));
+});
+
 test("garbage in is refused, not fatal", async () => {
   const e = await engineFor(sig[0]);
   for (const bad of [{ c: "nope" }, { c: "pointer" }, { c: "sign_seed", seed: "00", ts: 1, nonce: "x" }, { c: "finish_sign", sig: "00" }]) assert.equal(e.cmd(bad), false);

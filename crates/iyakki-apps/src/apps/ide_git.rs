@@ -102,6 +102,8 @@ impl GitUi {
         b.rows = rows;
         b.at = Some(Instant::now());
         b.stale = false;
+        // a read of the real folders that is still on its way would overwrite what the test has set
+        b.rx = None;
     }
 }
 

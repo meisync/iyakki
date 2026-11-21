@@ -35,7 +35,7 @@ PATHS=(
   "crates/iyakki-shell crates/iyakki-apps"
   "crates/iyakki-js crates/iyakki-web crates/iyakki-webview dist/webview dist/js"
   "crates/iyakki-core crates/iyakki-usb crates/iyakki-storage crates/iyakki-hw crates/iyakki-hwinfo crates/iyakki-sec crates/iyakki-proxy crates/iyakki-ui crates/iyakki-gui crates/iyakki-vfs crates/iyakki-wasm crates/iyakki-ledger crates/iyakki-mem crates/iyakki-swarm crates/iyakki-remote crates/iyakki-netscan crates/iyakki-devctl crates/iyakki-edit :(exclude)crates/iyakki-gui/Cargo.lock :(exclude)crates/iyakki-core/Cargo.toml"
-  "dist/buildroot dist/Dockerfile dist/k3s-manifest.yaml dist/k3s-web.yaml dist/systemd dist/test-bases.sh dist/samples dist/skills dist/templates tests :(exclude)dist/release"
+  "dist/buildroot dist/Dockerfile dist/k3s-manifest.yaml dist/k3s-web.yaml dist/systemd dist/test-bases.sh dist/samples dist/manual dist/skills dist/templates tests :(exclude)dist/release"
   "docs README.md CONTRIBUTING.md CODE_OF_CONDUCT.md BOUNDARY.md LICENSING.md FEATURES.md Agent*Architecture*Specification.md"
   "crates/iyakki-relcheck dist/release run.sh Cargo.toml Cargo.lock crates/iyakki-gui/Cargo.lock crates/iyakki-core/Cargo.toml CHANGELOG.md RELEASE-NOTES-$VERSION.md KNOWN-ISSUES.md SECURITY.md SUPPORT.md ALPHA-GATE.md COMMIT-PLAN.md SBOM.json THIRD_PARTY_LICENSES.txt NOTICE LICENSE about.toml about.hbs deny.toml .gitignore .iyakki/project.json"
   "."

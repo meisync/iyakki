@@ -89,7 +89,7 @@ static FBSET_SKIP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 
 /// Read `iyakki.fbset=` once (the splash and the shell both call it; the later call wins and is the same text).
 pub fn init_fbset_from_cmdline() -> FbSet {
-    let m = FbSet::from_cmdline(&iyakki_storage::cmdline_text());
+    let m = FbSet::from_cmdline(&iyakki_core_local::storage::cmdline_text());
     FBSET_SKIP.store(m == FbSet::Skip, std::sync::atomic::Ordering::Relaxed);
     m
 }
@@ -345,7 +345,7 @@ pub struct Framebuffer {
     pub info: ScreenInfo,
     /// Oddities found by [`geometry`].
     pub notes: Vec<String>,
-    /// [`sysfs_signature`] of the device, read just before it was opened (`None` without sysfs).
+    /// [`crate::screen::signature`] of the device, read just before it was opened (`None` without sysfs).
     pub signature: Option<String>,
 }
 
@@ -408,29 +408,16 @@ pub fn identify(path: &str) -> Result<Identity, String> {
     let file = std::fs::OpenOptions::new().read(true).open(path).map_err(|e| format!("{path}: {e}"))?;
     let (info, id) = query(&file, path)?;
     let geo = geometry(&info).map_err(|e| format!("{path}: {e}"))?;
-    let vis = crate::display::visible_now((geo.width, geo.height), (info.xres, info.yres));
+    let vis = crate::display::visible_with(&*crate::screen::facts(), (geo.width, geo.height), (info.xres, info.yres));
     Ok(Identity { id, width: vis.width, height: vis.height, pitch: geo.pitch })
-}
-
-/// What sysfs says about the screen behind `path` (`/dev/fbN` -> `<sys_graphics>/fbN`): the driver's name, the size, the
-/// stride and the depth, in one line. Reading it never opens the device. That matters: when a GPU driver takes over, the
-/// firmware's screen (simpledrm) is unplugged, and the last close of its device frees its buffer, which on this kernel
-/// (6.12, simpledrm's shmem fbdev) can spin forever in the kernel (`shmem_undo_range`), taking a CPU core and the thread
-/// with it. Polling with open/close every 100 ms could be that last close.
-pub fn sysfs_signature(sys_graphics: &std::path::Path, path: &str) -> Option<String> {
-    let node = std::path::Path::new(path).file_name()?.to_str()?;
-    let dir = sys_graphics.join(node);
-    let read = |f: &str| std::fs::read_to_string(dir.join(f)).ok().map(|v| v.trim().to_string());
-    let name = read("name")?;
-    Some(format!("{name} {} stride {} {} bpp", read("virtual_size").unwrap_or_default(), read("stride").unwrap_or_default(), read("bits_per_pixel").unwrap_or_default()))
 }
 
 impl Framebuffer {
     /// Has the screen behind `path` changed since this framebuffer was opened (a GPU driver replacing the firmware's
-    /// screen, another mode)? Asks sysfs when it can (see [`sysfs_signature`]), else the device itself.
+    /// screen, another mode)? Asks sysfs when it can (see [`crate::screen::signature`]), else the device itself.
     pub fn screen_changed(&self, path: &str) -> bool {
-        match (&self.signature, sysfs_signature(std::path::Path::new("/sys/class/graphics"), path)) {
-            (Some(was), Some(now)) => *was != format!("{now} | {}", crate::display::signature(std::path::Path::new("/sys/class/drm"))),
+        match (&self.signature, crate::screen::signature(&*crate::screen::facts(), path)) {
+            (Some(was), Some(now)) => *was != now,
             _ => identify(path).is_ok_and(|now| now != self.identity()),
         }
     }
@@ -464,7 +451,7 @@ impl Framebuffer {
 
     pub fn open(path: &str) -> Result<Framebuffer, String> {
         // read before opening: if the screen changes in between, the next [`Framebuffer::screen_changed`] notices
-        let signature = sysfs_signature(std::path::Path::new("/sys/class/graphics"), path).map(|s| format!("{s} | {}", crate::display::signature(std::path::Path::new("/sys/class/drm"))));
+        let signature = crate::screen::signature(&*crate::screen::facts(), path);
         let file = std::fs::OpenOptions::new().read(true).write(true).open(path).map_err(|e| format!("{path}: {e}"))?;
         let fd = file.as_raw_fd();
         let (info, id) = query(&file, path)?;
@@ -475,7 +462,7 @@ impl Framebuffer {
         if map == libc::MAP_FAILED {
             return Err(format!("{path}: mmap failed ({})", std::io::Error::last_os_error()));
         }
-        let vis = crate::display::visible_now((geo.width, geo.height), (info.xres, info.yres));
+        let vis = crate::display::visible_with(&*crate::screen::facts(), (geo.width, geo.height), (info.xres, info.yres));
         let mut notes = geo.notes;
         if vis.smaller_than((geo.width, geo.height)) {
             notes.push(format!("monitor shows {}x{} of the {}x{} buffer", vis.width, vis.height, geo.width, geo.height));
@@ -966,20 +953,16 @@ mod tests {
     }
 
     #[test]
-    fn the_sysfs_signature_follows_a_gpu_driver_taking_over_without_opening_the_device() {
-        let d = std::env::temp_dir().join(format!("iyakki-fb-sysfs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(d.join("fb0")).unwrap();
-        assert_eq!(sysfs_signature(&d, "/dev/fb0"), None, "no name: no signature (the caller asks the device)");
-        for (f, v) in [("name", "simpledrmdrmfb\n"), ("virtual_size", "1920,1080\n"), ("stride", "7680\n"), ("bits_per_pixel", "32\n")] {
-            std::fs::write(d.join("fb0").join(f), v).unwrap();
-        }
-        let firmware = sysfs_signature(&d, "/dev/fb0").unwrap();
-        assert_eq!(firmware, "simpledrmdrmfb 1920,1080 stride 7680 32 bpp");
-        std::fs::write(d.join("fb0/name"), "i915drmfb\n").unwrap();
-        assert_ne!(sysfs_signature(&d, "/dev/fb0").unwrap(), firmware, "same size, another driver");
-        assert_eq!(sysfs_signature(&d, "/dev/fb1"), None);
-        let _ = std::fs::remove_dir_all(&d);
+    fn a_gpu_driver_taking_over_changes_the_screen_signature_without_the_device_being_opened() {
+        let facts = iyakki_core_fake::FakeScreenFacts::default();
+        assert_eq!(crate::screen::signature(&facts, "/dev/fb0"), None, "no name: no signature (the caller asks the device)");
+        facts.set_fb_signature(Some("simpledrmdrmfb 1920,1080 stride 7680 32 bpp"));
+        facts.connector("/dev/dri/card0", "HDMI-A-1", true, &[(1920, 1080)]);
+        let firmware = crate::screen::signature(&facts, "/dev/fb0").unwrap();
+        assert_eq!(firmware, "simpledrmdrmfb 1920,1080 stride 7680 32 bpp | HDMI-A-1:1920x1080");
+        facts.set_fb_signature(Some("i915drmfb 1920,1080 stride 7680 32 bpp"));
+        assert_ne!(crate::screen::signature(&facts, "/dev/fb0").unwrap(), firmware, "same size, another driver");
+        assert!(facts.reads() >= 4);
     }
 
     #[test]

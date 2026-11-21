@@ -22,6 +22,9 @@ impl Backend for FileBackend {
     fn wifi_ap_why(&self) -> Option<String> {
         real::wifi_ap_why()
     }
+    fn nap_why(&self) -> Option<String> {
+        real::nap_available().err()
+    }
     fn status(&self) -> Status {
         rs(&self.data)
     }

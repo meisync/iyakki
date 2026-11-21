@@ -631,6 +631,15 @@ class Test:
         bad += ["text@%d,%d" % (x, y) for x, y, _ in st.lines if x < 0 or x >= st.width]
         return self.check(name, not st.cut and not bad, "cut=%s outside=%s" % (st.cut, bad[:5]))
 
+    def assert_scrollbar_found(self, shot, strip=40):
+        """The thumb the detector finds in the right-hand strip of the shot, or None (no check is recorded)."""
+        iw, ih = shot.size()
+        img = shot.image.crop((max(0, iw - strip), 0, iw, ih)).convert("RGB")
+        data = list(img.getdata())
+        sw = img.size[0]
+        step = max(1, ih // 400)
+        return find_scrollbar([data[y * sw:(y + 1) * sw] for y in range(0, ih, step)])
+
     def assert_scrollbar(self, shot, present=True, name=None, strip=40):
         """A scrollbar thumb is (or is not) visible in the right-hand strip of the screenshot. A page with more lines than the screen shows
         one; a short page must not."""

@@ -212,6 +212,8 @@ pub struct Surface {
     pub blur: u8,
     /// The size of a glyph or small icon inside an SDK widget, in logical units.
     pub glyph: u16,
+    /// Draw the screen on every CPU core (the drawing calls of a frame are written down and replayed band by band; F-SHELL-64). Off by default.
+    pub parallel_draw: bool,
 }
 
 impl Surface {
@@ -222,7 +224,7 @@ impl Surface {
 impl Default for Surface {
     /// What the SDK widgets drew before skins existed.
     fn default() -> Surface {
-        Surface { shape: Shape::Soft, edge: Edge::Regular, spacing: Spacing::Normal, elevation: Elevation::Flat, glass: false, blur: 12, glyph: 20 }
+        Surface { shape: Shape::Soft, edge: Edge::Regular, spacing: Spacing::Normal, elevation: Elevation::Flat, glass: false, blur: 12, glyph: 20, parallel_draw: false }
     }
 }
 
@@ -407,7 +409,7 @@ impl Look {
         let f = &self.surface;
         s.push_str(&format!("\n[shape]\nshape = {}\nedge = {}\n", f.shape.key(), f.edge.key()));
         s.push_str(&format!("\n[spacing]\nspacing = {}\n", f.spacing.key()));
-        s.push_str(&format!("\n[effects]\nelevation = {}\nglass = {}\nblur = {}\nglyph_size = {}\n", f.elevation.key(), onoff(f.glass), f.blur, f.glyph));
+        s.push_str(&format!("\n[effects]\nelevation = {}\nglass = {}\nblur = {}\nglyph_size = {}\nparallel_draw = {}\n", f.elevation.key(), onoff(f.glass), f.blur, f.glyph, onoff(f.parallel_draw)));
         s
     }
 
@@ -495,7 +497,7 @@ fn section_of(key: &str) -> Option<&'static str> {
         "motion" => "motion",
         "shape" | "edge" => "shape",
         "spacing" => "spacing",
-        "elevation" | "glass" | "blur" | "glyph_size" => "effects",
+        "elevation" | "glass" | "blur" | "glyph_size" | "parallel_draw" => "effects",
         k if COLOUR_KEYS.contains(&k) => "colours",
         _ => return None,
     })
@@ -635,6 +637,7 @@ fn set(look: &mut Look, key: &str, v: &str) -> Result<(), String> {
         "elevation" => look.surface.elevation = word(v, Elevation::from_key, Elevation::keys())?,
         "glass" => look.surface.glass = flag(v)?,
         "blur" => look.surface.blur = v.parse::<u8>().map_err(|_| "write a number of pixels from 0 to 24".to_string())?,
+        "parallel_draw" => look.surface.parallel_draw = flag(v)?,
         "glyph_size" => look.surface.glyph = v.parse::<u16>().map_err(|_| "write a size in logical units (12 to 48)".to_string())?,
         _ => return Err("internal: unknown key".into()),
     }

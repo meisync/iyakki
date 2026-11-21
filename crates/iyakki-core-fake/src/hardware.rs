@@ -116,4 +116,41 @@ impl Hardware for FakeHardware {
     fn hardware_report(&self) -> Vec<String> {
         self.state.lock().unwrap().report.clone()
     }
+    fn volume(&self, card: u32) -> Option<Volume> {
+        self.state.lock().unwrap().cards.iter().find(|(c, _)| c.index == card).and_then(|(_, v)| v.clone())
+    }
+    fn set_volume(&self, card: u32, percent: u32) -> Result<Volume, String> {
+        let mut s = self.state.lock().unwrap();
+        s.calls.push(format!("set_volume({card},{percent})"));
+        let v = s.cards.iter_mut().find(|(c, _)| c.index == card).and_then(|(_, v)| v.as_mut()).ok_or_else(|| format!("sound card {card} has no volume control"))?;
+        v.percent = percent.min(100);
+        v.muted = false;
+        Ok(v.clone())
+    }
+    fn change_volume(&self, card: u32, delta: Option<i32>) -> Result<Volume, String> {
+        let mut s = self.state.lock().unwrap();
+        s.calls.push(format!("change_volume({card},{delta:?})"));
+        let v = s.cards.iter_mut().find(|(c, _)| c.index == card).and_then(|(_, v)| v.as_mut()).ok_or_else(|| format!("sound card {card} has no volume control"))?;
+        match delta {
+            Some(d) => v.percent = (v.percent as i64 + d as i64).clamp(0, 100) as u32,
+            None => v.muted = !v.muted,
+        }
+        Ok(v.clone())
+    }
+    fn set_link(&self, name: &str, up: bool) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap();
+        s.calls.push(format!("set_link({name},{up})"));
+        let l = s.links.iter_mut().find(|l| l.name == name).ok_or_else(|| format!("no network connection {name}"))?;
+        l.up = up;
+        Ok(())
+    }
+    fn dhcp(&self, name: &str) -> Result<(), String> {
+        let mut s = self.state.lock().unwrap();
+        s.calls.push(format!("dhcp({name})"));
+        if s.links.iter().any(|l| l.name == name && l.up) { Ok(()) } else { Err(format!("{name} is not up")) }
+    }
+    fn request_class(&self, class: &str, who: &str) -> String {
+        self.state.lock().unwrap().calls.push(format!("request_class({class},{who})"));
+        "nothing to load: the drivers are loaded already".into()
+    }
 }

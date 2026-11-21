@@ -153,6 +153,38 @@ impl DomModule {
             .collect()
     }
 
+    /// What a parser has not read yet when a blocking script runs: everything after the script in document order (the following siblings
+    /// of the script and of each ancestor) is taken out of the page and handed back to [`DomModule::restore_unread`]. A script then sees
+    /// only what is above it, and what it appends lands before the rest, as in a browser (KI-996).
+    pub fn hide_unread(&mut self, script: usize) -> Vec<(usize, Vec<usize>)> {
+        let mut saved = Vec::new();
+        let mut cur = script;
+        while let Some(p) = self.tree.parent_of(cur) {
+            if let Some(pos) = self.tree.nodes[p].children.iter().position(|&c| c == cur) {
+                let tail = self.tree.nodes[p].children.split_off(pos + 1);
+                for &c in &tail {
+                    self.tree.nodes[c].parent = iyakki_web::html::NONE;
+                }
+                if !tail.is_empty() {
+                    saved.push((p, tail));
+                }
+            }
+            cur = p;
+        }
+        self.rev += 1;
+        saved
+    }
+
+    /// Put back what [`DomModule::hide_unread`] took out (after what the script added).
+    pub fn restore_unread(&mut self, saved: Vec<(usize, Vec<usize>)>) {
+        for (p, tail) in saved.into_iter().rev() {
+            for c in tail {
+                let _ = self.tree.append(p, c);
+            }
+        }
+        self.rev += 1;
+    }
+
     /// Mark a script as run; false if it already was.
     pub fn claim(&mut self, n: usize) -> bool {
         self.claimed.insert(n)

@@ -50,6 +50,11 @@ pub fn live_count() -> usize {
     LIVE.used()
 }
 
+/// What the page says when its scripts ran once but no place was free to keep them running for clicks and keys.
+pub fn no_place_note(max: usize) -> String {
+    format!("{max} pages in your tabs already keep their scripts running, so this page was shown after its first run only: clicks and keys on it do not reach its scripts. Close a tab and open the page again to use them.")
+}
+
 /// How long a page is looked at between two timer ticks sent to its scripts.
 pub const TICK_MS: u64 = 250;
 
@@ -77,6 +82,7 @@ enum Cmd {
 }
 
 pub struct LiveSession {
+    places: &'static Places,
     tx: Sender<Cmd>,
     rx: Receiver<Update>,
     pending: usize,
@@ -86,7 +92,7 @@ pub struct LiveSession {
 impl Drop for LiveSession {
     fn drop(&mut self) {
         // the thread ends when its channel closes (this struct's `tx` goes with it): its place is free from now on
-        LIVE.give_back();
+        self.places.give_back();
     }
 }
 
@@ -149,9 +155,26 @@ pub fn take(slot: &Slot) -> Option<PageKit> {
 
 impl LiveSession {
     /// Starts the thread that owns the page's engine.
-    pub fn start(mut live: LivePage, rebuild: Rebuild, first: iyakki_web::css::Viewport) -> Option<LiveSession> {
+    pub fn start(live: LivePage, rebuild: Rebuild, first: iyakki_web::css::Viewport) -> Option<LiveSession> {
+        Self::start_in(&LIVE, MAX_LIVE, live, rebuild, first)
+    }
+
+    /// Like [`LiveSession::start`], but also the sentence for the page when no place was free (the page is then shown as it came out of
+    /// its first run: its scripts do not hear clicks or keys until a tab is closed and the page is opened again).
+    pub fn start_with_note(live: LivePage, rebuild: Rebuild, first: iyakki_web::css::Viewport) -> (Option<LiveSession>, Option<String>) {
+        Self::start_noted(&LIVE, MAX_LIVE, live, rebuild, first)
+    }
+
+    fn start_noted(places: &'static Places, max: usize, live: LivePage, rebuild: Rebuild, first: iyakki_web::css::Viewport) -> (Option<LiveSession>, Option<String>) {
+        match Self::start_in(places, max, live, rebuild, first) {
+            Some(s) => (Some(s), None),
+            None => (None, Some(no_place_note(max))),
+        }
+    }
+
+    fn start_in(places: &'static Places, max: usize, mut live: LivePage, rebuild: Rebuild, first: iyakki_web::css::Viewport) -> Option<LiveSession> {
         // the place is taken first so two pages starting together cannot both take the last one
-        if !LIVE.take(MAX_LIVE) {
+        if !places.take(max) {
             return None;
         }
         let (tx, irx) = channel::<Cmd>();
@@ -184,9 +207,9 @@ impl LiveSession {
                     }
                 }
             })
-            .map_err(|_| LIVE.give_back())
+            .map_err(|_| places.give_back())
             .ok()?;
-        Some(LiveSession { tx, rx, pending: 0, last_tick: std::time::Instant::now() })
+        Some(LiveSession { places, tx, rx, pending: 0, last_tick: std::time::Instant::now() })
     }
 
     /// Time passes for a page that is looked at: its timers run (a clock, a slide show, an animation). Sent at most every [`TICK_MS`] and
@@ -301,6 +324,35 @@ mod tests {
         let live = LivePage::load(html, &u, Arc::new(Nothing), |_| true, &iyakki_js::SiteData::default(), iyakki_js::Limits::default(), Vec::new()).expect("engine");
         let vp = iyakki_web::css::Viewport::default();
         LiveSession::start(live, Box::new(|t, _| iyakki_web::doc::build(t)), vp).expect("a place was free")
+    }
+
+    fn page() -> LivePage {
+        struct Nothing;
+        impl iyakki_web::Fetch for Nothing {
+            fn get(&self, _: &Url) -> Result<iyakki_web::Response, String> {
+                Err("offline".into())
+            }
+        }
+        let u = Url::parse("https://a.org/").unwrap();
+        LivePage::load("<p id=c>0</p><script>1</script>", &u, Arc::new(Nothing), |_| true, &iyakki_js::SiteData::default(), iyakki_js::Limits::default(), Vec::new()).expect("engine")
+    }
+
+    #[test]
+    fn a_page_that_finds_no_place_says_so_in_words_and_a_freed_place_is_used_again() {
+        // a pool of its own: the real one is shared with every other test
+        let pool: &'static Places = Box::leak(Box::new(Places::new()));
+        let vp = iyakki_web::css::Viewport::default();
+        let rebuild = || -> Rebuild { Box::new(|t, _| iyakki_web::doc::build(t)) };
+        let (first, note) = LiveSession::start_noted(pool, 1, page(), rebuild(), vp);
+        assert!(first.is_some() && note.is_none(), "the first page keeps its engine");
+        let (second, note) = LiveSession::start_noted(pool, 1, page(), rebuild(), vp);
+        assert!(second.is_none(), "the next page finds the one place taken");
+        let note = note.expect("and is told");
+        assert!(note.contains("1 pages") && note.contains("Close a tab") && note.contains("do not reach its scripts"), "{note}");
+        assert_eq!(pool.used(), 1, "a refused page takes nothing");
+        drop(first);
+        assert_eq!(pool.used(), 0, "closing the page gives its place back");
+        assert!(LiveSession::start_noted(pool, 1, page(), rebuild(), vp).0.is_some());
     }
 
     #[test]

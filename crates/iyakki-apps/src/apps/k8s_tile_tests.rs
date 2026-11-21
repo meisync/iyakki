@@ -224,7 +224,7 @@ impl Fx {
     }
     fn audit_text(&self) -> String {
         // the log is JSON lines: a quote inside a detail is stored escaped
-        std::fs::read_to_string(self.cx.audit.path()).unwrap_or_default().replace("\\\"", "\"")
+        std::fs::read_to_string(self.cx.audit.path_buf()).unwrap_or_default().replace("\\\"", "\"")
     }
     fn calls_with(&self, needle: &str) -> usize {
         self.kube.calls().iter().filter(|c| c.contains(needle)).count()
@@ -1088,19 +1088,19 @@ fn pictures() {
         f.click("Allow changes");
         f.key('y');
         f.wait("yaml", |f| f.view_text().contains("kind: Pod"));
-        f.g.pm.save_png(dir.join(format!("{name}-yaml.png"))).unwrap();
+        f.g.pm_mut().save_png(dir.join(format!("{name}-yaml.png"))).unwrap();
         f.key('l');
         f.wait("logs", |f| f.view_text().contains("could not connect"));
-        f.g.pm.save_png(dir.join(format!("{name}-logs.png"))).unwrap();
+        f.g.pm_mut().save_png(dir.join(format!("{name}-logs.png"))).unwrap();
         f.key('s');
         f.draw();
-        f.g.pm.save_png(dir.join(format!("{name}-summary.png"))).unwrap();
+        f.g.pm_mut().save_png(dir.join(format!("{name}-summary.png"))).unwrap();
         f.click("Delete pod");
-        f.g.pm.save_png(dir.join(format!("{name}-card.png"))).unwrap();
+        f.g.pm_mut().save_png(dir.join(format!("{name}-card.png"))).unwrap();
     }
     let mut f = fixture_with("k8s-pictures2", Role::Admin, 1280, 720, 1.0, Managed::Stopped);
     f.draw();
-    f.g.pm.save_png(dir.join("stopped.png")).unwrap();
+    f.g.pm_mut().save_png(dir.join("stopped.png")).unwrap();
 }
 
 // ------------------------------------------------------------------------------------------------ the cluster switcher in the header
@@ -1706,4 +1706,91 @@ fn a_definition_without_its_plural_name_and_a_cluster_that_answers_with_an_error
     g.open_first("widgets.example.com");
     g.click("Instances");
     g.wait("the failure", |f| f.view_text().contains("Could not list the instances"));
+}
+
+// ------------------------------------------------------------------------------------------------ applying a manifest from the tile
+
+const MANIFEST: &str = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: settings\n  namespace: shop\ndata:\n  a: \"1\"\n---\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: extra\n";
+
+fn with_manifest(f: &mut Fx, path: &str, text: &str) {
+    let core = Arc::new(iyakki_core_fake::FakeCore::new());
+    core.file_tree_fake().put_file(&f.cx.session.user, path, text);
+    f.cx.core = core;
+}
+
+#[test]
+fn the_apply_button_reads_a_file_of_the_person_lists_every_object_dry_runs_first_and_applies_only_after_the_card_is_confirmed() {
+    let mut f = fixture();
+    with_manifest(&mut f, "deploy.yaml", MANIFEST);
+    f.draw();
+    assert!(f.has_hit("Apply YAML"), "an administrator sees the button");
+    // without Allow changes nothing opens
+    f.click("Apply YAML");
+    assert!(f.app.apply_path.is_none(), "the switch is off");
+    f.click("Allow changes");
+    f.click("Apply YAML");
+    assert!(f.app.apply_path.is_some());
+    let before = f.kube.calls().len();
+    for c in "deploy.yaml".chars() {
+        f.key(c);
+    }
+    f.press(Key::Enter);
+    let card = f.app.pending.as_ref().expect("the card is up");
+    assert!(matches!(card.action, Action::Apply { .. }));
+    let words = card.action.warning(true);
+    assert!(words.contains("ConfigMap settings in shop") && words.contains("Namespace extra") && words.contains("CLUSTER-WIDE"), "{words}");
+    assert_eq!(f.kube.calls().len(), before, "nothing reaches the cluster before the person says yes");
+    f.kube.answer("apply", "configmap/settings configured\nnamespace/extra unchanged\n");
+    f.press(Key::Enter);
+    f.wait("the apply", |f| f.app.panel.as_ref().is_some_and(|p| p.finished_at.is_some()));
+    let c = calls_after(&f, before);
+    let dry = c.iter().position(|x| x.contains("apply --dry-run=server")).expect("a dry run");
+    let real = c.iter().position(|x| x.contains("apply -f") && !x.contains("dry-run")).expect("the real apply");
+    assert!(dry < real, "{c:?}");
+    // the audit line names kinds and names, never the text
+    let audit = f.audit_text();
+    assert!(audit.contains("k8s.apply_yaml") && audit.contains("ConfigMap/settings") && !audit.contains("data:"), "{audit}");
+}
+
+#[test]
+fn a_manifest_the_cluster_refuses_in_the_dry_run_changes_nothing_and_a_bad_path_or_file_is_said_in_words() {
+    let mut f = fixture();
+    with_manifest(&mut f, "deploy.yaml", MANIFEST);
+    with_manifest_extra(&mut f, "notes.txt", "just some words\n");
+    f.draw();
+    f.click("Allow changes");
+    f.key('a');
+    for c in "missing.yaml".chars() {
+        f.key(c);
+    }
+    f.press(Key::Enter);
+    assert!(f.app.pending.is_none() && f.app.status.as_ref().is_some_and(|s| s.0.contains("could not be read")), "{:?}", f.app.status);
+    f.key('a');
+    for c in "notes.txt".chars() {
+        f.key(c);
+    }
+    f.press(Key::Enter);
+    assert!(f.app.pending.is_none() && f.app.status.as_ref().is_some_and(|s| s.0.contains("not a manifest")), "{:?}", f.app.status);
+    f.key('a');
+    for c in "deploy.yaml".chars() {
+        f.key(c);
+    }
+    f.press(Key::Enter);
+    let before = f.kube.calls().len();
+    f.kube.fail("dry-run=server", "admission webhook denied the request");
+    f.press(Key::Enter);
+    f.wait("the refusal", |f| f.app.panel.as_ref().is_some_and(|p| p.finished_at.is_some()));
+    let c = calls_after(&f, before);
+    assert!(!c.iter().any(|x| x.contains("apply -f") && !x.contains("dry-run")), "no real apply after a refused dry run: {c:?}");
+    // Esc closes the path box without a trace
+    f.key('a');
+    f.press(Key::Esc);
+    assert!(f.app.apply_path.is_none());
+}
+
+fn with_manifest_extra(f: &mut Fx, path: &str, text: &str) {
+    let core = Arc::new(iyakki_core_fake::FakeCore::new());
+    core.file_tree_fake().put_file(&f.cx.session.user, "deploy.yaml", MANIFEST);
+    core.file_tree_fake().put_file(&f.cx.session.user, path, text);
+    f.cx.core = core;
 }

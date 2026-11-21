@@ -55,6 +55,7 @@ if sh "$HERE/graft.sh" nosuch "$SRC" "$D2" > /dev/null 2> "$W/err6"; then bad "a
 check "repack.sh parses cleanly" "bash -n '$HERE/repack.sh'"
 check "repack.sh documents --graft" "grep -q -- '--graft NAME' '$HERE/repack.sh'"
 if bash "$HERE/repack.sh" web "$W/out" --graft > /dev/null 2> "$W/err7"; then bad "--graft without a name is refused"; else ok "--graft without a name is refused"; fi
+check "the ssh for git starts its jump hops with itself, not with Dropbear's ssh (KI-112)" "grep -q 'sed -i .s|\"/usr/bin/ssh\"|\"/usr/libexec/iyakki/git-ssh\"|. \$(@D)/pathnames.h' '$HERE/package/iyakki-git-ssh/iyakki-git-ssh.mk' && grep -q 'POST_PATCH_HOOKS += IYAKKI_GIT_SSH_JUMP_PROGRAM' '$HERE/package/iyakki-git-ssh/iyakki-git-ssh.mk'"
 check "the real list names git, libcurl and the ssh helper" "grep -q '^usr/bin/git' '$HERE/graft/git.list' && grep -q 'libcurl' '$HERE/graft/git.list' && grep -q 'iyakki/git-ssh' '$HERE/graft/git.list'"
 
 echo "$pass passed, $fail failed"

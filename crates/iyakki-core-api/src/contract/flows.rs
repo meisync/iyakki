@@ -24,6 +24,9 @@ pub enum RunState {
     Succeeded,
     Failed,
     Stopped,
+    /// A state a newer release added; a caller shows the run as not finished and asks again later.
+    #[serde(other)]
+    Unknown,
 }
 
 impl RunState {
@@ -61,6 +64,9 @@ pub enum FlowEvent {
     /// A camera frame handed to the run; read it with [`super::Streams`].
     Frame { run: RunId, stream: StreamHandle },
     Finished { run: RunId, state: RunState },
+    /// An event of a type a newer release added; a caller skips it.
+    #[serde(other)]
+    Unknown,
 }
 
 pub trait Flows: Send + Sync {

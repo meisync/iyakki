@@ -40,11 +40,19 @@ pub struct Schedule {
     /// When the last run was tried (seconds since the epoch; 0: never) and how it ended, in words.
     pub last_run: i64,
     pub last_result: String,
+    /// A network share to write to instead of `dest` (`smb://host/share[/folder]` or `nfs://host/export`): mounted only for the run (F-BACKUP-04).
+    pub share: String,
+    /// SMB only: a file (user on the first line, password on the second) the person made; the settings never hold the password.
+    pub credentials_file: String,
+    /// 0: every run is a full file. N (2 to 50): a full file, then incremental links until the chain holds N files, then a new full one (F-BACKUP-06).
+    pub full_every: u32,
+    /// The chains written so far (file names in the folder or share, the full file first), oldest chain first. Only the newest `keep` chains stay.
+    pub chains: Vec<Vec<String>>,
 }
 
 impl Default for Schedule {
     fn default() -> Schedule {
-        Schedule { enabled: false, every_days: 1, hour: 3, dest: String::new(), keep: 7, areas: Vec::new(), passphrase_file: String::new(), last_run: 0, last_result: String::new() }
+        Schedule { enabled: false, every_days: 1, hour: 3, dest: String::new(), keep: 7, areas: Vec::new(), passphrase_file: String::new(), last_run: 0, last_result: String::new(), share: String::new(), credentials_file: String::new(), full_every: 0, chains: Vec::new() }
     }
 }
 
@@ -84,6 +92,10 @@ impl Schedule {
         self.every_days = self.every_days.clamp(1, MAX_EVERY_DAYS);
         self.hour = self.hour.min(23);
         self.keep = self.keep.clamp(1, MAX_KEEP);
+        if self.full_every == 1 || self.full_every > MAX_KEEP {
+            self.full_every = 0;
+        }
+        self.chains.retain(|c| !c.is_empty() && c.iter().all(|n| !n.contains('/') && !n.contains("..")));
         self.areas.retain(|a| bk::AREAS.iter().any(|(id, _)| id == a));
         self
     }
@@ -99,8 +111,18 @@ impl Schedule {
         if !(1..=MAX_KEEP).contains(&self.keep) {
             return Err(format!("keep is 1 to {MAX_KEEP}"));
         }
-        if !absolute_plain(&self.dest) {
-            return Err("Choose the folder to write to (an absolute path, without ..)".into());
+        if self.share.is_empty() {
+            if !absolute_plain(&self.dest) {
+                return Err("Choose the folder to write to (an absolute path, without ..)".into());
+            }
+        } else {
+            crate::backup_share::ShareSpec::parse(&self.share)?;
+            if !self.credentials_file.is_empty() && !absolute_plain(&self.credentials_file) {
+                return Err("The credentials file is an absolute path, without ..".into());
+            }
+        }
+        if self.full_every == 1 || self.full_every > MAX_KEEP {
+            return Err(format!("full_every is 0 (always a full file) or 2 to {MAX_KEEP}"));
         }
         if !self.passphrase_file.is_empty() && !absolute_plain(&self.passphrase_file) {
             return Err("The passphrase file is an absolute path, without ..".into());
@@ -132,10 +154,11 @@ impl Schedule {
         }
         let next = iyakki_clock::format(zone, self.next_slot(zone, now), "%d %b %H:%M");
         format!(
-            "Every {} day(s) from {:02}:00 into {}, keeping the newest {}; {}. Next: {next}. Last: {}.",
+            "Every {} day(s) from {:02}:00 into {}{}, keeping the newest {}; {}. Next: {next}. Last: {}.",
             self.every_days,
             self.hour,
-            self.dest,
+            if self.share.is_empty() { self.dest.clone() } else { format!("the share {}", self.share) },
+            if self.full_every >= 2 { format!(" (a full file, then incremental links, a new full file after {} files)", self.full_every) } else { String::new() },
             self.keep,
             if self.passphrase_file.is_empty() { "NOT encrypted (no passphrase file)" } else { "encrypted with the passphrase in the file you named" },
             if self.last_run == 0 { "never".to_string() } else { format!("{} - {}", iyakki_clock::format(zone, self.last_run, "%d %b %H:%M"), self.last_result) }
@@ -167,25 +190,69 @@ pub fn prune(dest: &Path, user: &str, keep: u32) -> usize {
     names.iter().take(extra).filter(|n| std::fs::remove_file(dest.join(n)).is_ok()).count()
 }
 
-/// Make the scheduled backup now: validate, read the passphrase, write the file, then prune. On a result (good or not) the schedule's
-/// `last_run` and `last_result` are set so the next run waits for its slot; the caller saves it. A stop (`Progress::cancel`) leaves no file.
+/// Make the scheduled backup now: validate, read the passphrase, write the file (or the next link of the chain), then prune. On a result (good or
+/// not) the schedule's `last_run` and `last_result` are set so the next run waits for its slot; the caller saves it. A stop (`Progress::cancel`)
+/// leaves no file. A share is mounted by the machine's own mounter for the length of the run only.
 pub fn run(l: &Layout, s: &mut Schedule, now: i64, pr: &Progress) -> Result<Created, String> {
+    let work = l.data.join("backup-share-work");
+    run_with(l, s, now, pr, &crate::backup_share::RealMounter, &work)
+}
+
+/// [`run`] with the mounter and the private work folder given (tests use a fake mounter).
+pub fn run_with(l: &Layout, s: &mut Schedule, now: i64, pr: &Progress, mounter: &dyn crate::backup_share::Mounter, work: &Path) -> Result<Created, String> {
+    use crate::backup_share as sh;
     s.last_run = now;
     let out = (|| {
         s.validate()?;
-        if !Path::new(&s.dest).is_dir() {
-            return Err(format!("The folder {} is not there (is the stick plugged in?)", s.dest));
-        }
         let passphrase = if s.passphrase_file.is_empty() { None } else { Some(read_passphrase(&s.passphrase_file)?) };
         let areas = if s.areas.is_empty() { bk::all_areas() } else { s.areas.iter().cloned().collect() };
         let opts = bk::CreateOptions { areas, passphrase, now, release: env!("CARGO_PKG_VERSION").to_string() };
-        let c = bk::create_with_progress(l, Path::new(&s.dest), &opts, pr).map_err(|e| e.to_string())?;
-        let gone = prune(Path::new(&s.dest), &l.user, s.keep);
+        let mut chains = s.chains.clone();
+        let (full_every, keep, user) = (s.full_every, s.keep, l.user.clone());
+        let mut body = |dest: &Path| -> Result<(Created, usize), String> {
+            let current: Vec<PathBuf> = chains.last().map(|c| c.iter().map(|n| dest.join(n)).collect()).unwrap_or_default();
+            let base = if full_every >= 2 && !current.is_empty() && current.len() < full_every as usize { bk::chain_state(l, &current, opts.passphrase.as_deref()).ok() } else { None };
+            let c = match &base {
+                Some(b) => bk::create_incremental(l, dest, &opts, pr, b).map_err(|e| e.to_string())?,
+                None => bk::create_with_progress(l, dest, &opts, pr).map_err(|e| e.to_string())?,
+            };
+            let name = c.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let mut gone = 0;
+            if full_every >= 2 {
+                match (&base, chains.last_mut()) {
+                    (Some(_), Some(last)) => last.push(name),
+                    _ => chains.push(vec![name]),
+                }
+                while chains.len() > keep as usize {
+                    let old = chains.remove(0);
+                    gone += old.iter().filter(|n| std::fs::remove_file(dest.join(n)).is_ok()).count();
+                }
+            } else {
+                gone = prune(dest, &user, keep);
+            }
+            Ok((c, gone))
+        };
+        let r = if s.share.is_empty() {
+            if !Path::new(&s.dest).is_dir() {
+                return Err(format!("The folder {} is not there (is the stick plugged in?)", s.dest));
+            }
+            body(Path::new(&s.dest))
+        } else {
+            let spec = sh::ShareSpec::parse(&s.share)?;
+            let creds = if s.credentials_file.is_empty() { None } else { Some(sh::parse_credentials(&std::fs::read_to_string(&s.credentials_file).map_err(|e| format!("The credentials file cannot be read: {e}"))?)?) };
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(work).map_err(|e| format!("no private folder for the mount: {e}"))?;
+            }
+            sh::with_share(&spec, creds.as_ref().map(|(u, p)| (u.as_str(), p.as_str())), mounter, work, body)
+        };
+        let (c, gone) = r?;
+        s.chains = chains;
         Ok((c, gone))
     })();
     match out {
         Ok((c, gone)) => {
-            s.last_result = format!("done, {} files, {}{}{}", c.files, bk::human(c.bytes), if c.encrypted { ", encrypted" } else { ", not encrypted" }, if gone > 0 { format!("; removed {gone} older file(s)") } else { String::new() });
+            s.last_result = format!("done, {} files, {}{}{}{}", c.files, bk::human(c.bytes), if c.encrypted { ", encrypted" } else { ", not encrypted" }, if s.share.is_empty() { "" } else { ", on the share" }, if gone > 0 { format!("; removed {gone} older file(s)") } else { String::new() });
             Ok(c)
         }
         Err(e) => {

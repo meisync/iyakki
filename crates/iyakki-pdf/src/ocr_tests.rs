@@ -223,6 +223,32 @@ fn scanned_pdf(img: &Gray, dpi: f64) -> Vec<u8> {
 }
 
 #[test]
+fn a_scan_stored_as_jbig2_is_read_as_the_same_text() {
+    let Some(f) = load(assets("DejaVuSans.ttf")) else { return };
+    let scan = page(&f, &PARAGRAPH, 31.0, 1.5, 60);
+    // the scan made black and white and stored as one generic JBIG2 region (what a scanner's firmware writes)
+    let mut bm = crate::jbig2::Bitmap::new(scan.w, scan.h, 0).unwrap();
+    for (d, p) in bm.d.iter_mut().zip(&scan.px) {
+        *d = (*p < 128) as u8;
+    }
+    let data = crate::jbig2::jbig2_tests::generic_page_stream(&bm);
+    let (pw, ph) = (scan.w as f64 * 72.0 / 150.0, scan.h as f64 * 72.0 / 150.0);
+    let objs = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (3, format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw:.3} {ph:.3}] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>").into_bytes()),
+        (4, stream("", format!("q {pw:.3} 0 0 {ph:.3} 0 0 cm /Im0 Do Q").as_bytes())),
+        (5, stream(&format!("/Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /JBIG2Decode", scan.w, scan.h), &data)),
+    ];
+    let doc = Document::open(assemble(&objs, 1, "")).unwrap();
+    assert!(doc.page_has_no_text(0).unwrap());
+    let (text, recognised) = doc.page_text_or_ocr(0, 150.0).unwrap();
+    assert!(recognised);
+    let a = accuracy(&PARAGRAPH, text.trim_end());
+    assert!(a > 0.95, "{a}\n{text}");
+}
+
+#[test]
 fn a_scanned_pdf_page_has_no_text_of_its_own_and_its_picture_is_read() {
     let Some(f) = load(assets("DejaVuSans.ttf")) else { return };
     let scan = page(&f, &PARAGRAPH, 31.0, 1.5, 60);
@@ -466,4 +492,38 @@ fn a_plain_page_still_reads_the_same_and_dots_stay_dots() {
     let img = page(&f, &lines, 34.0, 1.6, 30);
     let got = recognise(&img).text();
     assert!(!got.chars().any(|c| (c as u32) > 127), "{got}");
+}
+
+const EXTENDED: [&str; 3] = ["\u{e7}a va, fa\u{e7}ade \u{c7}a ira", "\u{10d}esk\u{fd} \u{161}kola, \u{17e}\u{e1}ba, \u{159}eka", "\u{107}ao pi\u{15b}\u{107}e \u{144} \u{15b}wiat"];
+
+#[test]
+fn the_cedilla_the_hacek_and_the_acute_of_latin_extended_are_composed_and_read() {
+    use crate::ocr::{compose, Accent};
+    assert_eq!(compose('c', Accent::Cedilla), Some('\u{e7}'));
+    assert_eq!(compose('C', Accent::Cedilla), Some('\u{c7}'));
+    assert_eq!(compose('s', Accent::Caron), Some('\u{161}'));
+    assert_eq!(compose('Z', Accent::Caron), Some('\u{17d}'));
+    assert_eq!(compose('e', Accent::Caron), Some('\u{11b}'));
+    assert_eq!(compose('c', Accent::Acute), Some('\u{107}'));
+    assert_eq!(compose('s', Accent::Cedilla), Some('\u{15f}'));
+    assert_eq!(compose('e', Accent::Acute), Some('\u{e9}'), "the Latin-1 letters are as they were");
+    assert_eq!(compose('a', Accent::Caron), None);
+    assert_eq!(compose('c', Accent::Grave), None);
+    assert_eq!(compose('m', Accent::Cedilla), None);
+    let Some(f) = load(assets("DejaVuSans.ttf")) else { return };
+    let (mut right, mut total) = (0, 0);
+    let mut report = String::new();
+    for px in [30.0f32, 44.0] {
+        let img = page(&f, &EXTENDED, px, 1.7, 30);
+        let got = recognise(&img).text();
+        report.push_str(&got);
+        report.push('\n');
+        for ch in "\u{e7}\u{c7}\u{10d}\u{161}\u{17e}\u{159}\u{107}\u{15b}\u{144}".chars() {
+            let want = EXTENDED.iter().map(|l| l.chars().filter(|c| *c == ch).count()).sum::<usize>();
+            let have = got.chars().filter(|c| *c == ch).count().min(want);
+            right += have;
+            total += want;
+        }
+    }
+    assert!(right * 10 >= total * 6, "{right} of {total} extended letters read\n{report}");
 }

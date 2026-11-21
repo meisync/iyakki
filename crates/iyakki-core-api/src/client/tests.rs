@@ -18,6 +18,9 @@ fn every_client_message_survives_encode_and_decode() {
         ClientMsg::Resume { last_seq: 3 },
         ClientMsg::Ping { ts: 5 },
         ClientMsg::Bye,
+        ClientMsg::AppOpen { app: "sample".into(), w: 800, h: 600 },
+        ClientMsg::AppInput { lines: "key enter\naction 3".into() },
+        ClientMsg::AppClose,
     ];
     for m in all {
         assert_eq!(decode_client(&encode_client(&m)).unwrap(), m);
@@ -58,7 +61,7 @@ fn error_codes_are_stable_strings_and_match_the_wire() {
 fn a_hello_with_only_the_version_is_enough_and_unknown_messages_are_refused() {
     let m = decode_client(r#"{"t":"hello","v":1}"#).unwrap();
     assert_eq!(m, ClientMsg::Hello { v: 1, min_v: 1, offered: vec![], needed: vec![], client: String::new() });
-    assert_eq!(decode_client(r#"{"t":"nope"}"#).unwrap_err().code, ErrorCode::BadMessage);
+    assert_eq!(decode_client(r#"{"t":"nope"}"#).unwrap(), ClientMsg::Unknown, "a type a newer client added is an open case, not an error");
     assert_eq!(decode_client("not json").unwrap_err().code, ErrorCode::BadMessage);
     assert_eq!(decode_client(&format!(r#"{{"t":"ping","ts":1,"x":"{}"}}"#, "a".repeat(MAX_TEXT))).unwrap_err().code, ErrorCode::TooBig);
 }
@@ -124,4 +127,46 @@ fn events_resume_after_a_sequence_number_and_a_hole_is_a_gap() {
     assert_eq!(r.since(1, "ann"), Resumed::Gap { oldest: 3 });
     assert_eq!(r.since(5, "ann"), Resumed::Events(vec![]));
     assert_eq!(r.since(99, "ann"), Resumed::Gap { oldest: 3 }, "a client ahead of the ring (the instance restarted) starts again");
+}
+
+#[test]
+fn the_display_list_pair_is_additive_a_list_may_be_long_and_typed_text_is_never_printed() {
+    // advertised by its own capability; the old lists are unchanged, so an older client that offers nothing new agrees on nothing new
+    assert!(cap::SERVER_UI.contains(&cap::DISPLAY_LIST) && !cap::SERVER.contains(&cap::DISPLAY_LIST) && !cap::SERVER_MEDIA.contains(&cap::DISPLAY_LIST));
+    let mut server: Vec<&str> = cap::SERVER.to_vec();
+    assert!(negotiate(1, 1, &s(&["picture"]), &[], &server).unwrap() == s(&["picture"]), "without the list capability an old client's agreement is as before");
+    server.extend_from_slice(cap::SERVER_UI);
+    assert_eq!(negotiate(1, 1, &s(&["picture", "display.list"]), &[], &server).unwrap(), s(&["picture", "display.list"]));
+    assert_eq!(negotiate(1, 1, &[], &s(&["display.list"]), cap::SERVER).unwrap_err().code, ErrorCode::CapabilityMissing, "an instance without it says so");
+    // every message of the instance's side survives encode and decode, and none of them is a ServerMsg (that reader is unchanged)
+    for m in [
+        AppMsg::AppList { app: "sample".into(), text: "iyakki-display-list 1 800 600\n".into() },
+        AppMsg::AppClosed { app: "sample".into(), reason: "left".into() },
+        AppMsg::AppErr { code: "not_found".into(), message: "no such app".into() },
+    ] {
+        let text = encode_app(&m);
+        assert_eq!(decode_app(&text).unwrap(), Some(m));
+        assert_eq!(decode_server(&text).unwrap(), ServerMsg::Unknown, "the old reader does not know it (a type it has no name for is Unknown): {text}");
+    }
+    // a text that is not one of these is not this reader's
+    assert_eq!(decode_app(&encode_server(&ServerMsg::PictureOk)).unwrap(), None);
+    assert_eq!(decode_app("not json").unwrap(), None);
+    assert_eq!(decode_app(r#"{"t":"app_nope"}"#).unwrap_err().code, ErrorCode::BadMessage);
+    assert_eq!(decode_app(r#"{"t":"app_list","app":"x"}"#).unwrap_err().code, ErrorCode::BadMessage, "a field missing");
+    assert_eq!(decode_app(r#"{"t":"app_list","app":1,"text":"x"}"#).unwrap_err().code, ErrorCode::BadMessage, "a field of the wrong kind");
+    // a list is longer than an ordinary message but not longer than its own bound; any other long message is still refused
+    let long = AppMsg::AppList { app: "sample".into(), text: "x".repeat(MAX_TEXT * 2) };
+    assert_eq!(decode_app(&encode_app(&long)).unwrap(), Some(long));
+    let too_long = AppMsg::AppList { app: "sample".into(), text: "x".repeat(MAX_APP_LIST + 512) };
+    assert_eq!(decode_app(&encode_app(&too_long)).unwrap_err().code, ErrorCode::TooBig);
+    let other = AppMsg::AppClosed { app: "x".repeat(MAX_TEXT), reason: String::new() };
+    assert_eq!(decode_app(&encode_app(&other)).unwrap_err().code, ErrorCode::TooBig);
+    // the client's own input lines are ordinary messages: bounded by MAX_TEXT
+    let big = ClientMsg::AppInput { lines: "t".repeat(MAX_TEXT) };
+    assert_eq!(decode_client(&encode_client(&big)).unwrap_err().code, ErrorCode::TooBig);
+    let shown = format!("{:?}", ClientMsg::AppInput { lines: "text hunter2".into() });
+    assert!(!shown.contains("hunter2"), "{shown}");
+    // the old wire is untouched: an old message decodes exactly as before
+    assert_eq!(decode_client(r#"{"t":"picture_open"}"#).unwrap(), ClientMsg::PictureOpen { deflate: false });
+    assert_eq!(decode_server(r#"{"t":"picture_ok"}"#).unwrap(), ServerMsg::PictureOk);
 }

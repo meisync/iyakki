@@ -1026,7 +1026,10 @@ pub fn pack(img: &Path, dir: &Path, version: Option<&str>, variant: Option<&str>
         return Err(format!("{} is not empty: pick a new folder for the payload", dir.display()));
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let files = iyakki_usb::bootpack::extract(img, dir)?;
+    let files = {
+        use iyakki_core_api::installer::DiskTools;
+        iyakki_core_local::LocalDiskTools::system().extract_boot_pack(img, dir)?
+    };
     let list: Vec<(String, u64, String)> = files.iter().map(|f| (f.path.clone(), f.size, f.sha256.clone())).collect();
     // an image with layers makes a v2 pack: only the layers that changed against PREV are carried (docs/development/LAYERED-ROOT-DESIGN.md)
     let prev = match against {

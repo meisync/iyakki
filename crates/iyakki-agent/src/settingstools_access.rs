@@ -9,7 +9,7 @@ use crate::accessbroker as ab;
 use crate::settingstools::{arg_bool, arg_str, no_args, Entry, Env};
 pub use iyakki_shared::settingstools_access::{PROMPT_RULE};
 
-pub const TOOLS: [&str; 7] = ["apps_access_list", "apps_access_revoke", "connect_client_status", "connect_client_enable", "app_sdk_status", "app_money_limit_status", "app_money_limit_set"];
+pub const TOOLS: [&str; 8] = ["apps_access_list", "apps_access_revoke", "apps_access_limit", "connect_client_status", "connect_client_enable", "app_sdk_status", "app_money_limit_status", "app_money_limit_set"];
 
 
 const LOG_LINES: usize = 10;
@@ -24,7 +24,8 @@ pub fn entries(env: &Env) -> Vec<Entry> {
                 let mut out = String::new();
                 for h in &held {
                     for c in &h.holds {
-                        out.push_str(&format!("{} {}: {c} (approved by {}) [installation {}]\n", h.app, h.version, h.who, h.installation));
+                        let until = h.ends.get(c).map_or(String::new(), |end| format!(", ends {}", crate::clock::format(&crate::clock::Zone::system_with(None), *end, "%d %b %H:%M")));
+                        out.push_str(&format!("{} {}: {c} (approved by {}{until}) [installation {}]\n", h.app, h.version, h.who, h.installation));
                     }
                     for c in &h.revoked {
                         out.push_str(&format!("{} {}: {c} TAKEN AWAY [installation {}]\n", h.app, h.version, h.installation));
@@ -56,6 +57,34 @@ pub fn entries(env: &Env) -> Vec<Entry> {
                         Ok(format!("{app} can no longer use {cap}. It applies at its next try."))
                     }
                     false => Ok(format!("{app} did not hold {cap} (already taken away).")),
+                }
+            })
+            .admin(),
+        );
+    }
+    {
+        let e = env.clone();
+        let schema = json!({"type": "object", "properties": {"installation": {"type": "string", "description": "The installation id from apps_access_list."}, "capability": {"type": "string"}, "hours": {"type": "integer", "description": "The grant ends this many hours from now (1 to 8784). Leave out to take an earlier limit away. A limit only shortens what was approved; it never grants more."}}, "required": ["installation", "capability"]});
+        v.push(
+            Entry::change("AppAccess", "apps_access_limit", "Give one capability of one installed app a time limit: it stops working that many hours from now and the app is told. Or take the limit away. The person approves a card first.", schema, |a| match a.get("hours").and_then(|h| h.as_u64()) {
+                Some(h) => format!("Let {} use {} for {h} more hour(s) only", a["installation"].as_str().unwrap_or("an app"), a["capability"].as_str().unwrap_or("access")),
+                None => format!("Take the time limit off {} for {}", a["capability"].as_str().unwrap_or("access"), a["installation"].as_str().unwrap_or("an app")),
+            }, move |a| {
+                let (inst, cap) = (arg_str(a, "installation")?, arg_str(a, "capability")?);
+                let hours = match a.get("hours") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(h) => Some(h.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or("`hours` is a whole number")?),
+                };
+                let app = ab::held_list(&e.dir).into_iter().find(|h| h.installation == inst).map(|h| format!("{} {}", h.app, h.version)).unwrap_or_else(|| inst.clone());
+                match crate::accessbroker_revoke::limit(&e.dir, &inst, &cap, hours, crate::clock::now_unix())? {
+                    true => {
+                        e.audit("access.limit", &format!("{app} {cap} {}", hours.map_or("no limit".to_string(), |h| format!("{h} h"))));
+                        Ok(match hours {
+                            Some(h) => format!("{app} may use {cap} for {h} more hour(s). It applies at its next try."),
+                            None => format!("{app} has no time limit on {cap} now."),
+                        })
+                    }
+                    false => Ok(format!("{app} does not hold {cap}, so no limit was set.")),
                 }
             })
             .admin(),
@@ -150,7 +179,7 @@ mod tests {
     fn connect_switch_and_the_access_list_are_for_administrators_and_ask_for_changes() {
         let r = rig("access", true);
         let t = tools(&r, entries(&r.env));
-        assert_policy(&t, &["apps_access_list", "connect_client_status"], &["apps_access_revoke", "connect_client_enable"]);
+        assert_policy(&t, &["apps_access_list", "connect_client_status"], &["apps_access_revoke", "apps_access_limit", "connect_client_enable"]);
         assert!(t.call("apps_access_list", &json!({})).unwrap().contains("No installed app"));
         assert!(t.call("apps_access_revoke", &json!({"installation": "nope", "capability": "camera.view"})).is_err());
         assert!(t.call("connect_client_status", &json!({})).unwrap().contains("off"));
@@ -166,6 +195,33 @@ mod tests {
         assert!(t2.defs().iter().all(|d| d.spec.name.starts_with("app_")) && t2.defs().len() == 3);
         assert!(t2.call("connect_client_enable", &json!({"on": true})).is_err());
         assert!(t2.call("apps_access_list", &json!({})).is_err());
+        let _ = std::fs::remove_dir_all(&r2.dir);
+    }
+
+    #[test]
+    fn a_time_limit_is_given_shown_and_taken_off_by_an_administrator_only_and_never_grants_more() {
+        use iyakki_core_api::appcaps::{record_approval, ApprovalBook, CapabilityRequest};
+        let r = rig("access-limit", true);
+        let store = crate::store::Store::open(&r.dir);
+        let mut book = crate::store::approvals::FileBook(&store);
+        let reqs = vec![CapabilityRequest { name: "camera.view".into(), why: "x".into(), param: None, extra: Default::default() }];
+        book.put("tile/user/root/notes", record_approval("root", "notes", "1.2", "abc", 5, &reqs));
+        let t = tools(&r, entries(&r.env));
+        let ask = |h: serde_json::Value| json!({"installation": "tile/user/root/notes", "capability": "camera.view", "hours": h});
+        assert!(t.describe("apps_access_limit", &ask(json!(2))).contains("2 more hour"));
+        assert!(t.call("apps_access_limit", &ask(json!(0))).is_err());
+        assert!(t.call("apps_access_limit", &ask(json!("soon"))).is_err());
+        assert!(t.call("apps_access_limit", &json!({"installation": "tile/user/root/notes", "capability": "mic.record", "hours": 1})).unwrap().contains("does not hold"));
+        assert!(t.call("apps_access_limit", &ask(json!(2))).unwrap().contains("2 more hour"));
+        assert!(t.call("apps_access_list", &json!({})).unwrap().contains(", ends "));
+        assert!(r.audits.lock().unwrap().iter().any(|a| a.starts_with("access.limit") && a.contains("camera.view 2 h")));
+        let off = json!({"installation": "tile/user/root/notes", "capability": "camera.view"});
+        assert!(t.call("apps_access_limit", &off).unwrap().contains("no time limit"));
+        assert!(!t.call("apps_access_list", &json!({})).unwrap().contains(", ends "));
+        let _ = std::fs::remove_dir_all(&r.dir);
+        let r2 = rig("access-limit2", false);
+        let t2 = tools(&r2, entries(&r2.env));
+        assert!(t2.call("apps_access_limit", &ask(json!(2))).is_err(), "not for people who are not administrators");
         let _ = std::fs::remove_dir_all(&r2.dir);
     }
 

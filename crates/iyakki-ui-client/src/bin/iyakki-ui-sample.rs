@@ -30,6 +30,8 @@ fn parse(kind: &SettingKind, text: &str) -> Option<SettingValue> {
         },
         SettingKind::Int { .. } => text.parse().ok().map(SettingValue::Int),
         SettingKind::Text { .. } | SettingKind::Choice { .. } => Some(SettingValue::Text(text.to_string())),
+        // a kind a newer machine added: this sample cannot write it
+        SettingKind::Unknown => None,
     }
 }
 

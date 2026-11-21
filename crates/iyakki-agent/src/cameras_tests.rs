@@ -237,7 +237,12 @@ fn only_the_owner_and_the_people_on_the_list_may_watch_and_administrators_manage
 #[test]
 fn a_digest_camera_goes_live_with_the_password_from_the_vault_and_pictures_are_shrunk() {
     let cam = FakeCamera::rtsp(cfg(Some(("admin", "s3cret")), true));
-    let r = rig("live");
+    let mut r = rig("live");
+    // the picture-rate cap runs on a clock the test moves
+    let clock = iyakki_testkit::ManualClock::new(0);
+    let base = Instant::now();
+    let reader = clock.reader();
+    r.hub.set_clock(move || base + Duration::from_millis(reader()));
     let amy = who(&r, "amy", false);
     let id = r.hub.save(&amy, None, &new_cam("Hall", &format!("rtsp://admin:s3cret@127.0.0.1:{}/live", cam.port), "", &[]), None).unwrap();
     let f = wait_frame(&r, &amy, &id, false);
@@ -247,11 +252,18 @@ fn a_digest_camera_goes_live_with_the_password_from_the_vault_and_pictures_are_s
     let v = &r.hub.cameras(&amy)[0];
     assert!(v.fps >= 0.0 && v.size == (48, 32));
     assert!(cam.requests().iter().all(|l| !l.contains("s3cret")));
-    // seq advances with new pictures, at the capped rate
+    // seq advances with new pictures, at the capped rate: the cap is a fifth of a second on the hub's clock, which the test moves, so the
+    // camera's pictures (every 15 ms) are read and dropped while the clock stands still, and one more is kept per 200 ms that passes
     let first = f.seq;
-    std::thread::sleep(Duration::from_millis(500));
-    let later = r.hub.view(&amy, &id, false).unwrap().unwrap();
-    assert!(later.seq > first && later.seq <= first + 5, "{} -> {} in half a second (cap {SMALL_FPS}/s)", first, later.seq);
+    let step = Duration::from_millis(1000 / SMALL_FPS as u64);
+    for n in 1..=SMALL_FPS as u64 {
+        let read = r.hub.pictures_read(&id);
+        iyakki_testkit::wait_until(iyakki_testkit::BUDGET, || r.hub.pictures_read(&id) >= read + 5);
+        assert_eq!(r.hub.view(&amy, &id, false).unwrap().unwrap().seq, first + n - 1, "the clock stood still: the cap kept the pictures back");
+        clock.advance(step);
+        iyakki_testkit::wait_until(iyakki_testkit::BUDGET, || r.hub.view(&amy, &id, false).unwrap().is_some_and(|f| f.seq > first + n - 1));
+    }
+    assert_eq!(r.hub.view(&amy, &id, false).unwrap().unwrap().seq, first + SMALL_FPS as u64, "one second of the clock, {SMALL_FPS} pictures (cap {SMALL_FPS}/s)");
     let big = wait_frame(&r, &amy, &id, true);
     assert_eq!(big.width, 48);
     r.hub.stop_all();
@@ -356,6 +368,45 @@ fn h264_needs_the_addon_unless_a_decoder_is_plugged_in() {
     let id = r2.hub.save(&amy, None, &new_cam("H264", &format!("rtsp://127.0.0.1:{}/live", cam.port), "", &[]), None).unwrap();
     let f = wait_frame(&r2, &amy, &id, false);
     assert_eq!((f.width, f.height), (4, 2));
+    r2.hub.stop_all();
+}
+
+struct Fake265;
+impl H264Decoder for Fake265 {
+    fn decode(&mut self, au: &AccessUnit) -> Result<Option<(u32, u32, Vec<u8>)>, String> {
+        assert!(!au.nals.is_empty());
+        Ok(Some((4, 2, [9, 9, 9, 255].repeat(8))))
+    }
+}
+struct WithH265(Arc<Mutex<Vec<crate::camdecode::VideoKind>>>);
+impl H264Support for WithH265 {
+    fn decoder(&self) -> Option<Box<dyn H264Decoder>> {
+        None
+    }
+    fn video_decoder(&self, kind: crate::camdecode::VideoKind) -> Option<Box<dyn H264Decoder>> {
+        self.0.lock().unwrap().push(kind);
+        Some(Box::new(Fake265))
+    }
+    fn hint(&self) -> String {
+        String::new()
+    }
+}
+
+#[test]
+fn h265_needs_the_addon_in_words_that_name_it_and_shows_pictures_once_a_decoder_is_plugged_in() {
+    let cam = FakeCamera::rtsp(Config { h265: true, ..cfg(None, true) });
+    let r = rig("h265");
+    let amy = who(&r, "amy", false);
+    let id = r.hub.save(&amy, None, &new_cam("H265", &format!("rtsp://127.0.0.1:{}/live", cam.port), "", &[]), None).unwrap();
+    let s = wait_status(&r, &amy, &id, |s| matches!(s, Status::NeedsAddon(_)));
+    assert!(s.detail_text().contains("H.265") && s.detail_text().contains("add-on"), "{}", s.detail_text());
+    r.hub.stop_all();
+    let asked = Arc::new(Mutex::new(vec![]));
+    let r2 = rig_with("h265b", Arc::new(NoUsb), Arc::new(WithH265(asked.clone())), 4000);
+    let id = r2.hub.save(&amy, None, &new_cam("H265", &format!("rtsp://127.0.0.1:{}/live", cam.port), "", &[]), None).unwrap();
+    let f = wait_frame(&r2, &amy, &id, false);
+    assert_eq!((f.width, f.height), (4, 2));
+    assert_eq!(asked.lock().unwrap()[0], crate::camdecode::VideoKind::H265);
     r2.hub.stop_all();
 }
 
@@ -682,4 +733,130 @@ fn the_black_message_needs_several_seconds_of_unbroken_black() {
 fn the_black_message_is_a_question_and_does_not_hide_the_camera() {
     assert!(DARK_MESSAGE.ends_with('?'));
     assert!(DARK_MESSAGE.contains("shutter"));
+}
+
+struct MicFeed(u8);
+impl Feed for MicFeed {
+    fn next(&mut self) -> Result<Picture, FeedErr> {
+        std::thread::sleep(Duration::from_millis(10)); // flaky-ok: paces a fake camera so it does not spin; nothing waits on it
+        Ok(Picture::Rgba { width: 8, height: 4, data: [1, 2, 3, 255].repeat(32) })
+    }
+    fn take_sound(&mut self) -> Option<iyakki_shared::cameras::Sound> {
+        // one second of sound at the first call, then a short piece each time (a camera with a microphone)
+        self.0 += 1;
+        Some(iyakki_shared::cameras::Sound { rate: 8000, pcm: vec![i16::from(self.0); if self.0 == 1 { 8000 } else { 80 }] })
+    }
+}
+pub(crate) struct MicUsb;
+impl UsbProvider for MicUsb {
+    fn list(&self) -> Vec<UsbCam> {
+        vec![UsbCam { id: "video0".into(), name: "HD Webcam".into(), builtin: false }]
+    }
+    fn open(&self, _: &str) -> Result<Box<dyn Feed>, FeedErr> {
+        Ok(Box::new(MicFeed(0)))
+    }
+}
+
+#[test]
+fn a_camera_with_a_microphone_gives_its_sound_to_one_listener_who_may_watch_it_and_it_is_kept_two_seconds_at_most() {
+    let r = rig_with("listen", Arc::new(MicUsb), Arc::new(NoH264), 4000);
+    let amy = who(&r, "amy", false);
+    let nobody = Who { usb_ok: false, ..who(&r, "bob", false) };
+    assert!(r.hub.listen(&nobody, "usb:video0").is_err(), "a person who may not watch the camera cannot listen to it");
+    let s = iyakki_testkit::wait::wait_for_state(Duration::from_secs(30), || match r.hub.listen(&amy, "usb:video0") {
+        Ok(Some(s)) => Ok(s),
+        Ok(None) => Err("no sound yet".to_string()),
+        Err(e) => Err(e),
+    });
+    assert_eq!(s.rate, 8000);
+    assert!(!s.pcm.is_empty() && s.pcm.len() <= 16_000, "never more than two seconds: {}", s.pcm.len());
+    assert!(r.audit.lock().unwrap().iter().any(|l| l.contains("amy|camera.listen|HD Webcam")), "listening is in the log, once");
+    // nothing is replayed: a second look sees only what came after
+    let again = iyakki_testkit::wait::wait_for_state(Duration::from_secs(30), || match r.hub.listen(&amy, "usb:video0") {
+        Ok(Some(s)) => Ok(s),
+        Ok(None) => Err("no sound yet".to_string()),
+        Err(e) => Err(e),
+    });
+    assert!(again.pcm.len() <= s.pcm.len() + 16_000);
+    assert_eq!(r.audit.lock().unwrap().iter().filter(|l| l.contains("camera.listen")).count(), 1);
+    r.hub.stop_all();
+}
+
+struct TestRoute(crate::mixer::Mixer);
+impl crate::camsource::SoundRoute for TestRoute {
+    fn open(&self, rate: u32, label: &str) -> Result<crate::mixer::SourceWriter, String> {
+        self.0.open_source_with(crate::mixer::SourceKind::Media, rate, 1, label, false).map_err(|e| e.to_string())
+    }
+}
+
+#[test]
+fn the_cameras_tile_plays_a_cameras_sound_on_the_speaker_and_lets_it_go() {
+    use iyakki_tile_api::cameras::{CameraSource, Listen};
+    let _rt = crate::mixer::rt_serial();
+    let r = rig_with("listen-tile", Arc::new(MicUsb), Arc::new(NoH264), 4000);
+    let sink = crate::mixer::FakeSink::new();
+    let mixer = crate::mixer::Mixer::start(crate::mixer::MixerCfg::default(), Box::new(sink.clone()));
+    let hub = Arc::new(r.hub);
+    let amy = Who { user: "amy".into(), manage: false, usb_ok: true, home: r.dir.join("home").join("amy"), may_write: Arc::new(|_| true) };
+    let src = crate::camsource::HubSource::with_route(hub.clone(), amy, Arc::new(TestRoute(mixer)));
+    assert_eq!(src.listen("usb:video0", false), Listen::Off, "not listening until the person asks");
+    iyakki_testkit::wait::wait_for_state(Duration::from_secs(30), || match src.listen("usb:video0", true) {
+        Listen::Playing => Ok(()),
+        other => Err(format!("{other:?}")),
+    });
+    iyakki_testkit::wait::wait_for_state(Duration::from_secs(30), || if sink.lock().opens >= 1 && !sink.lock().samples.is_empty() { Ok(()) } else { Err("the speaker has no sound yet".to_string()) });
+    assert_eq!(src.listen("usb:video0", false), Listen::Off);
+    // a camera the person may not watch is refused in words and nothing plays
+    assert!(matches!(src.listen("usb:nothere", true), Listen::Unavailable(_)));
+    hub.stop_all();
+}
+
+#[test]
+fn camera_sound_with_the_mixer_off_is_refused_in_words() {
+    use iyakki_tile_api::cameras::{CameraSource, Listen};
+    let _route = crate::mixer::pin_command_route(); // the mixer is off for this test (on a Mac it is otherwise always on)
+    let r = rig_with("listen-off", Arc::new(MicUsb), Arc::new(NoH264), 4000);
+    let hub = Arc::new(r.hub);
+    let amy = Who { user: "amy".into(), manage: false, usb_ok: true, home: r.dir.join("home").join("amy"), may_write: Arc::new(|_| true) };
+    let src = crate::camsource::HubSource::new(hub.clone(), amy);
+    let got = iyakki_testkit::wait::wait_for_state(Duration::from_secs(30), || match src.listen("usb:video0", true) {
+        Listen::Waiting => Err("no sound yet".to_string()),
+        other => Ok(other),
+    });
+    assert!(matches!(&got, Listen::Unavailable(m) if m.contains("mixer")), "{got:?}");
+    hub.stop_all();
+}
+
+#[test]
+fn the_tile_shows_a_waiting_certificate_and_approves_only_the_one_that_was_shown() {
+    use iyakki_tile_api::cameras::CameraSource;
+    let r = rig_with("trust-card", Arc::new(MicUsb), Arc::new(NoH264), 4000);
+    let data = r.hub.data_dir();
+    let hub = Arc::new(r.hub);
+    let amy = Who { user: "amy".into(), manage: false, usb_ok: true, home: r.dir.join("home").join("amy"), may_write: Arc::new(|_| true) };
+    let src = crate::camsource::HubSource::new(hub.clone(), amy);
+    assert_eq!(src.trust_waiting("usb:video0"), None);
+    crate::camtls::TrustStore::change(&data, |st| {
+        st.pending.insert("usb:video0".into(), "AA:BB".into());
+        st.pending.insert("not-on-amys-list".into(), "CC:DD".into());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(src.trust_waiting("usb:video0").as_deref(), Some("AA:BB"));
+    assert_eq!(src.trust_waiting("not-on-amys-list"), None, "a camera the person may not watch shows nothing");
+    assert!(src.trust_approve("not-on-amys-list", "CC:DD").is_err());
+    // the camera presented another certificate while the card was open: the old yes is refused
+    crate::camtls::TrustStore::change(&data, |st| {
+        st.pending.insert("usb:video0".into(), "EE:FF".into());
+        Ok(())
+    })
+    .unwrap();
+    assert!(src.trust_approve("usb:video0", "AA:BB").unwrap_err().contains("different certificate"));
+    assert!(crate::camtls::TrustStore::load(&data).pinned.is_empty());
+    assert!(src.trust_approve("usb:video0", "EE:FF").unwrap().contains("trusted"));
+    let st = crate::camtls::TrustStore::load(&data);
+    assert_eq!(st.pinned.get("usb:video0").map(String::as_str), Some("EE:FF"));
+    assert!(st.pending.get("usb:video0").is_none());
+    assert!(r.audit.lock().unwrap().iter().any(|l| l.contains("amy|camera.trust|usb:video0 approve")));
+    hub.stop_all();
 }

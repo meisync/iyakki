@@ -18,9 +18,9 @@ pub const MOUNTS: &[(&str, &str, &str, u64, &str)] = &[
     ("tmpfs", "/run", "tmpfs", 0, "mode=0755"),
     ("tmpfs", "/tmp", "tmpfs", 0, "mode=1777"),
     ("cgroup2", "/sys/fs/cgroup", "cgroup2", 0, ""),
-    ("efivarfs", "/sys/firmware/efi/efivars", "efivarfs", 0, ""),
+    ("efivarfs", iyakki_core_local::bootdisk::EFIVARS, "efivarfs", 0, ""),
     // root-only (0700): the USB port monitor (`usbports`) reads the xHCI port states from here; nothing else uses it
-    ("debugfs", "/sys/kernel/debug", "debugfs", 0, "mode=0700"),
+    ("debugfs", iyakki_core_local::kernelfacts::DEBUGFS, "debugfs", 0, "mode=0700"),
 ];
 
 /// Mounting is Linux only (the boot code runs as init there); elsewhere the window runs as an ordinary program.
@@ -39,6 +39,29 @@ fn mount(src: &str, target: &str, fstype: &str, flags: u64, data: &str) -> Resul
     let rc = unsafe { libc::mount(s.as_ptr(), t.as_ptr(), f.as_ptr(), flags, d.as_ptr().cast()) };
     if rc == 0 { Ok(()) } else { Err(std::io::Error::last_os_error().to_string()) }
 }
+
+/// `mount(2)` for the early side image (the same call as the pseudo file systems use).
+#[cfg(target_os = "linux")]
+pub fn mount_raw(src: &str, target: &str, fstype: &str, flags: u64, data: &str) -> Result<(), String> {
+    mount(src, target, fstype, flags, data)
+}
+
+/// The side image (F-BOOT-25): only when the kernel command line says `iyakki.side=1`. Any failure leaves boot as it was.
+#[cfg(target_os = "linux")]
+fn side_image_early() {
+    let cmdline = iyakki_core_local::kernelfacts::cmdline();
+    if !crate::sideimage::requested(&cmdline) {
+        return;
+    }
+    let release = iyakki_core_local::kernelfacts::osrelease_text();
+    match crate::sideimage::attach(&crate::sideimage::RealHost { release }) {
+        crate::sideimage::Outcome::Used { file, folders } => log::info!("side image {file} layered under {}", folders.join(", ")),
+        crate::sideimage::Outcome::NotUsed(why) => log::warn!("side image not used: {why}"),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn side_image_early() {}
 
 /// Collect `modalias` strings from sysfs devices; each names the driver module to load.
 /// How deep under `/sys/devices` the scan looks for `modalias` files.
@@ -158,7 +181,7 @@ pub fn run_install_console() -> i32 {
     // the node appears when mdev has run; wait a little for the console and the keyboard driver
     let mut tty = None;
     for _ in 0..100 {
-        tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty0").ok();
+        tty = iyakki_core_local::kernelfacts::open_console();
         if tty.is_some() {
             break;
         }
@@ -194,7 +217,7 @@ pub fn run_install_console() -> i32 {
 /// Show the boot screen on the framebuffer the kernel started with, until [`finish_boot_screen`].
 #[cfg(feature = "shell")]
 fn start_boot_screen() {
-    let cmd = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let cmd = iyakki_core_local::kernelfacts::cmdline();
     // install mode draws text on the console: the boot screen would paint over it
     if cmdline_param(&cmd, "iyakki.shell") == Some("0") || install_mode(&cmd) {
         return;
@@ -208,7 +231,7 @@ fn start_boot_screen() {
     let spawn = std::thread::Builder::new().name("iyakki-splash".into()).stack_size(crate::console::THREAD_STACK).spawn(|| {
         use iyakki_shell::splash::{self, note};
         let (dev, sys, started) = (Path::new("/dev"), Path::new("/sys"), std::time::Instant::now());
-        note(&format!("boot screen requested (minimum {} s); waiting for a framebuffer. {}", splash_minimum(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default()).as_secs(), splash::graphics_summary(sys)));
+        note(&format!("boot screen requested (minimum {} s); waiting for a framebuffer. {}", splash_minimum(&iyakki_core_local::kernelfacts::cmdline()).as_secs(), splash::graphics_summary(sys)));
         // a GPU driver that is a module only creates the screen after it loads, and a node can be missing even when
         // the kernel has the screen: wait for either, never longer than boot itself
         let mut told = 0u64;
@@ -269,6 +292,7 @@ pub fn screen_found() {
     iyakki_shell::splash::request_repaint();
 }
 
+#[cfg(feature = "shell")]
 static BOOT_SCREEN_SINCE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
 /// Seconds the boot screen must stay up at least (`iyakki.splash=N`, default 0): for looking at it on a fast machine.
@@ -280,7 +304,7 @@ pub fn splash_minimum(cmdline: &str) -> std::time::Duration {
 pub fn finish_boot_screen() {
     #[cfg(feature = "shell")]
     {
-        let min = splash_minimum(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default());
+        let min = splash_minimum(&iyakki_core_local::kernelfacts::cmdline());
         if let Some(t) = BOOT_SCREEN_SINCE.get() {
             std::thread::sleep(min.saturating_sub(t.elapsed()));
         }
@@ -324,6 +348,24 @@ type BootBroker = crate::broker::Broker<crate::broker::CapGate<fn(&str, &str) ->
 
 static BROKER: std::sync::Mutex<Option<BootBroker>> = std::sync::Mutex::new(None);
 
+/// The one line the boot step logs when this image has an optional driver pack and this computer's devices call for modules in it
+/// (F-PKG-11). Nothing is fetched here: the person's click (the chat tool `hardware_drivers_install`, the Store row) does that.
+pub fn optional_pack_line(root: &Path, modaliases: &[String]) -> Option<String> {
+    let n = iyakki_drivers::modpack::needed_here(root, modaliases).ok()?.len();
+    (n > 0).then(|| format!("optional drivers: {n} module(s) of the optional driver pack are needed by this computer's devices; install them from the Store or ask the assistant (nothing is downloaded without your approval)"))
+}
+
+fn optional_pack_note() {
+    let rel = iyakki_core_local::kernelfacts::osrelease_text();
+    let root = Path::new("/lib/modules").join(rel.trim());
+    if !root.join("optional-pack").is_dir() {
+        return;
+    }
+    if let Some(l) = optional_pack_line(&root, &collect_modaliases(Path::new(iyakki_core_local::kernelfacts::SYS_DEVICES))) {
+        log::info!("{l}");
+    }
+}
+
 /// Load what boot loads after sign-in. With `iyakki.lazydrivers=1` the held classes (sound, Bluetooth) are kept for the broker instead
 /// (`broker_request`); without it every alias loads as before.
 fn load_deferred(aliases: &[String], lazy: bool, what: &str, from: u32, to: u32) {
@@ -332,6 +374,7 @@ fn load_deferred(aliases: &[String], lazy: bool, what: &str, from: u32, to: u32)
     if !lazy {
         return;
     }
+    iyakki_core_local::set_device_broker(|class, who| crate::broker::answer(class, who, |c, w| broker_request(c, w)));
     let mut g = BROKER.lock().unwrap_or_else(|e| e.into_inner());
     match g.as_mut() {
         Some(b) => held.iter().for_each(|(c, a)| b.add_found(*c, a)),
@@ -353,7 +396,7 @@ pub fn broker_request(class: crate::broker::Class, who: &str) -> crate::broker::
 /// ones that wait for the sign-in screen are appended to `deferred`. Logs one line when something was found.
 fn coldplug_settle(seen: &mut crate::coldplug::Seen, deferred: &mut Vec<String>) {
     use crate::coldplug as cp;
-    let res = cp::settle(Path::new("/sys/devices"), seen, cp::MAX_EXTRA_PASSES, cp::BUDGET, |new| {
+    let res = cp::settle(Path::new(iyakki_core_local::kernelfacts::SYS_DEVICES), seen, cp::MAX_EXTRA_PASSES, cp::BUDGET, |new| {
         let (later, now): (Vec<String>, Vec<String>) = new.iter().cloned().partition(|a| is_deferred(a));
         deferred.extend(later);
         if !now.is_empty() {
@@ -379,7 +422,7 @@ fn apple_spi_keyboard() {
 
 /// Load drivers for all present hardware, in one go.
 pub fn coldplug() -> usize {
-    let aliases = collect_modaliases(Path::new("/sys/devices"));
+    let aliases = collect_modaliases(Path::new(iyakki_core_local::kernelfacts::SYS_DEVICES));
     load_aliases(&aliases, "Starting hardware drivers", 25, 70);
     aliases.len()
 }
@@ -535,10 +578,11 @@ pub fn early_boot_critical() -> LatePlan {
     // The kernel starts PID 1 with no PATH; without this, modprobe/ip/udhcpc/mdev are never found.
     std::env::set_var("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
     mount_pseudo_filesystems();
+    side_image_early();
     boot_record_start();
     // The kernel drops all but about 10 lines per 5 seconds that a program writes to its log (`printk.devkmsg=ratelimit`, the default), so the
     // boot lines that follow (and the timeline `lean-check.sh` reads) went missing. Switch the limit off; the lean first stage does the same.
-    let _ = std::fs::write("/proc/sys/kernel/printk_devkmsg", "on\n");
+    let _ = iyakki_core_local::kernelfacts::allow_unlimited_kmsg();
     tl.mark("mounts");
     // A clock that starts in the past (a Mac's RTC reads 2024) is lifted to the image's build time first, so nothing
     // that makes or checks certificates sees a date before the image existed; the saved time follows the data mount.
@@ -554,7 +598,7 @@ pub fn early_boot_critical() -> LatePlan {
     }
     iyakki_drivers::t2input::apply(Path::new("/sys/class/dmi/id/product_name"), Path::new("/etc/modprobe.d"));
     // Hotplug: let the kernel call mdev for new devices (creates nodes, loads modules).
-    let _ = std::fs::write("/proc/sys/kernel/hotplug", "/sbin/mdev\n");
+    let _ = iyakki_core_local::kernelfacts::set_hotplug_helper("/sbin/mdev");
     run_limited(Command::new("mdev").arg("-s"));
     // mdev makes device nodes but loads no drivers; this loads them for every device that appears from now on (a T2 Mac's keyboard
     // behind apple-bce, a USB network adapter plugged in later) and sets up a new network interface
@@ -568,7 +612,7 @@ pub fn early_boot_critical() -> LatePlan {
         run_limited(Command::new("modprobe").arg("-b").arg(m).stderr(std::process::Stdio::null()));
     }
     tl.mark("core modules");
-    let all = collect_modaliases(Path::new("/sys/devices"));
+    let all = collect_modaliases(Path::new(iyakki_core_local::kernelfacts::SYS_DEVICES));
     let (deferred, critical): (Vec<String>, Vec<String>) = all.into_iter().partition(|a| is_deferred(a));
     log::info!("coldplug: {} device aliases now, {} (network, sound, ...) after the sign-in screen", critical.len(), deferred.len());
     load_aliases(&critical, "Starting hardware drivers", 12, 66);
@@ -602,7 +646,7 @@ pub fn early_boot_critical() -> LatePlan {
     // a cloud node's config drive (hostname, network, first account, certificate, tenant files): docs/CLOUD-IMAGES.md
     #[cfg(feature = "shell")]
     {
-        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+        let cmdline = iyakki_core_local::kernelfacts::cmdline();
         let variant = iyakki_agent::relinfo::ReleaseInfo::load(Path::new(iyakki_agent::relinfo::RELEASE_FILE)).map(|r| r.variant).unwrap_or_default();
         for l in iyakki_agent::cloudseed::boot(&cmdline, &variant, DATA_DIR) {
             log::info!("cloud seed: {l}");
@@ -647,7 +691,7 @@ pub fn late_boot(mut plan: LatePlan) {
     // Cameras known to need a quirk lose their microphone and are held back, then uvcvideo and snd-usb-audio are loaded
     // by name (they are blacklisted for alias loading); the quirk binds and later hot plugs run in a background thread.
     crate::camera::prepare_boot();
-    let lazy = crate::broker::switch_on(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default());
+    let lazy = crate::broker::switch_on(&iyakki_core_local::kernelfacts::cmdline());
     load_deferred(&plan.deferred, lazy, "Starting network and sound", 70, 90);
     // The cable first, on its own thread: an Ethernet adapter that exists now is brought up at once, before the Wi-Fi reset below, the
     // sound check and the camera, none of which it needs (the Mac mini's cable used to wait about 20 s for them).
@@ -658,6 +702,7 @@ pub fn late_boot(mut plan: LatePlan) {
         coldplug_settle(&mut plan.seen, &mut more);
         load_deferred(&more, lazy, "Starting network and sound", 88, 90);
     }
+    optional_pack_note();
     cs8409_sound();
     // Wi-Fi never holds the boot: the reset of a silent chip (up to about 16 s), its interface and its join run on a thread of their own
     wifi_in_background();
@@ -673,7 +718,7 @@ pub fn late_boot(mut plan: LatePlan) {
     iyakki_fw::service::network_changed();
     crate::hotplug::boot_done();
     touchbar_retry();
-    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let cmdline = iyakki_core_local::kernelfacts::cmdline();
     if cmdline_param(&cmdline, "iyakki.ssh") == Some("1") {
         start_remote_diagnostics();
     }
@@ -689,7 +734,7 @@ fn touchbar_retry() {}
 
 #[cfg(target_os = "linux")]
 fn touchbar_retry() {
-    let usb = Path::new("/sys/bus/usb/devices");
+    let usb = Path::new(iyakki_core_local::kernelfacts::USB_DEVICES);
     let Some(found) = iyakki_drivers::touchbar::find_devices(usb).into_iter().find(|f| f.configured.is_none()) else { return };
     let _ = std::thread::Builder::new().name("iyakki-touchbar".into()).spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(3));
@@ -705,7 +750,7 @@ fn touchbar_retry() {
 
 /// Apply the firewall from the machine settings (`iyakki.firewall=off` skips it for this boot).
 pub fn firewall_boot() {
-    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let cmdline = iyakki_core_local::kernelfacts::cmdline();
     iyakki_fw::service::boot(&cmdline);
     let st = iyakki_fw::service::engine().status();
     match st {
@@ -841,7 +886,7 @@ fn start_remote_diagnostics() {
 
 /// The memory settings in force: kernel command line over `system.conf` over the defaults.
 pub fn memory_settings() -> iyakki_zram::Resolved {
-    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let cmdline = iyakki_core_local::kernelfacts::cmdline();
     let conf = std::fs::read_to_string(iyakki_zram::CONF_PATH).unwrap_or_default();
     // the experimental compressed memory (F-BOOT-31) looks at the data volume only when it is on
     let (exp, _) = iyakki_zram::compressed::resolve_experiment(&cmdline, &conf);
@@ -881,7 +926,7 @@ pub fn available_ram() -> u64 {
 
 /// (total, free, available, swap total, swap free) in bytes.
 fn meminfo_bytes() -> (u64, u64, u64, u64, u64) {
-    iyakki_zram::stats::parse_meminfo(&std::fs::read_to_string("/proc/meminfo").unwrap_or_default())
+    iyakki_zram::stats::parse_meminfo(&iyakki_core_local::kernelfacts::meminfo_text())
 }
 
 fn log_steps(steps: Vec<iyakki_zram::apply::Step>) {
@@ -897,7 +942,7 @@ fn log_steps(steps: Vec<iyakki_zram::apply::Step>) {
 /// The host name chosen in the installer (`hostname=` in `system.conf`), if valid.
 fn configured_hostname() -> Option<String> {
     // the boot option wins over the file (and locks the page in Settings)
-    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let cmdline = iyakki_core_local::kernelfacts::cmdline();
     if let Some(n) = cmdline_param(&cmdline, "iyakki.hostname").filter(|h| iyakki_usb::install::valid_hostname(h)) {
         return Some(n.to_string());
     }
@@ -907,7 +952,7 @@ fn configured_hostname() -> Option<String> {
 
 /// zram swap and the vm settings, early so even a small machine has room while the rest starts. Never fatal.
 pub fn memory_setup() {
-    if cmdline_param(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default(), "iyakki.env").is_some_and(|e| e == "docker") {
+    if cmdline_param(&iyakki_core_local::kernelfacts::cmdline(), "iyakki.env").is_some_and(|e| e == "docker") {
         return;
     }
     let r = memory_settings();
@@ -922,7 +967,7 @@ pub fn memory_setup() {
 /// The boot-order switches in force: the kernel command line over `system.conf` (Settings, Memory), off unless asked for.
 #[cfg(target_os = "linux")]
 fn boot_speed() -> iyakki_zram::bootspeed::BootSpeed {
-    iyakki_zram::bootspeed::resolve(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default(), &std::fs::read_to_string(iyakki_zram::CONF_PATH).unwrap_or_default())
+    iyakki_zram::bootspeed::resolve(&iyakki_core_local::kernelfacts::cmdline(), &std::fs::read_to_string(iyakki_zram::CONF_PATH).unwrap_or_default())
 }
 
 /// `iyakki.bootrecord=1`: for the first 90 seconds note every file opened on the root filesystem, in order, and keep the list on the data
@@ -1013,7 +1058,7 @@ fn bind_home_on_data() {
 /// documents and chats survive power-off. Without one, IYAKKI keeps running from RAM.
 /// `iyakki.data=ram` on the kernel command line skips the lookup; `iyakki.data=/dev/sdb2` uses that partition.
 pub fn mount_data_volume() {
-    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let cmdline = iyakki_core_local::kernelfacts::cmdline();
     if cmdline_param(&cmdline, "iyakki.data") == Some("ram") {
         log::info!("data: kept in RAM (iyakki.data=ram)");
         return;
@@ -1096,7 +1141,7 @@ pub fn mount_data_volume() {
                 Ok(None) => {}
                 Err(e) => log::warn!("data: could not link the data disk by uuid: {e}"),
             }
-            match iyakki_usb::efi::name_running_disk(&roots, Path::new("/sys/firmware/efi/efivars"), &dev) {
+            match iyakki_usb::efi::name_running_disk(&roots, Path::new(iyakki_core_local::bootdisk::EFIVARS), &dev) {
                 Ok(Some(entry)) => log::info!("data: this computer's boot menu now lists the disk as IYAKKI ({entry})"),
                 Ok(None) => {}
                 Err(e) => log::warn!("data: could not name the disk in the boot menu: {e}"),
@@ -1244,6 +1289,23 @@ pub fn sleep() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_boot_step_says_when_optional_drivers_are_needed_and_is_silent_otherwise() {
+        let d = std::env::temp_dir().join(format!("iyakki-boot-optpack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("optional-pack")).unwrap();
+        assert!(optional_pack_line(&d, &["usb:v1234p5678d0001".into()]).is_none(), "no manifest: silent");
+        let h = "0".repeat(64);
+        std::fs::write(d.join("optional-pack/manifest.txt"), format!("release 6.1.0\nmodule 4 {h} kernel/drivers/dvbu.ko\n")).unwrap();
+        std::fs::write(d.join("optional-pack/optional.map"), "alias usb:v1234p5678* kernel/drivers/dvbu.ko\n").unwrap();
+        assert!(optional_pack_line(&d, &["usb:v1234p5678d0001".into()]).unwrap().contains("1 module(s)"));
+        assert!(optional_pack_line(&d, &["usb:v0000p0000".into()]).is_none());
+        let src = include_str!("boot.rs");
+        let late = src.split("pub fn late_boot").nth(1).unwrap();
+        assert!(late.find("coldplug_settle(&mut plan.seen").unwrap() < late.find("optional_pack_note()").unwrap(), "after the devices are all known");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn the_boot_time_memory_choice_follows_the_command_line_then_the_file_and_the_room_on_the_data_disk() {
         use super::memory_settings_from;
@@ -1575,7 +1637,7 @@ mod tests {
         // `printk.devkmsg=ratelimit` (the default) drops all but about 10 program-written log lines per 5 s: the boot timeline lost its lines
         let src = include_str!("boot.rs");
         let body = src.split("pub fn early_boot_critical").nth(1).unwrap();
-        let off = body.find("/proc/sys/kernel/printk_devkmsg").expect("the limit is switched off");
+        let off = body.find("kernelfacts::allow_unlimited_kmsg").expect("the limit is switched off (the shared kernel-access module writes printk_devkmsg)");
         assert!(off < body.find("clock_floor_early();").unwrap() && body[..off].contains("mount_pseudo_filesystems();"), "right after /proc is mounted, before the first line");
         // and a data volume mounted by the first stage is kept private like one this code mounts
         assert!(src.split("pub fn mount_data_volume").nth(1).unwrap().split("let roots = iyakki_storage::Roots::real();").next().unwrap().contains("from_mode(0o700)"));

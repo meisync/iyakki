@@ -1,5 +1,5 @@
 //! Image XObjects and inline images: raw samples at 1, 2, 4, 8 or 16 bits in the device, indexed, ICC and separation spaces, Flate/LZW
-//! (through the stream filters) and DCT (the browser's JPEG decoder) and CCITT fax (Group 3 and 4, in-house). Image masks give a stencil. JPX and JBIG2 are not
+//! (through the stream filters) and DCT (the browser's JPEG decoder) and CCITT fax (Group 3 and 4, in-house) and JBIG2 (arithmetic coding and MMR, in-house). Image masks give a stencil. JPX is not
 //! decoded: the viewer draws a grey box and says so.
 
 use crate::color::Cs;
@@ -74,6 +74,17 @@ pub fn decode(f: &File, d: &Dict, src: &Obj, inline: Option<&[u8]>, res: &Dict) 
                 data[y * dst_row..y * dst_row + n].copy_from_slice(&from[..n]);
             }
             decoded = crate::file::Decoded { data, image_filter: None };
+        }
+    }
+    if let Some((name, parms)) = decoded.image_filter.clone() {
+        if name == "JBIG2Decode" {
+            // JBIG2 (F-PDF-17): the picture is read in-house; the global segments the filter names come first. What is not read (Huffman
+            // coding, halftones) is left white and the picture still shows the rest.
+            let globals = parms.dict().map(|pd| f.get(pd, "JBIG2Globals")).filter(|g| matches!(g, Obj::Stream(..))).and_then(|g| f.stream_data(&g).ok()).map(|d| d.data);
+            match crate::jbig2::decode(&decoded.data, globals.as_deref()) {
+                Ok((page, _problem)) => decoded = crate::file::Decoded { data: crate::jbig2::pack_pdf(&page, w, h), image_filter: None },
+                Err(e) => return Err(Failure::Unsupported(format!("JBIG2 pictures ({e})"))),
+            }
         }
     }
     if let Some((name, _)) = &decoded.image_filter {

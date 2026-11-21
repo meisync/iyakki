@@ -1,0 +1,12 @@
+# autotest pilot, batch A (2026-11-21). Written against the Feature text with sha f42200b64d2924aa; honest subset only: everything not checked is under not-covered.
+row: F-CORE-20
+targets: qemu
+profile: ram
+feature-sha: f42200b64d2924aa
+doc: `dev info` shows the compatibility report of the running core (where unfinished migrations would appear)
+clause: 1 `dev info` shows the compatibility report of the running core (where unfinished migrations would appear)
+not-covered: data migrated in a staged copy next to the old
+not-covered: committed only after the new version booted and confirmed
+not-covered: rolled back when the old version starts again
+not-covered: a commit that stopped half way finished by the next call
+expect-info compat\s+core

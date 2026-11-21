@@ -43,6 +43,26 @@ struct Tee {
 #[derive(Default)]
 pub struct Share {
     tees: Mutex<HashMap<String, Arc<Tee>>>,
+    /// Cameras that a recorder wants to record, with how many recorders (see [`Share::want`]).
+    wanted: Mutex<HashMap<String, usize>>,
+}
+
+/// Held by a recorder while it wants a camera; dropping it says it does not.
+pub struct Want {
+    share: Arc<Share>,
+    camera: String,
+}
+
+impl Drop for Want {
+    fn drop(&mut self) {
+        let mut w = self.share.wanted.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = w.get_mut(&self.camera) {
+            *n -= 1;
+            if *n == 0 {
+                w.remove(&self.camera);
+            }
+        }
+    }
 }
 
 impl Share {
@@ -54,7 +74,19 @@ impl Share {
         Box::new(TeeFeed { inner, tee, share: self.clone(), camera: camera.to_string() })
     }
 
-    /// Whether the recorder holds this camera's connection now.
+    /// A recorder says it wants this camera. While it does, a live view that opens the camera FIRST keeps its connection in the table too
+    /// (the other direction of F-CAM-19), so the recorder looks through it instead of opening a second one that a one-connection camera refuses.
+    pub fn want(self: &Arc<Self>, camera: &str) -> Want {
+        *self.wanted.lock().unwrap_or_else(|e| e.into_inner()).entry(camera.to_string()).or_insert(0) += 1;
+        Want { share: self.clone(), camera: camera.to_string() }
+    }
+
+    /// Whether a recorder wants this camera now.
+    pub fn is_wanted(&self, camera: &str) -> bool {
+        self.wanted.lock().unwrap_or_else(|e| e.into_inner()).contains_key(camera)
+    }
+
+    /// Whether a connection to this camera is held now (by the recorder, or by the live view that opened it first).
     pub fn held(&self, camera: &str) -> bool {
         self.tees.lock().unwrap_or_else(|e| e.into_inner()).contains_key(camera)
     }
@@ -173,6 +205,53 @@ impl Viewer {
                 return if self.q.closed.load(Ordering::SeqCst) { Err(FeedErr::Lost("the recorder let go of the camera".into())) } else { Err(FeedErr::Timeout) };
             }
         }
+    }
+}
+
+/// A viewer is also a feed, so the recorder can read the live view's connection like one of its own. When the owner lets go the viewer
+/// says `Lost` and the recorder opens its own connection after its usual pause.
+impl RecFeed for Viewer {
+    fn next(&mut self) -> Result<Unit, FeedErr> {
+        Viewer::next(self)
+    }
+    fn kind(&self) -> RecKind {
+        self.kind
+    }
+    fn params(&self) -> Vec<u8> {
+        self.params.clone()
+    }
+}
+
+/// The owner of a connection that reads it itself (the live view that opened the camera): the H.264 parameter sets go in front of its
+/// first key frame, as they do for a viewer, so a decoder can start there.
+pub struct ParamsFirst {
+    inner: Box<dyn RecFeed>,
+    sent: bool,
+}
+
+impl ParamsFirst {
+    pub fn new(inner: Box<dyn RecFeed>) -> ParamsFirst {
+        ParamsFirst { inner, sent: false }
+    }
+}
+
+impl RecFeed for ParamsFirst {
+    fn next(&mut self) -> Result<Unit, FeedErr> {
+        Ok(match self.inner.next()? {
+            Unit::H264 { mut annex_b, key } if !self.sent && key => {
+                self.sent = true;
+                let mut v = self.inner.params();
+                v.append(&mut annex_b);
+                Unit::H264 { annex_b: v, key }
+            }
+            other => other,
+        })
+    }
+    fn kind(&self) -> RecKind {
+        self.inner.kind()
+    }
+    fn params(&self) -> Vec<u8> {
+        self.inner.params()
     }
 }
 

@@ -1,0 +1,3 @@
+//! The system-prompt text of the Alexa chat tools (kept here so the UI crates can name it; the tools are in `iyakki-agent`).
+
+pub const PROMPT_RULE: &str = "\nALEXA (Amazon's voice assistant, optional, off by default): alexa_status says whether the owner's Amazon product is set up, whether it is on and whether this person said yes (free). alexa_set switches it on or off for this computer (administrators, asks every time; it refuses with no owner client id). You can never say yes for the person to the card that sends their voice to Amazon, and you cannot type a client id: the person answers the card in Settings -> Alexa, and the owner puts the product in alexa-avs.json. Amazon's assistant does not use IYAKKI's tools or approvals.";

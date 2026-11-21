@@ -181,6 +181,13 @@ pub struct CamFrame {
     pub data: std::sync::Arc<Vec<u8>>,
 }
 
+/// A piece of a camera's sound: 16-bit mono samples at `rate` Hz (G.711 already decoded by the core).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CamSound {
+    pub rate: u32,
+    pub pcm: Vec<i16>,
+}
+
 /// A shape of the person's own motion detector: a zone where motion counts (`include`) or does not, or a privacy mask. Points are
 /// 0.0 to 1.0 across the picture.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -210,11 +217,14 @@ pub struct Overlay {
     pub marks: Vec<MotionMark>,
 }
 
-/// Pan, tilt and zoom, one step or a stop. Speeds are -1.0 to 1.0 (negative: left, down, out).
+/// Pan, tilt and zoom, one step, a place or a stop. Speeds are -1.0 to 1.0 (negative: left, down, out).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum PtzCommand {
     Move { pan: f32, tilt: f32, zoom: f32 },
+    /// Go to a place and stay there (F-SDK-167): `pan` and `tilt` from -1.0 (left, down) to 1.0 (right, up) across the camera's whole range,
+    /// `zoom` from 0.0 (wide) to 1.0 (closest).
+    Absolute { pan: f32, tilt: f32, zoom: f32 },
     Stop,
 }
 
@@ -228,6 +238,12 @@ impl PtzCommand {
                     return Err("a pan, tilt or zoom speed is not a number".into());
                 }
                 Ok(PtzCommand::Move { pan: pan.clamp(-1.0, 1.0), tilt: tilt.clamp(-1.0, 1.0), zoom: zoom.clamp(-1.0, 1.0) })
+            }
+            PtzCommand::Absolute { pan, tilt, zoom } => {
+                if ![pan, tilt, zoom].iter().all(|v| v.is_finite()) {
+                    return Err("a pan, tilt or zoom position is not a number".into());
+                }
+                Ok(PtzCommand::Absolute { pan: pan.clamp(-1.0, 1.0), tilt: tilt.clamp(-1.0, 1.0), zoom: zoom.clamp(0.0, 1.0) })
             }
         }
     }
@@ -298,6 +314,13 @@ pub trait Cameras: Send + Sync {
     /// The newest picture of a camera of the view with a sequence number above `after`; `None` when there is none (nothing new, the view
     /// waits for consent, is hidden or closed). The core paces itself: asking faster than the camera's rate returns `None`, not an error.
     fn frame(&self, _user: &str, _view: &str, _camera: &str, _after: u64, _format: FrameFormat) -> Result<Option<CamFrame>, String> {
+        Err("this core has no camera views".into())
+    }
+    /// The sound a camera of the view has sent since the last call (G.711 decoded: 16-bit mono samples and their rate); `None` while there
+    /// is none. Added in alpha.7 (F-CAM-20), additive. A core may refuse with a sentence: the embedded views of this system carry no sound
+    /// (their consent card promises pictures only), so [`crate::cameras::check_spec`] still refuses `audio` and the agent's answer here is the
+    /// same sentence; the machine's own Cameras tile listens through its own source instead.
+    fn listen(&self, _user: &str, _view: &str, _camera: &str) -> Result<Option<CamSound>, String> {
         Err("this core has no camera views".into())
     }
     /// Zones, masks and recent motion marks of a camera of the view, read-only.
@@ -374,13 +397,16 @@ pub fn check_spec(app: &str, spec: &ViewSpec) -> Result<(), String> {
         }
     }
     if spec.audio {
-        return Err("camera views carry no sound in this system".into());
+        return Err(NO_VIEW_SOUND.into());
     }
     if spec.label.chars().any(char::is_control) {
         return Err("the label of a camera view has no control characters".into());
     }
     Ok(())
 }
+
+/// The sentence for sound asked of an embedded camera view.
+pub const NO_VIEW_SOUND: &str = "camera views carry no sound in this system";
 
 /// Text made safe to show or write to an audit line: no control characters, cut at [`MAX_NAME`].
 pub fn clean_name(s: &str) -> String {

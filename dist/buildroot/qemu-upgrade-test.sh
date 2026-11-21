@@ -2,7 +2,10 @@
 # Upgrade test in QEMU (v1.0.0 gate item 5, docs/development/DATA-LAYOUT-AND-UPGRADE.md): a data disk that holds what an alpha.1
 # install left (tests/fixtures/upgrade/alpha1, synthetic) is booted by the CURRENT image, and the data must come through.
 #
-#   dist/buildroot/qemu-upgrade-test.sh [build-output-dir]        (default: target/buildroot-libre, the image the persist test uses, opened read-only)
+#   [FIXTURE=alpha1] dist/buildroot/qemu-upgrade-test.sh [build-output-dir]
+#                                      (default: target/buildroot-libre, the image the persist test uses, opened read-only; FIXTURE names a
+#                                       folder of tests/fixtures/upgrade: alpha1 today, `beta` the day one is captured from a beta image with
+#                                       dist/release/capture-upgrade-fixture.sh)
 #
 # Boot 1  selftest persist2: the volume is found and mounted, the marker is there, and the boot itself changed no file of the volume
 #         (a boot is not an upgrade: nothing is migrated before the shell opens its stores).
@@ -17,7 +20,10 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:-$ROOT/target/buildroot-libre}"
 QEMU="${QEMU:-qemu-system-x86_64}"
-FIX="$ROOT/tests/fixtures/upgrade/alpha1"
+FIXTURE="${FIXTURE:-alpha1}"
+case "$FIXTURE" in ""|*[!A-Za-z0-9_-]*|current) echo "FIXTURE must be the name of a folder of tests/fixtures/upgrade (letters, digits, - and _; not current)" >&2; exit 2 ;; esac
+FIX="$ROOT/tests/fixtures/upgrade/$FIXTURE"
+[ -d "$FIX" ] || { echo "no fixture folder tests/fixtures/upgrade/$FIXTURE (a beta fixture is captured from a beta image: dist/release/capture-upgrade-fixture.sh)" >&2; exit 2; }
 if pgrep -f "repack.sh" >/dev/null 2>&1 && [ "${OUT##*/}" = "buildroot-macweb" ]; then echo "repack.sh is running on $OUT: not touching it"; exit 3; fi
 for f in "$OUT/images/bzImage" "$OUT/images/rootfs.cpio.zst"; do [ -r "$f" ] || { echo "missing $f"; exit 3; }; done
 W="$(mktemp -d)"; [ -n "${KEEP:-}" ] && echo "work dir $W"; trap 'rm -rf "$W"' EXIT

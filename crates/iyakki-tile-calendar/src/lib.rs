@@ -345,16 +345,22 @@ impl App for CalendarApp {
         let mut y = area.y + 10.0 * s;
         // tabs and actions
         let tabs = [("Calendar".to_string(), Event::Tab(0)), ("Clock & alarms".to_string(), Event::Tab(1))];
-        fx::tab_strip(g, x, y, s, w * 0.5, &tabs, if self.tab == Tab::Calendar { 0 } else { 1 }, ACCENT);
+        let tabs_w = fx::tab_strip(g, x, y, s, w * 0.5, &tabs, if self.tab == Tab::Calendar { 0 } else { 1 }, ACCENT);
         let mut rx = x + w;
         if self.tab == Tab::Calendar {
             let l = format!("+ Event (n)");
             let bw = g.text_width(14.0 * s, &l, Face::Bold) + 14.0 * s * 1.7;
-            g.button(rx - bw, y, 14.0 * s, &l, ACCENT, Event::Tab(41));
+            let l2 = if self.show_alarms { "Alarms: shown (a)" } else { "Alarms: hidden (a)" };
+            let bw2 = g.text_width(14.0 * s, l2, Face::Bold) + 14.0 * s * 1.7;
+            // the two buttons share the row with the tabs only when they fit beside them; else they take a row of their own under the tabs
+            let own_row = bw + bw2 + 8.0 * s > w - tabs_w - 8.0 * s;
+            let by = if own_row { y + 38.0 * s } else { y };
+            g.button(rx - bw, by, 14.0 * s, &l, ACCENT, Event::Tab(41));
             rx -= bw + 8.0 * s;
-            let l = if self.show_alarms { "Alarms: shown (a)" } else { "Alarms: hidden (a)" };
-            let bw = g.text_width(14.0 * s, l, Face::Bold) + 14.0 * s * 1.7;
-            g.button(rx - bw, y, 14.0 * s, l, if self.show_alarms { AMBER } else { MUTED }, Event::Tab(40));
+            g.button(rx - bw2, by, 14.0 * s, l2, if self.show_alarms { AMBER } else { MUTED }, Event::Tab(40));
+            if own_row {
+                y += 38.0 * s;
+            }
         } else {
             let l = "+ Alarm (n)";
             let bw = g.text_width(14.0 * s, l, Face::Bold) + 14.0 * s * 1.7;

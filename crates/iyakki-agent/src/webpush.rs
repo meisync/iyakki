@@ -28,12 +28,15 @@ pub const SUBSCRIBE: &str = "webpush_subscribe";
 pub const UNSUBSCRIBE: &str = "webpush_unsubscribe";
 pub const SEND: &str = "webpush_send";
 pub const PREFS: &str = "webpush_prefs";
+pub const LINK: &str = "webpush_link";
+pub const SITES: &str = "webpush_sites";
+pub const SITE_FORGET: &str = "webpush_site_forget";
 
 pub fn is_webpush_tool(n: &str) -> bool {
-    matches!(n, STATUS | SUBSCRIBE | UNSUBSCRIBE | SEND | PREFS)
+    matches!(n, STATUS | SUBSCRIBE | UNSUBSCRIBE | SEND | PREFS | LINK | SITES | SITE_FORGET)
 }
 
-pub const PROMPT_RULE: &str = "\nWEB PUSH: webpush_status lists the browsers that may get this person's notifications (a label and the push service's host, never a key) and the public key a page needs. webpush_subscribe saves a subscription the browser made (endpoint, p256dh, auth) and webpush_unsubscribe removes one; webpush_send sends one short notification to the saved browsers through their push service. All three ask the person on a card every time. webpush_prefs shows or changes the person's own push settings (on or off, the lowest severity that is pushed, quiet hours such as 22:00-06:30, the minutes east of UTC): a change asks first, and a critical notification is the only kind that goes through quiet hours. Never put a password, key or other secret into a notification: it is encrypted on the way but shown on a lock screen.";
+pub const PROMPT_RULE: &str = "\nWEB PUSH: webpush_status lists the browsers that may get this person's notifications (a label and the push service's host, never a key) and the public key a page needs. webpush_subscribe saves a subscription the browser made (endpoint, p256dh, auth) and webpush_unsubscribe removes one; webpush_send sends one short notification to the saved browsers through their push service. All three ask the person on a card every time. webpush_sites lists the web sites that asked to send notifications to this person's browser (their answer and the push service, never a key) and webpush_site_forget removes a site's registrations, subscriptions and saved answer (asks first). webpush_prefs shows or changes the person's own push settings (on or off, the lowest severity that is pushed, quiet hours such as 22:00-06:30, the minutes east of UTC): a change asks first, and a critical notification is the only kind that goes through quiet hours. Never put a password, key or other secret into a notification: it is encrypted on the way but shown on a lock screen.";
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 struct Rec {
@@ -196,6 +199,11 @@ impl WebPush {
         Ok(())
     }
 
+    /// Whether a notification could be pushed at all: push is on and at least one browser is saved (a locked vault says no).
+    pub fn can_push(&self) -> bool {
+        self.load().is_ok_and(|s| s.prefs.on && !s.subs.is_empty())
+    }
+
     pub fn prefs(&self) -> Result<Prefs, String> {
         Ok(self.load()?.prefs)
     }
@@ -292,11 +300,26 @@ impl WebPush {
 pub struct WebPushTools {
     inner: Arc<dyn Tools>,
     svc: Arc<WebPush>,
+    /// The subscribe pages of the tenant and the person: `webpush_link` makes a one-time link for a browser to open.
+    link: Option<(Arc<crate::webpush_page::PushPages>, String)>,
+    /// The sites that registered a service worker in the person's own browser (`webpush_sites`, `webpush_site_forget`).
+    sites: Option<Arc<crate::browserpush::PagePush>>,
 }
 
 impl WebPushTools {
     pub fn new(inner: Arc<dyn Tools>, svc: Arc<WebPush>) -> WebPushTools {
-        WebPushTools { inner, svc }
+        WebPushTools { inner, svc, link: None, sites: None }
+    }
+
+    /// Offer `webpush_link` for `person` over the tenant's subscribe pages.
+    pub fn with_link(mut self, pages: Arc<crate::webpush_page::PushPages>, person: &str) -> WebPushTools {
+        self.link = Some((pages, person.to_string()));
+        self
+    }
+    /// Offer `webpush_sites` and `webpush_site_forget` over the person's page push.
+    pub fn with_sites(mut self, p: Arc<crate::browserpush::PagePush>) -> WebPushTools {
+        self.sites = Some(p);
+        self
     }
     fn t(args: &Value, k: &str) -> String {
         args.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string()
@@ -306,6 +329,8 @@ impl WebPushTools {
             SUBSCRIBE => Some(format!("Save the browser \"{}\" for notifications (push service: {}). Notifications to it are encrypted and sent through that service.", Self::t(args, "label"), host_of(&Self::t(args, "endpoint")))),
             UNSUBSCRIBE => Some(format!("Stop sending notifications to the saved browser {}", Self::t(args, "id"))),
             PREFS => Some(format!("Change the push settings for your browsers:{}{}{}{}", args.get("on").and_then(Value::as_bool).map_or(String::new(), |b| format!("\npush {}", if b { "on" } else { "off" })), match Self::t(args, "min_severity") { v if v.is_empty() => String::new(), v => format!("\nlowest severity {v}") }, match Self::t(args, "quiet") { v if v.is_empty() => String::new(), v => format!("\nquiet hours {v}") }, args.get("offset_min").and_then(Value::as_i64).map_or(String::new(), |m| format!("\ntime zone {m} minutes east of UTC")))),
+            SITE_FORGET => Some(format!("Forget the notification settings of {}: its service worker registrations, its push subscriptions and your saved answer. It will have to ask again.", Self::t(args, "origin"))),
+            LINK => Some("Make a one-time link that lets one of your browsers (a phone, another computer) subscribe to this computer's notifications. The link works once, for ten minutes, and opens a page on this computer's public name.".to_string()),
             SEND => Some(format!("Send a notification to {} through its push service:\n{}\n{}", match Self::t(args, "id") { i if i.is_empty() => "every saved browser".to_string(), i => format!("the saved browser {i}") }, Self::t(args, "title"), Self::t(args, "body"))),
             _ => None,
         }
@@ -330,6 +355,13 @@ impl Tools for WebPushTools {
             risk: Risk::Ask,
             untrusted: false,
         });
+        if self.link.is_some() {
+            v.push(ToolDef { spec: spec(LINK, "Make a one-time link (valid ten minutes) that a browser opens to subscribe to this person's notifications: the page registers a service worker, asks the browser's permission and saves the subscription. Needs the owner's public HTTPS name. The person approves a card first.", json!({"type": "object", "properties": {}})), risk: Risk::Ask, untrusted: false });
+        }
+        if self.sites.is_some() {
+            v.push(ToolDef { spec: spec(SITES, "List the web sites that asked to send notifications to this person's browser: the origin, the answer (granted, denied, prompt) and the push service host. No keys.", json!({"type": "object", "properties": {}})), risk: Risk::Safe, untrusted: false });
+            v.push(ToolDef { spec: spec(SITE_FORGET, "Forget a web site's notification settings (registrations, subscriptions, saved answer). The person approves a card every time.", json!({"type": "object", "properties": {"origin": {"type": "string", "description": "such as https://example.org"}}, "required": ["origin"]})), risk: Risk::Ask, untrusted: false });
+        }
         v.push(ToolDef { spec: spec(UNSUBSCRIBE, "Remove a saved browser. The person approves a card every time.", json!({"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]})), risk: Risk::Ask, untrusted: false });
         v.push(ToolDef {
             spec: spec(PREFS, "Change this person's push settings: `on` (false is the opt-out), `min_severity` (low, normal, high, critical), `quiet` (hours such as 22:00-06:30, or \"none\"), `offset_min` (minutes east of UTC, for the quiet hours). Only what is given changes. The person approves a card first. webpush_status shows the current settings.", json!({"type": "object", "properties": {"on": {"type": "boolean"}, "min_severity": {"type": "string"}, "quiet": {"type": "string"}, "offset_min": {"type": "integer"}}})),
@@ -350,6 +382,18 @@ impl Tools for WebPushTools {
             SUBSCRIBE => {
                 let id = self.svc.subscribe(&Self::t(args, "label"), &Self::t(args, "endpoint"), &Self::t(args, "p256dh"), &Self::t(args, "auth"))?;
                 Ok(format!("Saved as {id}. Public key for the page: {}", self.svc.public_key()?))
+            }
+            LINK => {
+                let (pages, person) = self.link.as_ref().ok_or("subscribe links are not available here")?;
+                let url = pages.mint(person)?;
+                self.svc.public_key()?;
+                self.svc.log("link", "a one-time subscribe link was made");
+                Ok(format!("Open this address in the browser to subscribe (works once, for ten minutes): {url}"))
+            }
+            SITES => self.sites.as_ref().ok_or("page notifications are not available here")?.sites(),
+            SITE_FORGET => {
+                let n = self.sites.as_ref().ok_or("page notifications are not available here")?.forget_site(&Self::t(args, "origin"))?;
+                Ok(format!("Forgotten ({n} registrations removed)."))
             }
             UNSUBSCRIBE => self.svc.unsubscribe(&Self::t(args, "id")).map(|_| "Removed.".into()),
             PREFS => {
@@ -381,14 +425,15 @@ impl Tools for WebPushTools {
     fn describe(&self, name: &str, args: &Value) -> String {
         match name {
             STATUS => "List the browsers saved for notifications".into(),
-            SUBSCRIBE | UNSUBSCRIBE | SEND | PREFS => self.card(name, args).and_then(|c| c.lines().next().map(str::to_string)).unwrap_or_default(),
+            SITES => "List the sites that may send notifications".into(),
+            SUBSCRIBE | UNSUBSCRIBE | SEND | PREFS | LINK | SITE_FORGET => self.card(name, args).and_then(|c| c.lines().next().map(str::to_string)).unwrap_or_default(),
             _ => self.inner.describe(name, args),
         }
     }
     fn preview(&self, name: &str, args: &Value) -> Option<String> {
         match name {
-            SUBSCRIBE | UNSUBSCRIBE | SEND | PREFS => self.card(name, args),
-            STATUS => None,
+            SUBSCRIBE | UNSUBSCRIBE | SEND | PREFS | LINK | SITE_FORGET => self.card(name, args),
+            STATUS | SITES => None,
             _ => self.inner.preview(name, args),
         }
     }
@@ -396,19 +441,20 @@ impl Tools for WebPushTools {
         match name {
             SEND if Self::t(args, "title").is_empty() => Some("a notification needs a title".into()),
             SUBSCRIBE => wp::Subscription::new(&Self::t(args, "endpoint"), &Self::t(args, "p256dh"), &Self::t(args, "auth")).err(),
-            STATUS | UNSUBSCRIBE | SEND | PREFS => None,
+            SITE_FORGET if !Self::t(args, "origin").starts_with("https://") => Some("give the site's origin, such as https://example.org".into()),
+            STATUS | SITES | SITE_FORGET | UNSUBSCRIBE | SEND | PREFS | LINK => None,
             _ => self.inner.refusal(name, args),
         }
     }
     fn pre_approved(&self, name: &str) -> bool {
-        if is_webpush_tool(name) { name == STATUS } else { self.inner.pre_approved(name) }
+        if is_webpush_tool(name) { matches!(name, STATUS | SITES) } else { self.inner.pre_approved(name) }
     }
     fn approved_always(&self, name: &str) -> bool {
         !is_webpush_tool(name) && self.inner.approved_always(name)
     }
     fn grant_blocker(&self, name: &str, args: &Value) -> Option<String> {
         match name {
-            SUBSCRIBE | UNSUBSCRIBE | SEND | PREFS => Some("changing or using the saved browsers asks every time".into()),
+            SUBSCRIBE | UNSUBSCRIBE | SEND | PREFS | LINK | SITE_FORGET => Some("changing or using the saved browsers asks every time".into()),
             _ => self.inner.grant_blocker(name, args),
         }
     }
@@ -435,3 +481,69 @@ impl Tools for WebPushTools {
 #[cfg(test)]
 #[path = "webpush_tests.rs"]
 mod tests;
+
+/// The open-vault registry of this process (F-INBOX-09): who is signed in with an open vault, and the Web Push service over that
+/// person's vault. The notification hub is tenant-wide and holds no vault of its own, so its push sender asks this registry: a person
+/// who is signed out (vault locked) is simply not in it and gets no push (their notification stays in the INBOX). Keyed by the data
+/// folder as well, so two tenants in one process never meet. The sign-in puts the service in ([`offer`](crate::msg::tools::offer)) and
+/// the sign-out takes it out (`Services::on_logout`).
+#[derive(Default)]
+pub struct OpenVaults {
+    map: std::sync::Mutex<std::collections::HashMap<(String, String), Arc<WebPush>>>,
+}
+
+impl OpenVaults {
+    /// The registry of this process.
+    pub fn global() -> &'static OpenVaults {
+        static G: std::sync::OnceLock<OpenVaults> = std::sync::OnceLock::new();
+        G.get_or_init(OpenVaults::default)
+    }
+
+    fn key(dir: &std::path::Path, person: &str) -> (String, String) {
+        (dir.display().to_string(), person.to_string())
+    }
+
+    /// Most people kept at once (a sign-in beyond this is not registered: its pushes wait in the INBOX).
+    pub const MAX: usize = 500;
+
+    pub fn register(&self, dir: &std::path::Path, person: &str, w: Arc<WebPush>) -> bool {
+        let mut m = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        let k = Self::key(dir, person);
+        if !m.contains_key(&k) && m.len() >= Self::MAX {
+            return false;
+        }
+        m.insert(k, w);
+        true
+    }
+
+    pub fn forget(&self, dir: &std::path::Path, person: &str) {
+        self.map.lock().unwrap_or_else(|e| e.into_inner()).remove(&Self::key(dir, person));
+    }
+
+    pub fn get(&self, dir: &std::path::Path, person: &str) -> Option<Arc<WebPush>> {
+        self.map.lock().unwrap_or_else(|e| e.into_inner()).get(&Self::key(dir, person)).cloned()
+    }
+
+    /// The hub's sender over the people of `dir` whose vault is open.
+    pub fn sender(&'static self, dir: &std::path::Path) -> Arc<dyn crate::notifyhub::service::PushSender> {
+        let dir = dir.to_path_buf();
+        Arc::new(PersonPush { of: Arc::new(move |p| self.get(&dir, p)) })
+    }
+}
+
+
+/// The hub's Web Push sender over the people's own services: `of` gives the service of a person whose vault is open (and `None` for
+/// one whose vault is locked, who then gets no push).
+pub struct PersonPush {
+    pub of: Arc<dyn Fn(&str) -> Option<Arc<WebPush>> + Send + Sync>,
+}
+
+impl crate::notifyhub::service::PushSender for PersonPush {
+    fn can_push(&self, person: &str) -> bool {
+        (self.of)(person).is_some_and(|w| w.can_push())
+    }
+    fn push(&self, person: &str, severity: iyakki_shared::notifyhub_sink::Severity, title: &str, body: &str, now: u64) -> Result<(), String> {
+        let w = (self.of)(person).ok_or("the person's vault is locked")?;
+        w.notify(severity, title, body, now).map(|_| ())
+    }
+}

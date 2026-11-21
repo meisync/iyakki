@@ -3,7 +3,7 @@
 
 
 /// What a change of the listener asks for. Fields left `None` stay as they are.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ListenerChange {
     pub enabled: Option<bool>,
     pub http_port: Option<u16>,
@@ -20,14 +20,14 @@ use crate::cloudroute::Scheme;
 use crate::cloudroute::Target;
 
 /// One TCP port of a cluster Service.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FoundPort {
     pub name: String,
     pub port: u16,
     pub node_port: Option<u16>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Found {
     pub namespace: String,
     pub name: String,
@@ -55,7 +55,7 @@ impl Found {
 }
 
 /// A service of this device itself that a route can point at.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Own {
     pub label: String,
     pub target: Target,
@@ -101,7 +101,7 @@ impl Default for ListenerCfg {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CertRow {
     pub name: String,
     pub names: Vec<String>,
@@ -122,7 +122,7 @@ impl CertRow {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub struct Status {
     pub enabled: bool,
     pub running: bool,

@@ -158,7 +158,7 @@ impl crate::apps::App for Bomb {
 fn an_app_that_panics_in_draw_input_or_tick_is_closed_alone_with_a_note_in_the_audit_log() {
     for when in ["draw", "key", "tick"] {
         let mut sh = signed(&format!("ovl-crash-{when}"));
-        let before = std::fs::read_to_string(sh.env.audit.path()).unwrap_or_default().matches("app.crash").count();
+        let before = std::fs::read_to_string(sh.env.audit.path_buf()).unwrap_or_default().matches("app.crash").count();
         sh.show_app_for_test(Box::new(Bomb(when)), PApp::Chat);
         let mut g = Gfx::new(1280, 720);
         sh.render(&mut g);
@@ -167,7 +167,7 @@ fn an_app_that_panics_in_draw_input_or_tick_is_closed_alone_with_a_note_in_the_a
         sh.render(&mut g);
         assert_eq!(sh.screen_name(), "launcher", "{when}: only the app is closed, the desktop stays");
         assert!(sh.crash_card_text().is_some_and(|t| t.contains("Bomb stopped because of an internal error") && t.contains("Open it again")), "{when}: {:?}", sh.crash_card_text());
-        let log = std::fs::read_to_string(sh.env.audit.path()).unwrap();
+        let log = std::fs::read_to_string(sh.env.audit.path_buf()).unwrap();
         assert!(log.matches("app.crash").count() > before, "{when}: the crash is in the audit log");
         // everything else still works: another app opens and draws
         sh.open_for_test(PApp::Settings);
@@ -192,7 +192,7 @@ fn the_restart_card_reopens_the_app_that_stopped_and_can_be_dismissed_or_expire(
     sh.render(&mut g);
     assert_eq!(sh.screen_name(), "app:chat", "the app is open again");
     assert!(sh.crash_card_text().is_none());
-    let log = std::fs::read_to_string(sh.env.audit.path()).unwrap();
+    let log = std::fs::read_to_string(sh.env.audit.path_buf()).unwrap();
     assert!(log.contains("app.reopen"), "the reopen is in the audit log");
     // dismissing only removes the card
     sh.show_app_for_test(Box::new(Bomb("key")), PApp::Chat);

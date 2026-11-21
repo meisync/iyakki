@@ -74,7 +74,7 @@ impl Default for Budgets {
 }
 
 /// What a task is made from.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct NewTask {
     pub title: String,
     pub goal: String,
@@ -90,7 +90,7 @@ pub struct NewTask {
     pub from_member: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Approval {
     pub task: String,
     pub call_id: String,
@@ -100,7 +100,7 @@ pub struct Approval {
 }
 
 /// The answer of the dry run before a merge.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MergeCheck {
     pub clean: bool,
     pub conflicts: Vec<String>,
@@ -110,7 +110,7 @@ pub struct MergeCheck {
     pub message: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChatWho {
     /// The request given to the task (the goal, or a follow-up).
     You,
@@ -122,37 +122,8 @@ pub enum ChatWho {
     Note,
 }
 
-/// What to do with rows that become ready when an agent finishes one: nothing, offer them, or start tasks for them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AutoAssign {
-    Off,
-    Ask,
-    On,
-}
-
-impl AutoAssign {
-    pub fn key(self) -> &'static str {
-        match self {
-            AutoAssign::Off => "off",
-            AutoAssign::Ask => "ask",
-            AutoAssign::On => "on",
-        }
-    }
-    pub fn parse(s: &str) -> AutoAssign {
-        match s.trim().to_lowercase().as_str() {
-            "off" => AutoAssign::Off,
-            "on" => AutoAssign::On,
-            _ => AutoAssign::Ask,
-        }
-    }
-    pub fn next(self) -> AutoAssign {
-        match self {
-            AutoAssign::Off => AutoAssign::Ask,
-            AutoAssign::Ask => AutoAssign::On,
-            AutoAssign::On => AutoAssign::Off,
-        }
-    }
-}
+/// Moved to `iyakki-board-model` with the board; the old path stays.
+pub use iyakki_board_model::AutoAssign;
 
 // ---- moved from iyakki_agent::tasks (F-SPLIT-03) ----
 
@@ -260,7 +231,7 @@ pub struct RunSpec {
 }
 
 /// One line of a task's embedded chat.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChatLine {
     pub who: ChatWho,
     pub text: String,

@@ -115,11 +115,20 @@ pub struct JobExecutor {
     pub grace: Duration,
     /// An image that cannot start is reported after this long.
     pub image_fail_after: Duration,
+    /// Also carry out the namespace tier: the Job's pod runs `iyakki linuxapp-init` itself (the pod must allow user namespaces; the
+    /// tenant admin acknowledged that, `userns_ack`). Off: the namespace tier is [`LocalNsExecutor`]'s.
+    pub ns_in_pod: bool,
 }
 
 impl JobExecutor {
     pub fn new(kube: Arc<dyn KubeApi>, policy: SandboxPolicy, gate: Arc<dyn ApplyGate>, secrets: Arc<dyn SecretResolver>) -> JobExecutor {
-        JobExecutor { kube, policy, gate, secrets, injector: Arc::new(NoInjector), poll: Duration::from_millis(1500), grace: Duration::from_secs(240), image_fail_after: Duration::from_secs(20) }
+        JobExecutor { kube, policy, gate, secrets, injector: Arc::new(NoInjector), poll: Duration::from_millis(1500), grace: Duration::from_secs(240), image_fail_after: Duration::from_secs(20), ns_in_pod: false }
+    }
+
+    /// Carry out the namespace tier in the pod when the tenant's policy lists it and the admin acknowledged user namespaces.
+    pub fn for_policy(mut self) -> JobExecutor {
+        self.ns_in_pod = self.policy.userns_ack && self.policy.allows_tier(Tier::Namespace);
+        self
     }
 
     /// The namespace the Jobs run in.
@@ -130,10 +139,6 @@ impl JobExecutor {
             self.policy.namespace.clone()
         }
     }
-}
-
-fn browser_tier(adm: &Admitted) -> bool {
-    adm.tier() == Tier::Browser
 }
 
 struct Cleanup<'a> {
@@ -156,12 +161,12 @@ impl Executor for JobExecutor {
     }
 
     fn handles(&self, t: Tier) -> bool {
-        matches!(t, Tier::Job | Tier::Browser)
+        matches!(t, Tier::Job | Tier::Browser) || (self.ns_in_pod && t == Tier::Namespace)
     }
 
     fn run(&self, adm: &Admitted) -> Result<RawOutcome, SandboxError> {
-        if !matches!(adm.tier(), Tier::Job | Tier::Browser) {
-            return Err(SandboxError::Refused("the job executor runs the job and browser tiers only".into()));
+        if !self.handles(adm.tier()) {
+            return Err(SandboxError::Refused("the job executor runs the job and browser tiers only (and the namespace tier when it is switched on for pods)".into()));
         }
         let ns = self.namespace(adm);
         // the team's cluster binding decides before anything is applied
@@ -227,7 +232,7 @@ impl Executor for JobExecutor {
         };
         let cap = spec.limits.output_kib as usize * 1024 * 2;
         // files the request named come back framed at the end of the log (see `frames`); the text keeps the output cap
-        let named = !spec.artifacts.is_empty() && !browser_tier(adm);
+        let named = !spec.artifacts.is_empty() && adm.tier() == Tier::Job;
         let raw_logs = self.kube.logs(&ns, &name, if named { cap + super::frames::BUDGET } else { cap }).unwrap_or_default();
         let (mut logs, framed) = if named { super::frames::split(&raw_logs, &spec.artifacts) } else { (raw_logs, vec![]) };
         logs.truncate(cap);
@@ -282,28 +287,35 @@ pub struct LocalNsExecutor {
 impl LocalNsExecutor {
     /// The argument list for one run (pure, so tests can read it).
     pub fn plan(&self, adm: &Admitted, workspace: &std::path::Path, inputs: Option<&std::path::Path>) -> crate::linuxapps_init::Spec {
-        use crate::linuxapps_init::{Bind, IdMap, Spec};
-        let s = adm.spec();
-        let name: String = adm.run_name().chars().take(40).collect::<String>().trim_end_matches('-').to_string();
-        let mut sp = Spec::new(&self.rootfs.display().to_string(), &name, s.argv.clone());
-        sp.uid = job::RUN_UID as u32;
-        sp.gid = job::RUN_UID as u32;
-        sp.idmap = IdMap::Single;
-        sp.net = false;
-        sp.binds = vec![Bind { src: workspace.display().to_string(), dst: "/workspace".into(), rw: true }];
-        if let Some(i) = inputs {
-            sp.binds.push(Bind { src: i.display().to_string(), dst: "/inputs".into(), rw: false });
-        }
-        sp.tmp_mb = 64;
-        sp.cwd = s.workdir_or_default().to_string();
-        sp.env = s.env.iter().map(|e| (e.name.clone(), e.value.clone())).collect();
-        sp.env.push(("HOME".into(), "/workspace".into()));
-        sp.mem_mb = s.limits.mem_mib;
-        sp.cpu_pct = (s.limits.cpu_m / 10).max(1);
-        sp.pids = s.limits.pids;
-        sp.seccomp = true;
-        sp
+        ns_spec(adm, &self.rootfs.display().to_string(), &workspace.display().to_string(), inputs.map(|i| i.display().to_string()))
     }
+}
+
+/// The `linuxapp-init` plan of one namespace-tier run: the same safe settings whether it runs beside the core ([`LocalNsExecutor`])
+/// or inside a pod ([`JobExecutor`] with `ns_in_pod`, see [`job::job_for`]). `rootfs` is the folder it pivots into; `workspace` and
+/// `inputs` are the folders bound at `/workspace` and `/inputs`.
+pub fn ns_spec(adm: &Admitted, rootfs: &str, workspace: &str, inputs: Option<String>) -> crate::linuxapps_init::Spec {
+    use crate::linuxapps_init::{Bind, IdMap, Spec};
+    let s = adm.spec();
+    let name: String = adm.run_name().chars().take(40).collect::<String>().trim_end_matches('-').to_string();
+    let mut sp = Spec::new(rootfs, &name, s.argv.clone());
+    sp.uid = job::RUN_UID as u32;
+    sp.gid = job::RUN_UID as u32;
+    sp.idmap = IdMap::Single;
+    sp.net = false;
+    sp.binds = vec![Bind { src: workspace.to_string(), dst: "/workspace".into(), rw: true }];
+    if let Some(i) = inputs {
+        sp.binds.push(Bind { src: i, dst: "/inputs".into(), rw: false });
+    }
+    sp.tmp_mb = 64;
+    sp.cwd = s.workdir_or_default().to_string();
+    sp.env = s.env.iter().map(|e| (e.name.clone(), e.value.clone())).collect();
+    sp.env.push(("HOME".into(), "/workspace".into()));
+    sp.mem_mb = s.limits.mem_mib;
+    sp.cpu_pct = (s.limits.cpu_m / 10).max(1);
+    sp.pids = s.limits.pids;
+    sp.seccomp = true;
+    sp
 }
 
 impl Executor for LocalNsExecutor {
@@ -357,9 +369,9 @@ impl NsLauncher for SelfLauncher {
     fn launch(&self, args: &[String], timeout: Duration, cap: usize) -> Result<NsOutput, String> {
         use std::io::Read;
         use std::os::unix::process::ExitStatusExt;
-        use std::process::{Command, Stdio};
+        use iyakki_core_local::starters_launch::{Launch, Stream};
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let mut child = Command::new(exe).args(args).env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+        let mut child = Launch::new(exe).args(args).env_clear().stdin(Stream::Null).stdout(Stream::Piped).stderr(Stream::Piped).spawn().map_err(|e| e.to_string())?;
         let (mut so, mut se) = (child.stdout.take().ok_or("no pipe")?, child.stderr.take().ok_or("no pipe")?);
         let t1 = std::thread::spawn(move || {
             let mut b = Vec::new();

@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod braillehid;
+pub mod fidohid;
 pub mod bnep;
 pub mod bnep_nap;
 pub mod nap_server;
@@ -18,6 +19,7 @@ pub mod sbc_tables;
 #[cfg(feature = "legacy-sbc-window")]
 pub mod sbc_tables_legacy;
 pub mod a2dp;
+pub mod a2dp_aac;
 pub mod a2dp_send;
 pub mod a2dp_send_sys;
 pub mod a2dp_sys;

@@ -521,84 +521,7 @@ pub fn clean_download(l: &Layout) {
 
 // ------------------------------------------------------------------------------------------------ device nodes
 
-/// NVIDIA's character device major.
-pub const NVIDIA_MAJOR: u32 = 195;
-
-/// A device node to make: `mknod path c major minor`, mode 0666.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NodeToMake {
-    pub path: String,
-    pub major: u32,
-    pub minor: u32,
-}
-
-/// The nodes `nvidia-modprobe` would make: `/dev/nvidiactl` (195, 255), `/dev/nvidia<minor>` (195, minor) for each GPU and the UVM nodes
-/// (the major of `nvidia-uvm` from `/proc/devices`; minor 0 and 1). `gpu_minors` come from `/proc/driver/nvidia/gpus/*/information`
-/// (`Device Minor: N`); `proc_devices` is the text of `/proc/devices`.
-pub fn nodes_to_make(gpu_minors: &[u32], proc_devices: &str) -> Vec<NodeToMake> {
-    let mut v = vec![NodeToMake { path: "/dev/nvidiactl".into(), major: NVIDIA_MAJOR, minor: 255 }];
-    for m in gpu_minors {
-        v.push(NodeToMake { path: format!("/dev/nvidia{m}"), major: NVIDIA_MAJOR, minor: *m });
-    }
-    if let Some(uvm) = device_major(proc_devices, "nvidia-uvm") {
-        v.push(NodeToMake { path: "/dev/nvidia-uvm".into(), major: uvm, minor: 0 });
-        v.push(NodeToMake { path: "/dev/nvidia-uvm-tools".into(), major: uvm, minor: 1 });
-    }
-    v
-}
-
-/// The major number of a character device in `/proc/devices` text.
-pub fn device_major(proc_devices: &str, name: &str) -> Option<u32> {
-    let mut chars = false;
-    for l in proc_devices.lines() {
-        if l.starts_with("Character devices") {
-            chars = true;
-            continue;
-        }
-        if l.starts_with("Block devices") {
-            chars = false;
-        }
-        if chars {
-            let mut w = l.split_whitespace();
-            if let (Some(n), Some(d)) = (w.next(), w.next()) {
-                if d == name {
-                    return n.parse().ok();
-                }
-            }
-        }
-    }
-    None
-}
-
-/// `Device Minor: N` of one `/proc/driver/nvidia/gpus/<pci>/information`.
-pub fn parse_minor(info: &str) -> Option<u32> {
-    info.lines().find_map(|l| l.strip_prefix("Device Minor:").and_then(|v| v.trim().parse().ok()))
-}
-
-/// `GPU UUID: GPU-xxxx` of the same file.
-pub fn parse_uuid(info: &str) -> Option<String> {
-    info.lines().find_map(|l| l.strip_prefix("GPU UUID:").map(|v| v.trim().to_string()))
-}
-
-/// The minors and UUIDs of the GPUs the loaded driver found, sorted by minor: reads `<root>/proc/driver/nvidia/gpus/*/information`.
-pub fn driver_gpus(root: &Path) -> Vec<(u32, Option<String>)> {
-    let mut v: Vec<(u32, Option<String>)> = Vec::new();
-    for e in std::fs::read_dir(root.join("proc/driver/nvidia/gpus")).into_iter().flatten().flatten() {
-        if let Ok(t) = std::fs::read_to_string(e.path().join("information")) {
-            if let Some(m) = parse_minor(&t) {
-                v.push((m, parse_uuid(&t)));
-            }
-        }
-    }
-    v.sort();
-    v
-}
-
-/// The version of the loaded driver (`/proc/driver/nvidia/version`: `NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  595.99.02 ...`).
-pub fn loaded_version(root: &Path) -> Option<String> {
-    let t = std::fs::read_to_string(root.join("proc/driver/nvidia/version")).ok()?;
-    t.split_whitespace().find(|w| w.len() >= 5 && w.chars().all(|c| c.is_ascii_digit() || c == '.') && w.matches('.').count() >= 1 && w.chars().next().is_some_and(|c| c.is_ascii_digit()) && w.split('.').next().is_some_and(|m| m.len() == 3)).map(str::to_string)
-}
+pub use iyakki_core_local::nvidia::{device_major, driver_gpus, loaded_version, nodes_to_make, parse_minor, parse_uuid, NodeToMake, NVIDIA_MAJOR};
 
 // ------------------------------------------------------------------------------------------------ the CDI spec
 
@@ -625,22 +548,11 @@ pub fn modprobe_argv(module: &str) -> Vec<String> {
 }
 
 /// Let the kernel power the NVIDIA cards down when idle: `power/control` = `auto` on every NVIDIA display function and on the other functions
-/// of the same slot (the HDMI audio at `.1`, the USB-C controller). Returns what was changed, as `0000:01:00.0` addresses.
+/// of the same slot (the HDMI audio at `.1`, the USB-C controller). Returns what was changed, as `0000:01:00.0` addresses. The switch itself is
+/// the core's (`iyakki_core_local::nvidia`); the agent only says which functions are NVIDIA's.
 pub fn allow_power_saving(root: &Path) -> Vec<String> {
-    let dir = root.join("sys/bus/pci/devices");
-    let mut changed = Vec::new();
-    for g in crate::gpu::detect(root).iter().filter(|g| g.is_nvidia()) {
-        let slot = g.pci.rsplit_once('.').map(|(s, _)| s.to_string()).unwrap_or_else(|| g.pci.clone());
-        let mut names: Vec<String> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(&format!("{slot}."))).collect();
-        names.sort();
-        for n in names {
-            let ctl = dir.join(&n).join("power/control");
-            if std::fs::read_to_string(&ctl).map(|t| t.trim() != "auto").unwrap_or(false) && std::fs::write(&ctl, "auto\n").is_ok() {
-                changed.push(n);
-            }
-        }
-    }
-    changed
+    let pci: Vec<String> = crate::gpu::detect(root).iter().filter(|g| g.is_nvidia()).map(|g| g.pci.clone()).collect();
+    iyakki_core_local::nvidia::allow_power_saving(root, &pci)
 }
 
 /// Build the CDI spec of the machine for `kind` (use [`crate::gpucdi::NVIDIA_KIND`] and [`crate::gpucdi::PLUGIN_KIND`]).
@@ -656,15 +568,14 @@ pub fn cdi_spec(kind: &str, root: &Path, l: &Layout, gpus: &[(u32, Option<String
     if gpus.is_empty() {
         return Err("the driver reports no GPU (nothing under /proc/driver/nvidia/gpus)".into());
     }
-    let present = |p: &str| root.join(p.trim_start_matches('/')).exists();
+    use iyakki_core_local::nvidia::{gpu_node, nodes_present, CONTROL_NODE, NODE_NAMES};
     let mut common = Edits::default();
-    for n in ["/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/dev/nvidia-modeset"] {
-        if present(n) {
-            common.device_nodes.push(DeviceNode::open(n));
-        }
+    let present = nodes_present(root, &NODE_NAMES.iter().map(|n| n.to_string()).collect::<Vec<_>>());
+    for n in &present {
+        common.device_nodes.push(DeviceNode::open(n));
     }
-    if !present("/dev/nvidiactl") {
-        return Err("/dev/nvidiactl does not exist: the driver is not loaded or the device nodes were not made".into());
+    if !present.iter().any(|n| n == CONTROL_NODE) {
+        return Err(format!("{CONTROL_NODE} does not exist: the driver is not loaded or the device nodes were not made"));
     }
     // libraries: every regular file with its soname links
     let mut files: Vec<String> = Vec::new();
@@ -706,7 +617,7 @@ pub fn cdi_spec(kind: &str, root: &Path, l: &Layout, gpus: &[(u32, Option<String
         common.mounts.push(Mount::ro(&icd.display().to_string(), "/etc/vulkan/icd.d/nvidia_icd.json"));
     }
     common.env.push(format!("LD_LIBRARY_PATH={CONTAINER_ROOT}/lib64"));
-    let node = |m: u32| DeviceNode::open(&format!("/dev/nvidia{m}"));
+    let node = |m: u32| DeviceNode::open(&gpu_node(m));
     let mut devices: Vec<Device> = Vec::new();
     for (i, (minor, uuid)) in gpus.iter().enumerate() {
         devices.push(Device { name: i.to_string(), edits: Edits { device_nodes: vec![node(*minor)], ..Default::default() } });

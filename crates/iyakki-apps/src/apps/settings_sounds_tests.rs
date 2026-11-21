@@ -106,7 +106,7 @@ fn the_switches_the_level_and_the_slider_are_saved_and_audited() {
     let hit = g.hits.iter().find(|h| h.label == "Signing out").unwrap().ev.clone();
     a.handle(&hit, &cx);
     assert!(!sounds(&cx).logout && sounds(&cx).login);
-    let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+    let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
     assert!(log.contains("settings.sysnd") && log.contains("settings.sysnd.level"), "{log}");
     // kept: a new settings store reads the same
     let d = sounds(&cx);

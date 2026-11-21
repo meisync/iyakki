@@ -4,7 +4,7 @@ use std::cell::RefCell;
 const BODY: &[u8] = b"#!/bin/sh\necho hi\n";
 
 fn row(sha: &str) -> String {
-    format!("# c\nyt-dlp | Unlicense | download-only | digest | {sha} | yt-dlp 2026.11.01 from the vendor's release page | 2026-11-18\n")
+    format!("# c\nytdlp | Unlicense | download-only | digest | {sha} | yt-dlp 2026.11.01 from the vendor's release page | 2026-11-18\n")
 }
 
 fn good() -> String {
@@ -39,7 +39,7 @@ fn dir(tag: &str) -> PathBuf {
 fn an_empty_or_missing_pin_fails_closed_and_nothing_is_fetched() {
     let d = dir("ytdlp-closed");
     let f = Fake(BODY.to_vec(), RefCell::new(vec![]));
-    for text in ["", "# nothing\n", &row(""), &row("sha256:abc"), &row("floating"), "yt-dlp | MIT | download-only | digest | broken\n"] {
+    for text in ["", "# nothing\n", &row(""), &row("sha256:abc"), &row("floating"), "ytdlp | MIT | download-only | digest | broken\n"] {
         let e = install(&d, text, &f).unwrap_err();
         assert!(matches!(e, Refusal::NoPin(_)), "{text:?}: {e:?}");
         assert!(e.to_string().contains("Nothing was downloaded"));

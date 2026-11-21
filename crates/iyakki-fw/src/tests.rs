@@ -398,7 +398,15 @@ fn addresses_ranges_cidrs_and_ports_are_checked() {
     assert!(check_rule(&rule(Kind::Cidr, "::/129")).is_err());
     assert!(check_rule(&rule(Kind::Cidr, "10.0.0.0/x")).is_err());
     assert!(check_rule(&rule(Kind::Cidr, "10.0.0.0")).is_err());
-    assert!(check_rule(&rule(Kind::Cidr, "10.0.0.0/8")).unwrap().warnings.iter().all(|w| !w.contains("/8 is a very large")) || true);
+    // KI-1016: private and link-local ranges never get the "big part of the internet" warning; a public /8 still does.
+    for p in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "fc00::/7", "fe80::/10"] {
+        let k = check_rule(&rule(Kind::Cidr, p)).unwrap();
+        assert!(k.warnings.iter().all(|w| !w.contains("very large")), "{p}: {:?}", k.warnings);
+    }
+    let public8 = check_rule(&rule(Kind::Cidr, "8.0.0.0/8")).unwrap();
+    assert!(public8.warnings.iter().any(|w| w.contains("/8 is a very large")), "{:?}", public8.warnings);
+    let ula = check_rule(&rule(Kind::Range, "fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")).unwrap();
+    assert!(ula.warnings.iter().all(|w| !w.contains("very large")), "{:?}", ula.warnings);
     assert!(parse_ports("0").is_err() && parse_ports("65536").is_err() && parse_ports("-1").is_err());
     assert!(parse_ports("1,65535,80-443").is_ok());
     assert!(parse_ports("90-80").unwrap_err().contains("reversed"));
@@ -889,6 +897,27 @@ fn a_share_port_the_firewall_blocks_is_found_out() {
     assert!(r.e.would_allow_tcp(lan, 8081));
     r.e.disable_now("admin").unwrap();
     assert!(r.e.would_allow_tcp(lan, 8081), "no firewall in force: nothing is blocked");
+}
+
+#[test]
+fn the_media_server_preset_opens_its_tcp_range_and_the_finding_port_to_the_local_network_only() {
+    use crate::ruleset::{eval, Packet, MEDIA_PORTS, SSDP_PORT};
+    let mut r = rig();
+    r.e.boot(false);
+    let (lan, far) = (ip("192.168.1.20"), ip("8.8.8.8"));
+    assert!(!r.e.would_allow_tcp(lan, MEDIA_PORTS.0), "blocked by default");
+    let mut c = r.e.config().clone();
+    c.set_preset(Preset::MediaServer, true);
+    r.e.propose(c, "admin").unwrap();
+    assert_eq!(Preset::from_id("media"), Some(Preset::MediaServer));
+    assert!(r.e.would_allow_tcp(lan, MEDIA_PORTS.0) && r.e.would_allow_tcp(lan, MEDIA_PORTS.1));
+    assert!(!r.e.would_allow_tcp(lan, MEDIA_PORTS.1 + 1) && !r.e.would_allow_tcp(lan, MEDIA_PORTS.0 - 1), "only the range");
+    assert!(!r.e.would_allow_tcp(far, MEDIA_PORTS.0), "the internet never reaches it");
+    let b = crate::ruleset::build(r.e.config(), r.e.resolved(), &crate::ruleset::Ctx::default()).unwrap();
+    let udp = |src, port| Packet { iif: "eth0".into(), ct: crate::ruleset::CT_NEW, src, l4: 17, dport: port, icmp_type: 0 };
+    assert!(eval(&b.ruleset, &udp(lan, SSDP_PORT)), "players find it by UDP 1900");
+    assert!(!eval(&b.ruleset, &udp(far, SSDP_PORT)));
+    assert!(!eval(&b.ruleset, &udp(lan, MEDIA_PORTS.0)), "the playing ports are TCP only");
 }
 
 #[test]

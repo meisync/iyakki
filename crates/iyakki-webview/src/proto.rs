@@ -156,6 +156,10 @@ pub enum ToHelper {
     /// the helper but reported with `NavigationBlocked`, so the shell opens it in the Browser tile. Each is `scheme://host[:port]`, lower case.
     /// An empty list (and a helper that never got the message) means no limit, as the Browser tile has. At most 16 are read.
     SiteScope(Vec<String>),
+    /// The most the engine's disk cache may hold (optional 0x1a, F-BROX-17): `disk_mb` megabytes, 0 = no limit (above 65536 is read as none). The
+    /// helper empties the engine's disk cache when its folder is above the limit. The shell sends it with the person's Speed and memory
+    /// choice before a page and again when the choice changes. A helper without it keeps the cache as it always did.
+    CacheLimit { disk_mb: u32 },
     /// The shell has copied the pixels of this slot; the helper may draw into it again.
     Ack(u8),
     Quit,
@@ -209,6 +213,10 @@ pub enum FromHelper {
     /// What the page says about itself, once its document is ready: the address of its web app manifest (empty if none), the manifest's
     /// text (empty when it could not be read or is over 100 000 bytes) and the address of its icon (empty if none). Optional (0x96).
     PageMeta { manifest_url: String, manifest: String, icon: String },
+    /// The headings, links, buttons, form fields, pictures and landmarks of the page that are on screen, as a JSON list of
+    /// `{"r": role, "n": name, "l": level, "x": .., "y": .., "w": .., "h": ..}` with the boxes in CSS pixels of the viewport (at most 160;
+    /// F-A11Y-06). Optional (0x97): sent when the document is ready and after a scroll, a resize or a change, at most twice a second.
+    PageAccess(String),
 }
 
 /// Bits of the `kinds` byte of `PermissionRequest` and `CaptureState`.
@@ -339,6 +347,7 @@ impl ToHelper {
     pub const CLEAR_CACHE: u8 = 0x17;
     pub const MEDIA_POLICY: u8 = 0x18;
     pub const SITE_SCOPE: u8 = 0x19;
+    pub const CACHE_LIMIT: u8 = 0x1a;
 
     /// The whole framed message, ready to write to the socket.
     pub fn encode(&self) -> Vec<u8> {
@@ -449,6 +458,11 @@ impl ToHelper {
                 w.u32(*max_height).u8(*codecs as u8);
                 w.finish()
             }
+            ToHelper::CacheLimit { disk_mb } => {
+                let mut w = W::new(Self::CACHE_LIMIT);
+                w.u32(*disk_mb);
+                w.finish()
+            }
             ToHelper::SiteScope(list) => {
                 let mut w = W::new(Self::SITE_SCOPE);
                 let list: Vec<&String> = list.iter().take(MAX_SCOPE).collect();
@@ -511,6 +525,7 @@ impl ToHelper {
             Self::EXTENSIONS => ToHelper::Extensions(crate::ext::ExtBlob(r.0.to_vec())),
             Self::CLEAR_CACHE => ToHelper::ClearCache,
             Self::MEDIA_POLICY => ToHelper::MediaPolicy { max_height: r.u32()?, codecs: r.u8()? != 0 },
+            Self::CACHE_LIMIT => ToHelper::CacheLimit { disk_mb: r.u32()? },
             Self::SITE_SCOPE => {
                 let n = r.u8()? as usize;
                 if n > MAX_SCOPE {
@@ -554,6 +569,7 @@ impl FromHelper {
     pub const NAVIGATION_BLOCKED: u8 = 0x94;
     pub const KEY_SYSTEM: u8 = 0x95;
     pub const PAGE_META: u8 = 0x96;
+    pub const PAGE_ACCESS: u8 = 0x97;
 
     pub fn encode(&self) -> Vec<u8> {
         match self {
@@ -630,6 +646,7 @@ impl FromHelper {
                 w.str(manifest_url).str(manifest).str(icon);
                 w.finish()
             }
+            FromHelper::PageAccess(s) => str_msg(Self::PAGE_ACCESS, s),
             FromHelper::ScriptResult { id, ok, json } => {
                 let mut w = W::new(Self::SCRIPT_RESULT);
                 w.u32(*id).u8(*ok as u8).str(json);
@@ -672,6 +689,7 @@ impl FromHelper {
             Self::RESPONSE_HEADERS => FromHelper::ResponseHeaders { url: r.str()?, status: r.u32()?, headers: r.str()? },
             Self::NAVIGATION_BLOCKED => FromHelper::NavigationBlocked(r.str()?),
             Self::KEY_SYSTEM => FromHelper::KeySystem(r.str()?),
+            Self::PAGE_ACCESS => FromHelper::PageAccess(r.str()?),
             Self::PAGE_META => FromHelper::PageMeta { manifest_url: r.str()?, manifest: r.str()?, icon: r.str()? },
             Self::SCRIPT_RESULT => FromHelper::ScriptResult { id: r.u32()?, ok: r.bool()?, json: r.str()? },
             t => return Err(DecodeError::Unknown(t)),
@@ -753,6 +771,7 @@ mod tests {
         vec![
             ToHelper::SiteScope(vec!["https://www.shop.example".into(), "http://localhost:8080".into()]),
             ToHelper::SiteScope(vec![]),
+            ToHelper::CacheLimit { disk_mb: 512 },
             ToHelper::Hello(Hello { w: 1920, h: 1080, scale_pct: 150, user_agent: "Chrome/130".into(), profile: "/var/lib/iyakki/web-profile/a".into(), locale: "en-US".into(), allow_hosts: vec!["*".into(), "ünï.example".into()], ..Hello::default() }),
             ToHelper::Navigate("https://example.org/?q=ü&r=2".into()),
             ToHelper::Reload { hard: true },
@@ -802,6 +821,7 @@ mod tests {
             FromHelper::NavigationBlocked("https://b.org/".into()),
             FromHelper::KeySystem("com.widevine.alpha".into()),
             FromHelper::PageMeta { manifest_url: "https://a.org/m.json".into(), manifest: "{\"name\":\"A\"}".into(), icon: "/i.png".into() },
+            FromHelper::PageAccess("[{\"r\":\"heading\",\"n\":\"Pricing\",\"l\":2,\"x\":0,\"y\":10,\"w\":200,\"h\":30}]".into()),
             FromHelper::DevEvent("F\u{1f}GET\u{1f}404\u{1f}120\u{1f}https://a.org/x.js\u{1f}".into()),
             FromHelper::PermissionRequest { id: 3, kinds: media_kind::MICROPHONE | media_kind::CAMERA, origin: "https://meet.example".into() },
             FromHelper::CaptureState(media_kind::CAMERA),
@@ -834,6 +854,9 @@ mod tests {
         assert_eq!(ToHelper::decode(0x17, &[]), Ok(ToHelper::ClearCache));
         assert_eq!(ToHelper::MediaPolicy { max_height: 720, codecs: true }.encode(), vec![6, 0, 0, 0, 0x18, 0xD0, 2, 0, 0, 1]);
         assert_eq!(ToHelper::decode(0x18, &[0xD0, 2, 0, 0, 0]), Ok(ToHelper::MediaPolicy { max_height: 720, codecs: false }));
+        assert_eq!(ToHelper::CacheLimit { disk_mb: 512 }.encode(), vec![5, 0, 0, 0, 0x1a, 0, 2, 0, 0]);
+        assert_eq!(ToHelper::decode(0x1a, &[0, 0, 0, 0]), Ok(ToHelper::CacheLimit { disk_mb: 0 }));
+        assert!(ToHelper::decode(0x1a, &[1, 2]).is_err(), "a cut message is refused");
         // the site scope: a count, then each origin; more than the limit is refused, not cut
         assert_eq!(ToHelper::SiteScope(vec!["https://a.org".into()]).encode(), [&[19u8, 0, 0, 0, 0x19, 1, 13, 0, 0, 0][..], b"https://a.org"].concat());
         assert_eq!(ToHelper::decode(0x19, &[0]), Ok(ToHelper::SiteScope(vec![])));

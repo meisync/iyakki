@@ -54,9 +54,8 @@ impl HostIo for OsIo {
 }
 
 fn random32() -> Result<[u8; 32], String> {
-    use std::io::Read;
     let mut b = [0u8; 32];
-    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).map_err(|e| format!("random bytes: {e}"))?;
+    iyakki_sec::random_fill(&mut b).map_err(|e| format!("random bytes: {e}"))?;
     Ok(b)
 }
 

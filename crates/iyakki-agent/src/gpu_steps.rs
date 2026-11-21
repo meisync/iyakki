@@ -6,6 +6,8 @@
 //! * [`run_nvidia`] ("NVIDIA GPU driver (CUDA)", stage 3): refuses early when the card or the image cannot do it, downloads the vendor
 //!   files at the person's click, loads the open modules, makes the device nodes, writes the CDI spec, deploys the device plugin, waits for
 //!   `nvidia.com/gpu` on the node and runs `nvidia-smi` in a pod.
+//! * [`run_rocm`] ("AMD GPU compute (ROCm)", stage 2): refuses at once while the images are not pinned or the card cannot do it, labels the node,
+//!   deploys AMD's device plugin, waits for `amd.com/gpu`, runs `rocminfo` in a pod and gives Lemonade (and Ollama, when its ROCm image is pinned) the card.
 //! * [`ensure_runtime`] puts back, after a start, what lives in RAM: the CDI specs, the module and the device nodes.
 //! * [`run_test`] sends the test prompt and reports tokens per second.
 //!
@@ -96,8 +98,13 @@ fn make_containerd_read_cdi(env: &mut dyn StepEnv, wait: Duration, poll: Duratio
 /// Create a smoke pod, wait for it to finish, read its log, delete it. Returns the log.
 fn run_smoke_pod(env: &mut dyn StepEnv, g: wl::Gpu, timeout: Duration, poll: Duration) -> Result<String, String> {
     let (name, manifest) = wl::smoke_pod(g);
+    run_pod(env, name, &manifest, timeout, poll)
+}
+
+/// Apply a pod (with the namespace), wait until it ends, return its log and delete it again.
+fn run_pod(env: &mut dyn StepEnv, name: &str, manifest: &str, timeout: Duration, poll: Duration) -> Result<String, String> {
     let _ = gpu_env(env)?.kubectl(&["-n", wl::NAMESPACE, "delete", "pod", name, "--ignore-not-found", "--wait=true"]);
-    env.kubectl_apply(name, &wl::namespace_and(&manifest))?;
+    env.kubectl_apply(name, &wl::namespace_and(manifest))?;
     let mut waited = Duration::ZERO;
     let phase = loop {
         let out = gpu_env(env)?.kubectl(&["-n", wl::NAMESPACE, "get", "pod", name, "-o", "jsonpath={.status.phase}"]);
@@ -491,6 +498,94 @@ pub fn run_nvidia(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Resu
     let detail = format!("driver {} · {} · pods request nvidia.com/gpu", nv::NVIDIA_VERSION, seen);
     crate::quickinstall::mark_verified(env, Item::GpuNvidia, &detail)?;
     env.say(&format!("[9/9] done: {detail}"));
+    Ok(())
+}
+
+// ------------------------------------------------------------------------------------------------ stage 2 (AMD compute)
+
+/// "AMD GPU compute (ROCm)" with the images this build carries. Fails closed while they are not pinned.
+pub fn run_rocm(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Result<(), String> {
+    run_rocm_with(env, &iyakki_shared::gpu_rocm::Pins::shipped(), wait, poll)
+}
+
+/// The same with the pins given (tests; and the build that carries the owner's digests).
+pub fn run_rocm_with(env: &mut dyn StepEnv, pins: &iyakki_shared::gpu_rocm::Pins, wait: Duration, poll: Duration) -> Result<(), String> {
+    use crate::gpu_rocm as rocm;
+    env.say(&format!("[0/7] AMD GPU compute (ROCm); licence: {}", Item::GpuRocm.licence()));
+    pins.check()?;
+    let root = gpu_env(env)?.root();
+    let gpus = gpu::detect(&root);
+    let mut usable = Vec::new();
+    for g in &gpus {
+        let (ok, why) = rocm::rocm_verdict(g, &root);
+        if g.vendor == gpu::Vendor::Amd {
+            env.say(&format!("  {} {}\n      {why}", if ok { "usable:" } else { "not usable:" }, g.line()));
+        }
+        if ok {
+            usable.push(g.name.clone());
+        }
+    }
+    if usable.is_empty() {
+        return Err("no AMD card here can run ROCm for pods (reasons above); local models keep using Vulkan".into());
+    }
+    env.say("[1/7] checking the cluster");
+    crate::quickinstall::wait_for_cluster(env, wait, poll)?;
+    env.say(&format!("[2/7] marking this node ({}=true) so AMD's device plugin runs only here", rocm::NODE_LABEL));
+    let out = gpu_env(env)?.kubectl(&["label", "nodes", "--all", &format!("{}=true", rocm::NODE_LABEL), "--overwrite"]);
+    if out.code != Some(0) {
+        return Err(format!("could not label the node: {}", out.combined().trim()));
+    }
+    env.say("[3/7] deploying AMD's device plugin (Apache-2.0; the cluster pulls the pinned image now)");
+    let manifest = rocm::amd_plugin_manifest(&pins.plugin, wl::KUBELET_DIR)?;
+    let out = env.kubectl_apply("amd-device-plugin", &manifest)?;
+    say_lines(env, &out, 4);
+    let mut waited = Duration::ZERO;
+    loop {
+        let o = gpu_env(env)?.kubectl(&["get", "nodes", "-o", "json"]);
+        let n = wl::node_resource_count(&o.stdout, iyakki_shared::gpu_rocm::RESOURCE);
+        if n > 0 {
+            env.say(&format!("  the node reports {} = {n}", iyakki_shared::gpu_rocm::RESOURCE));
+            break;
+        }
+        if waited >= Duration::from_secs(900) {
+            let logs = gpu_env(env)?.kubectl(&["-n", "kube-system", "logs", "daemonset/iyakki-amd-gpu-device-plugin", "--tail=15"]);
+            return Err(format!("the node does not report {} after 15 minutes. Plugin log: {}", iyakki_shared::gpu_rocm::RESOURCE, logs.combined().lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join(" | ")));
+        }
+        env.sleep(poll);
+        waited += poll;
+    }
+    env.say("[4/7] smoke test: rocminfo in a pod that asks for one card (the first run pulls the ROCm image)");
+    let pod = rocm::rocm_smoke_pod(&pins.smoke, wl::NAMESPACE)?;
+    let log = run_pod(env, "gpu-smoke-rocm", &pod, Duration::from_secs(2400), poll)?;
+    say_lines(env, &log, 14);
+    let seen = rocm::rocm_smoke_ok(&log)?;
+    env.say(&format!("  the pod sees: {seen}"));
+    env.say("[5/7] Lemonade");
+    let data = gpu_env(env)?.data();
+    if lemonade_deployed(env) && lemonade_compute(&data) == Compute::Cpu {
+        env.say("  Lemonade is set to run on the CPU; it keeps that");
+    } else if lemonade_deployed(env) {
+        let out = gpu_env(env)?.kubectl(&["-n", wl::NAMESPACE, "patch", "deployment", "lemonade", "--type", "strategic", "-p", &rocm::lemonade_rocm_patch()]);
+        if out.code != Some(0) {
+            return Err(format!("could not give Lemonade the card: {}", out.combined().trim()));
+        }
+        env.say("  Lemonade got amd.com/gpu and the ROCm backend; it restarts");
+    } else {
+        env.say("  Lemonade is not installed; install it from Store -> Setup and run this step again to give it the card");
+    }
+    env.say("[6/7] Ollama");
+    if !ollama_deployed(env) {
+        env.say("  Ollama is not installed; nothing to do");
+    } else if let Some(img) = pins.ollama_image() {
+        let patch = rocm::ollama_rocm_patch(Some(img))?;
+        let out = gpu_env(env)?.kubectl(&["-n", wl::NAMESPACE, "patch", "deployment", crate::quickinstall::ollama_cluster::NAME, "--type", "strategic", "-p", &patch]);
+        env.say(&if out.code == Some(0) { "  Ollama got amd.com/gpu and its ROCm image; it restarts".to_string() } else { format!("  note: Ollama could not be given the card: {}", out.combined().trim()) });
+    } else {
+        env.say("  Ollama stays as it is: no ROCm build of it is pinned yet");
+    }
+    let detail = format!("{seen} · pods request {}: 1", iyakki_shared::gpu_rocm::RESOURCE);
+    crate::quickinstall::mark_verified(env, Item::GpuRocm, &detail)?;
+    env.say(&format!("[7/7] done: {detail}"));
     Ok(())
 }
 

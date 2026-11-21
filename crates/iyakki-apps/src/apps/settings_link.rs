@@ -17,5 +17,33 @@ impl super::SettingsApp {
         let probe: Option<iyakki_shared::wifilink::ProbeJob> = iyakki_shared::wifilink::probe_job(cx.data_dir());
         self.link.tick(now, Some(link), probe);
     }
-}
 
+    /// The key `o`: the page asked for a sign-in (a hotel or cafe network) is opened in the Browser tile. Only an http or https address
+    /// the sign-in check found is opened; with none, it says so and nothing opens.
+    pub(super) fn open_sign_in(&mut self, _cx: &super::AppCx) {
+        match self.link.sign_in_url().filter(|u| u.starts_with("http://") || u.starts_with("https://")) {
+            Some(u) => {
+                crate::apps::browser::request_open(&u);
+                self.hw.ask_shell("browser", u);
+                self.ok("Opening the network's sign-in page in the Browser.".to_string());
+            }
+            None => self.fail("This network has not asked for a sign-in (or no check address is set up)."),
+        }
+    }
+
+    /// The key `v`: with two or more WiFi adapters, use the next one for scanning and joining; remembered in `wifi-adapter.txt`.
+    pub(super) fn use_next_adapter(&mut self, _cx: &super::AppCx) {
+        let all = self.wifi.adapters();
+        if all.len() < 2 {
+            return self.fail("This computer has one WiFi adapter (or none): there is nothing to switch.");
+        }
+        let cur = self.wifi.iface();
+        let next = all.iter().position(|a| Some(a) == cur.as_ref()).map_or(0, |i| (i + 1) % all.len());
+        let name = all[next].clone();
+        if let Err(e) = self.wifi.known.set_chosen_adapter(Some(&name)) {
+            return self.fail(format!("The choice could not be kept: {e}"));
+        }
+        self.link = Default::default();
+        self.ok(format!("WiFi adapter {name} is in use now."));
+    }
+}

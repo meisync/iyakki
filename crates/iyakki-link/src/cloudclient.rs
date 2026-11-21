@@ -554,6 +554,11 @@ pub(crate) fn read_head(tls: &mut Tls) -> Result<(u16, Vec<(String, String)>, Ve
 
 /// One HTTP request on a fresh connection; returns status, headers and body.
 pub(crate) fn http(tls: &mut Tls, host: &str, method: &str, path: &str, extra: &[(&str, &str)], body: &[u8]) -> Result<(u16, Vec<(String, String)>, Vec<u8>), ConnErr> {
+    http_max(tls, host, method, path, extra, body, 1 << 20)
+}
+
+/// [`http`] with a larger answer allowed (a downloaded file): the body is read up to its `Content-Length` and at most `max` bytes.
+pub(crate) fn http_max(tls: &mut Tls, host: &str, method: &str, path: &str, extra: &[(&str, &str)], body: &[u8], max: usize) -> Result<(u16, Vec<(String, String)>, Vec<u8>), ConnErr> {
     let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n", body.len());
     for (k, v) in extra {
         req.push_str(&format!("{k}: {v}\r\n"));
@@ -563,8 +568,8 @@ pub(crate) fn http(tls: &mut Tls, host: &str, method: &str, path: &str, extra: &
     out.extend_from_slice(body);
     tls.write_all(&out).and_then(|_| tls.flush()).map_err(|e| ConnErr::Transient(format!("sending to the server: {e}")))?;
     let (status, headers, mut body) = read_head(tls)?;
-    let want = headers.iter().find(|(k, _)| k == "content-length").and_then(|(_, v)| v.parse::<usize>().ok()).unwrap_or(0).min(1 << 20);
-    let mut chunk = [0u8; 4096];
+    let want = headers.iter().find(|(k, _)| k == "content-length").and_then(|(_, v)| v.parse::<usize>().ok()).unwrap_or(0).min(max);
+    let mut chunk = [0u8; 16 * 1024];
     while body.len() < want {
         match tls.read(&mut chunk) {
             Ok(0) | Err(_) => break,

@@ -95,3 +95,9 @@ Recorded with `IYAKKI_COMPAT_RECORD=1 cargo test -p iyakki-core-api --test compa
 | Path | What | Tested by |
 |---|---|---|
 | `contract-hello-0.3.json` | the typed contract `hello` of contract 0.3 (the `appevents` domain, F-SDK-202), one machine | `iyakki-core-api/tests/compat_step4.rs` (`the_contract_0_3_hello_of_alpha7_...`; recorded by `record_alpha7_contract_hello_0_3`) |
+
+## What is in `alpha7/`
+
+| Path | What | Tested by |
+|---|---|---|
+| `devmode-state-v0.json` | the developer-mode state file (`devmode/state.json`, schema 0): on, by whom, since, until, port | `iyakki-agent` `compat_formats_tests` (`the_developer_mode_state_alpha7_wrote_...`) |

@@ -8,7 +8,7 @@ use iyakki_shared::aiconfig::AiConfig;
 use iyakki_shared::mcp::ServerSpec;
 use iyakki_core_api::HostApi;
 
-use crate::accounts::{AuditLog, Session, UserStore};
+use crate::accounts::{Session, UserStore};
 use crate::gfx::{Face, Gfx, Icon};
 use crate::ui::{Event, R, TEXT};
 
@@ -74,7 +74,7 @@ pub mod chat_hostname;
 pub mod chat_themes;
 
 /// The accounts as the core's source of a person's policy (for the embedded terminal, which checks every line against it).
-pub struct StorePolicies(pub std::sync::Arc<std::sync::Mutex<iyakki_accounts::UserStore>>);
+pub struct StorePolicies(pub iyakki_accounts::UsersRef);
 
 impl iyakki_core_api::PolicySource for StorePolicies {
     fn policy_of(&self, user: &str) -> Option<iyakki_sec::policy::Policy> {
@@ -83,10 +83,12 @@ impl iyakki_core_api::PolicySource for StorePolicies {
 }
 pub mod chat_monitor;
 pub mod chat_resume;
+pub mod firewall_tile;
 pub mod markdown;
 pub mod download_open;
 pub mod chat_settings;
 pub mod gemvoice;
+pub mod core_run;
 pub mod tool_chain;
 pub mod chat_settings_assistant;
 pub(crate) mod model_picker;
@@ -96,11 +98,16 @@ pub mod browser_assist;
 pub mod browser_av;
 pub mod site_apps;
 pub mod browser_badsites;
+pub mod browser_certview;
+pub mod browser_passkeys;
+pub mod browser_push;
+pub mod shared_app;
 pub mod browser_block;
 pub mod browser_live;
 pub mod browser_chrome;
 pub mod browser_groups;
 pub mod browser_headers;
+pub mod browser_plugins;
 pub mod browser_config;
 pub mod browser_dark;
 pub mod browser_data;
@@ -120,6 +127,7 @@ pub mod browser_images;
 pub mod browser_sound;
 pub mod soundask;
 pub mod browser_speed;
+pub mod browser_tuning;
 pub mod browser_typo;
 pub mod browser_logins;
 pub mod browser_persist;
@@ -141,6 +149,7 @@ pub mod flows_hook;
 pub mod flows_icons;
 pub mod flows_tip;
 pub mod flows_keys;
+mod flows_remote;
 pub mod flows_paint;
 pub mod flows_props;
 pub mod flows_run;
@@ -148,6 +157,7 @@ pub mod flows_view;
 pub mod data;
 pub mod data_port;
 pub mod dropattach;
+pub mod pastepic;
 pub mod hostfiles;
 pub mod mcp;
 pub mod mcp_port;
@@ -157,8 +167,10 @@ pub mod mediaplay;
 pub mod multiline;
 pub use iyakki_uikit::neon;
 pub mod mesh;
+pub mod mesh_port;
 pub mod radio;
 pub mod sample;
+pub mod sdk_apps;
 pub mod sdk_browser;
 pub mod sdk_media;
 pub mod assistant_port;
@@ -166,11 +178,14 @@ pub mod cameras_port;
 pub mod radio_port;
 pub mod rag;
 pub mod runs;
+pub mod runs_port;
 pub mod scan;
+pub mod scan_port;
 pub mod skills;
 pub mod skills_port;
 pub mod store;
 pub(crate) mod store_drivers;
+pub mod unserved;
 pub mod usage;
 pub mod voice;
 mod voice_mine;
@@ -188,12 +203,15 @@ pub mod camera_port;
 pub use iyakki_uikit::card;
 pub mod tile;
 pub mod tile_embed;
+pub mod tile_embed_page;
+pub mod tile_remote;
 pub mod tile_wasm;
 pub mod inbox;
 pub mod jobs_ui;
 pub mod edit;
 pub mod edit_preview;
-pub mod board;
+/// The feature board lives in the crate `iyakki-tile-board` (alpha.7 S2); the old path stays.
+pub use iyakki_tile_board as board;
 pub mod component;
 pub mod ide;
 pub mod ide_browser;
@@ -219,13 +237,18 @@ pub mod disks_tile;
 mod disks_tile_ui;
 pub mod checkup;
 mod checkup_ui;
+pub mod checkup_port;
 pub mod doctor;
 pub(crate) mod doctor_facts;
 mod doctor_ui;
+mod doctor_manual;
+mod doctor_manual_ui;
+pub mod doctor_port;
 pub mod cluster_host;
 pub mod cluster_switch;
 pub mod clusters_panel;
 pub mod linuxwin;
+pub mod linuxwin_port;
 mod k8s_cloud;
 mod k8s_tile_ui;
 pub mod platform_services;
@@ -275,8 +298,8 @@ pub struct AppCx {
     pub host: Arc<dyn HostApi>,
     pub cfg: AiConfig,
     pub chat: Arc<dyn ChatBackend>,
-    pub audit: Arc<AuditLog>,
-    pub store: Arc<Mutex<UserStore>>,
+    pub audit: Arc<dyn iyakki_agent_api::AuditApi>,
+    pub store: crate::accounts::UsersRef,
     pub mcp_servers: Vec<ServerSpec>,
     pub services: Arc<dyn iyakki_agent_api::ServicesHandle>,
     /// Web access for the browser (checked against the user's host policy by the browser itself).
@@ -332,21 +355,31 @@ impl AppCx {
     }
 
     /// The device watch (the things plugged in and the ones the person trusts).
-    pub fn devwatch(&self) -> &Arc<iyakki_shared::devwatch::DeviceWatch> {
-        &self.services.devwatch()
+    pub fn devwatch(&self) -> Arc<dyn iyakki_agent_api::DevWatchApi> {
+        self.services.devwatch()
     }
 
     /// The browser state (the person's consent, the jobs the shell serves) and the screen and camera hubs.
-    pub fn browser(&self) -> &iyakki_shared::browserconsent::BrowserState {
-        &self.services.browser()
+    pub fn browser(&self) -> Arc<dyn iyakki_agent_api::BrowserStateApi> {
+        self.services.browser()
     }
 
-    pub fn screen(&self) -> &iyakki_shared::screencap::ScreenCapture {
-        &self.services.screen()
+    /// The questions the assistant asks about the person's browser and their answers.
+    pub fn browser_consent(&self) -> Arc<dyn iyakki_agent_api::ConsentApi> {
+        self.services.browser_consent()
     }
 
-    pub fn camera(&self) -> &iyakki_shared::camtools::CameraHub {
-        &self.services.camera()
+    /// The queue between the assistant's browser tools and the page engine the shell services.
+    pub fn browser_jobs(&self) -> Arc<dyn iyakki_agent_api::BrowserJobsApi> {
+        self.services.browser_jobs()
+    }
+
+    pub fn screen(&self) -> Arc<dyn iyakki_agent_api::ScreenCaptureApi> {
+        self.services.screen()
+    }
+
+    pub fn camera(&self) -> Arc<dyn iyakki_agent_api::CameraHubApi> {
+        self.services.camera()
     }
 
     /// The chat sessions, skills, runs, MCP servers, skill packages and background jobs of the person (stores that stay in the agent).
@@ -380,8 +413,8 @@ impl AppCx {
     }
 
     /// The developer tools (the browser's console and network log).
-    pub fn devtools(&self) -> &iyakki_shared::devtools::DevTools {
-        &self.services.devtools()
+    pub fn devtools(&self) -> Arc<dyn iyakki_agent_api::DevToolsApi> {
+        self.services.devtools()
     }
 
     // --- the small reads of the person's services that no store owns (piece 10): one accessor each, so the day `services` goes only these bodies change.
@@ -463,28 +496,42 @@ impl AppCx {
     }
 
     /// The stores whose type is already shared data (no agent type): the settings, the inbox, the calendar, the study plans, the secrets, the knowledge base.
-    pub fn settings(&self) -> &Arc<Mutex<iyakki_shared::settings::SettingsStore>> {
-        &self.services.settings()
+    pub fn settings(&self) -> iyakki_agent_api::SettingsRef {
+        self.services.settings()
     }
 
-    pub fn inbox(&self) -> &iyakki_shared::inbox::Inbox {
-        &self.services.inbox()
+    pub fn inbox(&self) -> Arc<dyn iyakki_agent_api::InboxApi> {
+        self.services.inbox()
     }
 
-    pub fn calendar(&self) -> &iyakki_shared::calendar::CalendarStore {
-        &self.services.calendar()
+    pub fn calendar(&self) -> Arc<dyn iyakki_agent_api::CalendarApi> {
+        self.services.calendar()
     }
 
-    pub fn study(&self) -> &iyakki_shared::study::StudyStore {
-        &self.services.study()
+    pub fn study(&self) -> Arc<dyn iyakki_agent_api::StudyApi> {
+        self.services.study()
+    }
+
+    pub fn study_calendar(&self) -> Arc<dyn iyakki_agent_api::StudyCalendarApi> {
+        self.services.study_calendar()
     }
 
     pub fn secrets(&self) -> &iyakki_shared::vault::Secrets {
         &self.services.secrets()
     }
 
-    pub fn kb(&self) -> &Arc<Mutex<iyakki_memx::kb::KnowledgeBase>> {
-        &self.services.kb()
+    /// The secrets without their values: presence, provider list and provider test (the part that can cross the core socket).
+    pub fn secrets_api(&self) -> Arc<dyn iyakki_agent_api::member_stores::SecretsApi> {
+        self.services.secrets_api()
+    }
+
+    pub fn kb(&self) -> Arc<dyn iyakki_agent_api::KnowledgeBaseApi> {
+        self.services.kb()
+    }
+
+    /// The knowledge base as the source of the workspace history.
+    pub fn kb_source(&self) -> Arc<dyn iyakki_memx::kb::KbSource> {
+        self.services.kb_source()
     }
 
     /// The voice and sound settings, a copy of what the settings hold.
@@ -501,8 +548,8 @@ impl AppCx {
     }
 
     /// What the last look at each external coding agent found (shared data type).
-    pub fn ext_status(&self) -> &Arc<iyakki_shared::extagent::StatusCache> {
-        &self.services.ext_status()
+    pub fn ext_status(&self) -> Arc<dyn iyakki_agent_api::ExtStatusApi> {
+        self.services.ext_status()
     }
 
     // ---- split G: the model and speech side
@@ -528,13 +575,13 @@ impl AppCx {
     }
 
     /// The secrets the assistant asked the person for and that wait for an answer (shared data type).
-    pub fn secret_requests(&self) -> &iyakki_shared::secretreq::SecretRequests {
-        &self.services.secret_requests()
+    pub fn secret_requests(&self) -> Arc<dyn iyakki_agent_api::SecretRequestsApi> {
+        self.services.secret_requests()
     }
 
     /// The token usage log (shared data type, a file in the data folder).
-    pub fn usage(&self) -> &iyakki_shared::usagelog::UsageLog {
-        &self.services.usage()
+    pub fn usage(&self) -> Arc<dyn iyakki_agent_api::UsageLogApi> {
+        self.services.usage()
     }
 
     /// The store, the update check and the system components as narrow facets (iyakki-agent-api `store`): the handle a test gave, or the real one over
@@ -561,6 +608,10 @@ pub trait App {
     }
     fn icon(&self) -> Icon;
     fn accent(&self) -> [u8; 4];
+    /// True for the screen that stands in for an app whose core object this program is not given (`unserved::UnservedApp`).
+    fn is_unserved(&self) -> bool {
+        false
+    }
     /// One-line key help shown in the header.
     fn hint(&self) -> String;
     /// Every key and click this screen understands, one per line, for the F1 help popup. By default the header
@@ -572,6 +623,16 @@ pub trait App {
     /// The screen is about to lock and the person's protected browser data is sealed with it: an app that holds a web engine on that data
     /// lets it go first (F-VAULT-08, KI-742). The default does nothing.
     fn on_lock(&mut self, _cx: &AppCx) {}
+    /// Display-list mode (F-SDK-29): the app written against the UI SDK as the first frame of a pane `w` by `h` logical units, as display list
+    /// text, for a client that draws it itself. `None` (the default) for every app that is not an SDK app.
+    fn list_frame(&mut self, _w: f32, _h: f32, _cx: &AppCx) -> Option<String> {
+        None
+    }
+    /// Display-list mode: apply a batch of the SDK's input lines and answer the next frame and whether the person left the app (`Back`). `None`
+    /// (the default) for an app that is not an SDK app; `Some(Err(why))` for a bad batch (nothing applied).
+    fn list_apply(&mut self, _batch: &str, _cx: &AppCx) -> Option<Result<(String, bool), String>> {
+        None
+    }
     /// Asked when the person clicks Back: false keeps the app open (it may be asking something first, and then returns
     /// `Flow::Back` itself when the answer is yes).
     fn leave_guard(&mut self, _cx: &AppCx) -> bool {
@@ -635,6 +696,11 @@ pub trait App {
     }
     /// The shell opened this app because another one asked for a particular thing in it (`platform:private-store` in Settings).
     fn open_item(&mut self, _item: &str, _cx: &AppCx) {}
+    /// What this app holds that a restart of the shell can put back through [`App::open_item`] (the path of the file an editor has open):
+    /// plain text, never a secret or typed text. Kept in the resume ticket of a developer machine (F-SHELL-65). The default holds nothing.
+    fn resume_item(&self) -> Option<String> {
+        None
+    }
     /// Something changed on screen without a key or click (a frame arrived from an embedded engine): the shell draws again.
     /// Asked after every heartbeat; true once per change.
     fn wants_redraw(&mut self) -> bool {
@@ -730,6 +796,11 @@ pub trait App {
     #[cfg(any(test, feature = "testing"))]
     fn wasm_tile_text(&mut self) -> String {
         String::new()
+    }
+    /// One more handle to the same instance when this app is shared between desktop views (F-VIEW-02, [`shared_app::SharedApp`]); `None` for
+    /// an app that is not shared (the default).
+    fn share_handle(&self) -> Option<Box<dyn App>> {
+        None
     }
     /// Draw into `area` (below the header). `tick` advances ~30 times a second.
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64);
@@ -838,6 +909,8 @@ mod checkup_tests;
 #[cfg(test)]
 mod doctor_tests;
 #[cfg(test)]
+mod doctor_manual_tests;
+#[cfg(test)]
 mod linuxwin_tests;
 #[cfg(test)]
 mod ide_tests;
@@ -850,6 +923,8 @@ mod dash_tests;
 #[cfg(test)]
 mod flows_tests;
 #[cfg(test)]
+mod flows_jobs_tests;
+#[cfg(test)]
 pub(crate) mod lemonade_fake;
 #[cfg(test)]
 pub(crate) mod pdf_live_check;
@@ -861,6 +936,7 @@ pub mod tests {
     #[cfg(test)]
     use crate::agent_handles_b2::real::RealServices as _;
     use super::*;
+    use crate::accounts::AuditLog;
     use iyakki_sec::policy::{Policy, Role};
 
     #[derive(Default)]
@@ -898,6 +974,41 @@ pub mod tests {
         crate::testmem::start();
         // one folder per call (parallel tests ask for the same tags) and a short path (sockets live below it)
         (crate::testkit::kit().expect("install a test kit (iyakki_apps::testkit::install) before the first test helper").short_dir)("iyakki-shell", tag)
+    }
+
+    /// The pure-Rust fake helper of `iyakki-webview` (`iyakki-fake-webview`), built on demand: `cargo test` does not build the programs
+    /// of other crates. It does not matter how the test program was started (by cargo, or run directly from its path by a flake hunt
+    /// or a debugger): the profile folder is found from the program's own place (`<target>/<profile>/deps/<program>`), the build is
+    /// told that target folder and profile explicitly, runs in the crate's folder with the cargo that built the tests, and says why
+    /// it failed.
+    pub fn fake_webview_binary() -> std::path::PathBuf {
+        static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one_at_a_time = BUILD.lock().unwrap_or_else(|e| e.into_inner());
+        let exe = std::env::current_exe().unwrap();
+        let profile_dir = match exe.parent() {
+            Some(d) if d.file_name().is_some_and(|n| n == "deps") => d.parent().unwrap().to_path_buf(),
+            _ => exe.ancestors().skip(1).find(|d| d.file_name().is_some_and(|n| n == "debug" || n == "release")).expect("the profile folder (target/debug) above the test program").to_path_buf(),
+        };
+        let bin = profile_dir.join("iyakki-fake-webview");
+        if bin.is_file() {
+            return bin;
+        }
+        let target_dir = profile_dir.parent().expect("the target folder above the profile folder");
+        let profile = profile_dir.file_name().and_then(|n| n.to_str()).unwrap_or("debug");
+        let cargo = option_env!("CARGO").map(String::from).or_else(|| std::env::var("CARGO").ok()).unwrap_or_else(|| "cargo".into());
+        let mut cmd = std::process::Command::new(&cargo);
+        // cargo finds its compiler next to itself: the folder of the cargo that built the tests goes first on the path, so a program
+        // started from a bare environment (no rustup shims on its path) still builds
+        if let Some(dir) = std::path::Path::new(&cargo).parent().filter(|d| !d.as_os_str().is_empty()) {
+            let mut paths = vec![dir.to_path_buf()];
+            paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+            cmd.env("PATH", std::env::join_paths(paths).expect("a path"));
+        }
+        cmd.current_dir(env!("CARGO_MANIFEST_DIR")).args(["build", "-q", "--locked", "-p", "iyakki-webview", "--bin", "iyakki-fake-webview", "--profile", if profile == "debug" { "dev" } else { profile }]);
+        cmd.arg("--target-dir").arg(target_dir);
+        let out = cmd.output().expect("could not start cargo to build the fake helper");
+        assert!(out.status.success() && bin.is_file(), "could not build the fake helper in {}: {}", target_dir.display(), String::from_utf8_lossy(&out.stderr));
+        bin
     }
 
     /// An admin session (user "tester") with a store containing only that admin.
@@ -948,7 +1059,7 @@ pub mod tests {
         let mut store = UserStore::open(&d.join("users.json")).unwrap();
         store.create_first_admin("root", "rootpass12").unwrap();
         let services = services_in(&d, Arc::new(Offline));
-        let store = Arc::new(Mutex::new(store));
+        let store = crate::accounts::UsersRef::of_store(&Arc::new(Mutex::new(store)));
         AppCx {
             session: Session { user: "root".into(), role: Role::Admin, policy: Role::Admin.template() },
             host: Arc::new(MockHost::default()),
@@ -977,27 +1088,29 @@ pub mod tests {
         assert!(cx.services.is_real(), "AppCx::services is not the real implementation");
         let real = cx.services.real(); // panics unless the handle is the agent's Services
 
-        assert!(std::ptr::eq(cx.settings().as_ref(), real.settings.as_ref()), "settings are not the real store");
-        assert!(std::ptr::eq(cx.kb().as_ref(), real.kb.as_ref()), "the knowledge base is not the real store");
-        assert!(std::ptr::eq(cx.devwatch().as_ref(), real.devwatch.as_ref()), "the device watch is not the real one");
-        assert!(std::ptr::eq(cx.browser(), &real.browser) && std::ptr::eq(cx.screen(), &real.screen) && std::ptr::eq(cx.camera(), &real.camera));
-        assert!(std::ptr::eq(cx.devtools(), &real.devtools));
+        cx.settings().lock().unwrap().update(|s| s.tool_log_days = 123).unwrap();
+        assert_eq!(real.settings.lock().unwrap().get().tool_log_days, 123, "settings are not the real store");
+        cx.kb().add_document("selftest", "t", "t", "the knowledge base is the real store", Default::default()).unwrap();
+        assert_eq!(real.kb.lock().unwrap().docs("selftest").len(), 1, "the knowledge base is not the real store");
+        assert!(std::ptr::eq(Arc::as_ptr(&cx.devwatch()) as *const u8, Arc::as_ptr(&real.devwatch) as *const u8), "the device watch is not the real one");
+        assert!(std::ptr::eq(Arc::as_ptr(&cx.browser()) as *const u8, Arc::as_ptr(&real.browser) as *const u8) && std::ptr::eq(Arc::as_ptr(&cx.screen()) as *const u8, Arc::as_ptr(&real.screen) as *const u8) && std::ptr::eq(Arc::as_ptr(&cx.camera()) as *const u8, Arc::as_ptr(&real.camera) as *const u8));
+        assert!(std::ptr::eq(Arc::as_ptr(&cx.devtools()) as *const u8, Arc::as_ptr(&real.devtools) as *const u8));
         assert!(std::ptr::eq(cx.services.dir(), real.dir()), "the data folder is not the real one");
         let (a, b): (Arc<dyn iyakki_agent_api::SessionApi>, Arc<dyn iyakki_agent_api::SessionApi>) = (cx.sessions(), real.sessions.clone());
         assert!(std::ptr::eq(Arc::as_ptr(&a) as *const u8, Arc::as_ptr(&b) as *const u8), "the sessions are not the real store");
-        assert!(std::ptr::eq(cx.inbox(), cx.services.inbox()));
-        assert!(std::ptr::eq(cx.calendar(), cx.services.calendar()));
-        assert!(std::ptr::eq(cx.study(), cx.services.study()));
+        assert!(Arc::ptr_eq(&cx.inbox(), &cx.services.inbox()));
+        assert!(Arc::ptr_eq(&cx.calendar(), &cx.services.calendar()));
+        assert!(Arc::ptr_eq(&cx.study(), &cx.services.study()));
         assert!(std::ptr::eq(cx.secrets(), cx.services.secrets()));
-        assert!(Arc::ptr_eq(cx.settings(), &cx.services.settings()));
-        assert!(Arc::ptr_eq(cx.kb(), &cx.services.kb()));
-        assert!(Arc::ptr_eq(cx.ext_status(), &cx.services.ext_status()));
+        assert_eq!(cx.settings().lock().unwrap().get(), cx.services.settings().lock().unwrap().get());
+        assert_eq!(cx.kb().namespaces(), cx.services.kb().namespaces());
+        assert!(cx.ext_status().get("none").is_none());
         cx.settings().lock().unwrap().update(|s| s.voice.mic = "sweep-mic".into()).unwrap();
         assert_eq!(cx.services.voice_settings().mic, "sweep-mic");
         assert_eq!(cx.voice_settings().mic, "sweep-mic");
         // split G: the usage log and the secret requests are the same objects; the facets write through to the real stores
-        assert!(std::ptr::eq(cx.usage(), cx.services.usage()));
-        assert!(std::ptr::eq(cx.secret_requests(), cx.services.secret_requests()));
+        assert!(Arc::ptr_eq(&cx.usage(), &cx.services.usage()));
+        assert!(Arc::ptr_eq(&cx.secret_requests(), &cx.services.secret_requests()));
         cx.ai().usage_record("root", "p", "m", 3, 4);
         assert_eq!(cx.services.usage().entries(Some("root")).iter().map(|e| e.input + e.output).sum::<u64>(), 7);
         cx.ai().ext_session_set("chat1", "claude-code", "vendor-9");

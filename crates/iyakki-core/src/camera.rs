@@ -172,7 +172,7 @@ mod tests {
     fn boot_blocks_autoload_before_the_hotplug_helper_and_holds_cameras_back_before_the_deferred_drivers() {
         let boot = include_str!("boot.rs");
         let at = |s: &str| boot.find(s).unwrap_or_else(|| panic!("{s} not in boot.rs"));
-        assert!(at("crate::camera::block_autoload()") < at("/proc/sys/kernel/hotplug"), "before mdev can load uvcvideo");
+        assert!(at("crate::camera::block_autoload()") < at("kernelfacts::set_hotplug_helper"), "before mdev can load uvcvideo");
         assert!(at("crate::camera::block_autoload()") < at("load_aliases(&critical"), "before the coldplug");
         assert!(at("crate::camera::prepare_boot()") < at("load_deferred(&plan.deferred"));
         assert!(at("load_deferred(&plan.deferred") < at("crate::camera::start()"));

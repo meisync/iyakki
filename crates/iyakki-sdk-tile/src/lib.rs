@@ -9,14 +9,14 @@
 //!   dropped so the app is not told twice; a `Hit` that no pointer pair came before (a keyboard walk, switch access) is an action.
 //! * `guest` (wasm32 only): the six exports of the tile ABI over the SAMPLE app with core-backed storage and dock.
 //!
-//! Not here: names for a screen reader (the ABI's `Access` operation needs ABI 2 and the tile-kit guest speaks ABI 1), a pinch event
-//! (the ABI has one pointer), the shell's pane manager and the wallpaper port.
+//! Names for a screen reader travel as `Access` operations with the hit's state and a field's value (ABI 2 lists); a pinch arrives as the
+//! SDK's own gesture when the tile declared ABI 3 (feature `app-events`, an app crate's `tile` feature). Not here: the shell's pane manager.
 use iyakki_tile_abi::{measure_text, DisplayList as Tile, Event};
 use iyakki_tile_kit::App;
 use iyakki_ui_sdk::app::UiApp;
 use iyakki_ui_sdk::canvas::TextStyle;
 use iyakki_ui_sdk::desktop::{Arrangement, DockPort, MemWallpaper};
-use iyakki_ui_sdk::event::{Phase, Pointer, UiEvent, UiKey};
+use iyakki_ui_sdk::event::{Gesture, Phase, Pointer, UiEvent, UiKey};
 use iyakki_ui_sdk::host::Host;
 use iyakki_ui_sdk::list::{DisplayList as Sdk, ListCanvas};
 use iyakki_ui_sdk::look::Look;
@@ -161,6 +161,13 @@ impl<A: UiApp> App for SdkTile<A> {
             Event::Tick { dt_ms } => {
                 self.now_ms.set(now.saturating_add(u64::from(*dt_ms)));
                 host.tick(self.now_ms.get());
+            }
+            // the shell sends these only to a tile that declared tile ABI 3 (D-SDK-34-01); the app hears the same gesture as on the device
+            Event::Pinch { scale_milli, x, y } => {
+                host.event(&UiEvent::Gesture(Gesture::Pinch { scale: *scale_milli as f32 / 1000.0, x: *x as f32, y: *y as f32 }));
+            }
+            Event::PinchEnd { scale_milli } => {
+                host.event(&UiEvent::Gesture(Gesture::PinchEnd { scale: *scale_milli as f32 / 1000.0 }));
             }
             Event::Resize { w, h, .. } => host.resize((*w).max(1) as f32, (*h).max(1) as f32),
             // the Look comes from the SDK's own theme and the person's settings through the core, not from the page

@@ -127,3 +127,45 @@ fn start_codes_of_three_and_four_bytes_split_into_units() {
     assert_eq!(nals_from_annex_b(&[0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 2, 0, 0, 1, 0x65]), vec![vec![0x67, 1], vec![0x68, 2], vec![0x65]]);
     assert!(nals_from_annex_b(&[]).is_empty() && nals_from_annex_b(&[1, 2, 3]).is_empty());
 }
+
+#[test]
+fn a_recorder_wants_a_camera_while_its_guard_lives_and_two_recorders_count() {
+    let share = Arc::new(Share::default());
+    assert!(!share.is_wanted("c"));
+    let a = share.want("c");
+    let b = share.want("c");
+    assert!(share.is_wanted("c") && !share.is_wanted("other"));
+    drop(a);
+    assert!(share.is_wanted("c"), "the second recorder still wants it");
+    drop(b);
+    assert!(!share.is_wanted("c"));
+}
+
+#[test]
+fn the_recorder_reads_the_live_views_connection_as_a_feed_and_is_told_when_the_live_view_lets_go() {
+    let share = Arc::new(Share::default());
+    let units: Vec<Result<Unit, FeedErr>> = (1..=3).map(|i| Ok(Unit::Jpeg(vec![i]))).collect();
+    // the live view opened the camera first: it owns the connection and reads it itself
+    let mut live = share.tee("cam", Box::new(Script { kind: RecKind::Jpeg, params: vec![], units: units.into() }));
+    let mut as_recorder: Box<dyn RecFeed> = Box::new(share.subscribe("cam").expect("the live view holds the camera"));
+    assert_eq!(as_recorder.kind(), RecKind::Jpeg);
+    for i in 1..=3u8 {
+        assert_eq!(tag(&live.next().unwrap()), i);
+        assert_eq!(tag(&as_recorder.next().unwrap()), i, "the recorder gets every picture the live view reads");
+    }
+    drop(live);
+    assert!(!share.held("cam"));
+    assert!(matches!(as_recorder.next(), Err(FeedErr::Lost(_))), "so it opens a connection of its own after its pause");
+}
+
+#[test]
+fn the_owner_that_reads_its_own_connection_gets_the_parameter_sets_before_its_first_key_frame_only() {
+    let params = vec![0, 0, 0, 1, 0x67, 9];
+    let feed = Script { kind: RecKind::H264, params: params.clone(), units: vec![Ok(h264(false, 1)), Ok(h264(true, 2)), Ok(h264(true, 3))].into() };
+    let mut f = ParamsFirst::new(Box::new(feed));
+    assert_eq!(tag(&f.next().unwrap()), 1, "a delta frame is passed as it is");
+    let Unit::H264 { annex_b, .. } = f.next().unwrap() else { panic!() };
+    assert!(annex_b.starts_with(&params) && annex_b.ends_with(&[0x65, 2]));
+    let Unit::H264 { annex_b, .. } = f.next().unwrap() else { panic!() };
+    assert_eq!(annex_b, vec![0, 0, 0, 1, 0x65, 3], "the sets are sent once");
+}

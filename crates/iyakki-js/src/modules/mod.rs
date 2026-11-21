@@ -14,10 +14,13 @@ pub mod fetch;
 pub mod glyphs;
 pub mod idb;
 pub mod passkeys;
+pub mod push;
 pub mod storage;
 pub mod timers;
 pub mod url;
+pub mod brotli;
 pub mod webfont;
+pub mod woff2;
 
 pub use bridge::{Bridge, BridgeModule};
 pub use console::ConsoleModule;
@@ -29,6 +32,7 @@ pub use esm::EsmModule;
 pub use fetch::FetchModule;
 pub use idb::{IdbModule, IdbStore};
 pub use passkeys::{PasskeyHost, PasskeysModule};
+pub use push::{PushHost, PushModule, PushSub};
 pub use storage::{KeyValueStore, MemoryStore, StorageModule};
 #[cfg(test)]
 mod dom_extra_tests;

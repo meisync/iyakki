@@ -12,6 +12,29 @@ use iyakki_devctl::wifi_ext::{parse_link, portal_sentence, Link, LinkTimers, Por
 pub type LinkJob = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 pub type ProbeJob = Arc<dyn Fn() -> PortalState + Send + Sync>;
 
+/// What the last sign-in check on this machine found, kept for the event sources: 0 nothing checked, 1 free internet, 2 a sign-in page.
+/// Reading it sends nothing; it only changes when the check the person chose runs by itself.
+static PORTAL_SEEN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// `Some(true)` while the network wants a sign-in, `Some(false)` when the check found free internet, `None` when no check has run.
+pub fn portal_seen() -> Option<bool> {
+    match PORTAL_SEEN.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some(false),
+        2 => Some(true),
+        _ => None,
+    }
+}
+
+fn publish_portal(p: Option<&PortalState>) {
+    let v = match p {
+        None => 0,
+        Some(PortalState::SignIn(_)) => 2,
+        Some(PortalState::Open) => 1,
+        Some(PortalState::Unknown(_)) => return,
+    };
+    PORTAL_SEEN.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[derive(Default)]
 pub struct LinkWatch {
     timers: LinkTimers,
@@ -25,6 +48,11 @@ pub struct LinkWatch {
 }
 
 impl LinkWatch {
+    /// A watch that has already seen a sign-in page at `url` (tests of the page that opens it).
+    pub fn with_portal_for_test(url: &str) -> LinkWatch {
+        LinkWatch { portal: Some(PortalState::SignIn(Some(url.to_string()))), ..Default::default() }
+    }
+
     /// Collect finished answers, then start what is due. `now` counts seconds from any steady start.
     pub fn tick(&mut self, now: u64, link: Option<LinkJob>, probe: Option<ProbeJob>) {
         if let Some(rx) = &self.sig_rx {
@@ -36,6 +64,7 @@ impl LinkWatch {
                         if self.ssid.as_deref() != Some(l.ssid.as_str()) {
                             self.tracker = SignalTracker::new();
                             self.portal = None;
+                            publish_portal(None);
                             self.timers.joined(now);
                             self.ssid = Some(l.ssid.clone());
                         }
@@ -45,6 +74,7 @@ impl LinkWatch {
                         self.timers.left();
                         self.tracker = SignalTracker::new();
                         self.portal = None;
+                        publish_portal(None);
                         self.ssid = None;
                     }
                 }
@@ -54,6 +84,7 @@ impl LinkWatch {
             if let Ok(p) = rx.try_recv() {
                 self.probe_rx = None;
                 self.timers.probe_done(now, &p);
+                publish_portal(Some(&p));
                 self.portal = Some(p);
             }
         }

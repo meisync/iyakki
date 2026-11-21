@@ -1,0 +1,17 @@
+[package]
+name = "iyakki-tile-board"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The feature BOARD (Kanban, table, phases, graph; the IDE's board tab and full-screen board). Rule
+# (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit` and on the pure model crates named in
+# tests/data/tile_crate_deps.allow (`iyakki-board-model`, `iyakki-clock`), never on the agent or the shared crate.
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-board-model = { workspace = true }
+iyakki-clock = { workspace = true }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroize::{Zeroize, Zeroizing};
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VaultError {
     #[error("the vault is locked")]
     Locked,
@@ -452,6 +452,13 @@ impl Secrets {
         self.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().is_some_and(|v| v.is_unlocked())
     }
 
+    /// Whether a reference resolves now (the system or common vault is open and holds it, or the provider answers), without handing the value
+    /// to the caller. This is what a screen that only shows "key present" asks, and what a UI on the far side of the core socket may ask:
+    /// the plain value of a secret is never part of the interface that crosses it (D-SPLIT-03-SECRETS).
+    pub fn has_ref(&self, reference: &str) -> bool {
+        self.resolve(reference, None).is_ok()
+    }
+
     /// Resolve a reference. `user_vault` is consulted for `uvault:` references.
     pub fn resolve(&self, reference: &str, user_vault: Option<&LocalVault>) -> Result<Zeroizing<String>, SecretError> {
         let (scheme, rest) = reference.split_once(':').ok_or_else(|| SecretError::BadRef("expected scheme:name".into()))?;
@@ -682,6 +689,24 @@ mod tests {
     }
     fn mock(f: impl Fn(&str) -> (u16, String) + Send + 'static) -> Arc<Mock> {
         Arc::new(Mock { calls: Default::default(), reply: Mutex::new(Box::new(f)) })
+    }
+
+    #[test]
+    fn has_ref_says_whether_a_reference_resolves_and_the_interface_that_crosses_the_socket_has_no_way_to_read_the_value() {
+        let d = tmp("hasref");
+        let mut sys = LocalVault::create(&d.join("s.afv"), "user:root", "pass-phrase-1").unwrap();
+        sys.set("openai", "sk-live").unwrap();
+        let s = Secrets::new(Some(sys), mock(|_| (500, String::new())));
+        assert!(s.has_ref("vault:openai"));
+        assert!(!s.has_ref("vault:nope") && !s.has_ref("no-scheme") && !s.has_ref("uvault:x"), "missing, malformed and a user vault (none given) are not present");
+        s.system.lock().unwrap().as_mut().unwrap().lock();
+        assert!(!s.has_ref("vault:openai"), "a locked vault is not present");
+        // the trait generated for the socket never carries a value out: no method of it returns the secret text
+        let api = include_str!("../../iyakki-agent-api/src/member_stores.rs");
+        let start = api.find("pub trait SecretsApi").unwrap();
+        let body = &api[start..start + api[start..].find("\n}\n").unwrap()];
+        assert!(body.contains("fn has_ref(&self, reference: &str) -> bool;"), "{body}");
+        assert!(!body.contains("fn resolve") && !body.contains("Zeroizing") && !body.contains("-> String"), "{body}");
     }
 
     #[test]

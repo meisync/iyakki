@@ -127,82 +127,82 @@ impl InboxApi for iyakki_shared::inbox::Inbox {
 pub struct InboxVia(pub Arc<dyn ServicesHandle>);
 impl InboxApi for InboxVia {
     fn add(&self, user: &str, kind: iyakki_shared::inbox::Kind, title: &str, body: &str, source: &str, link: Option<iyakki_shared::inbox::Link>, now: i64) -> Result<iyakki_shared::inbox::Notification, String> {
-        iyakki_shared::inbox::Inbox::add(self.0.inbox(), user, kind, title, body, source, link, now)
+        self.0.inbox().add(user, kind, title, body, source, link, now)
     }
     fn maintain(&self, user: &str, now: i64) -> Result<(), String> {
-        iyakki_shared::inbox::Inbox::maintain(self.0.inbox(), user, now)
+        self.0.inbox().maintain(user, now)
     }
     fn take_notice(&self, user: &str) -> Option<String> {
-        iyakki_shared::inbox::Inbox::take_notice(self.0.inbox(), user)
+        self.0.inbox().take_notice(user)
     }
     fn clear_source(&self, user: &str, source: &str) -> Result<usize, String> {
-        iyakki_shared::inbox::Inbox::clear_source(self.0.inbox(), user, source)
+        self.0.inbox().clear_source(user, source)
     }
     fn level(&self, user: &str, source: &str) -> iyakki_shared::inbox::Level {
-        iyakki_shared::inbox::Inbox::level(self.0.inbox(), user, source)
+        self.0.inbox().level(user, source)
     }
     fn levels(&self, user: &str) -> std::collections::BTreeMap<String, iyakki_shared::inbox::Level> {
-        iyakki_shared::inbox::Inbox::levels(self.0.inbox(), user)
+        self.0.inbox().levels(user)
     }
     fn set_level(&self, user: &str, source: &str, level: iyakki_shared::inbox::Level) -> Result<(), String> {
-        iyakki_shared::inbox::Inbox::set_level(self.0.inbox(), user, source, level)
+        self.0.inbox().set_level(user, source, level)
     }
     fn sources(&self, user: &str) -> Vec<(String, String)> {
-        iyakki_shared::inbox::Inbox::sources(self.0.inbox(), user)
+        self.0.inbox().sources(user)
     }
     fn list(&self, user: &str) -> Vec<iyakki_shared::inbox::Notification> {
-        iyakki_shared::inbox::Inbox::list(self.0.inbox(), user)
+        self.0.inbox().list(user)
     }
     fn mark_read(&self, user: &str, id: &str, read: bool) -> Result<(), String> {
-        iyakki_shared::inbox::Inbox::mark_read(self.0.inbox(), user, id, read)
+        self.0.inbox().mark_read(user, id, read)
     }
     fn mark_all_read(&self, user: &str) -> Result<usize, String> {
-        iyakki_shared::inbox::Inbox::mark_all_read(self.0.inbox(), user)
+        self.0.inbox().mark_all_read(user)
     }
     fn flag(&self, user: &str, id: &str, flagged: bool) -> Result<(), String> {
-        iyakki_shared::inbox::Inbox::flag(self.0.inbox(), user, id, flagged)
+        self.0.inbox().flag(user, id, flagged)
     }
     fn snooze(&self, user: &str, id: &str, until: i64) -> Result<(), String> {
-        iyakki_shared::inbox::Inbox::snooze(self.0.inbox(), user, id, until)
+        self.0.inbox().snooze(user, id, until)
     }
     fn delete(&self, user: &str, id: &str) -> Result<(), String> {
-        iyakki_shared::inbox::Inbox::delete(self.0.inbox(), user, id)
+        self.0.inbox().delete(user, id)
     }
     fn attach_picture(&self, user: &str, id: &str, jpeg: &[u8]) -> Result<(), String> {
-        iyakki_shared::inbox::Inbox::attach_picture(self.0.inbox(), user, id, jpeg)
+        self.0.inbox().attach_picture(user, id, jpeg)
     }
     fn picture(&self, user: &str, id: &str) -> Option<Vec<u8>> {
-        iyakki_shared::inbox::Inbox::picture(self.0.inbox(), user, id)
+        self.0.inbox().picture(user, id)
     }
     fn upsert_keyed(&self, user: &str, key: &str, kind: iyakki_shared::inbox::Kind, title: &str, body: &str, source: &str, link: Option<iyakki_shared::inbox::Link>, unread: bool, now: i64) -> Result<iyakki_shared::inbox::Notification, String> {
-        iyakki_shared::inbox::Inbox::upsert_keyed(self.0.inbox(), user, key, kind, title, body, source, link, unread, now)
+        self.0.inbox().upsert_keyed(user, key, kind, title, body, source, link, unread, now)
     }
     fn remove_keyed(&self, user: &str, key: &str) -> Result<bool, String> {
-        iyakki_shared::inbox::Inbox::remove_keyed(self.0.inbox(), user, key)
+        self.0.inbox().remove_keyed(user, key)
     }
     fn clear_read(&self, user: &str) -> Result<usize, String> {
-        iyakki_shared::inbox::Inbox::clear_read(self.0.inbox(), user)
+        self.0.inbox().clear_read(user)
     }
     fn add_task(&self, user: &str, title: &str, notes: &str, due: Option<i64>, priority: iyakki_shared::inbox::Priority, by: &str, now: i64) -> Result<iyakki_shared::inbox::Task, String> {
-        iyakki_shared::inbox::Inbox::add_task(self.0.inbox(), user, title, notes, due, priority, by, now)
+        self.0.inbox().add_task(user, title, notes, due, priority, by, now)
     }
     fn tasks(&self, user: &str, sort: iyakki_shared::inbox::TaskSort) -> Vec<iyakki_shared::inbox::Task> {
-        iyakki_shared::inbox::Inbox::tasks(self.0.inbox(), user, sort)
+        self.0.inbox().tasks(user, sort)
     }
     fn update_task(&self, user: &str, id: &str, p: iyakki_shared::inbox::TaskPatch, now: i64) -> Result<iyakki_shared::inbox::Task, String> {
-        iyakki_shared::inbox::Inbox::update_task(self.0.inbox(), user, id, p, now)
+        self.0.inbox().update_task(user, id, p, now)
     }
     fn move_task(&self, user: &str, id: &str, status: iyakki_shared::inbox::Status, now: i64) -> Result<iyakki_shared::inbox::Task, String> {
-        iyakki_shared::inbox::Inbox::move_task(self.0.inbox(), user, id, status, now)
+        self.0.inbox().move_task(user, id, status, now)
     }
     fn delete_task(&self, user: &str, id: &str) -> Result<(), String> {
-        iyakki_shared::inbox::Inbox::delete_task(self.0.inbox(), user, id)
+        self.0.inbox().delete_task(user, id)
     }
     fn counts(&self, user: &str, now: i64) -> iyakki_shared::inbox::Counts {
-        iyakki_shared::inbox::Inbox::counts(self.0.inbox(), user, now)
+        self.0.inbox().counts(user, now)
     }
     fn agent_allowed(&self, user: &str, now: i64) -> bool {
-        iyakki_shared::inbox::Inbox::agent_allowed(self.0.inbox(), user, now)
+        self.0.inbox().agent_allowed(user, now)
     }
 }
 }
@@ -211,13 +211,19 @@ pub use inboxapi_mod::InboxVia;
 
 pub mod calendarapi_mod {
     use super::*;
-/// `CalendarStore` of `iyakki_shared::calendar` (5 methods; 7 stay inherent: `&mut self`, generic, closures or borrowed answers).
+/// `CalendarStore` of `iyakki_shared::calendar` (11 methods; 1 stay inherent: `&mut self`, generic, closures or borrowed answers).
 pub trait CalendarApi: Send + Sync {
     fn add_event(&self, user: &str, title: &str, start: i64, minutes: u32, all_day: bool, repeat: iyakki_shared::calendar::Repeat, notes: &str, by: &str, remind: Option<u32>) -> Result<iyakki_shared::calendar::Event, String>;
     fn remove_event(&self, user: &str, id: &str) -> Result<(), String>;
+    fn add_alarm(&self, user: &str, label: &str, hour: u32, minute: u32, days: u8, now: i64, zone: &iyakki_clock::Zone, by: &str) -> Result<iyakki_shared::calendar::Alarm, String>;
     fn remove_alarm(&self, user: &str, id: &str) -> Result<(), String>;
+    fn set_alarm_enabled(&self, user: &str, id: &str, on: bool, now: i64, zone: &iyakki_clock::Zone) -> Result<(), String>;
     fn alarms(&self, user: &str) -> Vec<iyakki_shared::calendar::Alarm>;
     fn events(&self, user: &str) -> Vec<iyakki_shared::calendar::Event>;
+    fn events_in(&self, user: &str, from: i64, to: i64, zone: &iyakki_clock::Zone) -> Vec<iyakki_shared::calendar::Occurrence>;
+    fn alarms_in(&self, user: &str, from: i64, to: i64, zone: &iyakki_clock::Zone) -> Vec<iyakki_shared::calendar::AlarmOccurrence>;
+    fn next_alarm(&self, user: &str, now: i64, zone: &iyakki_clock::Zone) -> Option<iyakki_shared::calendar::AlarmOccurrence>;
+    fn take_due(&self, user: &str, since: i64, now: i64, zone: &iyakki_clock::Zone) -> Vec<iyakki_shared::calendar::Due>;
 }
 impl CalendarApi for iyakki_shared::calendar::CalendarStore {
     fn add_event(&self, user: &str, title: &str, start: i64, minutes: u32, all_day: bool, repeat: iyakki_shared::calendar::Repeat, notes: &str, by: &str, remind: Option<u32>) -> Result<iyakki_shared::calendar::Event, String> {
@@ -226,8 +232,14 @@ impl CalendarApi for iyakki_shared::calendar::CalendarStore {
     fn remove_event(&self, user: &str, id: &str) -> Result<(), String> {
         iyakki_shared::calendar::CalendarStore::remove_event(self, user, id)
     }
+    fn add_alarm(&self, user: &str, label: &str, hour: u32, minute: u32, days: u8, now: i64, zone: &iyakki_clock::Zone, by: &str) -> Result<iyakki_shared::calendar::Alarm, String> {
+        iyakki_shared::calendar::CalendarStore::add_alarm(self, user, label, hour, minute, days, now, zone, by)
+    }
     fn remove_alarm(&self, user: &str, id: &str) -> Result<(), String> {
         iyakki_shared::calendar::CalendarStore::remove_alarm(self, user, id)
+    }
+    fn set_alarm_enabled(&self, user: &str, id: &str, on: bool, now: i64, zone: &iyakki_clock::Zone) -> Result<(), String> {
+        iyakki_shared::calendar::CalendarStore::set_alarm_enabled(self, user, id, on, now, zone)
     }
     fn alarms(&self, user: &str) -> Vec<iyakki_shared::calendar::Alarm> {
         iyakki_shared::calendar::CalendarStore::alarms(self, user)
@@ -235,24 +247,54 @@ impl CalendarApi for iyakki_shared::calendar::CalendarStore {
     fn events(&self, user: &str) -> Vec<iyakki_shared::calendar::Event> {
         iyakki_shared::calendar::CalendarStore::events(self, user)
     }
+    fn events_in(&self, user: &str, from: i64, to: i64, zone: &iyakki_clock::Zone) -> Vec<iyakki_shared::calendar::Occurrence> {
+        iyakki_shared::calendar::CalendarStore::events_in(self, user, from, to, zone)
+    }
+    fn alarms_in(&self, user: &str, from: i64, to: i64, zone: &iyakki_clock::Zone) -> Vec<iyakki_shared::calendar::AlarmOccurrence> {
+        iyakki_shared::calendar::CalendarStore::alarms_in(self, user, from, to, zone)
+    }
+    fn next_alarm(&self, user: &str, now: i64, zone: &iyakki_clock::Zone) -> Option<iyakki_shared::calendar::AlarmOccurrence> {
+        iyakki_shared::calendar::CalendarStore::next_alarm(self, user, now, zone)
+    }
+    fn take_due(&self, user: &str, since: i64, now: i64, zone: &iyakki_clock::Zone) -> Vec<iyakki_shared::calendar::Due> {
+        iyakki_shared::calendar::CalendarStore::take_due(self, user, since, now, zone)
+    }
 }
 /// `CalendarApi` over the `calendar()` member of a services handle.
 pub struct CalendarVia(pub Arc<dyn ServicesHandle>);
 impl CalendarApi for CalendarVia {
     fn add_event(&self, user: &str, title: &str, start: i64, minutes: u32, all_day: bool, repeat: iyakki_shared::calendar::Repeat, notes: &str, by: &str, remind: Option<u32>) -> Result<iyakki_shared::calendar::Event, String> {
-        iyakki_shared::calendar::CalendarStore::add_event(self.0.calendar(), user, title, start, minutes, all_day, repeat, notes, by, remind)
+        self.0.calendar().add_event(user, title, start, minutes, all_day, repeat, notes, by, remind)
     }
     fn remove_event(&self, user: &str, id: &str) -> Result<(), String> {
-        iyakki_shared::calendar::CalendarStore::remove_event(self.0.calendar(), user, id)
+        self.0.calendar().remove_event(user, id)
+    }
+    fn add_alarm(&self, user: &str, label: &str, hour: u32, minute: u32, days: u8, now: i64, zone: &iyakki_clock::Zone, by: &str) -> Result<iyakki_shared::calendar::Alarm, String> {
+        self.0.calendar().add_alarm(user, label, hour, minute, days, now, zone, by)
     }
     fn remove_alarm(&self, user: &str, id: &str) -> Result<(), String> {
-        iyakki_shared::calendar::CalendarStore::remove_alarm(self.0.calendar(), user, id)
+        self.0.calendar().remove_alarm(user, id)
+    }
+    fn set_alarm_enabled(&self, user: &str, id: &str, on: bool, now: i64, zone: &iyakki_clock::Zone) -> Result<(), String> {
+        self.0.calendar().set_alarm_enabled(user, id, on, now, zone)
     }
     fn alarms(&self, user: &str) -> Vec<iyakki_shared::calendar::Alarm> {
-        iyakki_shared::calendar::CalendarStore::alarms(self.0.calendar(), user)
+        self.0.calendar().alarms(user)
     }
     fn events(&self, user: &str) -> Vec<iyakki_shared::calendar::Event> {
-        iyakki_shared::calendar::CalendarStore::events(self.0.calendar(), user)
+        self.0.calendar().events(user)
+    }
+    fn events_in(&self, user: &str, from: i64, to: i64, zone: &iyakki_clock::Zone) -> Vec<iyakki_shared::calendar::Occurrence> {
+        self.0.calendar().events_in(user, from, to, zone)
+    }
+    fn alarms_in(&self, user: &str, from: i64, to: i64, zone: &iyakki_clock::Zone) -> Vec<iyakki_shared::calendar::AlarmOccurrence> {
+        self.0.calendar().alarms_in(user, from, to, zone)
+    }
+    fn next_alarm(&self, user: &str, now: i64, zone: &iyakki_clock::Zone) -> Option<iyakki_shared::calendar::AlarmOccurrence> {
+        self.0.calendar().next_alarm(user, now, zone)
+    }
+    fn take_due(&self, user: &str, since: i64, now: i64, zone: &iyakki_clock::Zone) -> Vec<iyakki_shared::calendar::Due> {
+        self.0.calendar().take_due(user, since, now, zone)
     }
 }
 }
@@ -261,8 +303,9 @@ pub use calendarapi_mod::CalendarVia;
 
 pub mod studyapi_mod {
     use super::*;
-/// `StudyStore` of `iyakki_shared::study` (12 methods; 7 stay inherent: `&mut self`, generic, closures or borrowed answers).
+/// `StudyStore` of `iyakki_shared::study` (19 methods; 6 stay inherent: `&mut self`, generic, closures or borrowed answers).
 pub trait StudyApi: Send + Sync {
+    fn create_plan(&self, user: &str, spec: &iyakki_shared::study::PlanSpec, now: i64, zone: &iyakki_clock::Zone) -> Result<iyakki_shared::study::Plan, String>;
     fn plans(&self, user: &str) -> Vec<iyakki_shared::study::Plan>;
     fn plan(&self, user: &str, id: &str) -> Result<iyakki_shared::study::Plan, String>;
     fn set_done(&self, user: &str, id: &str, session: usize, done: bool) -> Result<iyakki_shared::study::Plan, String>;
@@ -275,8 +318,17 @@ pub trait StudyApi: Send + Sync {
     fn chat_answer(&self, user: &str, id: &str, question: usize, option: &str, now: i64) -> Result<iyakki_shared::study::ChatAnswer, String>;
     fn chat_restart(&self, user: &str, id: &str) -> Result<(), String>;
     fn flag_question(&self, user: &str, id: &str, question: usize, flagged: bool) -> Result<(), String>;
+    fn lesson(&self, user: &str, plan: &str, n: usize) -> Option<iyakki_shared::studylesson::Lesson>;
+    fn lesson_image(&self, user: &str, plan: &str, n: usize, file: &str) -> Option<Vec<u8>>;
+    fn save_lesson(&self, user: &str, plan: &str, n: usize, lesson: &iyakki_shared::studylesson::Lesson, files: &[(String, Vec<u8>)]) -> Result<(), String>;
+    fn add_qa(&self, user: &str, plan: &str, n: usize, q: &str, a: &str) -> Result<(), String>;
+    fn delete_lesson(&self, user: &str, plan: &str, n: usize);
+    fn delete_lessons_of(&self, user: &str, plan: &str);
 }
 impl StudyApi for iyakki_shared::study::StudyStore {
+    fn create_plan(&self, user: &str, spec: &iyakki_shared::study::PlanSpec, now: i64, zone: &iyakki_clock::Zone) -> Result<iyakki_shared::study::Plan, String> {
+        iyakki_shared::study::StudyStore::create_plan(self, user, spec, now, zone)
+    }
     fn plans(&self, user: &str) -> Vec<iyakki_shared::study::Plan> {
         iyakki_shared::study::StudyStore::plans(self, user)
     }
@@ -313,45 +365,84 @@ impl StudyApi for iyakki_shared::study::StudyStore {
     fn flag_question(&self, user: &str, id: &str, question: usize, flagged: bool) -> Result<(), String> {
         iyakki_shared::study::StudyStore::flag_question(self, user, id, question, flagged)
     }
+    fn lesson(&self, user: &str, plan: &str, n: usize) -> Option<iyakki_shared::studylesson::Lesson> {
+        iyakki_shared::study::StudyStore::lesson(self, user, plan, n)
+    }
+    fn lesson_image(&self, user: &str, plan: &str, n: usize, file: &str) -> Option<Vec<u8>> {
+        iyakki_shared::study::StudyStore::lesson_image(self, user, plan, n, file)
+    }
+    fn save_lesson(&self, user: &str, plan: &str, n: usize, lesson: &iyakki_shared::studylesson::Lesson, files: &[(String, Vec<u8>)]) -> Result<(), String> {
+        iyakki_shared::study::StudyStore::save_lesson(self, user, plan, n, lesson, files)
+    }
+    fn add_qa(&self, user: &str, plan: &str, n: usize, q: &str, a: &str) -> Result<(), String> {
+        iyakki_shared::study::StudyStore::add_qa(self, user, plan, n, q, a)
+    }
+    fn delete_lesson(&self, user: &str, plan: &str, n: usize) {
+        iyakki_shared::study::StudyStore::delete_lesson(self, user, plan, n)
+    }
+    fn delete_lessons_of(&self, user: &str, plan: &str) {
+        iyakki_shared::study::StudyStore::delete_lessons_of(self, user, plan)
+    }
 }
 /// `StudyApi` over the `study()` member of a services handle.
 pub struct StudyVia(pub Arc<dyn ServicesHandle>);
 impl StudyApi for StudyVia {
+    fn create_plan(&self, user: &str, spec: &iyakki_shared::study::PlanSpec, now: i64, zone: &iyakki_clock::Zone) -> Result<iyakki_shared::study::Plan, String> {
+        self.0.study().create_plan(user, spec, now, zone)
+    }
     fn plans(&self, user: &str) -> Vec<iyakki_shared::study::Plan> {
-        iyakki_shared::study::StudyStore::plans(self.0.study(), user)
+        self.0.study().plans(user)
     }
     fn plan(&self, user: &str, id: &str) -> Result<iyakki_shared::study::Plan, String> {
-        iyakki_shared::study::StudyStore::plan(self.0.study(), user, id)
+        self.0.study().plan(user, id)
     }
     fn set_done(&self, user: &str, id: &str, session: usize, done: bool) -> Result<iyakki_shared::study::Plan, String> {
-        iyakki_shared::study::StudyStore::set_done(self.0.study(), user, id, session, done)
+        self.0.study().set_done(user, id, session, done)
     }
     fn create_quiz(&self, user: &str, topic: &str, count: u64, questions: &serde_json::Value, now: i64) -> Result<iyakki_shared::study::Quiz, String> {
-        iyakki_shared::study::StudyStore::create_quiz(self.0.study(), user, topic, count, questions, now)
+        self.0.study().create_quiz(user, topic, count, questions, now)
     }
     fn quizzes(&self, user: &str) -> Vec<iyakki_shared::study::Quiz> {
-        iyakki_shared::study::StudyStore::quizzes(self.0.study(), user)
+        self.0.study().quizzes(user)
     }
     fn quiz(&self, user: &str, id: &str) -> Result<iyakki_shared::study::Quiz, String> {
-        iyakki_shared::study::StudyStore::quiz(self.0.study(), user, id)
+        self.0.study().quiz(user, id)
     }
     fn delete_quiz(&self, user: &str, id: &str) -> Result<(), String> {
-        iyakki_shared::study::StudyStore::delete_quiz(self.0.study(), user, id)
+        self.0.study().delete_quiz(user, id)
     }
     fn record_attempt(&self, user: &str, id: &str, answers: &[Option<usize>], now: i64) -> Result<iyakki_shared::study::Scored, String> {
-        iyakki_shared::study::StudyStore::record_attempt(self.0.study(), user, id, answers, now)
+        self.0.study().record_attempt(user, id, answers, now)
     }
     fn chat_next(&self, user: &str, id: &str) -> Result<Option<(usize, iyakki_shared::study::Question)>, String> {
-        iyakki_shared::study::StudyStore::chat_next(self.0.study(), user, id)
+        self.0.study().chat_next(user, id)
     }
     fn chat_answer(&self, user: &str, id: &str, question: usize, option: &str, now: i64) -> Result<iyakki_shared::study::ChatAnswer, String> {
-        iyakki_shared::study::StudyStore::chat_answer(self.0.study(), user, id, question, option, now)
+        self.0.study().chat_answer(user, id, question, option, now)
     }
     fn chat_restart(&self, user: &str, id: &str) -> Result<(), String> {
-        iyakki_shared::study::StudyStore::chat_restart(self.0.study(), user, id)
+        self.0.study().chat_restart(user, id)
     }
     fn flag_question(&self, user: &str, id: &str, question: usize, flagged: bool) -> Result<(), String> {
-        iyakki_shared::study::StudyStore::flag_question(self.0.study(), user, id, question, flagged)
+        self.0.study().flag_question(user, id, question, flagged)
+    }
+    fn lesson(&self, user: &str, plan: &str, n: usize) -> Option<iyakki_shared::studylesson::Lesson> {
+        self.0.study().lesson(user, plan, n)
+    }
+    fn lesson_image(&self, user: &str, plan: &str, n: usize, file: &str) -> Option<Vec<u8>> {
+        self.0.study().lesson_image(user, plan, n, file)
+    }
+    fn save_lesson(&self, user: &str, plan: &str, n: usize, lesson: &iyakki_shared::studylesson::Lesson, files: &[(String, Vec<u8>)]) -> Result<(), String> {
+        self.0.study().save_lesson(user, plan, n, lesson, files)
+    }
+    fn add_qa(&self, user: &str, plan: &str, n: usize, q: &str, a: &str) -> Result<(), String> {
+        self.0.study().add_qa(user, plan, n, q, a)
+    }
+    fn delete_lesson(&self, user: &str, plan: &str, n: usize) {
+        self.0.study().delete_lesson(user, plan, n)
+    }
+    fn delete_lessons_of(&self, user: &str, plan: &str) {
+        self.0.study().delete_lessons_of(user, plan)
     }
 }
 }
@@ -360,11 +451,12 @@ pub use studyapi_mod::StudyVia;
 
 pub mod secretsapi_mod {
     use super::*;
-/// `Secrets` of `iyakki_shared::vault` (4 methods; 3 stay inherent: `&mut self`, generic, closures or borrowed answers).
+/// `Secrets` of `iyakki_shared::vault` (5 methods; 3 stay inherent: `&mut self`, generic, closures or borrowed answers).
 pub trait SecretsApi: Send + Sync {
     fn set_providers(&self, p: std::collections::HashMap<String, iyakki_shared::vault::ProviderConfig>);
     fn common_unlocked(&self) -> bool;
     fn system_unlocked(&self) -> bool;
+    fn has_ref(&self, reference: &str) -> bool;
     fn test_provider(&self, alias: &str) -> Result<(), iyakki_shared::vault::SecretError>;
 }
 impl SecretsApi for iyakki_shared::vault::Secrets {
@@ -376,6 +468,9 @@ impl SecretsApi for iyakki_shared::vault::Secrets {
     }
     fn system_unlocked(&self) -> bool {
         iyakki_shared::vault::Secrets::system_unlocked(self)
+    }
+    fn has_ref(&self, reference: &str) -> bool {
+        iyakki_shared::vault::Secrets::has_ref(self, reference)
     }
     fn test_provider(&self, alias: &str) -> Result<(), iyakki_shared::vault::SecretError> {
         iyakki_shared::vault::Secrets::test_provider(self, alias)
@@ -392,6 +487,9 @@ impl SecretsApi for SecretsVia {
     }
     fn system_unlocked(&self) -> bool {
         iyakki_shared::vault::Secrets::system_unlocked(self.0.secrets())
+    }
+    fn has_ref(&self, reference: &str) -> bool {
+        iyakki_shared::vault::Secrets::has_ref(self.0.secrets(), reference)
     }
     fn test_provider(&self, alias: &str) -> Result<(), iyakki_shared::vault::SecretError> {
         iyakki_shared::vault::Secrets::test_provider(self.0.secrets(), alias)
@@ -456,37 +554,37 @@ impl DevWatchApi for iyakki_shared::devwatch::DeviceWatch {
 pub struct DevWatchVia(pub Arc<dyn ServicesHandle>);
 impl DevWatchApi for DevWatchVia {
     fn enabled(&self) -> bool {
-        iyakki_shared::devwatch::DeviceWatch::enabled(self.0.devwatch())
+        self.0.devwatch().enabled()
     }
     fn set_enabled(&self, on: bool) {
-        iyakki_shared::devwatch::DeviceWatch::set_enabled(self.0.devwatch(), on)
+        self.0.devwatch().set_enabled(on)
     }
     fn observe(&self, seen: &[iyakki_shared::devwatch::Neighbor], now: i64) -> Vec<iyakki_shared::devwatch::Device> {
-        iyakki_shared::devwatch::DeviceWatch::observe(self.0.devwatch(), seen, now)
+        self.0.devwatch().observe(seen, now)
     }
     fn observe_scan(&self, seen: &[iyakki_shared::devwatch::Neighbor], now: i64) -> Vec<iyakki_shared::devwatch::Device> {
-        iyakki_shared::devwatch::DeviceWatch::observe_scan(self.0.devwatch(), seen, now)
+        self.0.devwatch().observe_scan(seen, now)
     }
     fn take_fresh(&self) -> Vec<iyakki_shared::devwatch::Device> {
-        iyakki_shared::devwatch::DeviceWatch::take_fresh(self.0.devwatch())
+        self.0.devwatch().take_fresh()
     }
     fn list(&self) -> Vec<iyakki_shared::devwatch::Device> {
-        iyakki_shared::devwatch::DeviceWatch::list(self.0.devwatch())
+        self.0.devwatch().list()
     }
     fn untrusted_count(&self) -> usize {
-        iyakki_shared::devwatch::DeviceWatch::untrusted_count(self.0.devwatch())
+        self.0.devwatch().untrusted_count()
     }
     fn trust(&self, mac: &str) -> bool {
-        iyakki_shared::devwatch::DeviceWatch::trust(self.0.devwatch(), mac)
+        self.0.devwatch().trust(mac)
     }
     fn trust_all(&self) -> usize {
-        iyakki_shared::devwatch::DeviceWatch::trust_all(self.0.devwatch())
+        self.0.devwatch().trust_all()
     }
     fn rename(&self, mac: &str, name: &str) -> bool {
-        iyakki_shared::devwatch::DeviceWatch::rename(self.0.devwatch(), mac, name)
+        self.0.devwatch().rename(mac, name)
     }
     fn forget(&self, mac: &str) -> bool {
-        iyakki_shared::devwatch::DeviceWatch::forget(self.0.devwatch(), mac)
+        self.0.devwatch().forget(mac)
     }
 }
 }
@@ -525,8 +623,12 @@ pub trait BrowserStateApi: Send + Sync {
     fn set_last_snapshot(&self, user: &str, text: &str);
     fn last_snapshot(&self, user: &str) -> String;
     fn ask(&self, user: &str, kind: iyakki_shared::browserconsent::ConsentKind, domain: &str, text: &str, detail: &str) -> Result<iyakki_shared::browserconsent::Answer, String>;
+    fn set_audit_sink(&self, sink: Arc<dyn Fn(&str, &str, &str) + Send + Sync>);
 }
 impl BrowserStateApi for iyakki_shared::browserconsent::BrowserState {
+    fn set_audit_sink(&self, sink: Arc<dyn Fn(&str, &str, &str) + Send + Sync>) {
+        iyakki_shared::browserconsent::BrowserState::set_audit(self, sink)
+    }
     fn now(&self) -> i64 {
         iyakki_shared::browserconsent::BrowserState::now(self)
     }
@@ -615,98 +717,271 @@ impl BrowserStateApi for iyakki_shared::browserconsent::BrowserState {
 /// `BrowserStateApi` over the `browser()` member of a services handle.
 pub struct BrowserStateVia(pub Arc<dyn ServicesHandle>);
 impl BrowserStateApi for BrowserStateVia {
+    fn set_audit_sink(&self, sink: Arc<dyn Fn(&str, &str, &str) + Send + Sync>) {
+        self.0.browser().set_audit_sink(sink)
+    }
     fn now(&self) -> i64 {
-        iyakki_shared::browserconsent::BrowserState::now(self.0.browser())
+        self.0.browser().now()
     }
     fn advance_clock(&self, secs: i64) {
-        iyakki_shared::browserconsent::BrowserState::advance_clock(self.0.browser(), secs)
+        self.0.browser().advance_clock(secs)
     }
     fn set_idle_limit(&self, secs: i64) {
-        iyakki_shared::browserconsent::BrowserState::set_idle_limit(self.0.browser(), secs)
+        self.0.browser().set_idle_limit(secs)
     }
     fn set_wait(&self, d: std::time::Duration) {
-        iyakki_shared::browserconsent::BrowserState::set_wait(self.0.browser(), d)
+        self.0.browser().set_wait(d)
     }
     fn wait_time(&self) -> std::time::Duration {
-        iyakki_shared::browserconsent::BrowserState::wait_time(self.0.browser())
+        self.0.browser().wait_time()
     }
     fn has_audit(&self) -> bool {
-        iyakki_shared::browserconsent::BrowserState::has_audit(self.0.browser())
+        self.0.browser().has_audit()
     }
     fn audit(&self, user: &str, event: &str, detail: &str) {
-        iyakki_shared::browserconsent::BrowserState::audit(self.0.browser(), user, event, detail)
+        self.0.browser().audit(user, event, detail)
     }
     fn begin_run(&self, user: &str, max_actions: u32, max_minutes: u32) -> u64 {
-        iyakki_shared::browserconsent::BrowserState::begin_run(self.0.browser(), user, max_actions, max_minutes)
+        self.0.browser().begin_run(user, max_actions, max_minutes)
     }
     fn end_run(&self, user: &str, run: u64) {
-        iyakki_shared::browserconsent::BrowserState::end_run(self.0.browser(), user, run)
+        self.0.browser().end_run(user, run)
     }
     fn charge(&self, user: &str, run: u64) -> Result<(), String> {
-        iyakki_shared::browserconsent::BrowserState::charge(self.0.browser(), user, run)
+        self.0.browser().charge(user, run)
     }
     fn actions_used(&self, user: &str, run: u64) -> u32 {
-        iyakki_shared::browserconsent::BrowserState::actions_used(self.0.browser(), user, run)
+        self.0.browser().actions_used(user, run)
     }
     fn check_control(&self, user: &str) -> Result<(), String> {
-        iyakki_shared::browserconsent::BrowserState::check_control(self.0.browser(), user)
+        self.0.browser().check_control(user)
     }
     fn looked(&self, user: &str, host: &str) -> bool {
-        iyakki_shared::browserconsent::BrowserState::looked(self.0.browser(), user, host)
+        self.0.browser().looked(user, host)
     }
     fn allow_look(&self, user: &str, host: &str) {
-        iyakki_shared::browserconsent::BrowserState::allow_look(self.0.browser(), user, host)
+        self.0.browser().allow_look(user, host)
     }
     fn allow_look_for(&self, user: &str, host: &str, secs: i64) {
-        iyakki_shared::browserconsent::BrowserState::allow_look_for(self.0.browser(), user, host, secs)
+        self.0.browser().allow_look_for(user, host, secs)
     }
     fn mode(&self, user: &str, domain: &str, run: u64) -> Option<iyakki_shared::browserconsent::Mode> {
-        iyakki_shared::browserconsent::BrowserState::mode(self.0.browser(), user, domain, run)
+        self.0.browser().mode(user, domain, run)
     }
     fn set_mode(&self, user: &str, domain: &str, mode: iyakki_shared::browserconsent::Mode) {
-        iyakki_shared::browserconsent::BrowserState::set_mode(self.0.browser(), user, domain, mode)
+        self.0.browser().set_mode(user, domain, mode)
     }
     fn touch(&self, user: &str, domain: &str) {
-        iyakki_shared::browserconsent::BrowserState::touch(self.0.browser(), user, domain)
+        self.0.browser().touch(user, domain)
     }
     fn preapprove(&self, user: &str, run: u64, domains: &[String]) {
-        iyakki_shared::browserconsent::BrowserState::preapprove(self.0.browser(), user, run, domains)
+        self.0.browser().preapprove(user, run, domains)
     }
     fn stop(&self, user: &str) {
-        iyakki_shared::browserconsent::BrowserState::stop(self.0.browser(), user)
+        self.0.browser().stop(user)
     }
     fn take_over(&self, user: &str) {
-        iyakki_shared::browserconsent::BrowserState::take_over(self.0.browser(), user)
+        self.0.browser().take_over(user)
     }
     fn resume(&self, user: &str) {
-        iyakki_shared::browserconsent::BrowserState::resume(self.0.browser(), user)
+        self.0.browser().resume(user)
     }
     fn on_logout(&self, user: &str) {
-        iyakki_shared::browserconsent::BrowserState::on_logout(self.0.browser(), user)
+        self.0.browser().on_logout(user)
     }
     fn note_doing(&self, user: &str, doing: &str, host: &str) {
-        iyakki_shared::browserconsent::BrowserState::note_doing(self.0.browser(), user, doing, host)
+        self.0.browser().note_doing(user, doing, host)
     }
     fn control_view(&self, user: &str) -> iyakki_shared::browserconsent::ControlView {
-        iyakki_shared::browserconsent::BrowserState::control_view(self.0.browser(), user)
+        self.0.browser().control_view(user)
     }
     fn set_last_snapshot(&self, user: &str, text: &str) {
-        iyakki_shared::browserconsent::BrowserState::set_last_snapshot(self.0.browser(), user, text)
+        self.0.browser().set_last_snapshot(user, text)
     }
     fn last_snapshot(&self, user: &str) -> String {
-        iyakki_shared::browserconsent::BrowserState::last_snapshot(self.0.browser(), user)
+        self.0.browser().last_snapshot(user)
     }
     fn ask(&self, user: &str, kind: iyakki_shared::browserconsent::ConsentKind, domain: &str, text: &str, detail: &str) -> Result<iyakki_shared::browserconsent::Answer, String> {
-        iyakki_shared::browserconsent::BrowserState::ask(self.0.browser(), user, kind, domain, text, detail)
+        self.0.browser().ask(user, kind, domain, text, detail)
     }
 }
 }
 pub use browserstateapi_mod::BrowserStateApi;
 pub use browserstateapi_mod::BrowserStateVia;
 
+pub mod consentapi_mod {
+    use super::*;
+/// `ConsentStore` of `iyakki_shared::browserconsent` (10 methods; 1 stay inherent: `&mut self`, generic, closures or borrowed answers).
+pub trait ConsentApi: Send + Sync {
+    fn create(&self, user: &str, kind: iyakki_shared::browserconsent::ConsentKind, domain: &str, text: &str, detail: &str, now: i64) -> Result<String, String>;
+    fn create_device(&self, user: &str, device: &str, title: &str, text: &str, now: i64) -> Result<String, String>;
+    fn create_permission(&self, user: &str, flow_id: &str, title: &str, text: &str, payload: &str, now: i64) -> Result<Option<String>, String>;
+    fn withdraw_permissions(&self, user: &str, run_id: &str) -> usize;
+    fn set_synthetic(&self, on: bool);
+    fn pending(&self, user: &str) -> Vec<iyakki_shared::browserconsent::ConsentRequest>;
+    fn get(&self, user: &str, id: &str) -> Option<iyakki_shared::browserconsent::ConsentRequest>;
+    fn resolve(&self, user: &str, id: &str, answer: iyakki_shared::browserconsent::Answer) -> Result<(), String>;
+    fn deny_all(&self, user: &str);
+    fn wait(&self, id: &str, timeout: std::time::Duration) -> Option<iyakki_shared::browserconsent::Answer>;
+}
+impl ConsentApi for iyakki_shared::browserconsent::ConsentStore {
+    fn create(&self, user: &str, kind: iyakki_shared::browserconsent::ConsentKind, domain: &str, text: &str, detail: &str, now: i64) -> Result<String, String> {
+        iyakki_shared::browserconsent::ConsentStore::create(self, user, kind, domain, text, detail, now)
+    }
+    fn create_device(&self, user: &str, device: &str, title: &str, text: &str, now: i64) -> Result<String, String> {
+        iyakki_shared::browserconsent::ConsentStore::create_device(self, user, device, title, text, now)
+    }
+    fn create_permission(&self, user: &str, flow_id: &str, title: &str, text: &str, payload: &str, now: i64) -> Result<Option<String>, String> {
+        iyakki_shared::browserconsent::ConsentStore::create_permission(self, user, flow_id, title, text, payload, now)
+    }
+    fn withdraw_permissions(&self, user: &str, run_id: &str) -> usize {
+        iyakki_shared::browserconsent::ConsentStore::withdraw_permissions(self, user, run_id)
+    }
+    fn set_synthetic(&self, on: bool) {
+        iyakki_shared::browserconsent::ConsentStore::set_synthetic(self, on)
+    }
+    fn pending(&self, user: &str) -> Vec<iyakki_shared::browserconsent::ConsentRequest> {
+        iyakki_shared::browserconsent::ConsentStore::pending(self, user)
+    }
+    fn get(&self, user: &str, id: &str) -> Option<iyakki_shared::browserconsent::ConsentRequest> {
+        iyakki_shared::browserconsent::ConsentStore::get(self, user, id)
+    }
+    fn resolve(&self, user: &str, id: &str, answer: iyakki_shared::browserconsent::Answer) -> Result<(), String> {
+        iyakki_shared::browserconsent::ConsentStore::resolve(self, user, id, answer)
+    }
+    fn deny_all(&self, user: &str) {
+        iyakki_shared::browserconsent::ConsentStore::deny_all(self, user)
+    }
+    fn wait(&self, id: &str, timeout: std::time::Duration) -> Option<iyakki_shared::browserconsent::Answer> {
+        iyakki_shared::browserconsent::ConsentStore::wait(self, id, timeout)
+    }
+}
+/// `ConsentApi` over the `browser_consent()` member of a services handle.
+pub struct ConsentVia(pub Arc<dyn ServicesHandle>);
+impl ConsentApi for ConsentVia {
+    fn create(&self, user: &str, kind: iyakki_shared::browserconsent::ConsentKind, domain: &str, text: &str, detail: &str, now: i64) -> Result<String, String> {
+        self.0.browser_consent().create(user, kind, domain, text, detail, now)
+    }
+    fn create_device(&self, user: &str, device: &str, title: &str, text: &str, now: i64) -> Result<String, String> {
+        self.0.browser_consent().create_device(user, device, title, text, now)
+    }
+    fn create_permission(&self, user: &str, flow_id: &str, title: &str, text: &str, payload: &str, now: i64) -> Result<Option<String>, String> {
+        self.0.browser_consent().create_permission(user, flow_id, title, text, payload, now)
+    }
+    fn withdraw_permissions(&self, user: &str, run_id: &str) -> usize {
+        self.0.browser_consent().withdraw_permissions(user, run_id)
+    }
+    fn set_synthetic(&self, on: bool) {
+        self.0.browser_consent().set_synthetic(on)
+    }
+    fn pending(&self, user: &str) -> Vec<iyakki_shared::browserconsent::ConsentRequest> {
+        self.0.browser_consent().pending(user)
+    }
+    fn get(&self, user: &str, id: &str) -> Option<iyakki_shared::browserconsent::ConsentRequest> {
+        self.0.browser_consent().get(user, id)
+    }
+    fn resolve(&self, user: &str, id: &str, answer: iyakki_shared::browserconsent::Answer) -> Result<(), String> {
+        self.0.browser_consent().resolve(user, id, answer)
+    }
+    fn deny_all(&self, user: &str) {
+        self.0.browser_consent().deny_all(user)
+    }
+    fn wait(&self, id: &str, timeout: std::time::Duration) -> Option<iyakki_shared::browserconsent::Answer> {
+        self.0.browser_consent().wait(id, timeout)
+    }
+}
+}
+pub use consentapi_mod::ConsentApi;
+pub use consentapi_mod::ConsentVia;
+
+pub mod browserjobsapi_mod {
+    use super::*;
+/// `BrowserJobs` of `iyakki_shared::browserjobs` (10 methods; 1 stay inherent: `&mut self`, generic, closures or borrowed answers).
+pub trait BrowserJobsApi: Send + Sync {
+    fn submit(&self, user: &str, op: iyakki_shared::browserjobs::Op) -> u64;
+    fn submit_detached(&self, user: &str, op: iyakki_shared::browserjobs::Op);
+    fn wait(&self, id: u64, timeout: std::time::Duration) -> Option<iyakki_shared::browserjobs::Reply>;
+    fn call(&self, user: &str, op: iyakki_shared::browserjobs::Op, timeout: std::time::Duration) -> Result<iyakki_shared::browserjobs::Reply, String>;
+    fn take(&self, user: &str) -> Vec<iyakki_shared::browserjobs::Job>;
+    fn complete(&self, id: u64, r: iyakki_shared::browserjobs::Reply);
+    fn beat(&self, user: &str);
+    fn serviced(&self, user: &str, within: std::time::Duration) -> bool;
+    fn pending_for(&self, user: &str) -> usize;
+    fn fail_all(&self, user: &str, why: &str);
+}
+impl BrowserJobsApi for iyakki_shared::browserjobs::BrowserJobs {
+    fn submit(&self, user: &str, op: iyakki_shared::browserjobs::Op) -> u64 {
+        iyakki_shared::browserjobs::BrowserJobs::submit(self, user, op)
+    }
+    fn submit_detached(&self, user: &str, op: iyakki_shared::browserjobs::Op) {
+        iyakki_shared::browserjobs::BrowserJobs::submit_detached(self, user, op)
+    }
+    fn wait(&self, id: u64, timeout: std::time::Duration) -> Option<iyakki_shared::browserjobs::Reply> {
+        iyakki_shared::browserjobs::BrowserJobs::wait(self, id, timeout)
+    }
+    fn call(&self, user: &str, op: iyakki_shared::browserjobs::Op, timeout: std::time::Duration) -> Result<iyakki_shared::browserjobs::Reply, String> {
+        iyakki_shared::browserjobs::BrowserJobs::call(self, user, op, timeout)
+    }
+    fn take(&self, user: &str) -> Vec<iyakki_shared::browserjobs::Job> {
+        iyakki_shared::browserjobs::BrowserJobs::take(self, user)
+    }
+    fn complete(&self, id: u64, r: iyakki_shared::browserjobs::Reply) {
+        iyakki_shared::browserjobs::BrowserJobs::complete(self, id, r)
+    }
+    fn beat(&self, user: &str) {
+        iyakki_shared::browserjobs::BrowserJobs::beat(self, user)
+    }
+    fn serviced(&self, user: &str, within: std::time::Duration) -> bool {
+        iyakki_shared::browserjobs::BrowserJobs::serviced(self, user, within)
+    }
+    fn pending_for(&self, user: &str) -> usize {
+        iyakki_shared::browserjobs::BrowserJobs::pending_for(self, user)
+    }
+    fn fail_all(&self, user: &str, why: &str) {
+        iyakki_shared::browserjobs::BrowserJobs::fail_all(self, user, why)
+    }
+}
+/// `BrowserJobsApi` over the `browser_jobs()` member of a services handle.
+pub struct BrowserJobsVia(pub Arc<dyn ServicesHandle>);
+impl BrowserJobsApi for BrowserJobsVia {
+    fn submit(&self, user: &str, op: iyakki_shared::browserjobs::Op) -> u64 {
+        self.0.browser_jobs().submit(user, op)
+    }
+    fn submit_detached(&self, user: &str, op: iyakki_shared::browserjobs::Op) {
+        self.0.browser_jobs().submit_detached(user, op)
+    }
+    fn wait(&self, id: u64, timeout: std::time::Duration) -> Option<iyakki_shared::browserjobs::Reply> {
+        self.0.browser_jobs().wait(id, timeout)
+    }
+    fn call(&self, user: &str, op: iyakki_shared::browserjobs::Op, timeout: std::time::Duration) -> Result<iyakki_shared::browserjobs::Reply, String> {
+        self.0.browser_jobs().call(user, op, timeout)
+    }
+    fn take(&self, user: &str) -> Vec<iyakki_shared::browserjobs::Job> {
+        self.0.browser_jobs().take(user)
+    }
+    fn complete(&self, id: u64, r: iyakki_shared::browserjobs::Reply) {
+        self.0.browser_jobs().complete(id, r)
+    }
+    fn beat(&self, user: &str) {
+        self.0.browser_jobs().beat(user)
+    }
+    fn serviced(&self, user: &str, within: std::time::Duration) -> bool {
+        self.0.browser_jobs().serviced(user, within)
+    }
+    fn pending_for(&self, user: &str) -> usize {
+        self.0.browser_jobs().pending_for(user)
+    }
+    fn fail_all(&self, user: &str, why: &str) {
+        self.0.browser_jobs().fail_all(user, why)
+    }
+}
+}
+pub use browserjobsapi_mod::BrowserJobsApi;
+pub use browserjobsapi_mod::BrowserJobsVia;
+
 pub mod screencaptureapi_mod {
     use super::*;
-/// `ScreenCapture` of `iyakki_shared::screencap` (8 methods; 2 stay inherent: `&mut self`, generic, closures or borrowed answers).
+/// `ScreenCapture` of `iyakki_shared::screencap` (9 methods; 2 stay inherent: `&mut self`, generic, closures or borrowed answers).
 pub trait ScreenCaptureApi: Send + Sync {
     fn set_present(&self, on: bool);
     fn set_wait_ms(&self, ms: u64);
@@ -716,6 +991,7 @@ pub trait ScreenCaptureApi: Send + Sync {
     fn revoke(&self, user: &str);
     fn request(&self, user: &str, timeout: std::time::Duration) -> Result<iyakki_shared::screencap::Frame, String>;
     fn wanted(&self, user: &str) -> bool;
+    fn serve_frame(&self, user: &str, frame: Option<iyakki_shared::screencap::Frame>) -> usize;
 }
 impl ScreenCaptureApi for iyakki_shared::screencap::ScreenCapture {
     fn set_present(&self, on: bool) {
@@ -742,33 +1018,39 @@ impl ScreenCaptureApi for iyakki_shared::screencap::ScreenCapture {
     fn wanted(&self, user: &str) -> bool {
         iyakki_shared::screencap::ScreenCapture::wanted(self, user)
     }
+    fn serve_frame(&self, user: &str, frame: Option<iyakki_shared::screencap::Frame>) -> usize {
+        iyakki_shared::screencap::ScreenCapture::serve_frame(self, user, frame)
+    }
 }
 /// `ScreenCaptureApi` over the `screen()` member of a services handle.
 pub struct ScreenCaptureVia(pub Arc<dyn ServicesHandle>);
 impl ScreenCaptureApi for ScreenCaptureVia {
     fn set_present(&self, on: bool) {
-        iyakki_shared::screencap::ScreenCapture::set_present(self.0.screen(), on)
+        self.0.screen().set_present(on)
     }
     fn set_wait_ms(&self, ms: u64) {
-        iyakki_shared::screencap::ScreenCapture::set_wait_ms(self.0.screen(), ms)
+        self.0.screen().set_wait_ms(ms)
     }
     fn present(&self) -> bool {
-        iyakki_shared::screencap::ScreenCapture::present(self.0.screen())
+        self.0.screen().present()
     }
     fn grant(&self, user: &str, secs: u64) {
-        iyakki_shared::screencap::ScreenCapture::grant(self.0.screen(), user, secs)
+        self.0.screen().grant(user, secs)
     }
     fn granted(&self, user: &str) -> bool {
-        iyakki_shared::screencap::ScreenCapture::granted(self.0.screen(), user)
+        self.0.screen().granted(user)
     }
     fn revoke(&self, user: &str) {
-        iyakki_shared::screencap::ScreenCapture::revoke(self.0.screen(), user)
+        self.0.screen().revoke(user)
     }
     fn request(&self, user: &str, timeout: std::time::Duration) -> Result<iyakki_shared::screencap::Frame, String> {
-        iyakki_shared::screencap::ScreenCapture::request(self.0.screen(), user, timeout)
+        self.0.screen().request(user, timeout)
     }
     fn wanted(&self, user: &str) -> bool {
-        iyakki_shared::screencap::ScreenCapture::wanted(self.0.screen(), user)
+        self.0.screen().wanted(user)
+    }
+    fn serve_frame(&self, user: &str, frame: Option<iyakki_shared::screencap::Frame>) -> usize {
+        self.0.screen().serve_frame(user, frame)
     }
 }
 }
@@ -777,7 +1059,7 @@ pub use screencaptureapi_mod::ScreenCaptureVia;
 
 pub mod camerahubapi_mod {
     use super::*;
-/// `CameraHub` of `iyakki_shared::camtools` (10 methods; 1 stay inherent: `&mut self`, generic, closures or borrowed answers).
+/// `CameraHub` of `iyakki_shared::camtools` (11 methods; 2 stay inherent: `&mut self`, generic, closures or borrowed answers).
 pub trait CameraHubApi: Send + Sync {
     fn set_backend(&self, b: Option<std::sync::Arc<dyn iyakki_shared::camtools::CameraBackend>>);
     fn backend(&self) -> Option<std::sync::Arc<dyn iyakki_shared::camtools::CameraBackend>>;
@@ -787,7 +1069,8 @@ pub trait CameraHubApi: Send + Sync {
     fn grant(&self, user: &str, secs: u64);
     fn granted(&self, user: &str) -> bool;
     fn revoke(&self, user: &str);
-    fn begin(&self, user: &str, what: &str) -> iyakki_shared::camtools::Busy<'_>;
+    fn busy_set(&self, user: &str, what: &str);
+    fn busy_clear(&self);
     fn in_use(&self) -> Option<String>;
 }
 impl CameraHubApi for iyakki_shared::camtools::CameraHub {
@@ -815,8 +1098,11 @@ impl CameraHubApi for iyakki_shared::camtools::CameraHub {
     fn revoke(&self, user: &str) {
         iyakki_shared::camtools::CameraHub::revoke(self, user)
     }
-    fn begin(&self, user: &str, what: &str) -> iyakki_shared::camtools::Busy<'_> {
-        iyakki_shared::camtools::CameraHub::begin(self, user, what)
+    fn busy_set(&self, user: &str, what: &str) {
+        iyakki_shared::camtools::CameraHub::busy_set(self, user, what)
+    }
+    fn busy_clear(&self) {
+        iyakki_shared::camtools::CameraHub::busy_clear(self)
     }
     fn in_use(&self) -> Option<String> {
         iyakki_shared::camtools::CameraHub::in_use(self)
@@ -826,34 +1112,37 @@ impl CameraHubApi for iyakki_shared::camtools::CameraHub {
 pub struct CameraHubVia(pub Arc<dyn ServicesHandle>);
 impl CameraHubApi for CameraHubVia {
     fn set_backend(&self, b: Option<std::sync::Arc<dyn iyakki_shared::camtools::CameraBackend>>) {
-        iyakki_shared::camtools::CameraHub::set_backend(self.0.camera(), b)
+        self.0.camera().set_backend(b)
     }
     fn backend(&self) -> Option<std::sync::Arc<dyn iyakki_shared::camtools::CameraBackend>> {
-        iyakki_shared::camtools::CameraHub::backend(self.0.camera())
+        self.0.camera().backend()
     }
     fn present(&self) -> bool {
-        iyakki_shared::camtools::CameraHub::present(self.0.camera())
+        self.0.camera().present()
     }
     fn set_home_root(&self, p: &std::path::Path) {
-        iyakki_shared::camtools::CameraHub::set_home_root(self.0.camera(), p)
+        self.0.camera().set_home_root(p)
     }
     fn home(&self, user: &str) -> std::path::PathBuf {
-        iyakki_shared::camtools::CameraHub::home(self.0.camera(), user)
+        self.0.camera().home(user)
     }
     fn grant(&self, user: &str, secs: u64) {
-        iyakki_shared::camtools::CameraHub::grant(self.0.camera(), user, secs)
+        self.0.camera().grant(user, secs)
     }
     fn granted(&self, user: &str) -> bool {
-        iyakki_shared::camtools::CameraHub::granted(self.0.camera(), user)
+        self.0.camera().granted(user)
     }
     fn revoke(&self, user: &str) {
-        iyakki_shared::camtools::CameraHub::revoke(self.0.camera(), user)
+        self.0.camera().revoke(user)
     }
-    fn begin(&self, user: &str, what: &str) -> iyakki_shared::camtools::Busy<'_> {
-        iyakki_shared::camtools::CameraHub::begin(self.0.camera(), user, what)
+    fn busy_set(&self, user: &str, what: &str) {
+        self.0.camera().busy_set(user, what)
+    }
+    fn busy_clear(&self) {
+        self.0.camera().busy_clear()
     }
     fn in_use(&self) -> Option<String> {
-        iyakki_shared::camtools::CameraHub::in_use(self.0.camera())
+        self.0.camera().in_use()
     }
 }
 }
@@ -931,49 +1220,49 @@ impl DevToolsApi for iyakki_shared::devtools::DevTools {
 pub struct DevToolsVia(pub Arc<dyn ServicesHandle>);
 impl DevToolsApi for DevToolsVia {
     fn enabled(&self, user: &str) -> bool {
-        iyakki_shared::devtools::DevTools::enabled(self.0.devtools(), user)
+        self.0.devtools().enabled(user)
     }
     fn set_enabled(&self, user: &str, on: bool) {
-        iyakki_shared::devtools::DevTools::set_enabled(self.0.devtools(), user, on)
+        self.0.devtools().set_enabled(user, on)
     }
     fn set_page(&self, user: &str, url: &str) {
-        iyakki_shared::devtools::DevTools::set_page(self.0.devtools(), user, url)
+        self.0.devtools().set_page(user, url)
     }
     fn collecting(&self, user: &str) -> bool {
-        iyakki_shared::devtools::DevTools::collecting(self.0.devtools(), user)
+        self.0.devtools().collecting(user)
     }
     fn panel_open(&self, user: &str) -> bool {
-        iyakki_shared::devtools::DevTools::panel_open(self.0.devtools(), user)
+        self.0.devtools().panel_open(user)
     }
     fn set_panel(&self, user: &str, open: bool) {
-        iyakki_shared::devtools::DevTools::set_panel(self.0.devtools(), user, open)
+        self.0.devtools().set_panel(user, open)
     }
     fn seq(&self, user: &str) -> u64 {
-        iyakki_shared::devtools::DevTools::seq(self.0.devtools(), user)
+        self.0.devtools().seq(user)
     }
     fn snapshot(&self, user: &str) -> iyakki_shared::devtools::Snapshot {
-        iyakki_shared::devtools::DevTools::snapshot(self.0.devtools(), user)
+        self.0.devtools().snapshot(user)
     }
     fn record_line(&self, user: &str, line: &str) -> bool {
-        iyakki_shared::devtools::DevTools::record_line(self.0.devtools(), user, line)
+        self.0.devtools().record_line(user, line)
     }
     fn record(&self, user: &str, ev: iyakki_shared::devtools::DevEvent) -> bool {
-        iyakki_shared::devtools::DevTools::record(self.0.devtools(), user, ev)
+        self.0.devtools().record(user, ev)
     }
     fn probe_alive(&self, user: &str) -> bool {
-        iyakki_shared::devtools::DevTools::probe_alive(self.0.devtools(), user)
+        self.0.devtools().probe_alive(user)
     }
     fn summary(&self, user: &str) -> iyakki_shared::devtools::Summary {
-        iyakki_shared::devtools::DevTools::summary(self.0.devtools(), user)
+        self.0.devtools().summary(user)
     }
     fn failed_report(&self, user: &str, scope: &iyakki_shared::devtools::Scope, limit: usize) -> String {
-        iyakki_shared::devtools::DevTools::failed_report(self.0.devtools(), user, scope, limit)
+        self.0.devtools().failed_report(user, scope, limit)
     }
     fn timings_report(&self, user: &str, scope: &iyakki_shared::devtools::Scope, limit: usize) -> String {
-        iyakki_shared::devtools::DevTools::timings_report(self.0.devtools(), user, scope, limit)
+        self.0.devtools().timings_report(user, scope, limit)
     }
     fn console_report(&self, user: &str, scope: &iyakki_shared::devtools::Scope, level: &str, limit: usize) -> String {
-        iyakki_shared::devtools::DevTools::console_report(self.0.devtools(), user, scope, level, limit)
+        self.0.devtools().console_report(user, scope, level, limit)
     }
 }
 }
@@ -1011,19 +1300,19 @@ impl SecretRequestsApi for iyakki_shared::secretreq::SecretRequests {
 pub struct SecretRequestsVia(pub Arc<dyn ServicesHandle>);
 impl SecretRequestsApi for SecretRequestsVia {
     fn create(&self, user: &str, name: &str, purpose: &str, kind: &str, now: i64) -> Result<String, String> {
-        iyakki_shared::secretreq::SecretRequests::create(self.0.secret_requests(), user, name, purpose, kind, now)
+        self.0.secret_requests().create(user, name, purpose, kind, now)
     }
     fn pending(&self, user: &str) -> Vec<iyakki_shared::secretreq::SecretRequest> {
-        iyakki_shared::secretreq::SecretRequests::pending(self.0.secret_requests(), user)
+        self.0.secret_requests().pending(user)
     }
     fn get(&self, user: &str, id: &str) -> Option<iyakki_shared::secretreq::SecretRequest> {
-        iyakki_shared::secretreq::SecretRequests::get(self.0.secret_requests(), user, id)
+        self.0.secret_requests().get(user, id)
     }
     fn resolve(&self, user: &str, id: &str, outcome: iyakki_shared::secretreq::Outcome) -> Result<(), String> {
-        iyakki_shared::secretreq::SecretRequests::resolve(self.0.secret_requests(), user, id, outcome)
+        self.0.secret_requests().resolve(user, id, outcome)
     }
     fn wait(&self, id: &str, timeout: std::time::Duration) -> Option<iyakki_shared::secretreq::Outcome> {
-        iyakki_shared::secretreq::SecretRequests::wait(self.0.secret_requests(), id, timeout)
+        self.0.secret_requests().wait(id, timeout)
     }
 }
 }
@@ -1032,14 +1321,16 @@ pub use secretrequestsapi_mod::SecretRequestsVia;
 
 pub mod usagelogapi_mod {
     use super::*;
-/// `UsageLog` of `iyakki_shared::usagelog` (6 methods; 4 stay inherent: `&mut self`, generic, closures or borrowed answers).
+/// `UsageLog` of `iyakki_shared::usagelog` (8 methods; 2 stay inherent: `&mut self`, generic, closures or borrowed answers).
 pub trait UsageLogApi: Send + Sync {
     fn record(&self, user: &str, provider: &str, model: &str, input: u64, output: u64);
     fn record_at(&self, ts: i64, user: &str, provider: &str, model: &str, input: u64, output: u64);
     fn record_call(&self, ts: i64, user: &str, c: &iyakki_shared::usagelog::Call);
     fn entries(&self, user: Option<&str>) -> Vec<iyakki_shared::usagelog::Entry>;
+    fn series(&self, range: iyakki_shared::usagelog::Range, now_unix: i64, zone: &iyakki_clock::Zone, user: Option<&str>) -> iyakki_shared::usagelog::Series;
     fn by_source(&self, user: Option<&str>, from_unix: i64) -> Vec<iyakki_shared::usagelog::Totals>;
     fn totals_of(&self, user: Option<&str>, src: &str, cat: Option<&str>, from_unix: i64) -> iyakki_shared::usagelog::Totals;
+    fn days_of(&self, user: Option<&str>, src: &str, cat: Option<&str>, days: usize, now_unix: i64, zone: &iyakki_clock::Zone) -> Vec<(String, iyakki_shared::usagelog::Totals)>;
 }
 impl UsageLogApi for iyakki_shared::usagelog::UsageLog {
     fn record(&self, user: &str, provider: &str, model: &str, input: u64, output: u64) {
@@ -1054,63 +1345,84 @@ impl UsageLogApi for iyakki_shared::usagelog::UsageLog {
     fn entries(&self, user: Option<&str>) -> Vec<iyakki_shared::usagelog::Entry> {
         iyakki_shared::usagelog::UsageLog::entries(self, user)
     }
+    fn series(&self, range: iyakki_shared::usagelog::Range, now_unix: i64, zone: &iyakki_clock::Zone, user: Option<&str>) -> iyakki_shared::usagelog::Series {
+        iyakki_shared::usagelog::UsageLog::series(self, range, now_unix, zone, user)
+    }
     fn by_source(&self, user: Option<&str>, from_unix: i64) -> Vec<iyakki_shared::usagelog::Totals> {
         iyakki_shared::usagelog::UsageLog::by_source(self, user, from_unix)
     }
     fn totals_of(&self, user: Option<&str>, src: &str, cat: Option<&str>, from_unix: i64) -> iyakki_shared::usagelog::Totals {
         iyakki_shared::usagelog::UsageLog::totals_of(self, user, src, cat, from_unix)
     }
+    fn days_of(&self, user: Option<&str>, src: &str, cat: Option<&str>, days: usize, now_unix: i64, zone: &iyakki_clock::Zone) -> Vec<(String, iyakki_shared::usagelog::Totals)> {
+        iyakki_shared::usagelog::UsageLog::days_of(self, user, src, cat, days, now_unix, zone)
+    }
 }
 /// `UsageLogApi` over the `usage()` member of a services handle.
 pub struct UsageLogVia(pub Arc<dyn ServicesHandle>);
 impl UsageLogApi for UsageLogVia {
     fn record(&self, user: &str, provider: &str, model: &str, input: u64, output: u64) {
-        iyakki_shared::usagelog::UsageLog::record(self.0.usage(), user, provider, model, input, output)
+        self.0.usage().record(user, provider, model, input, output)
     }
     fn record_at(&self, ts: i64, user: &str, provider: &str, model: &str, input: u64, output: u64) {
-        iyakki_shared::usagelog::UsageLog::record_at(self.0.usage(), ts, user, provider, model, input, output)
+        self.0.usage().record_at(ts, user, provider, model, input, output)
     }
     fn record_call(&self, ts: i64, user: &str, c: &iyakki_shared::usagelog::Call) {
-        iyakki_shared::usagelog::UsageLog::record_call(self.0.usage(), ts, user, c)
+        self.0.usage().record_call(ts, user, c)
     }
     fn entries(&self, user: Option<&str>) -> Vec<iyakki_shared::usagelog::Entry> {
-        iyakki_shared::usagelog::UsageLog::entries(self.0.usage(), user)
+        self.0.usage().entries(user)
+    }
+    fn series(&self, range: iyakki_shared::usagelog::Range, now_unix: i64, zone: &iyakki_clock::Zone, user: Option<&str>) -> iyakki_shared::usagelog::Series {
+        self.0.usage().series(range, now_unix, zone, user)
     }
     fn by_source(&self, user: Option<&str>, from_unix: i64) -> Vec<iyakki_shared::usagelog::Totals> {
-        iyakki_shared::usagelog::UsageLog::by_source(self.0.usage(), user, from_unix)
+        self.0.usage().by_source(user, from_unix)
     }
     fn totals_of(&self, user: Option<&str>, src: &str, cat: Option<&str>, from_unix: i64) -> iyakki_shared::usagelog::Totals {
-        iyakki_shared::usagelog::UsageLog::totals_of(self.0.usage(), user, src, cat, from_unix)
+        self.0.usage().totals_of(user, src, cat, from_unix)
+    }
+    fn days_of(&self, user: Option<&str>, src: &str, cat: Option<&str>, days: usize, now_unix: i64, zone: &iyakki_clock::Zone) -> Vec<(String, iyakki_shared::usagelog::Totals)> {
+        self.0.usage().days_of(user, src, cat, days, now_unix, zone)
     }
 }
 }
 pub use usagelogapi_mod::UsageLogApi;
 pub use usagelogapi_mod::UsageLogVia;
 
-pub mod settingsapi_mod {
-    use super::*;
-/// `SettingsStore` of `iyakki_shared::settings` (0 methods; 14 stay inherent: `&mut self`, generic, closures or borrowed answers).
-pub trait SettingsApi: Send + Sync {
-}
-impl SettingsApi for iyakki_shared::settings::SettingsStore {
-}
-}
-pub use settingsapi_mod::SettingsApi;
-
 pub mod extstatusapi_mod {
     use super::*;
-/// `StatusCache` of `iyakki_shared::extagent` (8 methods; 6 stay inherent: `&mut self`, generic, closures or borrowed answers).
+/// `StatusCache` of `iyakki_shared::extagent` (7 methods; 7 stay inherent: `&mut self`, generic, closures or borrowed answers).
 pub trait ExtStatusApi: Send + Sync {
     fn set_models(&self, id: &str, list: Vec<iyakki_extagentx::ModelInfo>);
     fn set_models_at(&self, id: &str, list: Vec<iyakki_extagentx::ModelInfo>, at: u64);
     fn cli_models(&self, id: &str) -> Option<Vec<iyakki_extagentx::ModelInfo>>;
-    fn models_for(&self, a: &dyn iyakki_shared::extagent::ExternalAgent) -> Vec<iyakki_extagentx::ModelInfo>;
     fn get(&self, id: &str) -> Option<iyakki_extagentx::Status>;
     fn set(&self, id: &str, s: iyakki_extagentx::Status);
     fn busy(&self) -> bool;
     fn invalidate(&self);
+    fn refresh(&self, cfg: iyakki_shared::extagentcfg::AgentsCfg);
+    fn reset(&self, cfg: iyakki_shared::extagentcfg::AgentsCfg);
+    fn recheck(&self, cfg: iyakki_shared::extagentcfg::AgentsCfg, id: &str);
+    fn recheck_after(&self, cfg: iyakki_shared::extagentcfg::AgentsCfg, id: &str, min: Duration);
+    fn refresh_one(&self, cfg: iyakki_shared::extagentcfg::AgentsCfg, id: &str);
 }
-impl ExtStatusApi for iyakki_shared::extagent::StatusCache {
+impl ExtStatusApi for std::sync::Arc<iyakki_shared::extagent::StatusCache> {
+    fn refresh(&self, cfg: iyakki_shared::extagentcfg::AgentsCfg) {
+        iyakki_shared::extagent::StatusCache::refresh(self, cfg)
+    }
+    fn reset(&self, cfg: iyakki_shared::extagentcfg::AgentsCfg) {
+        iyakki_shared::extagent::StatusCache::reset(self, cfg)
+    }
+    fn recheck(&self, cfg: iyakki_shared::extagentcfg::AgentsCfg, id: &str) {
+        iyakki_shared::extagent::StatusCache::recheck(self, cfg, id)
+    }
+    fn recheck_after(&self, cfg: iyakki_shared::extagentcfg::AgentsCfg, id: &str, min: Duration) {
+        iyakki_shared::extagent::StatusCache::recheck_after(self, cfg, id, min)
+    }
+    fn refresh_one(&self, cfg: iyakki_shared::extagentcfg::AgentsCfg, id: &str) {
+        iyakki_shared::extagent::StatusCache::refresh_one(self, cfg, id, None)
+    }
     fn set_models(&self, id: &str, list: Vec<iyakki_extagentx::ModelInfo>) {
         iyakki_shared::extagent::StatusCache::set_models(self, id, list)
     }
@@ -1119,9 +1431,6 @@ impl ExtStatusApi for iyakki_shared::extagent::StatusCache {
     }
     fn cli_models(&self, id: &str) -> Option<Vec<iyakki_extagentx::ModelInfo>> {
         iyakki_shared::extagent::StatusCache::cli_models(self, id)
-    }
-    fn models_for(&self, a: &dyn iyakki_shared::extagent::ExternalAgent) -> Vec<iyakki_extagentx::ModelInfo> {
-        iyakki_shared::extagent::StatusCache::models_for(self, a)
     }
     fn get(&self, id: &str) -> Option<iyakki_extagentx::Status> {
         iyakki_shared::extagent::StatusCache::get(self, id)
@@ -1139,29 +1448,41 @@ impl ExtStatusApi for iyakki_shared::extagent::StatusCache {
 /// `ExtStatusApi` over the `ext_status()` member of a services handle.
 pub struct ExtStatusVia(pub Arc<dyn ServicesHandle>);
 impl ExtStatusApi for ExtStatusVia {
+    fn refresh(&self, cfg: iyakki_shared::extagentcfg::AgentsCfg) {
+        self.0.ext_status().refresh(cfg)
+    }
+    fn reset(&self, cfg: iyakki_shared::extagentcfg::AgentsCfg) {
+        self.0.ext_status().reset(cfg)
+    }
+    fn recheck(&self, cfg: iyakki_shared::extagentcfg::AgentsCfg, id: &str) {
+        self.0.ext_status().recheck(cfg, id)
+    }
+    fn recheck_after(&self, cfg: iyakki_shared::extagentcfg::AgentsCfg, id: &str, min: Duration) {
+        self.0.ext_status().recheck_after(cfg, id, min)
+    }
+    fn refresh_one(&self, cfg: iyakki_shared::extagentcfg::AgentsCfg, id: &str) {
+        self.0.ext_status().refresh_one(cfg, id)
+    }
     fn set_models(&self, id: &str, list: Vec<iyakki_extagentx::ModelInfo>) {
-        iyakki_shared::extagent::StatusCache::set_models(self.0.ext_status(), id, list)
+        self.0.ext_status().set_models(id, list)
     }
     fn set_models_at(&self, id: &str, list: Vec<iyakki_extagentx::ModelInfo>, at: u64) {
-        iyakki_shared::extagent::StatusCache::set_models_at(self.0.ext_status(), id, list, at)
+        self.0.ext_status().set_models_at(id, list, at)
     }
     fn cli_models(&self, id: &str) -> Option<Vec<iyakki_extagentx::ModelInfo>> {
-        iyakki_shared::extagent::StatusCache::cli_models(self.0.ext_status(), id)
-    }
-    fn models_for(&self, a: &dyn iyakki_shared::extagent::ExternalAgent) -> Vec<iyakki_extagentx::ModelInfo> {
-        iyakki_shared::extagent::StatusCache::models_for(self.0.ext_status(), a)
+        self.0.ext_status().cli_models(id)
     }
     fn get(&self, id: &str) -> Option<iyakki_extagentx::Status> {
-        iyakki_shared::extagent::StatusCache::get(self.0.ext_status(), id)
+        self.0.ext_status().get(id)
     }
     fn set(&self, id: &str, s: iyakki_extagentx::Status) {
-        iyakki_shared::extagent::StatusCache::set(self.0.ext_status(), id, s)
+        self.0.ext_status().set(id, s)
     }
     fn busy(&self) -> bool {
-        iyakki_shared::extagent::StatusCache::busy(self.0.ext_status())
+        self.0.ext_status().busy()
     }
     fn invalidate(&self) {
-        iyakki_shared::extagent::StatusCache::invalidate(self.0.ext_status())
+        self.0.ext_status().invalidate()
     }
 }
 }
@@ -1170,51 +1491,212 @@ pub use extstatusapi_mod::ExtStatusVia;
 
 pub mod knowledgebaseapi_mod {
     use super::*;
-/// `KnowledgeBase` of `iyakki_memx::kb` (7 methods; 13 stay inherent: `&mut self`, generic, closures or borrowed answers).
+/// `KnowledgeBase` of `iyakki_memx::kb` (16 methods; 6 stay inherent: `&mut self`, generic, closures or borrowed answers).
 pub trait KnowledgeBaseApi: Send + Sync {
     fn embedder_id(&self) -> String;
     fn namespaces(&self) -> Vec<String>;
     fn stats(&self, ns: &str) -> Option<iyakki_memx::kb::Stats>;
     fn docs(&self, ns: &str) -> Vec<iyakki_memx::kb::DocInfo>;
+    fn add_document(&self, ns: &str, title: &str, source: &str, text: &str, meta: std::collections::BTreeMap<String, String>) -> Result<(String, bool), iyakki_memx::kb::KbError>;
+    fn add_documents(&self, ns: &str, items: &[(String, String, String)]) -> Vec<Result<(String, bool), iyakki_memx::kb::KbError>>;
+    fn ingest_dir(&self, ns: &str, dir: &std::path::Path) -> (usize, usize);
     fn embedder_of(&self, ns: &str) -> Option<String>;
     fn doc_chunks(&self, ns: &str, doc_id: &str) -> Vec<(u32, String)>;
+    fn remove_document(&self, ns: &str, doc_id: &str) -> Result<(), iyakki_memx::kb::KbError>;
+    fn drop_namespace(&self, ns: &str) -> Result<(), iyakki_memx::kb::KbError>;
+    fn reindex(&self, ns: &str) -> Result<(), iyakki_memx::kb::KbError>;
     fn stale_namespaces(&self) -> Vec<String>;
+    fn reindex_stale(&self) -> (usize, Option<String>);
+    fn search_in(&self, namespaces: &[String], query: &str, k: usize) -> Vec<iyakki_shared::kb::Hit>;
+    fn search_weighted_in(&self, namespaces: &[(String, f32)], query: &str, k: usize) -> Vec<iyakki_shared::kb::Hit>;
 }
-impl KnowledgeBaseApi for iyakki_memx::kb::KnowledgeBase {
+impl KnowledgeBaseApi for std::sync::Arc<std::sync::Mutex<iyakki_memx::kb::KnowledgeBase>> {
     fn embedder_id(&self) -> String {
-        iyakki_memx::kb::KnowledgeBase::embedder_id(self)
+        let g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::embedder_id(&*g)
     }
     fn namespaces(&self) -> Vec<String> {
-        iyakki_memx::kb::KnowledgeBase::namespaces(self)
+        let g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::namespaces(&*g)
     }
     fn stats(&self, ns: &str) -> Option<iyakki_memx::kb::Stats> {
-        iyakki_memx::kb::KnowledgeBase::stats(self, ns)
+        let g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::stats(&*g, ns)
     }
     fn docs(&self, ns: &str) -> Vec<iyakki_memx::kb::DocInfo> {
-        iyakki_memx::kb::KnowledgeBase::docs(self, ns)
+        let g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::docs(&*g, ns)
+    }
+    fn add_document(&self, ns: &str, title: &str, source: &str, text: &str, meta: std::collections::BTreeMap<String, String>) -> Result<(String, bool), iyakki_memx::kb::KbError> {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::add_document(&mut *g, ns, title, source, text, meta)
+    }
+    fn add_documents(&self, ns: &str, items: &[(String, String, String)]) -> Vec<Result<(String, bool), iyakki_memx::kb::KbError>> {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::add_documents(&mut *g, ns, items)
+    }
+    fn ingest_dir(&self, ns: &str, dir: &std::path::Path) -> (usize, usize) {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::ingest_dir(&mut *g, ns, dir)
     }
     fn embedder_of(&self, ns: &str) -> Option<String> {
-        iyakki_memx::kb::KnowledgeBase::embedder_of(self, ns)
+        let g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::embedder_of(&*g, ns)
     }
     fn doc_chunks(&self, ns: &str, doc_id: &str) -> Vec<(u32, String)> {
-        iyakki_memx::kb::KnowledgeBase::doc_chunks(self, ns, doc_id)
+        let g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::doc_chunks(&*g, ns, doc_id)
+    }
+    fn remove_document(&self, ns: &str, doc_id: &str) -> Result<(), iyakki_memx::kb::KbError> {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::remove_document(&mut *g, ns, doc_id)
+    }
+    fn drop_namespace(&self, ns: &str) -> Result<(), iyakki_memx::kb::KbError> {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::drop_namespace(&mut *g, ns)
+    }
+    fn reindex(&self, ns: &str) -> Result<(), iyakki_memx::kb::KbError> {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::reindex(&mut *g, ns)
     }
     fn stale_namespaces(&self) -> Vec<String> {
-        iyakki_memx::kb::KnowledgeBase::stale_namespaces(self)
+        let g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::stale_namespaces(&*g)
+    }
+    fn reindex_stale(&self) -> (usize, Option<String>) {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::reindex_stale(&mut *g)
+    }
+    fn search_in(&self, namespaces: &[String], query: &str, k: usize) -> Vec<iyakki_shared::kb::Hit> {
+        let g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::search_in(&*g, namespaces, query, k)
+    }
+    fn search_weighted_in(&self, namespaces: &[(String, f32)], query: &str, k: usize) -> Vec<iyakki_shared::kb::Hit> {
+        let g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_memx::kb::KnowledgeBase::search_weighted_in(&*g, namespaces, query, k)
+    }
+}
+/// `KnowledgeBaseApi` over the `kb()` member of a services handle.
+pub struct KnowledgeBaseVia(pub Arc<dyn ServicesHandle>);
+impl KnowledgeBaseApi for KnowledgeBaseVia {
+    fn embedder_id(&self) -> String {
+        self.0.kb().embedder_id()
+    }
+    fn namespaces(&self) -> Vec<String> {
+        self.0.kb().namespaces()
+    }
+    fn stats(&self, ns: &str) -> Option<iyakki_memx::kb::Stats> {
+        self.0.kb().stats(ns)
+    }
+    fn docs(&self, ns: &str) -> Vec<iyakki_memx::kb::DocInfo> {
+        self.0.kb().docs(ns)
+    }
+    fn add_document(&self, ns: &str, title: &str, source: &str, text: &str, meta: std::collections::BTreeMap<String, String>) -> Result<(String, bool), iyakki_memx::kb::KbError> {
+        self.0.kb().add_document(ns, title, source, text, meta)
+    }
+    fn add_documents(&self, ns: &str, items: &[(String, String, String)]) -> Vec<Result<(String, bool), iyakki_memx::kb::KbError>> {
+        self.0.kb().add_documents(ns, items)
+    }
+    fn ingest_dir(&self, ns: &str, dir: &std::path::Path) -> (usize, usize) {
+        self.0.kb().ingest_dir(ns, dir)
+    }
+    fn embedder_of(&self, ns: &str) -> Option<String> {
+        self.0.kb().embedder_of(ns)
+    }
+    fn doc_chunks(&self, ns: &str, doc_id: &str) -> Vec<(u32, String)> {
+        self.0.kb().doc_chunks(ns, doc_id)
+    }
+    fn remove_document(&self, ns: &str, doc_id: &str) -> Result<(), iyakki_memx::kb::KbError> {
+        self.0.kb().remove_document(ns, doc_id)
+    }
+    fn drop_namespace(&self, ns: &str) -> Result<(), iyakki_memx::kb::KbError> {
+        self.0.kb().drop_namespace(ns)
+    }
+    fn reindex(&self, ns: &str) -> Result<(), iyakki_memx::kb::KbError> {
+        self.0.kb().reindex(ns)
+    }
+    fn stale_namespaces(&self) -> Vec<String> {
+        self.0.kb().stale_namespaces()
+    }
+    fn reindex_stale(&self) -> (usize, Option<String>) {
+        self.0.kb().reindex_stale()
+    }
+    fn search_in(&self, namespaces: &[String], query: &str, k: usize) -> Vec<iyakki_shared::kb::Hit> {
+        self.0.kb().search_in(namespaces, query, k)
+    }
+    fn search_weighted_in(&self, namespaces: &[(String, f32)], query: &str, k: usize) -> Vec<iyakki_shared::kb::Hit> {
+        self.0.kb().search_weighted_in(namespaces, query, k)
     }
 }
 }
 pub use knowledgebaseapi_mod::KnowledgeBaseApi;
+pub use knowledgebaseapi_mod::KnowledgeBaseVia;
 
 pub mod accountsapi_mod {
     use super::*;
-/// `UserStore` of `iyakki_accounts` (1 methods; 13 stay inherent: `&mut self`, generic, closures or borrowed answers).
+/// `UserStore` of `iyakki_accounts` (12 methods; 4 stay inherent: `&mut self`, generic, closures or borrowed answers).
 pub trait AccountsApi: Send + Sync {
+    fn refresh(&self);
     fn is_empty(&self) -> bool;
+    fn list_public(&self) -> Vec<iyakki_accounts::UserRecord>;
+    fn get_public(&self, name: &str) -> Option<iyakki_accounts::UserRecord>;
+    fn create_first_admin(&self, name: &str, pw: &str) -> Result<(), iyakki_accounts::AccountError>;
+    fn resume_session(&self, name: &str) -> Option<iyakki_accounts::Session>;
+    fn authenticate(&self, name: &str, pw: &str) -> Result<iyakki_accounts::Session, iyakki_accounts::AccountError>;
+    fn create_user(&self, actor: &iyakki_accounts::Session, name: &str, pw: &str, role: iyakki_sec::policy::Role) -> Result<(), iyakki_accounts::AccountError>;
+    fn delete_user(&self, actor: &iyakki_accounts::Session, name: &str) -> Result<(), iyakki_accounts::AccountError>;
+    fn set_role(&self, actor: &iyakki_accounts::Session, name: &str, role: iyakki_sec::policy::Role) -> Result<(), iyakki_accounts::AccountError>;
+    fn set_overrides(&self, actor: &iyakki_accounts::Session, name: &str, ov: iyakki_sec::policy::PolicyOverride) -> Result<(), iyakki_accounts::AccountError>;
+    fn set_password(&self, actor: &iyakki_accounts::Session, name: &str, old: Option<&str>, new: &str) -> Result<(), iyakki_accounts::AccountError>;
 }
-impl AccountsApi for iyakki_accounts::UserStore {
+impl AccountsApi for std::sync::Arc<std::sync::Mutex<iyakki_accounts::UserStore>> {
+    fn refresh(&self) {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_accounts::UserStore::refresh(&mut *g)
+    }
     fn is_empty(&self) -> bool {
-        iyakki_accounts::UserStore::is_empty(self)
+        let g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_accounts::UserStore::is_empty(&*g)
+    }
+    fn list_public(&self) -> Vec<iyakki_accounts::UserRecord> {
+        let g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_accounts::UserStore::list_public(&*g)
+    }
+    fn get_public(&self, name: &str) -> Option<iyakki_accounts::UserRecord> {
+        let g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_accounts::UserStore::get_public(&*g, name)
+    }
+    fn create_first_admin(&self, name: &str, pw: &str) -> Result<(), iyakki_accounts::AccountError> {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_accounts::UserStore::create_first_admin(&mut *g, name, pw)
+    }
+    fn resume_session(&self, name: &str) -> Option<iyakki_accounts::Session> {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_accounts::UserStore::resume_session(&mut *g, name)
+    }
+    fn authenticate(&self, name: &str, pw: &str) -> Result<iyakki_accounts::Session, iyakki_accounts::AccountError> {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_accounts::UserStore::authenticate(&mut *g, name, pw)
+    }
+    fn create_user(&self, actor: &iyakki_accounts::Session, name: &str, pw: &str, role: iyakki_sec::policy::Role) -> Result<(), iyakki_accounts::AccountError> {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_accounts::UserStore::create_user(&mut *g, actor, name, pw, role)
+    }
+    fn delete_user(&self, actor: &iyakki_accounts::Session, name: &str) -> Result<(), iyakki_accounts::AccountError> {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_accounts::UserStore::delete_user(&mut *g, actor, name)
+    }
+    fn set_role(&self, actor: &iyakki_accounts::Session, name: &str, role: iyakki_sec::policy::Role) -> Result<(), iyakki_accounts::AccountError> {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_accounts::UserStore::set_role(&mut *g, actor, name, role)
+    }
+    fn set_overrides(&self, actor: &iyakki_accounts::Session, name: &str, ov: iyakki_sec::policy::PolicyOverride) -> Result<(), iyakki_accounts::AccountError> {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_accounts::UserStore::set_overrides(&mut *g, actor, name, ov)
+    }
+    fn set_password(&self, actor: &iyakki_accounts::Session, name: &str, old: Option<&str>, new: &str) -> Result<(), iyakki_accounts::AccountError> {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        iyakki_accounts::UserStore::set_password(&mut *g, actor, name, old, new)
     }
 }
 }
@@ -1222,14 +1704,19 @@ pub use accountsapi_mod::AccountsApi;
 
 pub mod auditapi_mod {
     use super::*;
-/// `AuditLog` of `iyakki_accounts` (4 methods; 3 stay inherent: `&mut self`, generic, closures or borrowed answers).
+/// `AuditLog` of `iyakki_accounts` (6 methods; 2 stay inherent: `&mut self`, generic, closures or borrowed answers).
 pub trait AuditApi: Send + Sync {
+    fn path_buf(&self) -> std::path::PathBuf;
     fn record(&self, user: &str, event: &str, detail: &str);
     fn flush_notes(&self);
     fn start_new_log(&self) -> Result<std::path::PathBuf, String>;
+    fn verify(&self) -> Result<usize, usize>;
     fn recent(&self, n: usize) -> Vec<String>;
 }
 impl AuditApi for iyakki_accounts::AuditLog {
+    fn path_buf(&self) -> std::path::PathBuf {
+        iyakki_accounts::AuditLog::path_buf(self)
+    }
     fn record(&self, user: &str, event: &str, detail: &str) {
         iyakki_accounts::AuditLog::record(self, user, event, detail)
     }
@@ -1238,6 +1725,9 @@ impl AuditApi for iyakki_accounts::AuditLog {
     }
     fn start_new_log(&self) -> Result<std::path::PathBuf, String> {
         iyakki_accounts::AuditLog::start_new_log(self)
+    }
+    fn verify(&self) -> Result<usize, usize> {
+        iyakki_accounts::AuditLog::verify(self)
     }
     fn recent(&self, n: usize) -> Vec<String> {
         iyakki_accounts::AuditLog::recent(self, n)

@@ -70,16 +70,7 @@ pub struct Hooks {
 // ------------------------------------------------------------------------------------------------ git
 
 fn git_cmd(dir: &Path) -> Command {
-    let mut c = Command::new("git");
-    c.current_dir(dir)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_EDITOR", "true")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .args(["-c", "user.name=IYAKKI", "-c", "user.email=iyakki@localhost", "-c", "commit.gpgsign=false", "-c", "core.quotepath=off"]);
-    c
+    iyakki_core_local::starters::git_command(dir)
 }
 
 /// (success, stdout, stderr)
@@ -101,7 +92,7 @@ pub(crate) fn git_ok(dir: &Path, args: &[&str]) -> Result<String, String> {
 
 /// Run a program in a folder and say whether it succeeded with the last lines of its output (the test command of a workspace).
 pub fn run_command_in(dir: &Path, program: &str, args: &[String]) -> (bool, String) {
-    match Command::new(program).args(args).current_dir(dir).output() {
+    match iyakki_core_local::starters::run_in_dir(dir, program, args) {
         Ok(o) => {
             let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
             let tail: String = text.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
@@ -112,7 +103,7 @@ pub fn run_command_in(dir: &Path, program: &str, args: &[String]) -> (bool, Stri
 }
 
 pub fn git_available() -> bool {
-    Command::new("git").arg("--version").output().is_ok_and(|o| o.status.success())
+    iyakki_core_local::starters::git_available()
 }
 
 /// Is the workspace folder itself the top of a git repository with a commit?
@@ -1606,7 +1597,7 @@ impl Manager {
         if t.status.active() {
             return Err("the task is still running".into());
         }
-        let out = Command::new(program).args(args).current_dir(&t.tree).output().map_err(|e| format!("{program}: {e}"))?;
+        let out = iyakki_core_local::starters::run_in_dir(&t.tree, program, args).map_err(|e| format!("{program}: {e}"))?;
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         let tail: String = text.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
         let res = format!("{} (exit {})\n{tail}", if out.status.success() { "tests passed" } else { "tests failed" }, out.status.code().unwrap_or(-1));

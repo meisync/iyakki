@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::apps::tests::{cx_with_admin_store, services_in, temp_dir};
-use iyakki_zram::compressed::{self, Experiment};
-use iyakki_zram::Swapper;
+use iyakki_core_api::device_types::zram::compressed::{self, Experiment};
+use iyakki_core_api::device_types::zram::Swapper;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -79,7 +79,7 @@ fn goto_memory(a: &mut SettingsApp, _cx: &AppCx) {
 }
 
 /// A made-up machine: 4 GiB of RAM, zram0 in use (2 GiB, zstd) with 1 MiB stored.
-fn machine(tag: &str, swap_used_kib: u64) -> (std::path::PathBuf, iyakki_zram::Env) {
+fn machine(tag: &str, swap_used_kib: u64) -> (std::path::PathBuf, iyakki_core_api::device_types::zram::Env) {
     let root = temp_dir(&format!("{tag}-mem"));
     let z = root.join("sys/block/zram0");
     std::fs::create_dir_all(&z).unwrap();
@@ -94,7 +94,7 @@ fn machine(tag: &str, swap_used_kib: u64) -> (std::path::PathBuf, iyakki_zram::E
     std::fs::write(root.join("proc/pressure/memory"), "some avg10=1.50 avg60=0.75 avg300=0.10 total=1\n").unwrap();
     std::fs::write(root.join("proc/meminfo"), "MemTotal: 4194304 kB\nMemFree: 1000000 kB\nMemAvailable: 2000000 kB\nSwapTotal: 2097148 kB\nSwapFree: 2097148 kB\n").unwrap();
     std::fs::write(root.join("proc/swaps"), format!("Filename Type Size Used Priority\n/dev/zram0 partition 2097148 {swap_used_kib} 100\n")).unwrap();
-    let env = iyakki_zram::Env::under(&root);
+    let env = iyakki_core_api::device_types::zram::Env::under(&root);
     (root, env)
 }
 
@@ -165,7 +165,7 @@ fn editing_previewing_and_saving_for_the_next_boots() {
     assert!(saved.contains("zram=1G,lz4") && saved.contains("swappiness=60") && saved.contains("swapfile=2G") && saved.contains("zswap=on"), "{saved}");
     assert!(!a.mem_dirty(), "after saving the page matches the file");
     assert!(sw.0.lock().unwrap().is_empty(), "saving does not touch the running system");
-    assert!(std::fs::read_to_string(cx.audit.path()).unwrap_or_default().contains("memory.save"));
+    assert!(std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default().contains("memory.save"));
 }
 
 #[test]
@@ -188,7 +188,7 @@ fn apply_now_reconfigures_the_running_system_after_confirming() {
     assert_eq!(*sw.0.lock().unwrap(), vec!["off zram0", "on zram0 100"]);
     assert_eq!(std::fs::read_to_string(root.join("sys/block/zram0/disksize")).unwrap(), (1u64 << 30).to_string());
     assert_eq!(std::fs::read_to_string(root.join("sys/block/zram0/comp_algorithm")).unwrap(), "lz4");
-    assert!(std::fs::read_to_string(cx.audit.path()).unwrap_or_default().contains("memory.apply"));
+    assert!(std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default().contains("memory.apply"));
     assert!(!root.join("system.conf").exists(), "apply does not save");
 }
 
@@ -316,7 +316,7 @@ fn the_boot_order_switches_are_toggled_saved_to_system_conf_locked_by_boot_optio
     let text = std::fs::read_to_string(&conf).unwrap();
     assert!(text.contains("boot-record=on") && text.contains("boot-prefetch=on"), "{text}");
     assert!(!a.mem_dirty());
-    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
     assert!(audit.contains("boot-record=true boot-prefetch=true"), "{audit}");
     // switching one off again is saved too, and the other keys stay
     press(&mut a, &cx, 'b');

@@ -380,7 +380,7 @@ impl EditorView {
                     let label = format!("{} line {}: -{} +{}", if on { "Accept" } else { "Skip" }, h.old_start + 1, h.old.len(), h.new.len());
                     let tx = fit(c, sf, &label, TextStyle::Regular, rr.w - 2.0 * md);
                     c.text(rr.x + md, rr.y + ((hh - sf) / 2.0).max(0.0), sf, if on { th.text } else { th.dim }, &tx, TextStyle::Regular);
-                    c.hit(rr, Hit { action: self.base + A_HUNK0 + i as u32, name: label, role: Role::Button });
+                    c.hit(rr, Hit { action: self.base + A_HUNK0 + i as u32, name: label, role: Role::Button, ..Default::default() });
                     y += hh + m.gap(Space::Xxs);
                 }
                 let by = card.bottom() - t - sm;
@@ -455,7 +455,7 @@ impl EditorView {
                     let cx = text_area.x + gutter + cur.1.saturating_sub(start) as f32 * cw;
                     c.rect(Rect::new(cx, y + 1.0, 2.0, lh - 2.0), th.accent);
                 }
-                c.hit(row, Hit { action: self.base + A_LINE0 + r as u32, name: format!("line {}", ln + 1), role: Role::ListItem });
+                c.hit(row, Hit { action: self.base + A_LINE0 + r as u32, name: format!("line {}", ln + 1), role: Role::ListItem, ..Default::default() });
             }
         });
     }

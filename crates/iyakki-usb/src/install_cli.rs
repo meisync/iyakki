@@ -235,8 +235,7 @@ fn run_inner(args: &[String]) -> Result<i32, String> {
         println!("\nDry run: nothing was written.");
         return Ok(0);
     }
-    // SAFETY: geteuid takes no arguments.
-    if unsafe { libc::geteuid() } != 0 {
+    if !crate::posix::is_root() {
         return Err("installing needs administrator rights: run it as root (or use --dry-run to see the plan)".into());
     }
     let d = &plan.target.drive;

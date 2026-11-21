@@ -200,9 +200,10 @@ fn a_gpu_of_unknown_size_is_honest_and_hides_nothing() {
     let p = nv("0x1234");
     assert!(p.unknown() && !p.capable());
     assert!(p.line().contains("memory size unknown"));
-    for i in Item::ALL {
+    for i in Item::ALL.into_iter().filter(|i| *i != Item::GpuRocm) {
         assert!(rule(&p, i).shown(), "{i:?} stays");
     }
+    assert!(!rule(&p, Item::GpuRocm).shown(), "no AMD card here, so no ROCm entry");
     // a big resizable BAR is believed (4 GB or more), a 256 MB window is not
     let r = tmp("bar");
     mem(&r, 32);

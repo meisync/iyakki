@@ -102,7 +102,11 @@ that nobody mistakes (b) for it.
 * Chat tools `shared_vault_provider` (read) and `shared_vault_provider_set` (hard-ask, administrators). The setting file is also
   readable and writable by hand. There is no separate web API route for it: the settings page shows it, changes go through the tool.
 
-**Remaining:** the snapshot keyring and the `iyakki vault` command still use the built-in client directly; the built-in service does
-not refuse writes by itself when the provider is `external`; the setting is not yet part of the tenant launch configuration
-(`cloudtenant.rs`) and no settings-page control changes it (display only); envelope mode (c); a real HashiCorp Vault or OpenBao
-has not been tried (the tests use a fake KV v2 server); no migration of secrets between providers.
+**Alpha.7 (written):** the setting is part of the tenant launch configuration (`shared_vault` in `cloudtenant.rs`, checked on save,
+handed to the pod as `IYAKKI_SHARED_VAULT`; a setting file saved on the data volume wins over it). `iyakki vault secret
+put|get|list|delete` and the snapshot keyring (`--keys vault`, `key-rotate`) follow the provider the setting names
+(`sharedvault_cli.rs`; the external system's token comes from `--token-file`, a value is read from a file and written to a new 0600
+file, never printed or put on a command line).
+
+**Remaining (not code):** a real HashiCorp Vault or OpenBao has not been tried (the tests use a fake KV v2 server); stored secrets are
+not moved between providers (the page says so before it saves).

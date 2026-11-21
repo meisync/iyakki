@@ -260,8 +260,8 @@ impl LearnApp {
     fn calendar(&mut self, cx: &AppCx, add: bool) {
         let View::Plan(id) = &self.view else { return };
         let id = id.clone();
-        let st = &cx.study();
-        let r = if add { st.to_calendar(&self.user, &id, &cx.calendar(), &Zone::system()).map(|n| format!("Added {n} sessions to the calendar.")) } else { st.calendar_remove(&self.user, &id, &cx.calendar()).map(|n| format!("Removed {n} events from the calendar.")) };
+        let st = cx.study_calendar();
+        let r = if add { st.to_calendar(&self.user, &id, &Zone::system()).map(|n| format!("Added {n} sessions to the calendar.")) } else { st.calendar_remove(&self.user, &id).map(|n| format!("Removed {n} events from the calendar.")) };
         match r {
             Ok(m) => self.say(&m, true),
             Err(e) => self.say(&e, false),
@@ -272,13 +272,13 @@ impl LearnApp {
     fn delete_open(&mut self, cx: &AppCx) {
         self.confirm_delete = false;
         let r = match (&self.view, self.tab) {
-            (View::Plan(id), _) => cx.study().delete_plan(&self.user, id, &cx.calendar()).map(|_| "Plan deleted."),
+            (View::Plan(id), _) => cx.study_calendar().delete_plan(&self.user, id).map(|_| "Plan deleted."),
             (_, Tab::Quizzes) => match self.quizzes.get(self.sel[1]) {
                 Some(q) => cx.study().delete_quiz(&self.user, &q.id).map(|_| "Quiz deleted."),
                 None => return,
             },
             (_, Tab::Plans) => match self.plans.get(self.sel[0]) {
-                Some(p) => cx.study().delete_plan(&self.user, &p.id, &cx.calendar()).map(|_| "Plan deleted."),
+                Some(p) => cx.study_calendar().delete_plan(&self.user, &p.id).map(|_| "Plan deleted."),
                 None => return,
             },
         };

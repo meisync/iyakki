@@ -22,9 +22,11 @@ pub use iyakki_shared::vpntools::{PROMPT_RULE};
 
 pub const WRITE_TOOLS: [&str; 4] = ["vpn_add", "vpn_enable", "vpn_disable", "vpn_delete"];
 pub const READ_TOOL: &str = "vpn_list";
+/// The one-glance status: the top-bar line (connected, connecting, down, needs you), the guard, the policy routing and the helper.
+pub const STATUS_TOOL: &str = "vpn_status";
 
 pub fn is_vpn_tool(n: &str) -> bool {
-    n == READ_TOOL || WRITE_TOOLS.contains(&n)
+    n == READ_TOOL || n == STATUS_TOOL || WRITE_TOOLS.contains(&n)
 }
 
 pub struct VpnTools {
@@ -55,6 +57,20 @@ impl VpnTools {
             return Err(r);
         }
         self.inner.call("read_file", &json!({"path": path})).map(String::into_bytes)
+    }
+
+    /// What `vpn_status` says: the summary line of the enabled profile (the one the top bar shows), the guard, the policy routing and the helper.
+    fn status_text(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(self.mgr.summary().map_or_else(|| "No VPN is enabled: traffic goes direct.".to_string(), |s| s.line));
+        if let Some(g) = self.mgr.guard_line() {
+            lines.push(g);
+        }
+        if let Some(p) = self.mgr.policy_line() {
+            lines.push(p);
+        }
+        lines.push(format!("The privileged VPN helper is {}.", if self.mgr.helper_enabled() { "on" } else { "off" }));
+        lines.join("\n")
     }
 
     fn card(&self, name: &str, args: &Value) -> Result<String, String> {
@@ -142,6 +158,7 @@ impl Tools for VpnTools {
         let profile = |desc: &str| json!({"type": "object", "properties": {"profile": {"type": "string", "description": "The VPN profile's id or name."}}, "required": ["profile"], "description": desc});
         let ask = |name: &str, desc: &str, schema: Value| ToolDef { spec: ToolSpec { name: name.into(), description: desc.into(), schema }, risk: Risk::Ask, untrusted: false };
         v.push(ToolDef { spec: ToolSpec { name: READ_TOOL.into(), description: "List the person's VPN profiles with their state (no keys).".into(), schema: json!({"type": "object", "properties": {}}) }, risk: Risk::Safe, untrusted: false });
+        v.push(ToolDef { spec: ToolSpec { name: STATUS_TOOL.into(), description: "Say how the VPN is right now in a few lines: connected, connecting, down or needing the person; whether the kill-switch guard is blocking traffic; the policy routing; and whether the privileged VPN helper is on. Changes nothing, shows no keys.".into(), schema: json!({"type": "object", "properties": {}}) }, risk: Risk::Safe, untrusted: false });
         v.push(ask(
             "vpn_add",
             "Import a VPN profile from a FILE the person has (WireGuard .conf or OpenVPN .ovpn), by path. The file is read by the tool and its keys go to the vault; send the path, never the text. Starts disabled. The person approves a card.",
@@ -168,6 +185,7 @@ impl Tools for VpnTools {
                 }
                 Ok(out)
             }
+            STATUS_TOOL => Ok(self.status_text()),
             "vpn_add" => {
                 reject_secrets(args)?;
                 let data = self.read(args)?;
@@ -212,6 +230,9 @@ impl Tools for VpnTools {
         if name == READ_TOOL {
             return "List the VPN profiles".into();
         }
+        if name == STATUS_TOOL {
+            return "Show how the VPN is".into();
+        }
         self.inner.describe(name, args)
     }
 
@@ -219,14 +240,14 @@ impl Tools for VpnTools {
         if WRITE_TOOLS.contains(&name) {
             return self.card(name, args).ok();
         }
-        if name == READ_TOOL { None } else { self.inner.preview(name, args) }
+        if name == READ_TOOL || name == STATUS_TOOL { None } else { self.inner.preview(name, args) }
     }
 
     fn refusal(&self, name: &str, args: &Value) -> Option<String> {
         if WRITE_TOOLS.contains(&name) {
             return self.card(name, args).err();
         }
-        if name == READ_TOOL { None } else { self.inner.refusal(name, args) }
+        if name == READ_TOOL || name == STATUS_TOOL { None } else { self.inner.refusal(name, args) }
     }
 
     fn pre_approved(&self, name: &str) -> bool {

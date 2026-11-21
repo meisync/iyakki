@@ -152,6 +152,28 @@ fn a_password_is_only_sent_at_the_sign_in_step_and_never_shown_by_debug() {
 }
 
 #[test]
+fn a_message_type_or_an_error_code_a_newer_machine_added_is_said_once_and_ignored_and_never_ends_the_connection() {
+    let mut e = Engine::new(cfg(None, Some("dev1")));
+    to_sign_in(&mut e);
+    // a message type this page does not know: one notice, no failure, the page keeps its state
+    e.on_text(r#"{"t":"hologram","id":1}"#);
+    let (m, rest) = sent(&mut e);
+    assert!(m.is_empty());
+    assert!(rest.iter().any(|o| matches!(o, Out::Notice { text } if text.contains("does not know"))), "{rest:?}");
+    assert!(!rest.iter().any(|o| matches!(o, Out::Fail { .. })));
+    assert!(e.wants_reconnect() || e.phase() != Phase::Failed);
+    // an error code it has no words for: described as unknown, not fatal, and the machine's own text is not shown
+    let code: ErrorCode = serde_json::from_str("\"quota_full\"").unwrap();
+    assert_eq!(code, ErrorCode::Unknown);
+    let d = describe(code);
+    assert!(!d.fatal && d.message.contains("newer than this page"));
+    tell(&mut e, ServerMsg::Error { code, message: "free text from the machine".into() });
+    let (_, rest) = sent(&mut e);
+    let fail = rest.iter().find_map(|o| if let Out::Fail { fatal, message, .. } = o { Some((*fatal, message.clone())) } else { None }).expect("a Fail");
+    assert!(!fail.0 && !fail.1.contains("free text"));
+}
+
+#[test]
 fn every_error_code_has_words_and_a_decision_and_the_page_never_loops_on_a_fatal_one() {
     let all = [
         "bad_message", "too_big", "bad_sequence", "version_mismatch", "capability_missing", "token_unknown", "token_expired", "token_used", "bad_enrolment", "bad_signature",

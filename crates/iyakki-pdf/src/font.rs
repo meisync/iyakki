@@ -138,6 +138,8 @@ pub struct Font {
     pub two_byte: bool,
     pub type3: bool,
     pub vertical: bool,
+    /// A Type 0 font whose predefined CMap is a Unicode one (`UniJIS-UCS2-H`, `UniGB-UTF16-H`, ...): the character code is the UTF-16 code unit.
+    pub unicode_codes: bool,
     pub bold: bool,
     pub italic: bool,
     pub mono: bool,
@@ -180,6 +182,7 @@ impl Font {
             f.two_byte = true;
             if let Some(enc) = file.get(fd, "Encoding").name() {
                 f.vertical = enc.ends_with("-V");
+                f.unicode_codes = is_unicode_cmap(enc);
             }
             let desc = file.get(fd, "DescendantFonts");
             let dd = desc.arr().and_then(|a| a.first().cloned()).map(|x| file.resolve(&x)).and_then(|x| x.dict().cloned());
@@ -312,7 +315,7 @@ impl Font {
         // a font with no Unicode map of its own (F-PDF-08): an embedded TrueType font read with the glyph number as the code (Identity-H,
         // CIDFontType2): what the font's own cmap table says each glyph is
         if f.two_byte && !f.has_to_unicode && depth < 4 {
-            if let Some(m) = glyph_unicode_from_font_file(file, fd) {
+            if let Some(m) = glyph_unicode_from_font_file(file, fd).or_else(|| glyph_unicode_from_cff_file(file, fd)) {
                 f.to_unicode = m;
                 f.has_to_unicode = true;
             }
@@ -334,7 +337,8 @@ impl Font {
             return Some(s.clone());
         }
         if self.two_byte {
-            return None;
+            // a predefined Unicode CMap: the code is the character (a UTF-16 code unit of the basic plane; a surrogate stands for nothing alone)
+            return if self.unicode_codes { char::from_u32(code).filter(|c| *c >= ' ').map(|c| c.to_string()) } else { None };
         }
         self.enc.get(code as usize).copied().flatten().map(|c| c.to_string()).or_else(|| if code >= 32 && code < 127 && self.enc.is_empty() { char::from_u32(code).map(|c| c.to_string()) } else { None })
     }
@@ -366,6 +370,31 @@ impl Font {
     }
 }
 
+/// For each glyph the character the font's cmap gives it; where several characters share a glyph the lowest printable one.
+fn reverse_cmap(ttf: &crate::ttf::Ttf) -> HashMap<u16, u32> {
+    // a character that only looks like another (Kangxi radicals, CJK radical supplement, compatibility ideographs) shares its glyph with
+    // the real one and loses to it; control and private-use characters lose to everything
+    let rank = |cp: u32| -> u8 {
+        if !char::from_u32(cp).is_some_and(|c| !c.is_control()) || (0xE000..=0xF8FF).contains(&cp) {
+            2
+        } else if (0x2E80..=0x2FDF).contains(&cp) || (0xF900..=0xFAFF).contains(&cp) || (0x2F800..=0x2FA1F).contains(&cp) {
+            1
+        } else {
+            0
+        }
+    };
+    let mut best: HashMap<u16, u32> = HashMap::new();
+    for (cp, gid) in ttf.cmap_map() {
+        match best.get(&gid) {
+            Some(&old) if (rank(old), old) <= (rank(cp), cp) => {}
+            _ => {
+                best.insert(gid, cp);
+            }
+        }
+    }
+    best
+}
+
 /// The glyph number -> text table of an embedded TrueType font, from its cmap table turned around. Only for a Type 0 font whose codes ARE
 /// the glyph numbers (Identity encoding, CIDFontType2, no CIDToGIDMap or the identity one). Where several characters share a glyph the
 /// lowest printable one is taken. None for any other font.
@@ -388,22 +417,49 @@ fn glyph_unicode_from_font_file(file: &File, fd: &Dict) -> Option<HashMap<u32, S
     let s = file.get(d, "FontFile2");
     let data = file.stream_data(&s).ok()?;
     let ttf = crate::ttf::Ttf::parse(&data.data)?;
-    let mut best: HashMap<u16, u32> = HashMap::new();
-    for (cp, gid) in ttf.cmap_map() {
-        let printable = char::from_u32(cp).is_some_and(|c| !c.is_control()) && !(0xE000..=0xF8FF).contains(&cp);
-        match best.get(&gid) {
-            Some(old) if *old <= cp && (printable || !char::from_u32(*old).is_some_and(|c| !c.is_control())) => {}
-            Some(old) if !printable && char::from_u32(*old).is_some_and(|c| !c.is_control()) => {}
-            _ => {
-                best.insert(gid, cp);
-            }
-        }
-    }
+    let best = reverse_cmap(&ttf);
     let out: HashMap<u32, String> = best.into_iter().filter_map(|(g, cp)| char::from_u32(cp).map(|c| (g as u32, c.to_string()))).collect();
     (!out.is_empty()).then_some(out)
 }
 
-/// The encoding an embedded CFF program (`FontFile3`, Type1C) carries, as characters. None when the font is not CFF, is CID-keyed or
+/// The character identifier -> text table of an embedded CFF program in a Type 0 font with the Identity encoding (`CIDFontType0`, F-PDF-18):
+/// the program is bare (`CIDFontType0C`) or wrapped in an OpenType file (`OpenType`). A CID-keyed program gives each glyph its CID through
+/// the charset; a program that is not CID-keyed uses the CID as the glyph number. The character of a glyph comes from the OpenType file's
+/// cmap when there is one, else from the glyph's name in the program (a CID-keyed program has no names and, bare, no characters: the
+/// font's ToUnicode map is then all there is). No registry's CID to Unicode table is used.
+fn glyph_unicode_from_cff_file(file: &File, fd: &Dict) -> Option<HashMap<u32, String>> {
+    if !file.get(fd, "Encoding").name().is_some_and(|n| n.starts_with("Identity")) {
+        return None;
+    }
+    let desc = file.get(fd, "DescendantFonts");
+    let dd = desc.arr().and_then(|a| a.first().cloned()).map(|x| file.resolve(&x)).and_then(|x| x.dict().cloned())?;
+    if file.get(&dd, "Subtype").name() != Some("CIDFontType0") {
+        return None;
+    }
+    let fdesc = file.get(&dd, "FontDescriptor");
+    let d = fdesc.dict()?;
+    let s = file.get(d, "FontFile3");
+    if !matches!(s, Obj::Stream(..)) {
+        return None;
+    }
+    let data = file.stream_data(&s).ok()?.data;
+    let cff = crate::cff::Cff::parse(&data)?;
+    let rev = if data.starts_with(b"OTTO") { crate::ttf::Ttf::cmap_only(&data).map(|t| reverse_cmap(&t)) } else { None };
+    let mut out: HashMap<u32, String> = HashMap::new();
+    for g in 1..cff.glyph_names.len() {
+        let cid = if cff.cid_keyed { cff.cids.get(g).copied().unwrap_or(0) as u32 } else { g as u32 };
+        if cid == 0 {
+            continue;
+        }
+        let ch = rev.as_ref().and_then(|r| r.get(&(g as u16)).copied()).and_then(char::from_u32).or_else(|| cff.glyph_names[g].as_deref().and_then(glyph_unicode));
+        if let Some(c) = ch {
+            out.entry(cid).or_insert_with(|| c.to_string());
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The encoding an embedded CFF program (`FontFile3`, Type1C or OpenType) carries, as characters. None when the font is not CFF, is CID-keyed or
 /// uses the Standard encoding.
 fn cff_builtin_encoding(file: &File, fdesc: &Dict) -> Option<Vec<Option<char>>> {
     let s = file.get(fdesc, "FontFile3");
@@ -444,7 +500,7 @@ fn type1_builtin_encoding(file: &File, fdesc: &Dict) -> Option<Vec<Option<char>>
             continue;
         }
         let (Some(code), Some(name), Some("put")) = (toks.next(), toks.next(), toks.next()) else { break };
-        if let (Ok(c), Some(n)) = (code.parse::<usize>(), name.strip_prefix('/')) {
+        if let (Some(c), Some(n)) = (type1_code(code), name.strip_prefix('/')) {
             if c < 256 {
                 table[c] = glyph_unicode(n);
                 found += 1;
@@ -452,6 +508,21 @@ fn type1_builtin_encoding(file: &File, fdesc: &Dict) -> Option<Vec<Option<char>>
         }
     }
     (found > 0).then_some(table)
+}
+
+/// The predefined CMaps whose codes are Unicode (PDF 32000-1 table 118): `UniGB-UCS2-H`, `UniJIS-UTF16-V`, `UniCNS-UCS2-H`, `UniKS-UTF16-H`, ...
+pub fn is_unicode_cmap(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("Uni") else { return false };
+    let Some((script, form)) = rest.split_once('-') else { return false };
+    matches!(script, "GB" | "CNS" | "JIS" | "KS" | "JISX0213" | "JISPro" | "JIS2004") && matches!(form, "UCS2-H" | "UCS2-V" | "UCS2-HW-H" | "UCS2-HW-V" | "UTF16-H" | "UTF16-V")
+}
+
+/// A character code written in a Type 1 program: `97`, or with a radix as `8#141` or `16#61`.
+fn type1_code(t: &str) -> Option<usize> {
+    match t.split_once('#') {
+        Some((r, d)) => usize::from_str_radix(d, r.parse::<u32>().ok().filter(|r| (2..=36).contains(r))?).ok(),
+        None => t.parse().ok(),
+    }
 }
 
 fn base_from_name(n: &str, dflt: Base) -> Base {

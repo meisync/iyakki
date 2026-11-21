@@ -81,7 +81,7 @@ fn until(sh: &mut Shell, ok: impl Fn(&Shell) -> bool) -> bool {
 }
 
 fn audit_text(sh: &Shell) -> String {
-    std::fs::read_to_string(sh.env.audit.path()).unwrap_or_default()
+    std::fs::read_to_string(sh.env.audit.path_buf()).unwrap_or_default()
 }
 
 #[test]

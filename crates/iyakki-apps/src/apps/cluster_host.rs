@@ -44,7 +44,7 @@ pub struct ClusterHost {
     effective: Option<ClusterEntry>,
     loaded: Option<Instant>,
     fleet: std::sync::Arc<dyn iyakki_agent_api::FleetApi>,
-    audit: std::sync::Arc<crate::accounts::AuditLog>,
+    audit: std::sync::Arc<dyn iyakki_agent_api::AuditApi>,
 }
 
 /// The shell's request that opens Settings -> Clusters.

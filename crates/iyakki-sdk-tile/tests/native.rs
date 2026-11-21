@@ -20,7 +20,7 @@ fn list(ops: Vec<S>) -> DisplayList {
 
 #[test]
 fn every_sdk_operation_maps_onto_the_tile_abi() {
-    let hit = Hit { action: 6, name: "Go".into(), role: Role::Button };
+    let hit = Hit { action: 6, name: "Go".into(), role: Role::Button, ..Default::default() };
     let t = to_tile(&list(vec![
         S::Rect(Rect::new(1.4, 2.6, 10.0, 5.0), [1, 2, 3, 255]),
         S::RoundRect(Rect::new(0.0, 0.0, 20.0, 20.0), 4.0, [9, 9, 9, 255]),
@@ -292,4 +292,43 @@ fn version_3_paths_layers_and_cluster_runs_map_onto_the_tile_abi() {
     assert!(lines.iter().all(|o| matches!(o, Op::Line { color, thickness: 2, .. } if color.3 == 128)));
     assert!(t.ops.iter().any(|o| matches!(o, Op::Rect { color, .. } if *color == Color(9, 9, 9, 255))), "outside the layer nothing fades");
     assert!(t.ops.iter().any(|o| matches!(o, Op::Text { text, .. } if text == "e\u{0301}")));
+}
+
+#[test]
+fn a_hits_state_and_a_fields_value_reach_the_access_node_and_a_secret_field_says_no_value() {
+    use iyakki_tile_abi::access_flags as f;
+    let node = |hit: Hit| -> (String, u8) {
+        let t = to_tile(&list(vec![S::Hit(Rect::new(0.0, 0.0, 30.0, 10.0), hit)])).unwrap();
+        match &t.ops[1] {
+            Op::Access { value, flags, .. } => (value.clone(), *flags),
+            o => panic!("{o:?}"),
+        }
+    };
+    let row = Hit::new(1, "Notes", Role::ListItem).with_state(Hit::SELECTED | Hit::EXPANDED);
+    assert_eq!(node(row), (String::new(), f::SELECTED | f::EXPANDED));
+    let field = Hit::new(2, "Name", Role::Field).with_value("Ada");
+    assert_eq!(node(field), ("Ada".to_string(), 0));
+    let secret = Hit::new(3, "Password", Role::Field).with_value("hunter2").with_state(Hit::SECRET | Hit::DISABLED);
+    assert_eq!(node(secret), (String::new(), f::SECRET | f::DISABLED), "the typed text never crosses");
+    // a value is cut like a name, and bits the ABI does not know are dropped
+    let long = Hit::new(4, "Long", Role::Field).with_value("x".repeat(400));
+    assert!(node(long).0.len() <= limits::MAX_ACCESS_TEXT);
+    let mut odd = Hit::new(5, "Odd", Role::Button);
+    odd.state = 0xE0 | Hit::CHECKED;
+    assert_eq!(node(odd).1, f::CHECKED);
+}
+
+#[test]
+fn the_widgets_say_selected_and_the_text_of_a_field_and_the_tile_carries_both() {
+    use iyakki_ui_sdk::list::ListCanvas;
+    use iyakki_ui_sdk::look::Look;
+    let look = Look::default();
+    let m = iyakki_ui_sdk::size::Metrics::new(360.0, 740.0, 1.0, 1.0, true);
+    let mut c = ListCanvas::new(360.0, 740.0);
+    iyakki_ui_sdk::widgets::row(&mut c, &look.theme, &m, Rect::new(0.0, 0.0, 300.0, 40.0), "First", true, 1);
+    iyakki_ui_sdk::widgets::row(&mut c, &look.theme, &m, Rect::new(0.0, 50.0, 300.0, 40.0), "Second", false, 2);
+    iyakki_ui_sdk::widgets::field(&mut c, &look.theme, &m, Rect::new(0.0, 100.0, 300.0, 40.0), "Title", "Hello", true, 3);
+    let t = to_tile(&c.finish()).unwrap();
+    let access: Vec<_> = t.ops.iter().filter_map(|o| if let Op::Access { name, value, flags, .. } = o { Some((name.as_str(), value.as_str(), *flags)) } else { None }).collect();
+    assert_eq!(access, vec![("First", "", 1), ("Second", "", 0), ("Title", "Hello", 0)]);
 }

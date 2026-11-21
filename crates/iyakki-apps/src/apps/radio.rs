@@ -279,7 +279,7 @@ mod tests {
         wait(&cx, |s| matches!(s, RadioState::Playing { .. }));
         b.handle(&Event::Key(Key::Char('s')), &cx);
         assert_eq!(cx.radio().state(), RadioState::Idle);
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("radio.add") && log.contains("radio.play"), "{log}");
     }
 

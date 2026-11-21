@@ -157,6 +157,23 @@ pub fn apply(root: &Path, trash: &Path, c: &FileChange) -> Result<String, String
             })?;
             Ok(format!("Saved `{name}`."))
         }
+        FileChange::SaveBytes { path, bytes } => {
+            let (dir, name) = path.rsplit_once('/').map_or(("", path.as_str()), |(d, n)| (d, n));
+            check_name(name)?;
+            let target = folder(root, dir)?.join(name);
+            match std::fs::symlink_metadata(&target) {
+                Ok(m) if m.file_type().is_symlink() => return Err("that is a link, which is not followed".into()),
+                Ok(m) if !m.is_file() => return Err("that is a folder, not a file".into()),
+                _ => {}
+            }
+            let tmp = target.with_file_name(format!(".{name}.saving"));
+            std::fs::write(&tmp, bytes).map_err(|_| "the file could not be written".to_string())?;
+            std::fs::rename(&tmp, &target).map_err(|_| {
+                let _ = std::fs::remove_file(&tmp);
+                "the file could not be written".to_string()
+            })?;
+            Ok(format!("Saved `{name}`."))
+        }
     }
 }
 
@@ -288,5 +305,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::remove_dir_all(&outside);
         let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn a_clients_bytes_are_saved_whole_inside_the_home_and_read_back_and_nothing_else_is_reached() {
+        let d = tree("bytes");
+        let t = d.join("trash");
+        let body: Vec<u8> = (0..5000u32).map(|i| (i % 256) as u8).collect();
+        let save = |p: &str, b: &[u8]| apply(&d, &t, &FileChange::SaveBytes { path: p.into(), bytes: b.to_vec() });
+        assert_eq!(save("Docs/pic.bin", &body).unwrap(), "Saved `pic.bin`.");
+        assert_eq!(read_bytes(&d, "Docs/pic.bin", 10_000).unwrap(), body);
+        assert_eq!(save("Docs/pic.bin", b"new").unwrap(), "Saved `pic.bin`.");
+        assert_eq!(read_bytes(&d, "Docs/pic.bin", 10).unwrap(), b"new", "the old file was replaced whole");
+        assert!(read_bytes(&d, "Docs/pic.bin", 2).is_err(), "a file over the limit is refused, never cut");
+        assert!(!d.join("Docs/.pic.bin.saving").exists(), "no half-written file is left");
+        // not into a folder that is not there, over a folder, over a link, into a hidden name, or outside
+        std::os::unix::fs::symlink(d.join("b.txt"), d.join("lnk.bin")).unwrap();
+        for bad in ["nope/x.bin", "Docs", "lnk.bin", ".hid.bin", "../x.bin", "Docs/../../x.bin"] {
+            assert!(save(bad, b"x").is_err(), "{bad}");
+        }
+        assert_eq!(std::fs::read(d.join("b.txt")).unwrap(), b"bee", "the link's target was not written through");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

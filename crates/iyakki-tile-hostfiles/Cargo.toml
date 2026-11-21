@@ -1,0 +1,16 @@
+[package]
+name = "iyakki-tile-hostfiles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The HOST FILES dialog (window mode). Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit`; the one listed
+# exception is `iyakki-hostfiles`, the rules of the bridge (no I/O beyond the granted host folders, no agent). The shell hands the dialog a
+# `HostEnv` (plain data and an audit closure), never its own context.
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-hostfiles = { path = "../iyakki-hostfiles" }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

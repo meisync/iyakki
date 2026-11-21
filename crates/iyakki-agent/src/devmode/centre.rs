@@ -128,7 +128,7 @@ fn write_trial(data: &Path, t: &Trial) -> Result<(), String> {
 
 /// The kernel's id of this boot (empty when it cannot be read).
 pub fn boot_id_now() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/random/boot_id").map(|s| s.trim().to_string()).unwrap_or_default()
+    iyakki_core_local::kernelfacts::boot_id()
 }
 
 /// What the check after a start found, in words for the person; `None` when there is nothing to say.
@@ -218,7 +218,7 @@ impl Centre {
 
     /// The device: the boot partition found on the data volume's own disk, `/etc/iyakki-release`, the built-in release key.
     pub fn real(data: &Path) -> Centre {
-        let mounted = iyakki_storage::read_mounts().map(|t| super::bootmount::parse_mounts(&t).iter().any(|m| m.dir == data)).unwrap_or(false);
+        let mounted = super::bootmount::parse_mounts(&iyakki_core_local::kernelfacts::mounts_text()).iter().any(|m| m.dir == data);
         Centre::new(data, Box::new(super::bootmount::SysBoot::real(data)), std::fs::read_to_string(crate::relinfo::RELEASE_FILE).unwrap_or_default(), !mounted, crate::dlmanifest::builtin_key())
     }
 

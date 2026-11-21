@@ -50,9 +50,8 @@ pub use iyakki_shared::pkg::{Installed, MAX_EXTENSION_PACKAGE_BYTES, MAX_PACKAGE
 
 /// A fresh signing key from the operating system's random source.
 pub fn new_signing_key() -> Result<SigningKey, PkgError> {
-    use std::io::Read;
     let mut seed = [0u8; 32];
-    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut seed)).map_err(|e| PkgError::Storage(e.to_string()))?;
+    iyakki_sec::random_fill(&mut seed).map_err(|e| PkgError::Storage(e.to_string()))?;
     Ok(SigningKey::from_bytes(&seed))
 }
 

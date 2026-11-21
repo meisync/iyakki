@@ -182,11 +182,8 @@ pub fn share_dependency_folders(main: &Path, tree: &Path) -> Vec<String> {
 
 /// Paths with uncommitted changes in the main workspace (`git status --porcelain`); empty outside git.
 pub fn uncommitted_in_main(main: &Path) -> Vec<String> {
-    let Ok(o) = std::process::Command::new("git").current_dir(main).args(["status", "--porcelain", "-uall"]).output() else { return vec![] };
-    if !o.status.success() {
-        return vec![];
-    }
-    String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.len() > 3).map(|l| l[3..].trim().trim_matches('"').to_string()).filter(|p| !p.starts_with(".iyakki/")).collect()
+    let Some(o) = iyakki_core_local::starters::git_status_porcelain(main) else { return vec![] };
+    o.lines().filter(|l| l.len() > 3).map(|l| l[3..].trim().trim_matches('"').to_string()).filter(|p| !p.starts_with(".iyakki/")).collect()
 }
 
 /// Copy the listed uncommitted files of the main workspace into the task's tree (deleted ones are removed there). Returns the count.

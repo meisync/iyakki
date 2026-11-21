@@ -1,7 +1,7 @@
 //! The Wi-Fi hotspot's radio for a card that does authentication, association and beacons itself (FullMAC, `ApMode::PskOffload` or card-managed): a second interface of type
 //! access point is made next to the Wi-Fi client and the access point is started on it. The 4-way handshake is run by this computer (`HandshakeMode::Host`, see
 //! `wifi_ap_host`, the default) or handed to the firmware with the key derived from the passphrase (`HandshakeMode::PskOffload`). Nothing here knows a chip or a driver: the capability probe decides
-//! (`iyakki_hotspot::caps::can_host_ap`), and a card that needs our own handshake (`ApMode::Software`) is not started by this module.
+//! (`iyakki_hotspot::caps::can_host_ap`), and a card that needs our own handshake (`ApMode::Software`) is started here too, with `wifi_ap_sw` running the exchange (plain SAE, no hash-to-element).
 //!
 //! The access point itself stays up without this process, but in host mode only this process runs the handshake (a thread, ended by `stop`). Addresses, DHCP, DNS and the firewall are the
 //! sharing manager's job (`crate::sharing`), on the interface this returns.
@@ -25,12 +25,8 @@ fn settings_country_ok(c: &str) -> bool {
     iyakki_hotspot::rsn::valid_country(c)
 }
 
-fn sysfs(path: &str) -> Option<String> {
-    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
-}
-
 fn ifindex_of(name: &str) -> Option<u32> {
-    sysfs(&format!("/sys/class/net/{name}/ifindex")).and_then(|s| s.parse().ok())
+    iyakki_core_local::net::iface_attr(name, "ifindex").and_then(|s| s.parse().ok())
 }
 
 /// Who runs the WPA2 4-way handshake on a card that does authentication and association itself (FullMAC).
@@ -77,6 +73,7 @@ pub fn params_with_security(ifindex: u32, bssid: [u8; 6], ssid: &str, channel: u
         probe_resp: mgmt::probe_response_with(bssid, ssid.as_bytes(), 100, band, ch, &rsn),
         inactivity_secs: 0,
         pmk: Some(pmk),
+        security: mode,
     }
 }
 
@@ -124,12 +121,23 @@ pub fn effective_security(wanted: &str, c: &caps::PhyCaps, host_handshake: bool)
     (m, why.map(String::from))
 }
 
+/// The security for a card whose computer runs the whole exchange (`ApMode::Software`): what the person asked for. The SAE exchange is
+/// ours (`wifi_ap_sw`, plain SAE), so the card's own SAE offload does not matter.
+pub fn software_security(wanted: &str) -> (iyakki_hotspot::rsn::SecurityMode, Option<String>) {
+    use iyakki_hotspot::rsn::SecurityMode;
+    match wanted {
+        "transition" => (SecurityMode::Transition, None),
+        "wpa3" => (SecurityMode::Wpa3, None),
+        _ => (SecurityMode::Wpa2, None),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn start(client: &str, ssid: &str, passphrase: &str, band_pref: &str, country: &str, security: &str, client_paused: bool, log: &mut dyn FnMut(String)) -> Result<Up, String> {
     settings::validate_ssid(ssid).map_err(|e| format!("the network name: {e:?}"))?;
     settings::validate_passphrase(passphrase).map_err(|e| format!("the password: {e:?}"))?;
-    let phy_name = sysfs(&format!("/sys/class/net/{client}/phy80211/name")).ok_or_else(|| format!("{client} is not a Wi-Fi interface"))?;
-    let wiphy: u32 = sysfs(&format!("/sys/class/net/{client}/phy80211/index")).and_then(|s| s.parse().ok()).ok_or("the radio has no index")?;
+    let phy_name = iyakki_core_local::net::iface_attr(client, "phy80211/name").ok_or_else(|| format!("{client} is not a Wi-Fi interface"))?;
+    let wiphy: u32 = iyakki_core_local::net::iface_attr(client, "phy80211/index").and_then(|s| s.parse().ok()).ok_or("the radio has no index")?;
 
     let sock = Nl80211Socket::open(Duration::from_secs(5)).map_err(|e| e.to_string())?;
     let nl = crate::nl80211_os::SharedNl::new(sock);
@@ -168,8 +176,8 @@ pub fn start(client: &str, ssid: &str, passphrase: &str, band_pref: &str, countr
     let hs = handshake_mode();
     log(format!("hotspot: handshake by {}", if hs == HandshakeMode::Host { "this computer (host mode)" } else { "the card's firmware (PMK offload)" }));
     match (plan.mode, hs) {
-        (caps::ApMode::Software, _) => return Err("this card needs the computer to run the handshake; that path is only used for a card of its own".into()),
-        (caps::ApMode::PskOffload, _) | (caps::ApMode::CardManaged, HandshakeMode::Host) => {}
+        // a card that leaves everything to the computer: `wifi_ap_sw` runs authentication, SAE and the handshake (always on the computer)
+        (caps::ApMode::Software, _) | (caps::ApMode::PskOffload, _) | (caps::ApMode::CardManaged, HandshakeMode::Host) => {}
         _ => return Err("this card manages the access point by itself and gives no way to set the password; not supported".to_string()),
     }
 
@@ -181,31 +189,39 @@ pub fn start(client: &str, ssid: &str, passphrase: &str, band_pref: &str, countr
     }
     ap.add_ap_interface(wiphy, AP_IFACE).map_err(|e| err("making the access point interface", e, &nl))?;
     let ifindex = ifindex_of(AP_IFACE).ok_or("the access point interface did not appear")?;
-    let mac_text = sysfs(&format!("/sys/class/net/{AP_IFACE}/address")).ok_or("the access point interface has no address")?;
+    let mac_text = iyakki_core_local::net::iface_attr(AP_IFACE, "address").ok_or("the access point interface has no address")?;
     let bssid: [u8; 6] = mac_text.split(':').filter_map(|p| u8::from_str_radix(p, 16).ok()).collect::<Vec<_>>().try_into().map_err(|_| "bad interface address".to_string())?;
     let undo = |ap: &mut ApControl<crate::nl80211_os::SharedNl>| {
         let _ = ap.remove_interface(ifindex);
     };
-    if let Err(e) = crate::sharing::real::sys::link_up(AP_IFACE) {
-        undo(&mut ap);
-        return Err(e);
+    // the link goes up through the routing netlink (our own encoder); the interface ioctl is only the fallback
+    if let Err(e) = crate::rtnl::set_link(AP_IFACE, true) {
+        log(format!("hotspot: the routing netlink could not bring {AP_IFACE} up ({e}); trying the interface request"));
+        if let Err(e) = crate::sharing::real::sys::link_up(AP_IFACE) {
+            undo(&mut ap);
+            return Err(e);
+        }
     }
     let pmk = kdf::pmk_from_passphrase(passphrase, ssid.as_bytes());
     // host mode: no PMK in the start, so the driver expects us to install keys; the runner follows every (re)start of the access point
-    let (sec, sec_why) = effective_security(security, c, hs == HandshakeMode::Host);
+    let software = plan.mode == caps::ApMode::Software;
+    let (sec, sec_why) = if software { software_security(security) } else { effective_security(security, c, hs == HandshakeMode::Host) };
     if let Some(w) = sec_why {
         log(format!("hotspot: {w}"));
     }
     log(format!("hotspot: security announced: {}", sec.label()));
     let mk = |ch: u32, f: u32| {
         let mut p = params_with_security(ifindex, bssid, ssid, ch, f, pmk, sec);
-        if hs == HandshakeMode::Host {
+        if hs == HandshakeMode::Host || software {
             p.pmk = None;
         }
         p
     };
-    let host_begin = || -> Result<(), String> {
-        if hs == HandshakeMode::Host {
+    let host_begin = |freq: u32| -> Result<(), String> {
+        if software {
+            // the computer runs authentication, the SAE exchange and the handshake; no PMK goes to the card
+            crate::wifi_ap_sw::begin(ifindex, bssid, ssid, passphrase, freq, sec)?;
+        } else if hs == HandshakeMode::Host {
             crate::wifi_ap_host::begin(ifindex, bssid, ssid, passphrase)?;
         }
         Ok(())
@@ -215,7 +231,7 @@ pub fn start(client: &str, ssid: &str, passphrase: &str, band_pref: &str, countr
         undo(&mut ap);
         return Err(msg);
     }
-    if let Err(e) = host_begin() {
+    if let Err(e) = host_begin(plan.freq) {
         let _ = ap.stop_ap(ifindex);
         undo(&mut ap);
         return Err(format!("starting the handshake: {e}"));
@@ -242,11 +258,12 @@ pub fn start(client: &str, ssid: &str, passphrase: &str, band_pref: &str, countr
         log(format!("hotspot: {client} moved to {now} MHz; moving the access point from {freq} MHz"));
         // stopping the access point drops its keys: the runner ends first and begins again after the start
         crate::wifi_ap_host::end();
+        crate::wifi_ap_sw::end();
         let _ = ap.stop_ap(ifindex);
         match ap.start_ap(&mk(ch, now)) {
             Ok(()) => {
                 (freq, channel) = (now, ch);
-                if let Err(e) = host_begin() {
+                if let Err(e) = host_begin(now) {
                     log(format!("hotspot: handshake did not restart: {e}"));
                 }
             }
@@ -254,7 +271,7 @@ pub fn start(client: &str, ssid: &str, passphrase: &str, band_pref: &str, countr
                 log(format!("hotspot: could not move the access point: {}", err("starting it again", e, &nl)));
                 // go back to where it was
                 let _ = ap.start_ap(&mk(channel, freq));
-                let _ = host_begin();
+                let _ = host_begin(freq);
                 break;
             }
         }
@@ -302,6 +319,7 @@ fn resume_client_at(dir: &str, client: &str) -> Result<(), String> {
 /// End the access point and remove its interface. Not an error when it is not there.
 pub fn stop() -> Result<(), String> {
     crate::wifi_ap_host::end();
+    crate::wifi_ap_sw::end();
     let Some(ifindex) = ifindex_of(AP_IFACE) else { return Ok(()) };
     let sock = Nl80211Socket::open(Duration::from_secs(5)).map_err(|e| e.to_string())?;
     let mut ap = ApControl::new(crate::nl80211_os::SharedNl::new(sock));
@@ -355,6 +373,7 @@ mod tests {
         let rsn3 = iyakki_hotspot::rsn::rsn_ie(iyakki_hotspot::rsn::SecurityMode::Wpa3);
         assert!(p3.beacon_tail.ends_with(&rsn3) && p3.probe_resp.ends_with(&rsn3));
         assert_eq!(p3.beacon_head, p5.beacon_head);
+        assert_eq!((p5.security, p3.security), (iyakki_hotspot::rsn::SecurityMode::Wpa2, iyakki_hotspot::rsn::SecurityMode::Wpa3), "the start call is told what the beacon announces");
     }
 
     #[test]

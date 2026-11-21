@@ -30,7 +30,7 @@ impl SettingsApp {
     }
 
     fn host_env(cx: &AppCx) -> HostEnv {
-        HostEnv::for_cx(cx)
+        crate::apps::hostfiles::env_for_cx(cx)
     }
 
     /// Keys and clicks for a dialog opened from this page; true when one is open (it takes everything).

@@ -15,7 +15,7 @@ use crate::services::Services;
 use crate::skills::Scope;
 
 pub fn is_store_tool(name: &str) -> bool {
-    matches!(name, "store_search" | "store_info" | "store_buy" | "store_add_licence" | "store_install" | "store_outdated" | "store_update" | "store_remove" | "store_rollback" | "store_data_snapshots" | "store_data_restore" | "store_data_migrate")
+    matches!(name, "store_search" | "store_info" | "store_buy" | "store_add_licence" | "store_install" | "store_outdated" | "store_update" | "store_remove" | "store_rollback" | "store_data_snapshots" | "store_data_restore" | "store_data_migrate" | "store_bundle_members")
 }
 
 fn offered(p: &Policy) -> bool {
@@ -106,6 +106,13 @@ pub fn defs(p: &Policy) -> Vec<ToolDef> {
             obj(json!({"id": {"type": "string"}}), &["id"]),
             Risk::Ask,
             false,
+        ),
+        tool(
+            "store_bundle_members",
+            "List the members of the app bundles installed here: for each bundle its members with kind (skill, flow, tool, mcp, agent, template, theme, extension, tile) and title, and for the data kinds (agent, template, theme, extension) the kept, verified contents. Optional `kind` narrows the list. Read-only; a member only ever holds the approval the person gave that member alone.",
+            obj(json!({"kind": {"type": "string"}}), &[]),
+            Risk::Safe,
+            true,
         ),
     ]
 }
@@ -325,6 +332,7 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str) ->
             let rec = st.install(svc, &a, &r, Confirm::all()).map_err(|e| format!("Not installed: {e}"))?;
             Ok(format!("Installed {} {} ({}). {}", rec.title, rec.version, r.verdict.level.label(), if r.permissions.is_empty() { "It asks for no extra access.".to_string() } else { format!("It may: {}.", r.permissions.iter().map(|p| p.words.clone()).collect::<Vec<_>>().join("; ")) }))
         }
+        "store_bundle_members" => Ok(super::bundle::members_text(&st, s("kind"))),
         "store_outdated" => Ok(outdated_text(svc, p, user, arg_bool(args, "all"))),
         "store_update" => {
             let fetch = HttpFetch(svc.quick_upstream());

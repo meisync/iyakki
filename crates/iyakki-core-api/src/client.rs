@@ -24,6 +24,8 @@ pub const MAX_TEXT: usize = 64 * 1024;
 /// The most bytes of the one text message that may be longer than [`MAX_TEXT`]: `clipboard_put` and `clipboard_text` carry up to
 /// [`media::MAX_CLIPBOARD`] bytes of text, which JSON may escape to six bytes a character.
 pub const MAX_CLIPBOARD_MESSAGE: usize = 6 * media::MAX_CLIPBOARD + 256;
+/// The most bytes of one `app_list` message (a display list of an SDK app, F-SDK-29): larger than [`MAX_TEXT`], never larger than this.
+pub const MAX_APP_LIST: usize = 512 * 1024;
 /// The path of the WebSocket, and what a signed challenge covers.
 pub const WS_PATH: &str = "/client/ws";
 
@@ -46,6 +48,15 @@ pub mod cap {
     pub const CLIENT_CAMERA: &str = "client.camera";
     /// The client's own microphone offered to the instance as a virtual source.
     pub const CLIENT_MICROPHONE: &str = "client.microphone";
+    /// Display-list mode (ADDITIVE, D-CLIENT-PROTO-DISPLAYLIST): the client asks for an SDK app by name and gets its display list as text
+    /// (`app_open`, `app_input`, `app_close`; answers `app_list`, `app_closed`, `app_err`). The picture stream is unchanged and stays the default.
+    pub const DISPLAY_LIST: &str = "display.list";
+    /// What an instance offers besides [`SERVER`] and [`SERVER_MEDIA`]: the display-list mode.
+    pub const SERVER_UI: &[&str] = &[DISPLAY_LIST];
+    /// File transfer through the page (F-CLIENT-01, ADDITIVE): list the person's home folder, download one file, upload one file, each file with a card
+    /// on the machine. Offered only by an instance whose media half is wired and whose screen has files.
+    pub const FILE_TRANSFER: &str = "files.transfer";
+    pub const SERVER_FILES: &[&str] = &[FILE_TRANSFER];
     /// What an instance with media wired serves, besides [`SERVER`].
     pub const SERVER_MEDIA: &[&str] = &[AUDIO_OUT, CLIPBOARD_TEXT, CAMERA_FRAMES, CLIENT_CAMERA, CLIENT_MICROPHONE];
 }
@@ -62,6 +73,13 @@ pub const STREAM_CAMERA: u8 = 3;
 pub const STREAM_MIC_IN: u8 = 4;
 /// Client to instance: one JPEG frame of the client's own camera.
 pub const STREAM_CAMERA_IN: u8 = 5;
+/// Instance to client: a chunk of a file being downloaded, `[id: u32 big endian][bytes]` (see [`FileMsg`]).
+pub const STREAM_FILE_OUT: u8 = 6;
+/// Client to instance: a chunk of a file being uploaded, `[id: u32 big endian][bytes]`.
+pub const STREAM_FILE_IN: u8 = 7;
+/// The most bytes of one file chunk, and of one file in either direction.
+pub const FILE_CHUNK: usize = 32 * 1024;
+pub const MAX_FILE: usize = crate::files::MAX_UPLOAD;
 
 /// A binary message of `stream` carrying `payload`.
 pub fn binary(stream: u8, payload: &[u8]) -> Vec<u8> {
@@ -108,6 +126,10 @@ pub enum ErrorCode {
     Unsupported,
     Closed,
     Internal,
+    /// A code a newer instance or client sent that this release does not know (the compatibility charter: enums are open). Never sent by this
+    /// release.
+    #[serde(other)]
+    Unknown,
 }
 
 impl ErrorCode {
@@ -134,6 +156,7 @@ impl ErrorCode {
             ErrorCode::Unsupported => "unsupported",
             ErrorCode::Closed => "closed",
             ErrorCode::Internal => "internal",
+            ErrorCode::Unknown => "unknown",
         }
     }
 }
@@ -232,6 +255,28 @@ pub enum ClientMsg {
     /// Offer this client's own `camera` or `microphone` to the instance as a virtual source named after the device.
     OfferOpen { kind: String },
     OfferClose { kind: String },
+    /// Open an SDK app of the instance in display-list mode (needs `display.list`): `app` is its id (`sample`, `markdown`), `w` and `h` the
+    /// size of the client's pane in logical units. Answered with `app_list` (the first frame) or `app_err`. One app per session.
+    AppOpen { app: String, w: u32, h: u32 },
+    /// Input lines for the open app (the SDK's text input lines, one per line: pointer, key, text, action, wheel, resize, tick). Answered with
+    /// the next `app_list`. A bad batch applies nothing and is answered with `app_err`.
+    AppInput { lines: String },
+    /// Close the app; the picture of the machine's screen carries on.
+    AppClose,
+    /// List a folder of the person's home (needs `files.transfer`; the machine asks on its screen). Answered with `file_list` ([`FileMsg`]).
+    FileList { dir: String },
+    /// Download one file of the person's home. The machine asks on its screen; then `file_get_ok`, chunks on [`STREAM_FILE_OUT`], `file_done`.
+    FileGet { id: u32, path: String },
+    /// Upload one file of `size` bytes into the person's home. The machine asks on its screen; `file_put_ok` says to send the chunks on
+    /// [`STREAM_FILE_IN`]; `file_end` closes it and the file is saved (`file_saved`).
+    FilePut { id: u32, path: String, size: u64 },
+    /// All the chunks of upload `id` were sent.
+    FileEnd { id: u32 },
+    /// Stop transfer `id` in either direction; what was received is thrown away.
+    FileCancel { id: u32 },
+    /// A message of a type this release does not know (a newer client). The instance answers `unsupported` and goes on; it is never sent.
+    #[serde(other)]
+    Unknown,
 }
 
 impl fmt::Debug for ClientMsg {
@@ -259,6 +304,17 @@ impl fmt::Debug for ClientMsg {
             ClientMsg::CameraClose { .. } => write!(f, "CameraClose"),
             ClientMsg::OfferOpen { kind } => write!(f, "OfferOpen({kind})"),
             ClientMsg::OfferClose { kind } => write!(f, "OfferClose({kind})"),
+            // typed text may be a password: the lines are never printed
+            ClientMsg::AppOpen { app, w, h } => write!(f, "AppOpen({app}, {w}x{h})"),
+            ClientMsg::AppInput { lines } => write!(f, "AppInput({} bytes)", lines.len()),
+            ClientMsg::AppClose => write!(f, "AppClose"),
+            // a path may name a person's private file: only its length is printed
+            ClientMsg::FileList { dir } => write!(f, "FileList({} chars)", dir.len()),
+            ClientMsg::FileGet { id, .. } => write!(f, "FileGet({id})"),
+            ClientMsg::FilePut { id, size, .. } => write!(f, "FilePut({id}, {size} bytes)"),
+            ClientMsg::FileEnd { id } => write!(f, "FileEnd({id})"),
+            ClientMsg::FileCancel { id } => write!(f, "FileCancel({id})"),
+            ClientMsg::Unknown => write!(f, "Unknown"),
         }
     }
 }
@@ -314,6 +370,9 @@ pub enum ServerMsg {
     /// A media request was refused. `what` is `audio`, `clipboard`, `camera` or `offer`; `code` is stable (the broker's denial codes,
     /// `in_use`, `consent_required`, `too_big`, `empty`, `unsupported`, `not_open`, `bad_request`).
     MediaErr { what: String, code: String, message: String },
+    /// A message of a type this release does not know (a newer instance). The client ignores it and goes on; it is never sent.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One camera in the list a client is offered.
@@ -321,6 +380,113 @@ pub enum ServerMsg {
 pub struct CameraEntry {
     pub unit: String,
     pub name: String,
+}
+
+/// Instance to client, display-list mode (D-CLIENT-PROTO-DISPLAYLIST, ADDITIVE). A text message like a [`ServerMsg`] (`{"t":"app_list",...}`), kept in
+/// its own type so that [`ServerMsg`] and the client engine's reader of it are unchanged: the engine reads these by hand ([`decode_app`]), which
+/// keeps its WebAssembly module inside its size limit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum AppMsg {
+    /// A frame of the open app as display-list text (the first after `app_open`, then one after every `app_input`).
+    AppList { app: String, text: String },
+    /// The app ended: `closed` (the client asked), `left` (the person left it with Back), `too_big`, `signed_out`.
+    AppClosed { app: String, reason: String },
+    /// An app request was refused. `code` is stable: `unsupported`, `not_found`, `denied`, `busy`, `bad_request`, `not_open`, `too_big`, `failed`.
+    AppErr { code: String, message: String },
+}
+
+/// Instance to client, file transfer (F-CLIENT-01, ADDITIVE; like [`AppMsg`] it is not a [`ServerMsg`]: the page reads the JSON itself and the
+/// engine only passes `{"t":"file_..."}` texts on).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum FileMsg {
+    /// The folder `dir` (relative to the home): `(name, is_dir, size)`.
+    FileList { dir: String, entries: Vec<FileRow>, truncated: bool },
+    /// The download `id` starts: `size` bytes follow on [`STREAM_FILE_OUT`].
+    FileGetOk { id: u32, size: u64 },
+    /// The download `id` is complete.
+    FileDone { id: u32 },
+    /// Send the chunks of upload `id` now.
+    FilePutOk { id: u32 },
+    /// The upload `id` is saved as `path`.
+    FileSaved { id: u32, path: String },
+    /// A file request was refused or failed. `id` is 0 for a listing. `code` is stable: `unsupported`, `capability_missing`, `role_denied`, the broker's denial
+    /// codes, `bad_request`, `too_big`, `not_found`, `busy`, `failed`.
+    FileErr { id: u32, code: String, message: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FileRow {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+pub fn encode_file(m: &FileMsg) -> String {
+    serde_json::to_string(m).unwrap_or_default()
+}
+
+/// A binary file chunk: the id and the bytes.
+pub fn file_chunk(stream: u8, id: u32, bytes: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(bytes.len() + 5);
+    v.push(stream);
+    v.extend_from_slice(&id.to_be_bytes());
+    v.extend_from_slice(bytes);
+    v
+}
+
+/// The id and the bytes of a file chunk's payload (what follows the stream tag); `None` when it is shorter than the id.
+pub fn split_file_chunk(payload: &[u8]) -> Option<(u32, &[u8])> {
+    let (id, bytes) = payload.split_at_checked(4)?;
+    Some((u32::from_be_bytes([id[0], id[1], id[2], id[3]]), bytes))
+}
+
+pub fn encode_app(m: &AppMsg) -> String {
+    serde_json::to_string(m).unwrap_or_default()
+}
+
+/// Is this text one of the display-list messages, and if so is it within its bound? `Ok(false)` for a text that is not one (it is for
+/// [`decode_server`]); an `app_list` may be as long as [`MAX_APP_LIST`], the others are held to [`MAX_TEXT`].
+pub fn app_text(text: &str) -> Result<bool, ProtoError> {
+    let list = text.starts_with(r#"{"t":"app_list""#);
+    if text.starts_with(r#"{"t":"file_"#) {
+        // a file message: the page reads it; here it is only held to the size of an ordinary message
+        return if text.len() > MAX_TEXT { Err(ProtoError::new(ErrorCode::TooBig, "that message is too long")) } else { Ok(true) };
+    }
+    if !list && !text.starts_with(r#"{"t":"app_"#) {
+        return Ok(false);
+    }
+    if text.len() > if list { MAX_APP_LIST + 256 } else { MAX_TEXT } {
+        return Err(ProtoError::new(ErrorCode::TooBig, "that message is too long"));
+    }
+    Ok(true)
+}
+
+/// The display-list message in an already parsed JSON value. The client engine parses with its own copy of the JSON reader and calls this
+/// (reading it with a derived `Deserialize` here would add a second copy of the reader to its module, which has a size limit).
+pub fn app_from_value(v: &serde_json::Value) -> Result<AppMsg, ProtoError> {
+    // a file message is the page's to read: it is checked to be a message with a tag, nothing more
+    if v.get("t").and_then(|t| t.as_str()).is_some_and(|t| t.starts_with("file_")) {
+        return Ok(AppMsg::AppClosed { app: String::new(), reason: String::new() });
+    }
+    let bad = || ProtoError::new(ErrorCode::BadMessage, "that message is not understood");
+    let f = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    match v.get("t").and_then(|t| t.as_str()) {
+        Some("app_list") => Ok(AppMsg::AppList { app: f("app").ok_or_else(bad)?, text: f("text").ok_or_else(bad)? }),
+        Some("app_closed") => Ok(AppMsg::AppClosed { app: f("app").ok_or_else(bad)?, reason: f("reason").ok_or_else(bad)? }),
+        Some("app_err") => Ok(AppMsg::AppErr { code: f("code").ok_or_else(bad)?, message: f("message").ok_or_else(bad)? }),
+        _ => Err(bad()),
+    }
+}
+
+/// Read one display-list message of the instance (for a client that is not the engine, and for tests): `Ok(None)` for a text that is not one.
+pub fn decode_app(text: &str) -> Result<Option<AppMsg>, ProtoError> {
+    if !app_text(text)? {
+        return Ok(None);
+    }
+    let v: serde_json::Value = serde_json::from_str(text).map_err(|_| ProtoError::new(ErrorCode::BadMessage, "that message is not understood"))?;
+    app_from_value(&v).map(Some)
 }
 
 impl From<ProtoError> for ServerMsg {

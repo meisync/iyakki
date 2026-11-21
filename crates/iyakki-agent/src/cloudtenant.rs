@@ -82,6 +82,11 @@ pub struct TenantConfig {
     /// `IYAKKI_SNAPSHOT_KEYS`, and `iyakki cloud snapshot` follows it when no `--keys` is given. Without it the command line decides.
     #[serde(default)]
     pub snapshot_keys: Option<String>,
+    /// The tenant's default shared-vault provider (`iyakki_shared::sharedvault::Setting`: `builtin`, or `external` with the address, mount,
+    /// path and the NAME of the vault secret holding the token; never the token). The pod gets it as `IYAKKI_SHARED_VAULT`; a setting
+    /// file a person saved on the data volume wins over it. Without it the shared vault is the built-in one.
+    #[serde(default)]
+    pub shared_vault: Option<iyakki_shared::sharedvault::Setting>,
 }
 
 fn default_image() -> String {
@@ -123,6 +128,7 @@ impl TenantConfig {
             vault_url: None,
             media: Default::default(),
             snapshot_keys: None,
+            shared_vault: None,
         }
     }
 
@@ -144,6 +150,9 @@ impl TenantConfig {
         self.isolation.deployable()?;
         if let Some(k) = &self.snapshot_keys {
             crate::cloudsnapshot_kms::ProviderSetting::parse(k).map_err(|e| format!("snapshot_keys: {e}"))?;
+        }
+        if let Some(v) = &self.shared_vault {
+            v.check().map_err(|e| format!("shared_vault: {e}"))?;
         }
         if let Some(u) = &self.vault_url {
             crate::cloudvault::check_url(u)?;
@@ -316,6 +325,10 @@ pub fn manifests(c: &TenantConfig) -> Result<String, String> {
     let env = if env.is_empty() { format!("          env:\n            - {{ name: IYAKKI_BROWSER_MEDIA, value: {media} }}\n") } else { format!("{env}            - {{ name: IYAKKI_BROWSER_MEDIA, value: {media} }}\n") };
     let env = match &c.snapshot_keys {
         Some(k) => format!("{env}            - {{ name: IYAKKI_SNAPSHOT_KEYS, value: \"{}\" }}\n", crate::cloudsnapshot_kms::ProviderSetting::parse(k).map(|p| p.text()).unwrap_or_default()),
+        None => env,
+    };
+    let env = match c.shared_vault.as_ref().and_then(|v| v.launch_text().ok()) {
+        Some(t) => format!("{env}            - {{ name: {}, value: '{}' }}\n", iyakki_shared::sharedvault::ENV, t.replace('\'', "''")),
         None => env,
     };
     // where the pod reads the tenant's configuration from (`tenantconfig::enforce::data_dir_from_env`): the media policy, the egress policy

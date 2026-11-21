@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::embed::{HashEmbed, TextEmbedder};
 pub use iyakki_shared::kb::{Hit};
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum KbError {
     #[error("invalid namespace name")]
     BadNamespace,
@@ -438,6 +438,16 @@ impl KnowledgeBase {
         self.search_weighted(&namespaces.iter().map(|n| (*n, 1.0f32)).collect::<Vec<_>>(), query, k)
     }
 
+    /// [`search`](Self::search) with owned namespace names (what a call over the core socket carries).
+    pub fn search_in(&self, namespaces: &[String], query: &str, k: usize) -> Vec<Hit> {
+        self.search(&namespaces.iter().map(String::as_str).collect::<Vec<_>>(), query, k)
+    }
+
+    /// [`search_weighted`](Self::search_weighted) with owned namespace names.
+    pub fn search_weighted_in(&self, namespaces: &[(String, f32)], query: &str, k: usize) -> Vec<Hit> {
+        self.search_weighted(&namespaces.iter().map(|(n, w)| (n.as_str(), *w)).collect::<Vec<_>>(), query, k)
+    }
+
     pub fn search_weighted(&self, namespaces: &[(&str, f32)], query: &str, k: usize) -> Vec<Hit> {
         let qtoks = tokenize(query);
         if k == 0 || (qtoks.is_empty() && query.trim().is_empty()) {
@@ -635,6 +645,59 @@ fn decode_namespace(b: &[u8]) -> Result<(String, Namespace), String> {
 }
 
 /// Default embedder when none is configured.
+/// The few things the workspace history needs of a knowledge base, as a trait so it can run over a store in this process or over the core socket
+/// (`iyakki_agent_api::KbHandle` adapts the services handle's trait object). The store behind a lock is the in-process form.
+pub trait KbSource: Send + Sync {
+    fn namespaces(&self) -> Vec<String>;
+    fn docs(&self, ns: &str) -> Vec<DocInfo>;
+    fn add_document(&self, ns: &str, title: &str, source: &str, text: &str, meta: BTreeMap<String, String>) -> Result<(String, bool), KbError>;
+    fn remove_document(&self, ns: &str, doc_id: &str) -> Result<(), KbError>;
+    fn drop_namespace(&self, ns: &str) -> Result<(), KbError>;
+    fn search_weighted(&self, namespaces: &[(String, f32)], query: &str, k: usize) -> Vec<Hit>;
+}
+
+impl<T: KbSource + ?Sized> KbSource for Arc<T> {
+    fn namespaces(&self) -> Vec<String> {
+        (**self).namespaces()
+    }
+    fn docs(&self, ns: &str) -> Vec<DocInfo> {
+        (**self).docs(ns)
+    }
+    fn add_document(&self, ns: &str, title: &str, source: &str, text: &str, meta: BTreeMap<String, String>) -> Result<(String, bool), KbError> {
+        (**self).add_document(ns, title, source, text, meta)
+    }
+    fn remove_document(&self, ns: &str, doc_id: &str) -> Result<(), KbError> {
+        (**self).remove_document(ns, doc_id)
+    }
+    fn drop_namespace(&self, ns: &str) -> Result<(), KbError> {
+        (**self).drop_namespace(ns)
+    }
+    fn search_weighted(&self, namespaces: &[(String, f32)], query: &str, k: usize) -> Vec<Hit> {
+        (**self).search_weighted(namespaces, query, k)
+    }
+}
+
+impl KbSource for std::sync::Mutex<KnowledgeBase> {
+    fn namespaces(&self) -> Vec<String> {
+        self.lock().unwrap_or_else(|e| e.into_inner()).namespaces()
+    }
+    fn docs(&self, ns: &str) -> Vec<DocInfo> {
+        self.lock().unwrap_or_else(|e| e.into_inner()).docs(ns)
+    }
+    fn add_document(&self, ns: &str, title: &str, source: &str, text: &str, meta: BTreeMap<String, String>) -> Result<(String, bool), KbError> {
+        self.lock().unwrap_or_else(|e| e.into_inner()).add_document(ns, title, source, text, meta)
+    }
+    fn remove_document(&self, ns: &str, doc_id: &str) -> Result<(), KbError> {
+        self.lock().unwrap_or_else(|e| e.into_inner()).remove_document(ns, doc_id)
+    }
+    fn drop_namespace(&self, ns: &str) -> Result<(), KbError> {
+        self.lock().unwrap_or_else(|e| e.into_inner()).drop_namespace(ns)
+    }
+    fn search_weighted(&self, namespaces: &[(String, f32)], query: &str, k: usize) -> Vec<Hit> {
+        self.lock().unwrap_or_else(|e| e.into_inner()).search_weighted_in(namespaces, query, k)
+    }
+}
+
 pub fn default_embedder() -> Arc<dyn TextEmbedder> {
     Arc::new(HashEmbed::default())
 }

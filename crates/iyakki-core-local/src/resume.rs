@@ -28,6 +28,14 @@ fn app_id_ok(s: &str) -> bool {
     !s.is_empty() && s.len() <= 24 && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
+/// The thing an app holds (a file path): short plain text.
+fn item_ok(s: &str) -> bool {
+    !s.is_empty() && s.len() <= MAX_ITEM && !s.chars().any(char::is_control)
+}
+
+/// The longest item, in bytes.
+pub const MAX_ITEM: usize = 512;
+
 pub struct Resume {
     dir: PathBuf,
     boot: String,
@@ -70,7 +78,8 @@ impl Resume {
         }
         // the open apps stay in the ticket while the same person refreshes it
         let apps = self.apps_of(user, now);
-        let v = serde_json::json!({"user": user, "boot": self.boot, "seen": now, "apps": apps});
+        let items = self.items_of(user, now);
+        let v = serde_json::json!({"user": user, "boot": self.boot, "seen": now, "apps": apps, "items": items});
         let tmp = self.dir.join(format!("{FILE}.tmp"));
         std::fs::write(&tmp, v.to_string()).map_err(|e| e.to_string())?;
         #[cfg(unix)]
@@ -95,7 +104,8 @@ impl Resume {
         if self.who(now).as_deref() != Some(user) {
             return Err("there is no fresh ticket for this person".into());
         }
-        let v = serde_json::json!({"user": user, "boot": self.boot, "seen": now, "apps": apps});
+        let items = self.items_of(user, now);
+        let v = serde_json::json!({"user": user, "boot": self.boot, "seen": now, "apps": apps, "items": items});
         let tmp = self.dir.join(format!("{FILE}.tmp"));
         std::fs::write(&tmp, v.to_string()).map_err(|e| e.to_string())?;
         #[cfg(unix)]
@@ -104,6 +114,42 @@ impl Resume {
             let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
         }
         std::fs::rename(&tmp, self.file()).map_err(|e| e.to_string())
+    }
+
+    fn items_of(&self, user: &str, now: u64) -> serde_json::Map<String, serde_json::Value> {
+        let Some(v) = std::fs::read_to_string(self.file()).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else { return Default::default() };
+        if v["user"].as_str() != Some(user) || v["boot"].as_str() != Some(self.boot.as_str()) || v["seen"].as_u64().is_none_or(|s| now < s || now - s > MAX_AGE) {
+            return Default::default();
+        }
+        v["items"].as_object().map(|o| o.iter().filter(|(k, x)| app_id_ok(k) && x.as_str().is_some_and(item_ok)).take(MAX_APPS).map(|(k, x)| (k.clone(), x.clone())).collect()).unwrap_or_default()
+    }
+
+    /// Say what each open app holds (an app id and the thing it shows, such as the path of the file an editor has open: text only, the app's
+    /// own words for it, never a password or the text being typed). Refused when the ticket is not fresh or names someone else. Items of apps
+    /// that are not in the ticket's list are dropped.
+    pub fn remember_items(&self, user: &str, items: &[(String, String)], now: u64) -> Result<(), String> {
+        if self.who(now).as_deref() != Some(user) {
+            return Err("there is no fresh ticket for this person".into());
+        }
+        let apps = self.apps_of(user, now);
+        let kept: serde_json::Map<String, serde_json::Value> = items.iter().filter(|(a, i)| app_id_ok(a) && item_ok(i) && apps.contains(a)).take(MAX_APPS).map(|(a, i)| (a.clone(), serde_json::Value::String(i.clone()))).collect();
+        let v = serde_json::json!({"user": user, "boot": self.boot, "seen": now, "apps": apps, "items": kept});
+        let tmp = self.dir.join(format!("{FILE}.tmp"));
+        std::fs::write(&tmp, v.to_string()).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
+        std::fs::rename(&tmp, self.file()).map_err(|e| e.to_string())
+    }
+
+    /// The (app id, item) pairs of the ticket to put back, when it is fresh.
+    pub fn items(&self, now: u64) -> Vec<(String, String)> {
+        match self.who(now) {
+            Some(u) => self.items_of(&u, now).into_iter().filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string()))).collect(),
+            None => vec![],
+        }
     }
 
     /// The app ids to open again, when the ticket is fresh (otherwise none).
@@ -170,6 +216,27 @@ mod tests {
         assert!(r.apps(1021).is_empty(), "another person starts with none");
         r.forget();
         assert!(r.apps(1021).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn what_an_app_holds_rides_in_the_ticket_as_plain_text_for_listed_apps_and_goes_with_it() {
+        let d = tmp("items");
+        let r = Resume::with_boot(&d, "boot-1");
+        r.remember("alice", 1000).unwrap();
+        r.remember_apps("alice", &["edit".into(), "chat".into()], 1001).unwrap();
+        let items = vec![("edit".to_string(), "/home/alice/notes.txt".to_string()), ("files".to_string(), "/x".to_string()), ("chat".to_string(), "a\nb".to_string()), ("edit2".to_string(), "x".repeat(MAX_ITEM + 1))];
+        r.remember_items("alice", &items, 1002).unwrap();
+        assert_eq!(r.items(1003), vec![("edit".to_string(), "/home/alice/notes.txt".to_string())], "only listed apps, only plain text");
+        r.remember("alice", 1010).unwrap();
+        assert_eq!(r.items(1011).len(), 1, "a refresh keeps them");
+        r.remember_apps("alice", &["chat".into()], 1012).unwrap();
+        assert!(r.items(1013).len() <= 1);
+        assert!(r.remember_items("bob", &items, 1013).is_err());
+        assert!(Resume::with_boot(&d, "boot-2").items(1013).is_empty(), "another boot");
+        assert!(r.items(1010 + MAX_AGE + 5).is_empty(), "stale");
+        r.forget();
+        assert!(r.items(1013).is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 

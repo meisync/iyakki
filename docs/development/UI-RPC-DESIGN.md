@@ -113,13 +113,20 @@ Done in the second piece (impl-rpc2, 2026-11-18):
    Settings overview (b4, camera, dir, mcp, radio, screen, settings, sound_settings, store_facets). Calls on the returned handles are not traced.
 5. `iyakki_compose::rpc::RpcRoots`: 20 roots over the real services plus `AuditApi` and `ChatRuns` when given; `uiserve::served` passes `rpc: Some` when the socket's
    config has `rpc: true` (`ui_socket_set rpc`, off by default); `iyakki-core` main wires the factory.
-6. `RemoteServicesHandle`: accessors over the connection, `is_real` true only while the core answers. It is not yet a `ServicesHandle`.
+6. `RemoteServicesHandle`: accessors over the connection, `is_real` true only while the core answers.
+7. `RemoteServicesHandle: ServicesHandle` (alpha.7 final wave, `dist/split/gen_services.py`, D-SPLIT-03-HANDLE): the core serves one more root, `ServicesHandle`
+   (`ServicesRoot`: the real services and the core's own audit callback). The client implementation is generated: plain methods go as `rpc.call` with the data
+   arguments only; the accessors of generated traits are roots (the stores) or handles of the root (`contract_local`, `rag_kit`); the audit callbacks are left out of the
+   wire; the borrowed answers (`dir`, the two prompt rules, `mcp`, `secrets`) are kept in the handle; the closures that change a value (`update_sound_with`,
+   `update_system_sounds_with`) read the whole value, change the copy and write it back (`set_sound_settings`, `set_system_sounds`); everything else answers the quiet value
+   of its type, and an accessor of a trait that is not generated yet answers an `Unserved` object (`gen_unserved.py`) or the default of its trait (`NoStoreFacets`).
+   `services-unserved.txt` lists the plain methods whose types cannot cross yet (no serde).
 
 Next, in this order:
 
 1. The real `RunStarter` (point 1 above), then `chat.rs` sends a `RunRequest` and draws events; the ~35 chain methods leave the UI.
 2. The shell moves from the concrete stores to the member traits (the ratchets pin the counts); `SettingsApi` and `KnowledgeBaseApi` need the lock inside the adapter.
-3. `RemoteServicesHandle: ServicesHandle`: S and H methods generated, closures and I/O arguments by the rules of section 3, the 14 accessors from the member traits.
+3. `RemoteServicesHandle: ServicesHandle`: done (point 7 above); what remains of it is to generate the traits of the 48 accessors one by one so they leave `Unserved`.
 4. `iyakki-ui --socket` builds `ShellEnv` from it and runs the launcher and Settings; a QEMU run with `iyakki.ui=process`; the ui layer is built without the agent and
    its size measured.
 

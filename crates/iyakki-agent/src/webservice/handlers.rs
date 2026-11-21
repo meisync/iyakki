@@ -143,6 +143,7 @@ pub fn dispatch(id: &str, c: &Ctx) -> Out {
         "git_log" => super::gitread::log(c),
         "git_diff" => super::gitread::diff(c),
         id if id.starts_with("sched_") => super::schedules::handle(c, id),
+        id if id.starts_with("hooks_") => super::hookapi::handle(c, id),
         "flows_run" => super::flowruns::start(c),
         "flows_runs" => super::flowruns::list(c),
         "flows_run_get" => super::flowruns::view(c),
@@ -157,6 +158,11 @@ pub fn dispatch(id: &str, c: &Ctx) -> Out {
             ok(c.sh.deps.extras.web_access(c.who())?)
         }
         "webaccess_set" => webaccess_set(c),
+        "voice_offer" => {
+            let (addr, offer) = c.sh.deps.extras.voice_offer(c.who())?;
+            ok(json!({"addr": addr, "offer": offer}))
+        }
+        "voice_return" => voice_return(c),
         "tenants_list" => super::tenants::list(c),
         "tenant_switch" => super::tenants::switch(c),
         "tenant_view" => tenant_view(c),
@@ -274,9 +280,11 @@ fn runs_start(c: &Ctx) -> Out {
 /// (`tenantconfig::enforce::agent_gate`: off by default, secret and vault state, allowed models, shared-use limits, audit line).
 fn agent_gate(c: &Ctx, model: Option<(&str, &str)>, team: Option<&str>) -> Result<(), Fail> {
     let Some((provider, m)) = model else { return Ok(()) };
-    let kind = match provider {
-        "claude" => "agent.claude",
-        "copilot" => "agent.copilot",
+    let (kind, name) = match provider {
+        "claude" => ("agent.claude", "default"),
+        "copilot" => ("agent.copilot", "default"),
+        // another coding agent the tenant or a team named (`agent.other`, F-TCFG-11): gated like the two above, by its own name
+        other if super::tenantcfg::has_entry(c, "agent.other", other, team) => ("agent.other", other),
         // a team's own provider, API-key integration or local host: model list, role, per-person and team counters
         other => return super::tenantcfg::provider_entry_gate(c, other, m, team),
     };
@@ -301,7 +309,7 @@ fn agent_gate(c: &Ctx, model: Option<(&str, &str)>, team: Option<&str>) -> Resul
     let sink = Sink(c.sh.deps.audit.as_ref());
     let env = crate::tenantconfig::api::Env { dir: &dir, vault: crate::tenantconfig::vault::for_user(&dir, &c.who().user), audit: &sink };
     let now = crate::tenantconfig::now_secs();
-    match crate::tenantconfig::enforce::agent_gate(&env, kind, "default", team, &c.who().user, Some(m), now) {
+    match crate::tenantconfig::enforce::agent_gate(&env, kind, name, team, &c.who().user, Some(m), now) {
         crate::tenantconfig::enforce::AgentUse::Allowed { .. } => Ok(()),
         crate::tenantconfig::enforce::AgentUse::Refused(why) => Err(Fail::new(403, "denied", &why)),
     }
@@ -514,6 +522,24 @@ fn tenant_audit(c: &Ctx) -> Out {
     let lines: Vec<Value> = page.into_iter().map(|(t, ch)| json!({"time": t, "change": ch})).collect();
     let more = offset + lines.len() < total;
     ok(json!({"lines": lines, "total": total, "offset": offset, "limit": limit, "more": more}))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VoiceReturnReq {
+    addr: String,
+    offer: String,
+}
+
+/// The device's return offer for the answer's sound. The address and the certificate are checked by the listener (`set_return`); the audit
+/// line never carries them.
+fn voice_return(c: &Ctx) -> Out {
+    let r: VoiceReturnReq = serde_json::from_value(json_body(c.req)?).map_err(|_| Fail::new(400, "invalid_input", "send {\"addr\":\"host:port\", \"offer\":\"<the certificate offer>\"}"))?;
+    if r.addr.len() > 256 || r.offer.len() > 16 << 10 {
+        return Err(Fail::new(400, "invalid_input", "the offer is too large"));
+    }
+    c.sh.deps.extras.voice_return(c.who(), &r.addr, &r.offer)?;
+    Ok((200, json!({"ok": true}), "answer sound target set".to_string()))
 }
 
 fn tenant_bootstrap(c: &Ctx) -> Out {

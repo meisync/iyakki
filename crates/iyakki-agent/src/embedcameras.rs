@@ -76,19 +76,23 @@ pub struct Parts {
     pub rec: Option<Arc<Recorder>>,
 }
 
-/// How a camera is asked whether it can move: stream address, user name, password. Tests give their own; the real one speaks ONVIF over HTTP.
-pub type PtzProbe = Arc<dyn Fn(&str, &str, &str) -> Result<Option<crate::onvif::PtzCamera>, String> + Send + Sync>;
+/// How a camera is asked whether it can move: camera id, stream address, user name, password. Tests give their own; the real one speaks ONVIF over HTTP.
+pub type PtzProbe = Arc<dyn Fn(&str, &str, &str, &str) -> Result<Option<crate::onvif::PtzCamera>, String> + Send + Sync>;
 type PtzBook = Arc<Mutex<HashMap<String, Option<Arc<crate::onvif::PtzCamera>>>>>;
 
-pub(crate) fn real_probe() -> PtzProbe {
-    Arc::new(|addr, user, pass| {
+pub(crate) fn real_probe(data: PathBuf) -> PtzProbe {
+    Arc::new(move |id, addr, user, pass| {
         // the camera answers on one of the usual ONVIF ports; a port that does not answer is skipped, a camera that answers and has nothing to move ends it
         let mut last = Err("the camera did not answer on any of the usual control ports".to_string());
-        for port in crate::onvif::candidate_ports(addr) {
-            let Some(url) = crate::onvif::device_url(addr, Some(port)) else { return Ok(None) };
-            let client = crate::onvif::Onvif::new(Box::new(crate::onvif::HttpTransport::default()), Box::new(crate::onvif::SystemSource), user, pass);
+        for (tls, port) in crate::onvif::candidate_endpoints(addr) {
+            let Some(url) = crate::onvif::device_url_for(addr, tls, port) else { return Ok(None) };
+            // an encrypted control address goes through the camera's pinned certificate (the same card as for its stream)
+            let transport = if tls { crate::onvif::HttpTransport::with_tls(data.clone(), id) } else { crate::onvif::HttpTransport::default() };
+            let client = crate::onvif::Onvif::new(Box::new(transport), Box::new(crate::onvif::SystemSource), user, pass);
             match crate::onvif::PtzCamera::probe(client, &url) {
                 Ok(found) => return Ok(found),
+                // a certificate that waits for the person's yes is the answer; the other ports would only repeat it
+                Err(e) if tls && e.contains("camera_trust_set") => return Err(e),
                 Err(e) => last = Err(e),
             }
         }
@@ -100,6 +104,11 @@ pub struct AgentCameras {
     /// The cameras that were asked whether they can move: `Some` can, `None` cannot (asked once per run of the computer).
     ptz: PtzBook,
     ptz_probe: Mutex<PtzProbe>,
+    /// Whether a list that shows a network camera nobody asked yet starts the question in the background, so the buttons are there at the next
+    /// look (on in the running machine, off until a test asks for it), the cameras asked this run, and the questions still running.
+    probe_list: std::sync::atomic::AtomicBool,
+    tried: Mutex<std::collections::HashSet<String>>,
+    probe_jobs: Mutex<Vec<std::thread::JoinHandle<()>>>,
     /// Made on first use: building the hub starts the motion watcher's and the recorder's supervisors, which a machine that never shows an
     /// embedded view has no reason to do at start.
     data: PathBuf,
@@ -175,17 +184,56 @@ impl AgentCameras {
         let parts = OnceLock::new();
         let data = hub.data_dir();
         let _ = parts.set(Parts { hub, who_of, motion, rec });
-        AgentCameras { ptz: Default::default(), ptz_probe: Mutex::new(real_probe()), data, parts, init: Arc::new(|| None), st: Mutex::new(State::default()) }
+        AgentCameras { ptz: Default::default(), ptz_probe: Mutex::new(real_probe(data.clone())), probe_list: Default::default(), tried: Default::default(), probe_jobs: Default::default(), data, parts, init: Arc::new(|| None), st: Mutex::new(State::default()) }
     }
 
     /// The parts are found by `init` when a person first lists or opens; `None` (the hub is not running yet) is asked again next time.
     pub fn lazy(data: &Path, init: Arc<dyn Fn() -> Option<Parts> + Send + Sync>) -> AgentCameras {
-        AgentCameras { ptz: Default::default(), ptz_probe: Mutex::new(real_probe()), data: data.to_path_buf(), parts: OnceLock::new(), init, st: Mutex::new(State::default()) }
+        AgentCameras { ptz: Default::default(), ptz_probe: Mutex::new(real_probe(data.to_path_buf())), probe_list: std::sync::atomic::AtomicBool::new(true), tried: Default::default(), probe_jobs: Default::default(), data: data.to_path_buf(), parts: OnceLock::new(), init, st: Mutex::new(State::default()) }
     }
 
     /// Use another way to ask a camera whether it can move (a test's fake camera).
     pub fn set_ptz_probe(&self, probe: PtzProbe) {
         *lk(&self.ptz_probe) = probe;
+    }
+
+    /// Let a list that shows a network camera nobody asked yet ask it in the background (F-SDK-167: the buttons are there at the next look, not
+    /// only after the first command). The running machine has it on; a test switches it on with its fake probe.
+    pub fn probe_on_list(&self, on: bool) {
+        self.probe_list.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Wait for the questions the last lists started (tests; the running machine never waits).
+    pub fn wait_probes(&self) {
+        let jobs: Vec<_> = lk(&self.probe_jobs).drain(..).collect();
+        for j in jobs {
+            let _ = j.join();
+        }
+    }
+
+    /// Start the question for each listed network camera that was never asked this run. One thread each; a camera that does not answer is
+    /// not asked again until the next run (a command still asks for itself), and the login is read from the owner's vault here, never kept.
+    fn probe_listed(&self, user: &str, listed: &[CameraInfo]) {
+        if !self.probe_list.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        for c in listed.iter().filter(|c| c.source == SourceKind::Network && !c.ptz) {
+            if lk(&self.ptz).contains_key(&c.id) || !lk(&self.tried).insert(c.id.clone()) {
+                continue;
+            }
+            let Ok((addr, name, pw)) = self.p().hub.control_login(&self.who(user), &c.id) else { continue };
+            let (probe, book, id) = (lk(&self.ptz_probe).clone(), self.ptz.clone(), c.id.clone());
+            let job = std::thread::Builder::new().name("iyakki-ptz-probe".into()).spawn(move || {
+                if let Ok(found) = probe(&id, &addr, &name, &pw) {
+                    lk(&book).insert(id, found.map(Arc::new));
+                }
+            });
+            if let Ok(j) = job {
+                let mut jobs = lk(&self.probe_jobs);
+                jobs.retain(|j| !j.is_finished());
+                jobs.push(j);
+            }
+        }
     }
 
     /// Ask one network camera whether it can pan, tilt or zoom and remember the answer (a failure is remembered as "cannot": the next run asks again).
@@ -196,7 +244,7 @@ impl AgentCameras {
         }
         let found = self.p().hub.control_login(&self.who(user), camera).ok().and_then(|(addr, name, pw)| {
             let probe = lk(&self.ptz_probe).clone();
-            probe(&addr, &name, &pw).ok().flatten().map(Arc::new)
+            probe(camera, &addr, &name, &pw).ok().flatten().map(Arc::new)
         });
         lk(&self.ptz).insert(camera.to_string(), found.clone());
         found
@@ -387,7 +435,9 @@ impl Cameras for AgentCameras {
         if !self.ready() {
             return Vec::new();
         }
-        self.watchable(&self.who(user))
+        let listed = self.watchable(&self.who(user));
+        self.probe_listed(user, &listed);
+        listed
     }
 
     fn open(&self, user: &str, app: &str, spec: &ViewSpec) -> Result<ViewInfo, String> {
@@ -504,6 +554,11 @@ impl Cameras for AgentCameras {
             return Ok(None);
         }
         frame_out(&f, format, &*self.p().hub.env().encode).map(Some)
+    }
+
+    fn listen(&self, user: &str, view: &str, camera: &str) -> Result<Option<iyakki_core_api::cameras::CamSound>, String> {
+        self.with_view(user, view, |v| if v.cameras.iter().any(|c| c == camera) { Ok(()) } else { Err(NOT_YOURS.to_string()) })?;
+        Err(iyakki_core_api::cameras::NO_VIEW_SOUND.into())
     }
 
     fn overlay(&self, user: &str, view: &str, camera: &str) -> Result<Overlay, String> {

@@ -214,7 +214,7 @@ fn a_login_starts_the_client_on_a_terminal_shows_its_output_sends_the_typing_and
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("bin")).unwrap();
     let script = dir.join("bin/ssh");
-    std::fs::write(&script, format!("#!/bin/sh\nPATH=/usr/bin:/bin; export PATH\nif [ \"$1\" = \"-V\" ]; then echo \"OpenSSH_9.6p1 Ubuntu-3, OpenSSL 3.0.13\" >&2; exit 0; fi\necho \"ARGS: $*\" > {log}\necho \"TERM=$TERM\"\necho READY\nstty size\nread line\necho got:$line\nexit 3\n", log = dir.join("args").display())).unwrap();
+    std::fs::write(&script, format!("#!/bin/sh\nPATH=/usr/bin:/bin; export PATH\nif [ \"$1\" = \"-V\" ]; then echo \"OpenSSH_9.6p1 Ubuntu-3, OpenSSL 3.0.13\" >&2; exit 0; fi\necho \"ARGS: $*\" > {log}\necho \"TERM=$TERM\"\nstty size\necho READY\nread line\necho got:$line\nexit 3\n", log = dir.join("args").display())).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     cx.services.real().clis.set_search_path(Some(&dir.join("bin").display().to_string()));
     let env = Env::for_services(&iyakki_agent::services::Services::from_handle(&cx.services), &cx.session.user);
@@ -228,8 +228,8 @@ fn a_login_starts_the_client_on_a_terminal_shows_its_output_sends_the_typing_and
     let mut ok = false;
     let __wall = std::time::Instant::now();
     while __wall.elapsed() < std::time::Duration::from_secs(30) {
+        // (no drawing yet: the first draw fits the terminal to the tile, and the program must have read its size, which it prints before READY, first)
         app.handle(&Event::Tick, &cx);
-        let _ = draw(&mut app, &cx, 1280, 720);
         if screen(&mut app).contains("READY") {
             ok = true;
             break;
@@ -237,6 +237,7 @@ fn a_login_starts_the_client_on_a_terminal_shows_its_output_sends_the_typing_and
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert!(ok, "the client's output reached the screen: {}", screen(&mut app));
+    let _ = draw(&mut app, &cx, 1280, 720);
     let text = screen(&mut app);
     assert!(text.contains("TERM=xterm-256color"), "{text}");
     let args = std::fs::read_to_string(dir.join("args")).unwrap();

@@ -1247,7 +1247,7 @@ def check_app_events_lock(s):
     p = s.guest.shot("ev-locked")
     ocr = subprocess.run(["tesseract", p, "-", "--psm", "11"], capture_output=True, text=True).stdout
     need(re.search(r"locked|unlock|password", ocr, re.I), "the screen did not lock: %s" % ocr[:200])
-    s.guest._type(pw)
+    s.guest.vm.typ(pw)
     s.guest._cmd("sendkey ret", 4.0)
     time.sleep(4)
     t = text(s)
@@ -1366,6 +1366,8 @@ def check_app_events_volume(s):
         _monitor(s, "device_add virtio-blk-pci,drive=evvol,id=evvol0")
         time.sleep(2)
         rc, out = s.sh("dev=$(ls /sys/block | grep -E '^vd[b-z]' | head -1); mkdir -p /mnt/evvol && mount /dev/$dev /mnt/evvol && echo mounted $dev")
+        if rc != 0 and "Permission denied" in out:
+            raise __import__("session_lib").devui.Skip("the guest shell is an unprivileged account and cannot mount a disk (needs a root shell or an image that mounts a hot-plugged disk by itself): %s" % out[-120:].strip())
         need(rc == 0 and "mounted" in out, "the guest could not mount the new disk: %s" % out[-200:])
         mounted = _heard(s, r"volume \S*evvol\S* mounted[^\n]*")
         s.sh("umount /mnt/evvol")
@@ -1384,7 +1386,9 @@ def check_app_events_volume(s):
 
 def check_app_events_usb(s):
     _open_sample_events(s)
-    _monitor(s, "device_add usb-mouse,id=evusb")
+    _monitor(s, "device_add qemu-xhci,id=evxhci")   # the session guest has no USB controller of its own: plug one in first (PCI hot-plug)
+    time.sleep(3)
+    _monitor(s, "device_add usb-mouse,id=evusb,bus=evxhci.0")
     added = _heard(s, r"usb added [^\n]*")
     _monitor(s, "device_del evusb")
     removed = _heard(s, r"usb removed [^\n]*")

@@ -108,3 +108,28 @@ fn hardware_firmware_asks_every_time_shows_the_licences_and_accepts_only_the_lis
 fn the_status_tool_prompt_explains_a_failed_last_attempt() {
     assert!(PROMPT_RULE.contains("the last attempt failed") && PROMPT_RULE.contains("never try to accept one yourself"));
 }
+
+#[test]
+fn the_mac_vm_recipe_is_text_only_needs_no_approval_and_refuses_bad_values() {
+    let (t, f) = rig();
+    let d = t.defs().into_iter().find(|d| d.spec.name == APPLEVM_TOOL).expect("the tool is offered");
+    assert_eq!(d.risk, Risk::Safe);
+    let ok = json!({"cpus": 2});
+    let r = t.call(APPLEVM_TOOL, &ok).unwrap();
+    assert!(r.contains("cpus: 2") && r.contains("vmType: \"vz\"") && r.contains("writes nothing"), "{r}");
+    assert!(r.contains("debian-12-genericcloud-arm64") && r.contains("sha512:") && r.contains("sha256sum -c"), "{r}");
+    assert!(t.call(APPLEVM_TOOL, &json!({"name": "a;b"})).is_err());
+    assert!(t.call(APPLEVM_TOOL, &json!({"memory_gib": 1})).is_err());
+    assert!(f.log.lock().unwrap().is_empty(), "nothing on this machine is touched");
+}
+
+#[test]
+fn the_optional_drivers_tool_asks_every_time_and_installs_only_after_a_card_was_shown() {
+    let (t, _f) = rig();
+    let d = t.defs().into_iter().find(|d| d.spec.name == MODPACK_TOOL).expect("the tool is offered");
+    assert_eq!(d.risk, Risk::Ask);
+    assert!(hard_ask(MODPACK_TOOL, &json!({})).is_some(), "Auto never runs it");
+    assert!(!t.pre_approved(MODPACK_TOOL) && !t.approved_always(MODPACK_TOOL) && t.grant_blocker(MODPACK_TOOL, &json!({})).is_some());
+    let e = t.call(MODPACK_TOOL, &json!({})).unwrap_err();
+    assert!(e.contains("no card was shown"), "{e}");
+}

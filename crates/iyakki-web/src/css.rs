@@ -538,7 +538,7 @@ fn media_feature(f: &str, vp: &Viewport) -> bool {
 
 // ---------------------------------------------------------------- values
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Length {
     Px(f32),
     Percent(f32),
@@ -1016,7 +1016,7 @@ const NAMED: &[(&str, u32)] = &[
 
 /// A `linear-gradient()` or `radial-gradient()`: the angle in CSS degrees (0 is up, 90 to the right, 180 down, the
 /// default) and the colour stops with their places along the line (0 to 1).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Gradient {
     pub angle: f32,
     pub radial: bool,
@@ -1165,7 +1165,7 @@ impl Gradient {
 }
 
 /// One `box-shadow`: offset, blur, spread (pixels) and colour.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Shadow {
     pub dx: f32,
     pub dy: f32,

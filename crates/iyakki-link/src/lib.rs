@@ -2,6 +2,7 @@
 //! the picture decoder and the certificate reader. The agent re-exports these; `iyakki-connect` uses them without the agent.
 
 pub mod certinfo;
+pub mod cloudcarrier;
 pub mod cloudclient;
 pub mod cloudtiles;
 pub mod pixelcodec;

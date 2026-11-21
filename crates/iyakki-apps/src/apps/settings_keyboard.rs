@@ -86,18 +86,52 @@ fn tri(v: Option<bool>) -> &'static str {
 /// Put the saved keyboard choices to work now: key repeat, trackpad tap, scrolling, the input profile and the Apple driver. The Keyboard page and the
 /// assistant's keyboard tools both end here, so a change made by chat is applied exactly as one made on the page.
 pub(crate) fn apply_keyboard(k: &KeyboardSettings, sys: &std::path::Path) -> Result<(), String> {
-    if let Some((d, p)) = k.repeat() {
-        crate::input::request_repeat(d, p);
+    // unit tests drive the Keyboard page on their own threads: unless a test asks for the live input layer (and holds the input lock), the
+    // process-wide input state (key repeat, touchpad, speeds, scrolling, profile) is left alone, so those tests share nothing and need no lock
+    #[cfg(test)]
+    let live = LIVE_INPUT.with(|l| l.get());
+    #[cfg(not(test))]
+    let live = true;
+    if live {
+        if let Some((d, p)) = k.repeat() {
+            crate::input::request_repeat(d, p);
+        }
+        let (tap, _) = k.trackpad();
+        crate::input::request_touchpad(tap);
+        crate::input::request_three_finger_drag(k.three_finger_drag_on());
+        crate::input::request_home_swipe(k.home_swipe_on(), k.home_swipe_fingers_n());
+        let (mouse, pad) = k.pointer_speeds();
+        crate::input::request_pointer_speed(mouse, pad);
+        crate::scrolleng::request_config(crate::fnkeys::scroll_config(k.scroll()));
+        crate::inputprofile::apply(k);
     }
-    let (tap, _) = k.trackpad();
-    crate::input::request_touchpad(tap);
-    crate::input::request_three_finger_drag(k.three_finger_drag_on());
-    crate::input::request_home_swipe(k.home_swipe_on(), k.home_swipe_fingers_n());
-    let (mouse, pad) = k.pointer_speeds();
-    crate::input::request_pointer_speed(mouse, pad);
-    crate::scrolleng::request_config(crate::fnkeys::scroll_config(k.scroll()));
-    crate::inputprofile::apply(k);
     crate::agent().keyboard_apple().apply_apple(sys, k).map(|_| ())
+}
+
+#[cfg(test)]
+thread_local! {
+    static LIVE_INPUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A test that reads the process-wide input state after the page applied a choice: holds the input lock and lets this thread's applies reach
+/// the real input layer, until dropped.
+#[cfg(test)]
+pub(crate) struct LiveInput {
+    _lock: iyakki_testkit::ProcessLock,
+}
+
+#[cfg(test)]
+pub(crate) fn live_input() -> LiveInput {
+    let l = iyakki_testkit::process_lock(iyakki_testkit::names::INPUT);
+    LIVE_INPUT.with(|c| c.set(true));
+    LiveInput { _lock: l }
+}
+
+#[cfg(test)]
+impl Drop for LiveInput {
+    fn drop(&mut self) {
+        LIVE_INPUT.with(|c| c.set(false));
+    }
 }
 
 impl SettingsApp {

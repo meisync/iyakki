@@ -1,0 +1,22 @@
+scenario: BT-PAIR-01
+title: Bluetooth pairing and headphones
+area: Bluetooth
+rows: F-NET-05, F-NET-08, F-NET-26
+machines: any
+needs: person
+prereq: A Bluetooth headset or speaker in pairing mode, within one metre.
+step: Open Settings, Bluetooth and switch the adapter on.
+expect: The page says the adapter is on and starts searching.
+clause: F-NET-08.on
+step: Choose your device in the list of found devices and press Pair.
+expect: The pairing finishes (a code may be shown and must match) and the device shows as connected.
+clause: F-NET-05.pair
+step: Play the test tone in Settings, Sound with the Bluetooth device chosen.
+expect: The tone comes out of the Bluetooth device, not the computer speakers.
+clause: F-NET-26.sound
+step: Walk out of range or switch the device off, then bring it back.
+expect: The device reconnects on its own within a minute, or the page offers Connect.
+clause: F-NET-26.reconnect
+step: Press Forget on the device.
+expect: It disappears from the paired list.
+clause: F-NET-05.forget

@@ -306,7 +306,10 @@ impl Shell {
                 _ => Ok(d),
             }) {
                 Ok(desktop) => {
-                    self.tenants.hub.open(Session::new(&name, &account, desktop));
+                    let session = Session::new(&name, &account, desktop);
+                    // the sealed browser data can be carried to this tenant while it is signed in (F-VAULT-11)
+                    iyakki_apps::agent().profile_store().set_tenant_carrier(&name, session.carrier());
+                    self.tenants.hub.open(session);
                     self.tenant_list().set_last_account(&name, &account);
                     let _ = self.tenant_save();
                     self.tenants.panel = Panel::Closed;
@@ -1047,7 +1050,7 @@ fn blit_scaled(g: &mut Gfx, p: &iyakki_link::cloudclient::Picture, dest: (f32, f
         return;
     }
     let (gw, gh) = (g.width() as i32, g.height() as i32);
-    let dst = g.pm.data_mut();
+    let dst = g.pm_mut().data_mut();
     let xs: Vec<usize> = (0..dw).map(|x| ((x as u64 * p.w as u64) / dw as u64) as usize).collect();
     for y in 0..dh {
         let gy = dy + y;
@@ -1098,5 +1101,54 @@ impl Shell {
             Panel::Changed { old, new, .. } => vec![old.display(), new.display()],
             _ => Vec::new(),
         }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ native tiles of a tenant (F-CLOUD-76)
+
+/// The key of a tenant tile in the launcher's list: `cloud/<tenant>/<tile id>`.
+pub(super) fn cloud_key(key: &str) -> Option<(String, String)> {
+    let rest = key.strip_prefix("cloud/")?;
+    let (tenant, id) = rest.rsplit_once('/')?;
+    (!tenant.is_empty() && !id.is_empty()).then(|| (tenant.to_string(), id.to_string()))
+}
+
+impl Shell {
+    /// The launcher entries for the tiles of the tenant that is shown (none when Personal is shown or the tenant offers none).
+    pub(super) fn tenant_tile_entries(&self) -> Vec<iyakki_shared::store_tilehub::TileEntry> {
+        let Some(s) = self.tenants.hub.current() else { return Vec::new() };
+        let user = self.session.as_ref().map(|x| x.user.clone()).unwrap_or_default();
+        s.tiles()
+            .into_iter()
+            .map(|t| iyakki_shared::store_tilehub::TileEntry {
+                key: format!("cloud/{}/{}", s.name, t.id),
+                name: format!("cloud-{}-{}", s.name, t.id),
+                title: t.title,
+                icon: String::new(),
+                icon_picture: None,
+                group: "Cloud".into(),
+                version: String::new(),
+                publisher: s.name.clone(),
+                trust: "tile of your cloud tenant".into(),
+                dev: false,
+                dir: None,
+                scope: iyakki_shared::skills::Scope::User(user.clone()),
+                caps: Default::default(),
+                wasm: false,
+            })
+            .collect()
+    }
+
+    /// Open one of the shown tenant's tiles on the screen: its own session supplies the frames, so a tile of another tenant is never reached.
+    pub(super) fn open_tenant_tile(&mut self, tenant: &str, id: &str, title: &str) {
+        let found = self.tenants.hub.sessions.iter().find(|s| s.name == tenant).and_then(|s| Some((s.frames()?, s.tiles().into_iter().find(|t| t.id == id)?)));
+        let Some((frames, tile)) = found else {
+            self.say(format!("The tile {title} is not offered by {tenant} any more"));
+            return;
+        };
+        let user = self.session.as_ref().map_or("-", |s| s.user.as_str()).to_string();
+        self.env.audit.record(&user, "cloud.tile.open", &format!("{tenant}/{id}"));
+        let app = crate::apps::tile_remote::RemoteTileApp::new(tenant, id, &tile.title, tile.ticks, frames);
+        self.screen = Screen::App(Box::new(app), PApp::Browser);
     }
 }

@@ -174,8 +174,9 @@ impl LayoutState {
         }
         let mut fonts = HashMap::new();
         for (css, base) in texts {
-            for (family, url) in super::webfont::font_faces(&css) {
-                if fonts.len() >= 8 || fonts.contains_key(&family) {
+            for rule in super::webfont::font_face_rules(&css) {
+                let (url, key_name) = (rule.url, super::webfont::variant_key(&rule.family, rule.bold, rule.italic));
+                if fonts.len() >= 8 || fonts.contains_key(&key_name) {
                     continue;
                 }
                 let Ok(u) = base.join(&url) else { continue };
@@ -191,7 +192,7 @@ impl LayoutState {
                     }
                 };
                 if let Some(f) = got {
-                    fonts.insert(family, f);
+                    fonts.insert(key_name, f);
                 }
             }
         }

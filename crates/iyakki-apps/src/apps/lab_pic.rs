@@ -155,6 +155,6 @@ pub fn draw_fit(g: &mut crate::gfx::Gfx, pm: &Pixmap, r: crate::ui::R) -> crate:
     let (dx, dy) = (r.x + (r.w - dw) / 2.0, r.y + (r.h - dh) / 2.0);
     let mut paint = tiny_skia::PixmapPaint::default();
     paint.quality = tiny_skia::FilterQuality::Bilinear;
-    g.pm.draw_pixmap(0, 0, pm.as_ref(), &paint, tiny_skia::Transform::from_translate(dx, dy).pre_scale(k, k), None);
+    g.pm_mut().draw_pixmap(0, 0, pm.as_ref(), &paint, tiny_skia::Transform::from_translate(dx, dy).pre_scale(k, k), None);
     crate::ui::R::new(dx, dy, dw, dh)
 }

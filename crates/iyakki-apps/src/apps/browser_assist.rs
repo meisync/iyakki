@@ -275,7 +275,7 @@ pub fn remember(cx: &AppCx, title: &str, url: &str, text: &str, whole_page: bool
     meta.insert("from".to_string(), "browser".to_string());
     meta.insert("kind".to_string(), if whole_page { "page" } else { "selection" }.to_string());
     let title = if title.trim().is_empty() { url.to_string() } else { title.trim().to_string() };
-    let mut kb = cx.kb().lock().map_err(|_| "the knowledge base is busy".to_string())?;
+    let kb = cx.kb();
     // keeping a whole page again after it changed replaces the older copy of that page (what was selected is never replaced)
     let older: Vec<String> = if whole_page { kb.docs(&ns).into_iter().filter(|d| d.source == url && d.meta.get("kind").is_some_and(|k| k == "page")).map(|d| d.id).collect() } else { Vec::new() };
     let (id, added) = kb.add_document(&ns, &title, url, text, meta).map_err(|e| e.to_string())?;
@@ -298,7 +298,7 @@ mod remember_tests {
         let cx = cx_with_admin_store("rememberpage");
         let ns = format!("user/{}", cx.session.user);
         let url = "https://news.example.org/harbour";
-        let docs = || cx.kb().lock().unwrap().docs(&ns);
+        let docs = || cx.kb().docs(&ns);
         remember(&cx, "Harbour", url, "The ferry leaves at nine and the lighthouse is closed this week.", true).unwrap();
         remember(&cx, "Harbour", url, "The ferry leaves at nine and the lighthouse is closed this week.", true).unwrap();
         assert_eq!(docs().len(), 1, "the same text twice is one document");
@@ -310,7 +310,7 @@ mod remember_tests {
         assert_eq!(d.len(), 2, "{d:?}");
         assert!(d.iter().any(|x| x.meta.get("kind").map(String::as_str) == Some("selection")));
         let page = d.iter().find(|x| x.meta.get("kind").map(String::as_str) == Some("page")).unwrap();
-        let text: String = cx.kb().lock().unwrap().doc_chunks(&ns, &page.id).into_iter().map(|c| c.1).collect();
+        let text: String = cx.kb().doc_chunks(&ns, &page.id).into_iter().map(|c| c.1).collect();
         assert!(text.contains("ten now") && !text.contains("at nine"), "{text}");
         assert!(remember(&cx, "x", url, "  ", true).is_err());
         assert!(cx.audit.recent(10).iter().any(|l| l.contains("browser.remember news.example.org")));

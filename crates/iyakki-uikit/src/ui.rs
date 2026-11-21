@@ -82,6 +82,11 @@ pub enum Event {
     /// landed, desktop pixels). `back` = the fingers moved right. The shell uses it on Home only; no app sees it (an app that wants
     /// swipes opts in later, see docs/development/HOME-SWIPE.md).
     Swipe { back: bool, at: Option<(i32, i32)> },
+    /// Two fingers moved apart or together (a touch screen): the scale since they landed (1000 is as they began) and the middle between them,
+    /// desktop pixels. Sent with the Ctrl+plus or Ctrl+minus key of the same gesture; only a WASM tile of ABI 3 acts on it (F-SDK-34).
+    Pinch { scale_milli: u32, x: i32, y: i32 },
+    /// The fingers of a pinch lifted: the last scale.
+    PinchEnd { scale_milli: u32 },
     /// A Ctrl+Alt chord for panes and displays (`panes.rs`).
     Layout(crate::keys::LayoutKey),
 }
@@ -253,6 +258,8 @@ pub mod clipboard {
         /// The latest picture copied (width, height, RGBA), and whether the host still has to be given it.
         image: Option<(u32, u32, Vec<u8>)>,
         host_image: bool,
+        /// HTML that goes to the host clipboard beside the plain text of the same copy, once.
+        host_html: Option<String>,
         /// How many copies to keep (0: the default).
         limit: usize,
         /// A secret copied once to be pasted once: never in `items`, gone after its first paste or when its time is up.
@@ -330,6 +337,7 @@ pub mod clipboard {
         S.with(|s| {
             let mut s = s.borrow_mut();
             s.host_out = Some(t.clone());
+            s.host_html = None;
             s.host_has_secret = true;
             s.secret = Some(Secret { text: t, expires_ms: now_ms() + SECRET_SECS * 1000 });
             s.toast = Some("Copied as a secret: pastes once, gone in 60 seconds".into());
@@ -416,9 +424,84 @@ pub mod clipboard {
         S.with(|s| {
             let mut s = s.borrow_mut();
             s.host_out = Some(text.chars().take(MAX_BYTES).collect());
+            s.host_html = None;
             s.host_has_secret = false;
             s.toast = Some("Copied to clipboard".into());
         });
+    }
+
+    /// The most HTML that goes to the host with a copy (the page refuses more than 1 MiB).
+    pub const MAX_HTML: usize = 256 * 1024;
+
+    /// Copy text that also has an HTML form (a message with paragraphs, code or links): the plain text is what the history keeps and
+    /// what a plain field gets, the HTML is queued for the host clipboard beside it (the web page writes both flavours).
+    pub fn copy_rich(plain: &str, html: &str) {
+        copy(plain);
+        if !html.is_empty() && html.len() <= MAX_HTML {
+            S.with(|s| s.borrow_mut().host_html = Some(html.to_string()));
+        }
+    }
+
+    /// The HTML to hand to the host with the last copy, once.
+    pub fn take_host_html() -> Option<String> {
+        S.with(|s| s.borrow_mut().host_html.take())
+    }
+
+    /// A small, safe HTML form of plain text: paragraphs at blank lines, fenced code as `<pre><code>`, everything escaped (nothing of
+    /// the text can become markup, a link, a script or an attribute).
+    pub fn html_from_text(text: &str) -> String {
+        fn esc(s: &str) -> String {
+            s.chars().fold(String::with_capacity(s.len()), |mut o, c| {
+                match c {
+                    '&' => o.push_str("&amp;"),
+                    '<' => o.push_str("&lt;"),
+                    '>' => o.push_str("&gt;"),
+                    '"' => o.push_str("&quot;"),
+                    '\'' => o.push_str("&#39;"),
+                    c => o.push(c),
+                }
+                o
+            })
+        }
+        let mut out = String::new();
+        let (mut code, mut para): (Option<String>, Vec<&str>) = (None, Vec::new());
+        let flush = |para: &mut Vec<&str>, out: &mut String| {
+            if !para.is_empty() {
+                out.push_str("<p>");
+                out.push_str(&para.iter().map(|l| esc(l)).collect::<Vec<_>>().join("<br>"));
+                out.push_str("</p>");
+                para.clear();
+            }
+        };
+        for line in text.lines() {
+            if line.trim_start().starts_with("```") {
+                match code.take() {
+                    Some(c) => {
+                        out.push_str("<pre><code>");
+                        out.push_str(&esc(c.trim_end_matches('\n')));
+                        out.push_str("</code></pre>");
+                    }
+                    None => {
+                        flush(&mut para, &mut out);
+                        code = Some(String::new());
+                    }
+                }
+            } else if let Some(c) = &mut code {
+                c.push_str(line);
+                c.push('\n');
+            } else if line.trim().is_empty() {
+                flush(&mut para, &mut out);
+            } else {
+                para.push(line);
+            }
+        }
+        if let Some(c) = code {
+            out.push_str("<pre><code>");
+            out.push_str(&esc(c.trim_end_matches('\n')));
+            out.push_str("</code></pre>");
+        }
+        flush(&mut para, &mut out);
+        out
     }
 
     /// Take `text` out of the copy history again (a secret that was copied once to be pasted).
@@ -438,6 +521,15 @@ pub mod clipboard {
                 Entry::Text(t) => Some(t.clone()),
                 Entry::Picture { .. } => None,
             })
+        })
+    }
+
+    /// The picture on top of the history: `Some` only when the newest copy IS a picture (a picture from a page's clipboard or a screenshot),
+    /// so a plain paste of older text is not mistaken for what the person just copied. Width, height, RGBA.
+    pub fn newest_picture() -> Option<(u32, u32, Vec<u8>)> {
+        S.with(|s| match s.borrow().items.front() {
+            Some(Entry::Picture { width, height, rgba }) => Some((*width, *height, rgba.as_ref().clone())),
+            _ => None,
         })
     }
 
@@ -1355,5 +1447,24 @@ mod theme_tests {
     fn the_elevation_steps_rise_and_the_accent_stands_out() {
         assert!(lum(BG_BOTTOM) < lum(BG_TOP) && lum(BG_TOP) < lum(CARD) && lum(CARD) < lum(CARD_HOVER) && lum(CARD_HOVER) < lum(CARD_SEL));
         assert!(contrast(BORDER, CARD) >= 1.3);
+    }
+
+    #[test]
+    fn a_rich_copy_queues_its_html_once_and_a_plain_copy_drops_a_stale_one() {
+        clipboard::clear();
+        clipboard::copy_rich("one\ntwo\n\n```\nlet a = 1 < 2;\n```\nlast <b>x</b>", &clipboard::html_from_text("one\ntwo\n\n```\nlet a = 1 < 2;\n```\nlast <b>x</b>"));
+        let h = clipboard::take_host_html().unwrap();
+        assert_eq!(h, "<p>one<br>two</p><pre><code>let a = 1 &lt; 2;</code></pre><p>last &lt;b&gt;x&lt;/b&gt;</p>");
+        assert!(clipboard::take_host_html().is_none(), "once");
+        assert!(clipboard::latest().unwrap().starts_with("one"), "the history keeps the plain text");
+        clipboard::copy_rich("a", "<p>a</p>");
+        clipboard::copy("b");
+        assert!(clipboard::take_host_html().is_none(), "a plain copy after it sends no stale HTML");
+        // nothing of the text can become markup, and an unclosed fence is closed
+        let evil = clipboard::html_from_text("<script>alert(1)</script> \"x\" 'y' &\n```\nopen");
+        assert!(!evil.contains("<script") && evil.contains("&lt;script&gt;") && evil.contains("&amp;") && evil.contains("&quot;x&quot;") && evil.ends_with("</code></pre>"), "{evil}");
+        assert_eq!(clipboard::html_from_text(""), "");
+        clipboard::copy_rich("x", &"y".repeat(clipboard::MAX_HTML + 1));
+        assert!(clipboard::take_host_html().is_none(), "too long: text only");
     }
 }

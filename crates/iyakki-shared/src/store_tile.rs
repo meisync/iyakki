@@ -23,7 +23,7 @@ impl TestReport {
 use serde_json::Value;
 
 /// A request the app made that needs the person: the shell shows it and answers with [`TileRuntime::resolve`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Request {
     pub id: u32,
     /// `host.openFile`, `host.saveFile`, `clipboard.read`, `clipboard.write`, `agent.ask`, `sdk.approve` (first use of `llm` or `speech`).

@@ -38,6 +38,14 @@ pub fn connect_for(filters: &FilterSet, url: &str, plan_mark: u32, addr: SocketA
 /// and then the address (a name rule that points one way is not overruled by silence of the address rules; no rule at all means a plain
 /// connection). A destination that goes into the tunnel gets the marked socket, or a sentence when it cannot be marked: never a plain one.
 pub fn dial_hook(filters: FilterSet, plan_mark: u32) -> iyakki_proxy::dial::Hook {
+    dial_hook_with(filters, plan_mark, std::sync::Arc::new(|addr, mark, t| connect_marked(addr, Some(mark), t)))
+}
+
+/// How a marked connection is made: this process (needs rights) or the privileged helper (hands the open socket over).
+pub type MarkedConnector = std::sync::Arc<dyn Fn(SocketAddr, u32, Duration) -> io::Result<TcpStream> + Send + Sync>;
+
+/// [`dial_hook`] with the way of making the marked connection given by the caller.
+pub fn dial_hook_with(filters: FilterSet, plan_mark: u32, connector: MarkedConnector) -> iyakki_proxy::dial::Hook {
     std::sync::Arc::new(move |host: &str, addr: SocketAddr, timeout: Duration| {
         use iyakki_vpn::filter::Reason;
         let by_name = filters.decide_domain(host);
@@ -45,7 +53,7 @@ pub fn dial_hook(filters: FilterSet, plan_mark: u32) -> iyakki_proxy::dial::Hook
         if d.route != Route::Tunnel {
             return None;
         }
-        Some(connect_marked(addr, Some(plan_mark), timeout).map_err(|e| io::Error::new(e.kind(), format!("the connection to {host} was meant to go through the VPN and could not be made ({e}); it was not sent outside the tunnel"))))
+        Some(connector(addr, plan_mark, timeout).map_err(|e| io::Error::new(e.kind(), format!("the connection to {host} was meant to go through the VPN and could not be made ({e}); it was not sent outside the tunnel"))))
     })
 }
 

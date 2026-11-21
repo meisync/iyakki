@@ -12,7 +12,7 @@ pub fn pull_address(port: u16) -> String {
 }
 
 /// A cluster and how to reach it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Target {
     pub name: String,
     pub kubeconfig: String,

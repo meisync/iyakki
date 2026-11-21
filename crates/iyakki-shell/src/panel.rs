@@ -11,7 +11,7 @@
 //!
 //! Everything takes the `/sys` folder and the restore file as arguments, so the tests run on fake folders.
 
-use crate::fnkeys::{panel_backlights, Light};
+use iyakki_core_local::backlight::{panel_backlights, read_u32, write_value, Light};
 use std::path::{Path, PathBuf};
 
 /// Where the previous brightness is kept while the panel is dimmed or off (a RAM folder: nothing is written to a drive).
@@ -66,14 +66,6 @@ pub struct Panel {
     sys: PathBuf,
     restore_file: PathBuf,
     held: Vec<Held>,
-}
-
-fn read_u32(p: &Path) -> Option<u32> {
-    std::fs::read_to_string(p).ok()?.trim().parse().ok()
-}
-
-fn write_value(dir: &Path, v: u32) -> bool {
-    std::fs::write(dir.join("brightness"), v.to_string()).is_ok()
 }
 
 impl Panel {

@@ -70,11 +70,30 @@ pub fn advertised(ip: std::net::IpAddr, port: u16, fingerprint: &str) -> String 
     format!("{SCHEME}{host}:{port}#{}", colon(fingerprint))
 }
 
+/// A TCP connection to `addr` (host:port): every address the name resolves to is tried in turn, the way `TcpStream::connect` does, not only
+/// the first. A name that resolves to an IPv6 and an IPv4 address (`localhost` on many systems lists `::1` first) must still reach a
+/// member that listens on one of them.
+pub fn connect_tcp(addr: &str) -> Result<std::net::TcpStream, String> {
+    let all: Vec<std::net::SocketAddr> = addr.to_socket_addrs().map_err(|_| "that address is not valid (use host:port)".to_string())?.collect();
+    connect_first_of(&all).map_err(|e| format!("could not reach {addr}: {e}"))
+}
+
+/// The first of `addrs` that accepts a connection (3 seconds each); the last error when none does.
+pub fn connect_first_of(addrs: &[std::net::SocketAddr]) -> Result<std::net::TcpStream, String> {
+    let mut last = "that address is not valid".to_string();
+    for sa in addrs {
+        match std::net::TcpStream::connect_timeout(sa, Duration::from_secs(3)) {
+            Ok(s) => return Ok(s),
+            Err(e) => last = e.to_string(),
+        }
+    }
+    Err(last)
+}
+
 /// A TLS connection to `addr`, the certificate pinned to `fingerprint`. The handshake runs on the first read or write, so a wrong
 /// certificate is refused before one byte of the message is sent (the client sends nothing until the verifier has accepted).
 pub fn connect(addr: &str, fingerprint: &str) -> Result<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>, String> {
-    let sa = addr.to_socket_addrs().map_err(|_| "that address is not valid (use tls://host:port#fingerprint)".to_string())?.next().ok_or("that address is not valid")?;
-    let sock = std::net::TcpStream::connect_timeout(&sa, Duration::from_secs(3)).map_err(|e| format!("could not reach {addr}: {e}"))?;
+    let sock = connect_tcp(addr).map_err(|e| if e.starts_with("that address") { "that address is not valid (use tls://host:port#fingerprint)".to_string() } else { e })?;
     let _ = sock.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = sock.set_write_timeout(Some(Duration::from_secs(5)));
     let cfg = crate::devmode::client::pinned_client_config(Some(fingerprint), Arc::new(Mutex::new(None)))?;
@@ -89,5 +108,22 @@ pub fn explain(e: &str) -> String {
         "the certificate that computer showed is not the one named in the address (check the fingerprint on its Fleet page)".into()
     } else {
         e.to_string()
+    }
+}
+
+#[cfg(test)]
+mod connect_tests {
+    use super::*;
+
+    #[test]
+    fn a_name_with_several_addresses_reaches_the_one_that_listens_not_only_the_first() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let good = l.local_addr().unwrap();
+        // port 0 can never be connected to: it stands for the first address of a name that does not listen (an IPv6 `::1` before the IPv4 one)
+        let dead: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let s = connect_first_of(&[dead, good]).unwrap();
+        assert_eq!(s.peer_addr().unwrap(), good);
+        assert!(connect_first_of(&[dead]).is_err() && connect_first_of(&[]).unwrap_err().contains("not valid"));
+        assert!(connect_tcp("not an address").unwrap_err().contains("not valid"));
     }
 }

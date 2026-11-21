@@ -9,20 +9,10 @@
 //! A very large document does not fit the box (the clipboard keeps 64 KB): type `@/path/to/file` in the input box and the tool reads
 //! that file (if the account may read it), up to 64 MB. The tools themselves are plain functions in the sibling modules.
 
-pub mod b64;
-pub mod convert;
-pub mod diff;
-pub mod hashes;
-pub mod json;
-pub mod jwt;
+pub use iyakki_devtools_engine::{b64, convert, diff, hashes, json, jwt, query, regex, tools, url, uuid_time};
 pub mod net;
 mod page;
 pub mod qrcode;
-pub mod query;
-pub mod regex;
-pub mod tools;
-pub mod url;
-pub mod uuid_time;
 
 use std::sync::Arc;
 
@@ -107,6 +97,8 @@ pub struct DevToolsApp {
 
 impl DevToolsApp {
     pub fn new(_cx: &AppCx) -> DevToolsApp {
+        // the system's random bytes for UUIDs (the agent's generator: a tile does not read the kernel's devices itself)
+        uuid_time::set_random(|n| crate::agent().sharedfolder_random_hex(n));
         let mut input = MultiLine::new(BOX_MAX);
         input.min_rows = 2;
         let mut aux = MultiLine::new(BOX_MAX);

@@ -73,7 +73,7 @@ The real IYAKKI logo (the one of the boot screen), on pure black:
 
 Cost: the saver draws 15 frames a second on mains, 8 on battery and 4 on a remote (browser) screen, and each frame repaints only the
 rectangle the logo left and the one it moved to (a few percent of a 2880x1800 screen), never the whole picture. The backend does
-not redraw the saver by itself. The log line `shell: N frames in 10s, draw X ms` shows the real figures.
+not redraw the saver by itself. The log line `shell: N frames in 10s, draw X ms` (at DEBUG after the first one, kept in the kernel log only for a slow window and once an hour) shows the real figures.
 
 ## Screen off, machine by machine
 

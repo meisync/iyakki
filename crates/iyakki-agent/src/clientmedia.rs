@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use iyakki_core_api::broker::{CardAnswer, CardAsk, Caller, CallerKind};
 use iyakki_core_api::client::media::{self as m, SourceKind};
-pub use iyakki_shared::clientmedia::{Audible, AudioRoutes, DEVICE_PERMISSIONS, Opened, Pulled, ROUTE_ALIVE, Route};
+pub use iyakki_shared::clientmedia::{Audible, AudioRoutes, DEVICE_PERMISSIONS, DEVICE_ROLES, Opened, Pulled, ROUTE_ALIVE, Route};
 
 pub use iyakki_core_api::client::media;
 
@@ -431,6 +431,64 @@ impl Drop for SourceTap {
     }
 }
 
+/// What a program that looked at a client's source got (F-CLIENT-06).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Look {
+    /// The newest camera picture, JPEG.
+    Picture(Vec<u8>),
+    /// The last second or less of microphone sound as a WAV (16 kHz mono, 16 bit).
+    Sound(Vec<u8>),
+}
+
+/// A WAV file around 16 kHz mono 16-bit sound.
+pub fn wav16k(pcm: &[u8]) -> Vec<u8> {
+    let n = pcm.len() as u32;
+    let mut w = Vec::with_capacity(44 + pcm.len());
+    w.extend_from_slice(b"RIFF");
+    w.extend_from_slice(&(36 + n).to_le_bytes());
+    w.extend_from_slice(b"WAVEfmt ");
+    w.extend_from_slice(&16u32.to_le_bytes());
+    w.extend_from_slice(&1u16.to_le_bytes());
+    w.extend_from_slice(&1u16.to_le_bytes());
+    w.extend_from_slice(&16_000u32.to_le_bytes());
+    w.extend_from_slice(&32_000u32.to_le_bytes());
+    w.extend_from_slice(&2u16.to_le_bytes());
+    w.extend_from_slice(&16u16.to_le_bytes());
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&n.to_le_bytes());
+    w.extend_from_slice(pcm);
+    w
+}
+
+/// The first consumer of [`VirtualSources::attach`]: look at the client source called `name` (of `tenant`) as program `consumer`. A tap
+/// is opened (frames are only kept while one is), then `between` is called whenever nothing has arrived yet; it waits a little and says
+/// whether to go on (`false` gives up). The tap is dropped on return, so the source goes back to dropping what it receives.
+pub fn look_at(table: &Arc<VirtualSources>, name: &str, tenant: &str, consumer: &str, between: &mut dyn FnMut() -> bool) -> Result<(Source, Look), String> {
+    let src = table.list(tenant).into_iter().find(|s| s.name.eq_ignore_ascii_case(name)).ok_or_else(|| format!("no client device shares a source called {name:?} now"))?;
+    let mut tap = table.attach(&src.id, tenant, consumer)?;
+    loop {
+        match src.kind {
+            SourceKind::Camera => {
+                if let Some(j) = tap.next_jpeg() {
+                    return Ok((src, Look::Picture(j)));
+                }
+            }
+            SourceKind::Microphone => {
+                let pcm = tap.take_sound();
+                if !pcm.is_empty() {
+                    return Ok((src, Look::Sound(wav16k(&pcm))));
+                }
+            }
+        }
+        if !tap.live() {
+            return Err("the client stopped sharing it".into());
+        }
+        if !between() {
+            return Err("nothing arrived from it in time; is the client still sending?".into());
+        }
+    }
+}
+
 /// A hold a program on this machine has on an instance device, taken through [`Leases::hold_local`]; the lease goes when it is dropped.
 pub struct LocalHold {
     table: Arc<Leases>,
@@ -548,7 +606,7 @@ impl MediaHost {
 
 /// What a person can give a client device (Settings, Devices; the chat tool). Each stays a hard ask where the catalogue says so: the grant
 /// only lets the question be asked.
-pub const GRANTABLE: &[&str] = &["speaker.play", "clipboard.client", "camera.view", "client.camera.offer", "client.microphone.offer"];
+pub const GRANTABLE: &[&str] = &["speaker.play", "clipboard.client", "camera.view", "client.camera.offer", "client.microphone.offer", "files.client"];
 
 /// Give a client device these capabilities (kept in the approval book under `client/<device id>`; earlier grants stay). The caller writes
 /// the audit line. Names outside [`GRANTABLE`] are refused.
@@ -612,16 +670,6 @@ pub fn revoke_device(data: &std::path::Path, device_id: &str, caps: &[&str]) -> 
     }
     Ok(n)
 }
-
-/// The role table of a client device (F-CORE-30): named presets over [`GRANTABLE`], so a person picks "listener" instead of five switches.
-/// A role only says what the device MAY ASK for; a hard ask stays a card at every use. `viewer` (the default of a new device) may ask
-/// for nothing: it sees the picture and sends keys, mouse and size, as before. The instance enforces it at the broker, never the client.
-pub const DEVICE_ROLES: &[(&str, &str, &[&str])] = &[
-    ("viewer", "sees the picture and sends keys and mouse; asks for nothing else", &[]),
-    ("listener", "also hears this computer's sound", &["speaker.play"]),
-    ("presenter", "also hears sound and shares its clipboard", &["speaker.play", "clipboard.client"]),
-    ("full", "may also ask to view cameras here and to offer its own camera and microphone", &["speaker.play", "clipboard.client", "camera.view", "client.camera.offer", "client.microphone.offer"]),
-];
 
 /// The capabilities of a role, or `None` for a name that is not in the table.
 pub fn role_caps(role: &str) -> Option<&'static [&'static str]> {

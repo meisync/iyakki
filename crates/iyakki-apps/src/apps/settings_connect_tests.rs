@@ -218,3 +218,33 @@ fn a_devices_permissions_are_switched_one_by_one_audited_and_count_at_the_next_r
     press(&mut a, &cx, '8');
     assert!(status(&a).contains("no device with that number"));
 }
+
+#[test]
+fn a_devices_role_is_shown_stepped_with_r_audited_and_sets_every_switch_at_once() {
+    let cx = admin("connect-role");
+    let mut a = page(&cx);
+    press(&mut a, &cx, 'k');
+    let d = cx.data_dir().to_path_buf();
+    let dev = cl::enrol_device(&d, "Maya's laptop", &DeviceKey::from_seed([8; 32]).public_hex(), "root", now()).unwrap();
+    press(&mut a, &cx, 'd');
+    press(&mut a, &cx, '1');
+    let t = texts(&draw(&mut a, &cx, 1280, 960));
+    assert!(t.contains("Role of Maya's laptop: viewer") && t.contains("Press r for the next role"), "{t}");
+    press(&mut a, &cx, 'r');
+    assert_eq!(device_holds(&d, &dev.id), vec!["speaker.play"], "listener: sound");
+    assert!(status(&a).contains("role listener"), "{}", status(&a));
+    press(&mut a, &cx, 'r');
+    press(&mut a, &cx, 'r');
+    let full = iyakki_shared::clientmedia::DEVICE_ROLES.iter().find(|r| r.0 == "full").expect("the full role").2;
+    assert_eq!(device_holds(&d, &dev.id).len(), full.len(), "full: every switch");
+    assert_eq!(full.len(), iyakki_agent::clientmedia::GRANTABLE.len(), "the full role holds every grantable switch");
+    assert!(texts(&draw(&mut a, &cx, 1280, 960)).contains("Role of Maya's laptop: full"));
+    press(&mut a, &cx, 'r');
+    assert!(device_holds(&d, &dev.id).is_empty(), "back to viewer: the other switches are taken away");
+    // a switch set by hand makes the role custom and the next press starts at the first role again
+    press(&mut a, &cx, '4');
+    assert!(texts(&draw(&mut a, &cx, 1280, 960)).contains("Role of Maya's laptop: custom"));
+    press(&mut a, &cx, 'r');
+    assert!(device_holds(&d, &dev.id).is_empty() && status(&a).contains("role viewer"));
+    assert!(cx.audit.recent(50).join("\n").contains("settings.client_role listener Maya's laptop"));
+}

@@ -1,6 +1,7 @@
 
 
 /// What came out: the file, its pages, and how many pictures went in or were left out (videos, undecodable files).
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StoryPdf {
     pub bytes: Vec<u8>,
     pub pages: usize,

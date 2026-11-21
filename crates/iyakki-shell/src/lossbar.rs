@@ -1,5 +1,5 @@
 //! The "IYAKKI drive" banner: a persistent card on every screen while the drive the data lives on is lost, failing or read-only
-//! (`iyakki_storage::loss`, docs/STORAGE-LOSS.md), and the short "reconnected" card afterwards.
+//! (`iyakki_core_local::storage::loss`, docs/STORAGE-LOSS.md), and the short "reconnected" card afterwards.
 //!
 //! While the drive is not healthy the card cannot be dismissed (there is no close button and Esc does not close it); it can be
 //! minimised to a slim strip that opens it again. It sits under the top bar, centred, and is drawn above every app and pane. Its
@@ -10,7 +10,7 @@ use crate::fx;
 use crate::gfx::{Face, Gfx};
 use crate::safeclamp::SafeClamp;
 use crate::ui::{Event, ERR, MUTED, TEXT, R};
-use iyakki_storage::loss::{self, Banner, Button, Snapshot, State};
+use iyakki_core_local::storage::loss::{self, Banner, Button, Snapshot, State};
 
 /// Click regions.
 pub const RECONNECT: usize = 1_350_001;

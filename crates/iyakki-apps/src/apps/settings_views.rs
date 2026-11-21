@@ -19,6 +19,8 @@ pub(super) enum VwRow {
     RememberLayout,
     /// Whether an app keeps one window (opening it again goes to the open one).
     OneWindow,
+    /// The person's own step keys (Ctrl+Alt plus a key each way).
+    OwnKeys,
 }
 
 impl SettingsApp {
@@ -37,6 +39,7 @@ impl SettingsApp {
         rows.push(VwRow::ResetOnLock);
         rows.push(VwRow::RememberLayout);
         rows.push(VwRow::OneWindow);
+        rows.push(VwRow::OwnKeys);
         rows
     }
 
@@ -55,6 +58,8 @@ impl SettingsApp {
                 let mut items: Vec<String> = TEMPLATES.iter().map(|t| format!("{} ({})", t.name, t.tiles.iter().map(|a| a.to_uppercase()).collect::<Vec<_>>().join(", "))).collect();
                 // the person's own templates (saved by chat) come after the built-in ones
                 items.extend(UserTemplates::load(cx.data_dir(), &cx.session.user).list.iter().map(|t| format!("{} ({}) - yours", t.name, t.tiles.iter().map(|a| a.to_uppercase()).collect::<Vec<_>>().join(", "))));
+                // then the templates installed bundles brought (kept members that passed the schema)
+                items.extend(iyakki_shared::bundle_members::bundled_view_templates(cx.data_dir(), &cx.session.user).iter().map(|t| format!("{} ({}) - from a bundle", t.name, t.tiles.iter().map(|a| a.to_uppercase()).collect::<Vec<_>>().join(", "))));
                 self.modal = Some(Modal::Pick(PickKind::ViewTemplate, Picker::new("New view from a template", items)));
             }
             (Key::Char('r'), Some(VwRow::View { id, name, .. })) => self.open_form(FormKind::View(Some(id)), Form::new("Rename view").text("Name (up to 16 characters)", &name, "")),
@@ -105,8 +110,37 @@ impl SettingsApp {
                 cx.audit.record(&cx.session.user, "view.single", if on { "all apps" } else { "off" });
                 self.ok(if on { "Every app keeps one window: opening an app that is already open goes to it. (Chat can choose single apps.)" } else { "An app can open more than once again." });
             }
+            (Key::Char('j') | Key::Enter, Some(VwRow::OwnKeys)) | (Key::Char('j'), _) => {
+                let v = Self::vw_load(cx);
+                let (p, n) = v.custom_keys.as_ref().map(|c| (Self::vw_typed(&c.prev), Self::vw_typed(&c.next))).unwrap_or_default();
+                self.open_form(FormKind::ViewKeys, Form::new("Your own step keys (Ctrl+Alt plus the key)").text("Previous view key (a letter other than M, Q, L, S, or [ ] , .)", &p, "for example J").text("Next view key", &n, "for example K; both empty turns them off"));
+            }
             _ => {}
         }
+    }
+
+    fn vw_typed(name: &str) -> String {
+        match name {
+            "BracketLeft" => "[".into(),
+            "BracketRight" => "]".into(),
+            "Comma" => ",".into(),
+            "Period" => ".".into(),
+            n => n.trim_start_matches("Key").to_string(),
+        }
+    }
+
+    /// The own-keys form was sent.
+    pub(super) fn vw_keys_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
+        let keys = iyakki_shared::views::CustomKeys::from_typed(&form.value(0), &form.value(1))?;
+        let mut v = Self::vw_load(cx);
+        let msg = match &keys {
+            Some(c) => format!("Own step keys: {}.", c.label()),
+            None => "Own step keys are off.".to_string(),
+        };
+        v.custom_keys = keys;
+        Self::vw_save(cx, &v);
+        cx.audit.record(&cx.session.user, "view.keys", if v.custom_keys.is_some() { "own keys on" } else { "own keys off" });
+        Ok(msg)
     }
 
     pub(super) fn vw_submit(&mut self, cx: &AppCx, editing: &Option<u32>, form: &Form) -> Result<String, String> {
@@ -127,6 +161,8 @@ impl SettingsApp {
     pub(super) fn vw_pick(&mut self, cx: &AppCx, item: &str) {
         let mut v = Self::vw_load(cx);
         let own = UserTemplates::load(cx.data_dir(), &cx.session.user).list.into_iter().find(|t| item.starts_with(&format!("{} (", t.name)) && item.ends_with(" - yours"));
+        let bundled = iyakki_shared::bundle_members::bundled_view_templates(cx.data_dir(), &cx.session.user).into_iter().find(|t| item == format!("{} ({}) - from a bundle", t.name, t.tiles.iter().map(|a| a.to_uppercase()).collect::<Vec<_>>().join(", ")));
+        let own = own.or(bundled);
         let made = match (&own, TEMPLATES.iter().find(|t| item.starts_with(&format!("{} (", t.name)) && !item.ends_with(" - yours"))) {
             (Some(t), _) => v.add_from_user_template(t),
             (None, Some(t)) => v.add_from_template(t.id),
@@ -178,6 +214,7 @@ impl SettingsApp {
                 VwRow::Keys => ("Keys".to_string(), v.key_set.label().to_string()),
                 VwRow::ResetOnLock => ("After the lock or saver".to_string(), if v.reset_on_lock { "return to the first view".to_string() } else { "stay on the view you were in".to_string() }),
                 VwRow::RememberLayout => ("Window arrangement".to_string(), if v.remember_layout { "kept for each view".to_string() } else { "not kept".to_string() }),
+                VwRow::OwnKeys => ("Your own step keys".to_string(), v.custom_keys.as_ref().map(|c| c.label()).unwrap_or_else(|| "off".to_string())),
                 VwRow::OneWindow => ("One window per app".to_string(), if v.single_apps.is_empty() { "off".to_string() } else if v.is_single("*") { "every app".to_string() } else { v.single_apps.join(", ") }),
             };
             let ty = r.y + (r.h - 14.0 * s) / 2.0 - s;
@@ -193,6 +230,6 @@ impl SettingsApp {
 
     pub(super) fn views_buttons(&self) -> Vec<Btn> {
         let (acc, mut_) = (ACCENT, TEXT);
-        vec![("New view", acc, 'n'), ("From a template", acc, 't'), ("Rename", mut_, 'r'), ("Delete view", ERR, 'x'), ("Earlier", mut_, '['), ("Later", mut_, ']'), ("Lock on/off", mut_, 'l'), ("Keys", mut_, 'k'), ("After the lock", mut_, 'o'), ("Keep arrangement", mut_, 'y'), ("One window per app", mut_, 'i')]
+        vec![("New view", acc, 'n'), ("From a template", acc, 't'), ("Rename", mut_, 'r'), ("Delete view", ERR, 'x'), ("Earlier", mut_, '['), ("Later", mut_, ']'), ("Lock on/off", mut_, 'l'), ("Keys", mut_, 'k'), ("After the lock", mut_, 'o'), ("Keep arrangement", mut_, 'y'), ("One window per app", mut_, 'i'), ("Own step keys", mut_, 'j')]
     }
 }

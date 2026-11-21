@@ -641,7 +641,7 @@ fn power_route(cx: &Ctx, action: &str, path: &str) -> Out {
     if reboot {
         // a dual-boot computer would otherwise start the other system: with the setting on, IYAKKI is set as the one-time next boot
         let on = cx.svc.is_some_and(|s| s.startup_reboot_into_iyakki());
-        if let Some(m) = crate::startupdisk::before_dev_reboot(on, &crate::startupdisk::Env::real()) {
+        if let Some(m) = iyakki_core_api::startupdisk::StartupDisk::before_dev_reboot(&crate::startupdisk::local(None), on) {
             cx.did("dev.power.boot_next", &m);
         }
     }

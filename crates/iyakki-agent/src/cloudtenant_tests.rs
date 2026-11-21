@@ -136,3 +136,30 @@ fn the_snapshot_key_source_is_checked_and_reaches_the_pod() {
     assert!(e.contains("snapshot_keys"), "{e}");
     assert!(with(|c| c.snapshot_keys = Some("tape".into())).check().is_err());
 }
+
+#[test]
+fn the_shared_vault_provider_is_part_of_the_launch_configuration_checked_on_save_and_a_saved_setting_wins() {
+    use iyakki_shared::sharedvault::{ExternalRef, Provider, Setting, ENV, FILE_VERSION};
+    let ext = Setting { v: FILE_VERSION, provider: Provider::External, external: Some(ExternalRef { address: "https://vault.example".into(), mount: "secret".into(), path: "iyakki/acme".into(), namespace: None, token_secret: "shared-vault-token".into() }) };
+    let c = with(|c| c.shared_vault = Some(ext.clone()));
+    assert!(c.check().is_ok());
+    let y = crate::cloudtenant::manifests(&c).unwrap();
+    assert!(y.contains(ENV) && y.contains("shared-vault-token") && y.contains("vault.example"), "{y}");
+    assert!(!crate::cloudtenant::manifests(&with(|_| {})).unwrap().contains(ENV));
+    // a text in the configuration file is read strictly, and a reference that cannot work is refused on save
+    let parsed = TenantConfig::parse(&format!(r#"{{"tenant":"acme","shared_vault":{}}}"#, ext.launch_text().unwrap())).unwrap();
+    assert_eq!(parsed.shared_vault, Some(ext.clone()));
+    let bad = Setting { external: None, ..ext.clone() };
+    assert!(with(|c| c.shared_vault = Some(bad)).check().unwrap_err().contains("shared_vault"));
+    assert!(TenantConfig::parse(r#"{"tenant":"acme","shared_vault":{"v":1,"provider":"tape"}}"#).is_err());
+    // the pod: no file means the launch configuration, a saved file means the person's choice, a damaged text never means built-in
+    let d = std::env::temp_dir().join(format!("iyakki-ct-sv-{}", crate::cloudkeys::hex(&crate::cloudkeys::random::<6>().unwrap())));
+    std::fs::create_dir_all(&d).unwrap();
+    let text = ext.launch_text().unwrap();
+    assert_eq!(Setting::load_with(&d, Some(&text)).unwrap().provider, Provider::External);
+    assert_eq!(Setting::load_with(&d, None).unwrap().provider, Provider::Builtin);
+    assert!(Setting::load_with(&d, Some("{broken")).is_err());
+    Setting::default().save(&d, "alice").unwrap();
+    assert_eq!(Setting::load_with(&d, Some(&text)).unwrap().provider, Provider::Builtin, "the saved file wins");
+    std::fs::remove_dir_all(&d).ok();
+}

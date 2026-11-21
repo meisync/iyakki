@@ -21,7 +21,7 @@ pub fn real_sender() -> Arc<dyn SendControl> {
             let sig = L2Sock::connect(addr, PSM_AVDTP, 12).map_err(|e| format!("could not connect to the device for audio: {e}"))?;
             let media: Box<dyn FnOnce() -> std::io::Result<L2Sock> + Send> = Box::new(move || L2Sock::connect(addr, PSM_AVDTP, 12).map_err(|e| std::io::Error::other(e.to_string())));
             Ok((sig, media))
-        }))
+        }).with_aac(crate::a2dp_aac::ready_backend))
     })
     .clone()
 }

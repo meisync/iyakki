@@ -565,3 +565,16 @@ fn the_menu_config_uses_one_condition_per_if_and_the_font_lines_are_nested() {
     let fis = cfg.lines().filter(|l| l.trim() == "fi").count();
     assert_eq!(ifs, fis, "every `if` of the menu config is closed");
 }
+
+#[test]
+fn every_aarch64_boot_entry_keeps_the_pl011_console_and_adds_the_virtio_console_last() {
+    // QEMU and real boards: ttyAMA0 exists, hvc0 does not, so /dev/console stays ttyAMA0 (the last console= that exists).
+    // Apple Virtualization (Lima vz): only hvc0 exists, so the same image shows its console there (KI-1015).
+    let cfg = read("board/iyakki-aarch64/grub.cfg");
+    let e = entries(&cfg);
+    assert!(e.len() >= 6, "{e:?}");
+    for (t, args) in &e {
+        let consoles: Vec<&str> = args.split_whitespace().filter(|a| a.starts_with("console=")).collect();
+        assert_eq!(consoles, ["console=tty0", "console=ttyAMA0,115200", "console=hvc0"], "{t}");
+    }
+}

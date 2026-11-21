@@ -906,7 +906,7 @@ fn opt(a: &[String], name: &str) -> Option<String> {
     a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).cloned()
 }
 
-/// `iyakki vault serve | keygen | enroll | enroll-member`.
+/// `iyakki vault serve | keygen | enroll | enroll-member | enroll-service | secret`.
 pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
     match a.first().map(String::as_str) {
         Some("serve") => {
@@ -936,6 +936,7 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
             out(&serde_json::to_string(&k.public()).map_err(|e| e.to_string())?);
             Ok(())
         }
+        Some("secret") => crate::sharedvault_cli::secret(&a[1..], crate::sharedvault_cli::deps_from_args(a)?, out),
         Some("enroll") => {
             let data = opt(a, "--data").ok_or("--data DIR is needed")?;
             let id = opt(a, "--id").ok_or("--id TENANT/PERSON or operator:NAME is needed")?;
@@ -1003,7 +1004,7 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
             }
             Ok(())
         }
-        _ => Err("usage: iyakki vault serve --listen ADDR --data DIR [--tls-cert F --tls-key F] | keygen --out FILE | enroll --data DIR --id ID --keys JSON | enroll-member --vault HOST:PORT --id TENANT/ADMIN --key FILE --name PERSON --keys JSON | enroll-service --vault HOST:PORT --id TENANT/ADMIN --key FILE --data DIR".into()),
+        _ => Err("usage: iyakki vault serve --listen ADDR --data DIR [--tls-cert F --tls-key F] | keygen --out FILE | enroll --data DIR --id ID --keys JSON | enroll-member --vault HOST:PORT --id TENANT/ADMIN --key FILE --name PERSON --keys JSON | enroll-service --vault HOST:PORT --id TENANT/ADMIN --key FILE --data DIR | secret put|get|list|delete (the provider the shared-vault setting names)".into()),
     }
 }
 

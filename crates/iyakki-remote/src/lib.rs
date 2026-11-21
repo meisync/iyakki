@@ -16,6 +16,7 @@ pub mod devserver;
 pub mod http;
 pub mod input;
 pub mod page;
+pub mod picturepump;
 pub mod relay;
 pub mod screen;
 pub mod server;

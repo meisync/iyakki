@@ -33,7 +33,7 @@ struct Side {
 }
 
 fn hb() -> Heartbeat {
-    Heartbeat { disk_free_mb: 1, disk_total_mb: 2, cpu_load_pct: 3, cpus: 4, mem_used_pct: 5, mem_total_mb: 6, tasks_running: 0, models: vec![] }
+    Heartbeat { disk_free_mb: 1, disk_total_mb: 2, cpu_load_pct: 3, cpus: 4, mem_used_pct: 5, mem_total_mb: 6, tasks_running: 0, models: vec![], battery_pct: None }
 }
 
 fn side(tag: &str) -> Side {

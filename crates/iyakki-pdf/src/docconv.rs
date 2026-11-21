@@ -59,6 +59,7 @@ fn walk(blocks: &[d::Block], image: &dyn Fn(usize) -> Option<PdfImage>, out: &mu
                 }
             }
             d::Block::Rule => out.push(Block::Rule),
+            d::Block::Mark { .. } => {}
             d::Block::Box(bx) => walk(&bx.children, image, out, depth + 1),
             d::Block::Row(r) => {
                 for c in &r.cols {

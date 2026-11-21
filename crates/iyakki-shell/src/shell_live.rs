@@ -52,7 +52,7 @@ impl Shell {
             && !self.startup.open
             && !self.battery.open
             && self.loss.card_until.is_none()
-            && iyakki_storage::loss::snapshot().state.healthy()
+            && iyakki_core_local::storage::loss::snapshot().state.healthy()
             && self.env.camera().in_use().is_none()
     }
 

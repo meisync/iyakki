@@ -156,7 +156,7 @@ pub fn group_of(name: &str) -> Group {
         "ssh_connections" | "ssh_login" => Group::System,
         n if n.starts_with("share_") || n.starts_with("vpn_") || n.starts_with("bluetooth_") || n.starts_with("remote_") || n.starts_with("sftp_") || n.starts_with("ssh_tunnel_") || n.starts_with("domain_") || n.starts_with("domains_") => Group::Network,
         n if n.starts_with("system_sounds_") => Group::Settings,
-        n if ["updates_", "components_", "builds_", "devmode_pairing", "hardware_firmware", "disks_", "encrypted_home_", "cloud_", "shared_vault_", "model_options_", "gemini_", "router_", "fleet_", "models_list", "provider_models_", "ollama_", "lemonade_compute_", "this_computer_", "client_device", "restart_grant", "trusted_computer", "patch_grant", "connect_client_", "apps_access_", "linux_", "quick_", "last_session_", "startup_disk_"].iter().any(|p| n.starts_with(p)) => Group::Machine,
+        n if ["updates_", "components_", "builds_", "devmode_pairing", "hardware_firmware", "disks_", "encrypted_home_", "cloud_", "shared_vault_", "model_options_", "gemini_", "router_", "fleet_", "models_list", "provider_models_", "ollama_", "lemonade_compute_", "this_computer_", "client_device", "client_sound_", "restart_grant", "trusted_computer", "patch_grant", "connect_client_", "apps_access_", "linux_", "quick_", "last_session_", "startup_disk_", "secureboot_"].iter().any(|p| n.starts_with(p)) => Group::Machine,
         n if n.starts_with("system_") || n.starts_with("browser_graphics_") => Group::System,
         n if n.starts_with("pdf_") || n == "page_save_pdf" || n == "tiles_list" => Group::Files,
         n if n.starts_with("object_storage_") => Group::Cluster,
@@ -164,10 +164,12 @@ pub fn group_of(name: &str) -> Group {
         "show_svg" | "show_image" | "generate_image" | "screen_capture" => Group::Pictures,
         // the trust choice of an encrypted camera is a setting, not a picture tool (the picture tools are always offered; this one is loaded by the words)
         n if n.starts_with("camera_trust_") => Group::Settings,
+        // Amazon's assistant behind the voice seam: a setting (loaded by the words alexa / amazon)
+        n if n.starts_with("alexa_") => Group::Settings,
         n if n.starts_with("camera_") || n.starts_with("cameras_") => Group::Pictures,
         "vault_request" | "ask_user" | "ask_form" => Group::Vault,
         "play_media" | "pause_media" | "resume_media" | "stop_media" => Group::Media,
-        "run_command" | "run_wasm" | "sandbox_run" | "list_clis" | "cli_download_list" | "cli_download_list_check" | "install_cli" | "remove_cli" | "cluster_status" | "cluster_start" | "cluster_stop" | "list_models" | "pull_model" | "store_search" | "store_info" | "store_buy" | "store_add_licence" | "store_install" | "store_outdated" | "store_update" | "store_remove" | "store_rollback" | "tile_scaffold" | "tile_validate" | "tile_test" | "tile_install_dev" | "tile_pack" | "tile_ship" => Group::System,
+        "run_command" | "run_wasm" | "sandbox_run" | "list_clis" | "cli_download_list" | "cli_download_list_check" | "install_cli" | "remove_cli" | "cluster_status" | "cluster_start" | "cluster_stop" | "list_models" | "pull_model" | "store_search" | "store_info" | "store_buy" | "store_add_licence" | "store_install" | "store_outdated" | "store_update" | "store_remove" | "store_rollback" | "store_bundle_members" | "tile_scaffold" | "tile_validate" | "tile_test" | "tile_install_dev" | "tile_pack" | "tile_ship" => Group::System,
         "notify" => Group::Calendar,
         n if n.starts_with("browser_") => Group::Browser,
         n if n.starts_with("media_") => Group::Media,
@@ -221,10 +223,10 @@ pub fn intent_groups(text: &str) -> BTreeSet<Group> {
     if has(&t, &["clone", "repository", "submodule", "workspace", "git ", "github", "gitlab", "board", "feature row", "backlog", "bug", "background job", "notebook"]) {
         g.insert(Group::Workspace);
     }
-    if has(&t, &["setting", "sound", "keyboard", "keys", "repeat", "trackpad", "touchpad", "scrolling", "time zone", "timezone", "clock", "12 hour", "12-hour", "24 hour", "power", "battery", "sleep", "lock the screen", "lock my screen", "screen lock", "idle", "screen saver", "screensaver", "accessib", "contrast", "pointer", "mouse", "cursor", "notification", "desktop view", " views", "voice assistant", "my iyakki", "wake phrase", "dictation", "startup", "compressed memory", "tool routing", "language", "home layout", "backup", "back up", "restore", "forget", "remember", "firewall", "money", "spend", "sdk", "api scope", "scope", "local network", "installed app", "template", "silence limit", "think limit", "rerank", "knowledge graph", "graph search", "entities", "watched folder", "pdf output", "pdf printer", "pdf folder", "waiting rule", "pending setting"]) {
+    if has(&t, &["setting", "sound", "keyboard", "keys", "repeat", "trackpad", "touchpad", "scrolling", "time zone", "timezone", "clock", "12 hour", "12-hour", "24 hour", "power", "battery", "sleep", "lock the screen", "lock my screen", "screen lock", "idle", "screen saver", "screensaver", "accessib", "contrast", "pointer", "mouse", "cursor", "notification", "desktop view", " views", "voice assistant", "alexa", "amazon", "my iyakki", "wake phrase", "dictation", "startup", "compressed memory", "tool routing", "language", "home layout", "backup", "back up", "restore", "forget", "remember", "firewall", "money", "spend", "sdk", "api scope", "scope", "local network", "installed app", "template", "silence limit", "think limit", "rerank", "knowledge graph", "graph search", "entities", "watched folder", "pdf output", "pdf printer", "pdf folder", "waiting rule", "pending setting"]) {
         g.insert(Group::Settings);
     }
-    if has(&t, &["update", "upgrade", "component", "kernel", "firmware", "cloud", "encrypt", "recovery key", "disk", "drive", "partition", "model option", "model router", "smart router", "fleet", "pair group", "pair my computers", "pair this computer", "join code", "planner model", "executor model", "gemini", "google", "provider", "ollama", "lemonade", "client device", "connect a client", "paired computer", "restart", "switch off", "app access", "permission", "sandbox", "this computer", "boot order", "boot menu", "startup disk", "start up disk", "windows", "last session", "uninstall"]) {
+    if has(&t, &["update", "upgrade", "component", "kernel", "firmware", "cloud", "encrypt", "recovery key", "disk", "drive", "partition", "model option", "model router", "smart router", "fleet", "pair group", "pair my computers", "pair this computer", "join code", "planner model", "executor model", "gemini", "google", "provider", "ollama", "lemonade", "client device", "connect a client", "paired computer", "restart", "switch off", "app access", "permission", "sandbox", "this computer", "boot order", "boot menu", "secure boot", "startup disk", "start up disk", "windows", "last session", "uninstall"]) {
         g.insert(Group::Machine);
     }
     if has(&t, &["vpn", "wireguard", "openvpn", "bluetooth", "headphone", "earbud", "tether", "remote computer", "remote desktop", "sftp", "share my ", "share the ", "share a ", "sharing", "shared folder", "ssh", "tunnel", "domain", "dns", "route ", ".local"]) {
@@ -454,6 +456,7 @@ mod tests {
             ("components_apply", Group::Machine),
             ("updates_check_now", Group::Machine),
             ("updates_bundle_open", Group::Machine),
+            ("secureboot_enroll", Group::Machine),
             ("updates_bundle_fetch", Group::Machine),
             ("encrypted_home_create", Group::Machine),
             ("pdf_info", Group::Files),

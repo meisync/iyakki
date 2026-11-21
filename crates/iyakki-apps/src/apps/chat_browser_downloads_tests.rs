@@ -29,7 +29,7 @@ fn setup(tag: &str) -> (AppCx, SettingsTools, Arc<Mutex<Vec<String>>>) {
     let audits = Arc::new(Mutex::new(Vec::new()));
     let a2 = audits.clone();
     let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
-    let e = Env { dir: cx.data_dir().to_path_buf(), user: cx.session.user.clone(), admin: true, settings, audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
+    let e = Env { dir: cx.data_dir().to_path_buf(), user: cx.session.user.clone(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
     let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &e));
     (cx, t, audits)
 }

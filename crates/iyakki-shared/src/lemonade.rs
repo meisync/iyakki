@@ -1,7 +1,7 @@
 
 
 /// An image model's own size and steps (`image_defaults`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImageDefaults {
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -49,7 +49,7 @@ pub const DEFAULT_KOKORO_VOICE: &str = "af_sky";
 pub const KOKORO_VOICES: [&str; 12] = ["af_sky", "af_heart", "af_bella", "af_nicole", "af_sarah", "am_adam", "am_echo", "am_michael", "bf_emma", "bf_isabella", "bm_george", "bm_lewis"];
 
 /// What a model does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum ModelType {
     Chat,
     Vision,
@@ -105,7 +105,7 @@ impl ModelType {
 
 
 /// One model of a Lemonade server.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Model {
     pub id: String,
     pub kind: ModelType,
@@ -273,7 +273,7 @@ pub fn parse_collections(v: &Value) -> Vec<Collection> {
 }
 
 /// One part of a collection, resolved against the same server's model list.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Part {
     pub id: String,
     /// What the part does; for an id the list does not know, guessed from the name (so a part can still be shown).
@@ -327,7 +327,7 @@ pub fn resolve_parts(c: &Collection, models: &[Model]) -> Vec<Part> {
 }
 
 /// What "Use all parts" would do with a collection: the part for each use, and what is missing.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UsePlan {
     pub parts: Vec<Part>,
     /// The chat part (the first chat or vision part).

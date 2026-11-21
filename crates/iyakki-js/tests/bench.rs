@@ -154,3 +154,45 @@ fn bench_blank_page() {
         eprintln!("BENCH blank page run {i}: {:.1} ms (ran {})", t.elapsed().as_secs_f64() * 1000.0, r.report.ran);
     }
 }
+
+#[test]
+#[ignore]
+fn bench_start_phases() {
+    // where a new engine's start goes (F-BROW-99): the wasm instance, QuickJS's own start, the platform preludes; printed by the engine as
+    // `JS-START ...` lines because IYAKKI_JS_STATS is set here, one per blank page, then the page's total
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var("IYAKKI_JS_STATS", "1"); // flaky-ok: an ignored benchmark, run alone by hand; no other test shares its process when it is picked by name
+    }
+    let html = "<body><p>x</p><script>1</script></body>";
+    let web: Arc<dyn Fetch> = Arc::new(iyakki_web::fetch::NoNetwork);
+    let u = Url::parse("https://a.org/").unwrap();
+    for i in 0..6 {
+        let t = Instant::now();
+        let r = run_page(html, &u, web.clone(), |_| true, &SiteData::default(), big());
+        eprintln!("BENCH start phases page {i}: {:.1} ms in all (ran {})", t.elapsed().as_secs_f64() * 1000.0, r.report.ran);
+    }
+}
+
+#[test]
+#[ignore]
+fn bench_small_scripts_pack() {
+    // F-BROW-99 step 3: a page of 80 inline scripts of about 3 KB each (all below the single-file size). The first page parses them and
+    // stores their compiled forms in the pack; the pages after read the pack once and skip the parsing.
+    let mut html = String::from("<body><p>x</p>");
+    for i in 0..80 {
+        let mut f = String::new();
+        for j in 0..40 {
+            f.push_str(&format!("function f{i}_{j}(a,b){{ var s=0; for (var k=0;k<a;k++){{ s+=k*b+{j}; }} return s; }}\n"));
+        }
+        html.push_str(&format!("<script>{f} globalThis.v{i} = f{i}_1(3,4);</script>"));
+    }
+    html.push_str("</body>");
+    let web: Arc<dyn Fetch> = Arc::new(iyakki_web::fetch::NoNetwork);
+    let u = Url::parse("https://a.org/").unwrap();
+    for i in 0..5 {
+        let t = Instant::now();
+        let r = run_page(&html, &u, web.clone(), |_| true, &SiteData::default(), big());
+        eprintln!("BENCH small scripts page {i}: {:.1} ms in all (ran {})", t.elapsed().as_secs_f64() * 1000.0, r.report.ran);
+    }
+}

@@ -121,7 +121,7 @@ fn the_account_is_added_in_the_background_and_the_token_lives_only_in_the_vault(
     let mut hits = vec![];
     walk(cx.data_dir(), &mut hits);
     assert!(hits.is_empty(), "{hits:?}");
-    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
     assert!(audit.contains("msg.account.add") && !audit.contains(TOKEN) && !audit.contains(PASSWORD), "{audit}");
     assert!(hs.seen.lock().unwrap().iter().all(|(_, u)| u.starts_with("http://192.168.1.9:8008/_matrix/")), "only the configured server");
     // the test message goes to the one room
@@ -207,7 +207,7 @@ fn the_m_key_switches_the_copy_of_saved_rooms_into_the_inbox_on_and_off_and_says
     let t = a.status().unwrap().0.clone();
     assert!(t.contains("copied into the INBOX") && t.contains("Nothing is sent"), "{t}");
     assert!(SettingsApp::matrix_reach_line(&cx).contains("are copied into the INBOX (m turns that off)"));
-    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
     assert!(audit.contains("\"event\":\"msg.mirror.set\"") && audit.contains("\"detail\":\"account=home on=true\""), "{audit}");
     key(&mut a, &cx, Key::Char('m'));
     assert!(!ms.accounts().mirror_on("home"));
@@ -236,7 +236,7 @@ fn the_r_key_leaves_one_saved_room_out_of_the_copy_and_back_in_and_the_reach_lin
     assert!(!ms.accounts().rooms("home")[1].mirror);
     key(&mut a, &cx, Key::Char('r'));
     assert!(ms.accounts().rooms("home")[0].mirror, "back in");
-    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
     assert!(audit.contains("msg.mirror.room") && audit.contains("on=false") && !audit.contains(TOKEN), "{audit}");
     assert!(a.notifs_buttons().iter().any(|b| b.2 == 'r'));
 }

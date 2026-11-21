@@ -353,7 +353,8 @@ pub mod https {
     impl UreqUpstream {
         /// Redirects stay disabled; `timeout` bounds the whole request (use a long one for LLM calls).
         pub fn with_timeout(timeout: std::time::Duration) -> Self {
-            let agent = ureq::Agent::config_builder().max_redirects(0).http_status_as_error(false).timeout_global(Some(timeout)).build().new_agent();
+            let config = ureq::Agent::config_builder().max_redirects(0).http_status_as_error(false).timeout_global(Some(timeout)).build();
+            let agent = hooked_agent(config);
             Self { agent }
         }
 
@@ -450,15 +451,14 @@ pub mod https {
     impl UreqStreamer {
         /// Waits up to `first_byte` for the answer to start (a local model that has to be loaded first needs minutes).
         pub fn with_response_timeout(first_byte: std::time::Duration) -> Self {
-            let agent = ureq::Agent::config_builder()
+            let config = ureq::Agent::config_builder()
                 .max_redirects(0)
                 .http_status_as_error(false)
                 .timeout_connect(Some(std::time::Duration::from_secs(10)))
                 .timeout_recv_response(Some(first_byte))
                 .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Iyakki/0.1")
-                .build()
-                .new_agent();
-            Self { agent }
+                .build();
+            Self { agent: hooked_agent(config) }
         }
     }
 
@@ -584,6 +584,11 @@ pub mod https {
         }
     }
 
+    /// An agent without an upstream proxy whose TCP sockets come from the dial hook (F-VPN-08).
+    fn hooked_agent(config: ureq::config::Config) -> ureq::Agent {
+        ureq::Agent::with_parts(config, crate::dial::ureq_hook::connector(), ureq::unversioned::resolver::DefaultResolver::default())
+    }
+
     fn browser_agent(user_agent: &str, timeout_secs: u64) -> ureq::Agent {
         let config = ureq::Agent::config_builder()
             .max_redirects(0)
@@ -594,7 +599,59 @@ pub mod https {
             .max_idle_connections_per_host(POOL_PER_HOST)
             .max_idle_age(std::time::Duration::from_secs(60))
             .build();
-        ureq::Agent::with_parts(config, ureq::unversioned::transport::DefaultConnector::default(), CachingResolver::default())
+        ureq::Agent::with_parts(config, crate::dial::ureq_hook::connector(), CachingResolver::default())
+    }
+
+    /// An HTTP proxy from the text a person types in Settings: `host:port`, `http://host:port` or `http://name:password@host:port`
+    /// (F-BROX-22). No other scheme (a SOCKS or HTTPS proxy is refused in words), a port from 1 to 65535, no spaces or control characters.
+    pub fn parse_proxy(text: &str) -> Result<crate::h2client::Proxy, String> {
+        let t = text.trim();
+        let t = t.strip_prefix("http://").unwrap_or(t);
+        if t.contains("://") {
+            return Err("only an HTTP proxy is supported (http://host:port)".into());
+        }
+        if t.is_empty() || t.len() > 300 || t.chars().any(|c| c.is_control() || c.is_whitespace() || c == '/' || c == '?' || c == '#') {
+            return Err("write the proxy as host:port".into());
+        }
+        let (creds, hostport) = match t.rsplit_once('@') {
+            Some((c, h)) => {
+                let (n, p) = c.split_once(':').ok_or("the sign-in is name:password")?;
+                if n.is_empty() {
+                    return Err("the sign-in needs a name".into());
+                }
+                (Some((n.to_string(), p.to_string())), h)
+            }
+            None => (None, t),
+        };
+        let (host, port) = hostport.rsplit_once(':').ok_or("the proxy needs a port (host:port)")?;
+        let port: u16 = port.parse().map_err(|_| "the port is a number from 1 to 65535".to_string())?;
+        if port == 0 || host.is_empty() || !host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) {
+            return Err("the proxy host is a name or an address".into());
+        }
+        Ok(crate::h2client::Proxy { host: host.to_string(), port, creds })
+    }
+
+    /// An HTTP/1.1 agent whose connections go through an HTTP proxy (`CONNECT`, also for plain http targets); the VPN dial hook is not
+    /// used on this path, the proxy decides where the traffic goes.
+    fn proxied_agent(user_agent: &str, timeout_secs: u64, proxy: &crate::h2client::Proxy) -> Result<ureq::Agent, String> {
+        use ureq::unversioned::transport::{ConnectProxyConnector, Connector, RustlsConnector, TcpConnector};
+        let mut b = ureq::Proxy::builder(ureq::ProxyProtocol::Http).host(&proxy.host).port(proxy.port);
+        if let Some((n, p)) = &proxy.creds {
+            b = b.username(n).password(p);
+        }
+        let px = b.build().map_err(|e| format!("the proxy setting is not usable: {e}"))?;
+        let config = ureq::Agent::config_builder()
+            .proxy(Some(px))
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
+            .user_agent(user_agent)
+            .max_idle_connections(POOL_TOTAL)
+            .max_idle_connections_per_host(POOL_PER_HOST)
+            .max_idle_age(std::time::Duration::from_secs(60))
+            .build();
+        let connector = ().chain(ConnectProxyConnector::default()).chain(TcpConnector::default()).chain(RustlsConnector::default());
+        Ok(ureq::Agent::with_parts(config, connector, CachingResolver::default()))
     }
 
     impl Default for BrowserFetch {
@@ -624,6 +681,12 @@ pub mod https {
             let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
             self.h2 = Some(crate::h2client::H2Pool::new(crate::h2client::tls_dialer_via(roots, std::time::Duration::from_secs(10), Some(proxy))));
             self
+        }
+
+        /// The same transport with everything, HTTP/2 and HTTP/1.1, going through an HTTP proxy (F-BROX-22).
+        pub fn with_proxy(mut self, proxy: crate::h2client::Proxy) -> Result<BrowserFetch, String> {
+            self.agent = proxied_agent(&self.user_agent, self.timeout.as_secs().max(1), &proxy)?;
+            Ok(self.with_h2_proxy(proxy))
         }
 
         /// The same transport that speaks HTTP/1.1 only.
@@ -796,6 +859,7 @@ pub mod https {
             Ok(iyakki_web::Response { status, location, content_type, set_cookies, body, content_length: None, max_age, cache_control, etag, last_modified, vary, expires, age, headers: all_headers })
         }
     }
+
 }
 
 #[cfg(test)]
@@ -942,3 +1006,12 @@ mod tests {
         assert!(got[0].contains("x-api-key: k123"));
     }
 }
+
+#[cfg(feature = "https")]
+pub mod proxyset;
+#[cfg(feature = "https")]
+pub mod certseen;
+
+#[cfg(all(test, feature = "https"))]
+#[path = "browserproxy_tests.rs"]
+mod proxy_tests;

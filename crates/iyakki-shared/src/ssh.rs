@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 pub const KEY_PREFIX: &str = "ssh.";
 
 /// One line of a `known_hosts` file.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HostKey {
     /// `host`, or `[host]:port` when the port is not 22.
     pub pattern: String,

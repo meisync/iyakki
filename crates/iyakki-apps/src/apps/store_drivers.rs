@@ -4,8 +4,7 @@
 //! (`Out`); the store tile does the installing through the normal review (`iyakki_agent::store::drivers`, docs/MAC-HARDWARE.md).
 
 use crate::safeclamp::SafeClamp;
-use iyakki_agent_api::StoreDrivers;
-use iyakki_core_api::drivers::{known, Availability, Delivery, Status};
+use iyakki_core_api::drivers::{known, Availability, Delivery, Drivers, Status};
 
 use super::ScrollLog;
 use crate::fx;
@@ -96,7 +95,7 @@ fn availability_color(a: Availability) -> [u8; 4] {
 
 impl Pane {
     /// Read the machine and the installed packs again.
-    pub fn refresh(&mut self, d: &dyn StoreDrivers) {
+    pub fn refresh(&mut self, d: &dyn Drivers) {
         let m = d.machine();
         self.machine = if m.product.is_empty() { "this machine (no DMI information)".into() } else { format!("{} {}", m.vendor, m.product).trim().to_string() };
         let installed = d.installed();
@@ -366,7 +365,7 @@ fn why_lines(k: Option<&known::Known>, devices: &[String], cmdline: Vec<String>)
 mod tests {
     use super::*;
     use iyakki_agent::store::drivers::Drivers;
-    use iyakki_drivers::Roots;
+    use iyakki_core_api::device_types::driver_packs::Roots;
 
     fn fake(tag: &str, product: &str, extra: &[(&str, &str)]) -> Drivers {
         let root = std::env::temp_dir().join(format!("iyakki-pane-{}-{tag}", std::process::id()));

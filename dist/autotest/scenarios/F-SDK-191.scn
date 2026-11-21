@@ -1,0 +1,11 @@
+# autotest pilot, batch A (2026-11-21). Written against the Feature text with sha 8eaed311f9c92ef9; honest subset only: everything not checked is under not-covered.
+row: F-SDK-191
+targets: qemu
+profile: ram
+feature-sha: 8eaed311f9c92ef9
+doc: what waited while the app was closed arrives marked late in SAMPLE
+clause: 1 what waited while the app was closed arrives marked late in SAMPLE
+not-covered: EventsPort and MemEvents semantics (scope, order, missed, coalescing, age, rate, replay, publish)
+not-covered: EventRouter on/on_prefix/on_missed/register_all/begin/pump/recover
+not-covered: EventActions (notify, start a flow, call a chat tool)
+session-check: app_events_late_after_away

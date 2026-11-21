@@ -4,7 +4,7 @@
 //! Read from the font file itself, in-house, from the published TrueType tables: `head` (units per em), `hhea` and `hmtx` (advances),
 //! `cmap` (formats 4 and 12), `kern` (format 0 pairs) and the `kern` feature of `GPOS` (pair adjustment, formats 1 and 2, also behind an
 //! extension lookup). Plain TrueType and OpenType files ("\0\1\0\0", "true", "OTTO") are read, and WOFF files (zlib per table, unpacked
-//! with `miniz_oxide`, which the reader already uses for PNG). NOT read: WOFF2 files (they need Brotli) and font collections. A file that
+//! with `miniz_oxide`, which the reader already uses for PNG) and WOFF2 files (`woff2`: Brotli per file, outlines not rebuilt, the metrics tables only). NOT read: font collections. A file that
 //! cannot be read is simply not used: the text is measured with the common tables as before. Every length is checked; a hostile file gives
 //! `None`, never a panic.
 
@@ -108,10 +108,13 @@ fn table<'a>(d: &'a [u8], tag: &[u8; 4]) -> Option<&'a [u8]> {
 }
 
 impl FontMetrics {
-    /// Read the metrics of a TrueType or OpenType file; `None` for anything else (WOFF, WOFF2, a collection, a damaged file).
+    /// Read the metrics of a TrueType or OpenType file; `None` for anything else (a collection, a damaged file).
     pub fn parse(d: &[u8]) -> Option<FontMetrics> {
         if d.get(..4) == Some(b"wOFF") {
             return Self::parse_sfnt(&unwoff(d)?);
+        }
+        if d.get(..4) == Some(b"wOF2") {
+            return Self::parse_sfnt(&super::woff2::unwoff2(d)?);
         }
         Self::parse_sfnt(d)
     }
@@ -446,14 +449,66 @@ impl FontSet {
         self.fonts.get(family).map(|f| &**f)
     }
 
+    /// The face of `family` for a weight and a slant: the one that matches both, else the one of the same weight, else the one of the same
+    /// slant, else the regular one (a browser draws a bold or slanted copy of that). The second value says whether the face found IS bold,
+    /// so the caller adds the width of a synthetic bold only when it is not.
+    pub fn get_styled(&self, family: &str, bold: bool, italic: bool) -> Option<(&FontMetrics, bool)> {
+        if family.is_empty() {
+            return None;
+        }
+        let tries = [(bold, italic), (bold, false), (false, italic), (false, false)];
+        tries.iter().find_map(|&(b, i)| self.fonts.get(&variant_key(family, b, i)).map(|f| (&**f, b)))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.fonts.is_empty()
+    }
+}
+
+/// The key of one face of a family in a [`FontSet`]: the family alone for the regular face, with `\u{1}b` and/or `\u{1}i` for bold and
+/// italic ones.
+pub fn variant_key(family: &str, bold: bool, italic: bool) -> String {
+    match (bold, italic) {
+        (false, false) => family.to_string(),
+        (true, false) => format!("{family}\u{1}b"),
+        (false, true) => format!("{family}\u{1}i"),
+        (true, true) => format!("{family}\u{1}bi"),
+    }
+}
+
+/// One face a style sheet declares: its family, the address of the file and which weight and slant it is for.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct FaceRule {
+    pub family: String,
+    pub url: String,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+/// The weights a `font-weight` descriptor covers as (regular, bold): a word, one number (600 and above is bold) or a range of a variable
+/// font (it serves both when it spans 599 and 600). No descriptor means the regular face.
+fn weights_of(v: Option<&str>) -> (bool, bool) {
+    let Some(v) = v else { return (true, false) };
+    let nums: Vec<u32> = v.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+    match nums.as_slice() {
+        [] => {
+            let w = v.trim().to_ascii_lowercase();
+            if w.starts_with("bold") { (false, true) } else { (true, false) }
+        }
+        [one] => (*one < 600, *one >= 600),
+        [lo, hi, ..] => (*lo < 600, *hi >= 600),
     }
 }
 
 /// The `@font-face` rules of a style sheet's text: (family, address of the first `url(...)` source). Only what a rule says in plain text;
 /// `local()` sources and rules without a url are skipped, at most 32 rules.
 pub fn font_faces(css: &str) -> Vec<(String, String)> {
+    font_face_rules(css).into_iter().map(|r| (r.family, r.url)).collect()
+}
+
+/// The same rules with the weight and slant each is for (a rule for a range of weights gives a face for the regular and one for the bold
+/// weight, with the same file).
+pub fn font_face_rules(css: &str) -> Vec<FaceRule> {
     let mut out = Vec::new();
     let lower = css.to_ascii_lowercase();
     let mut from = 0;
@@ -499,7 +554,17 @@ pub fn font_faces(css: &str) -> Vec<(String, String)> {
         }
         let Some((url, _)) = cands.iter().find(|c| !c.1).or(cands.first()).cloned() else { continue };
         if !family.is_empty() && !url.is_empty() {
-            out.push((family, url));
+            let italic = decl("font-style").is_some_and(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                v.starts_with("italic") || v.starts_with("oblique")
+            });
+            let (regular, bold) = weights_of(decl("font-weight"));
+            if regular {
+                out.push(FaceRule { family: family.clone(), url: url.clone(), bold: false, italic });
+            }
+            if bold {
+                out.push(FaceRule { family, url, bold: true, italic });
+            }
         }
         if out.len() >= 32 {
             break;
@@ -509,10 +574,10 @@ pub fn font_faces(css: &str) -> Vec<(String, String)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn be16(v: &mut Vec<u8>, x: u16) {
+    pub(in crate::modules) fn be16(v: &mut Vec<u8>, x: u16) {
         v.extend_from_slice(&x.to_be_bytes());
     }
     fn be32(v: &mut Vec<u8>, x: u32) {
@@ -521,7 +586,7 @@ mod tests {
 
     /// A small TrueType file made here: 1000 units per em, glyphs 0 (missing, 500), 1 = 'A' (700), 2 = 'V' (700), 3 = space (250),
     /// kerning A V by -140.
-    fn font() -> Vec<u8> {
+    pub(in crate::modules) fn font() -> Vec<u8> {
         font_with(true, None)
     }
 
@@ -640,6 +705,68 @@ mod tests {
         let two = "@font-face{font-family:a;src:url(a.woff2) format('woff2'),url(a.woff) format('woff')} @font-face{font-family:b;src:url(b.woff2?v=3)} @font-face{font-family:c;src:url(\"c.woff2\"),url(c.ttf)}";
         assert_eq!(font_faces(two), vec![("a".to_string(), "a.woff".to_string()), ("b".to_string(), "b.woff2?v=3".to_string()), ("c".to_string(), "c.ttf".to_string())]);
         assert!(font_faces("@font-face{").is_empty());
+    }
+
+    #[test]
+    fn font_face_rules_say_which_weight_and_slant_each_face_is_for() {
+        let css = "@font-face{font-family:A;src:url(r.ttf)} @font-face{font-family:A;src:url(b.ttf);font-weight:700} @font-face{font-family:A;src:url(i.ttf);font-style:italic} @font-face{font-family:'A';src:url(bi.ttf);font-weight:bold;font-style:oblique 10deg} @font-face{font-family:V;src:url(v.ttf);font-weight:100 900} @font-face{font-family:L;src:url(l.ttf);font-weight:300}";
+        let got: Vec<(String, String, bool, bool)> = font_face_rules(css).into_iter().map(|r| (r.family, r.url, r.bold, r.italic)).collect();
+        let want = |f: &str, u: &str, b: bool, i: bool| (f.to_string(), u.to_string(), b, i);
+        assert_eq!(got, vec![want("a", "r.ttf", false, false), want("a", "b.ttf", true, false), want("a", "i.ttf", false, true), want("a", "bi.ttf", true, true), want("v", "v.ttf", false, false), want("v", "v.ttf", true, false), want("l", "l.ttf", false, false)]);
+        assert_eq!(font_faces(css).len(), 7, "the older call lists the same faces");
+    }
+
+    #[test]
+    fn a_face_is_taken_by_weight_and_slant_and_the_regular_one_stands_in_for_the_rest() {
+        let f = |w: u16| std::sync::Arc::new(FontMetrics { upem: 1000.0, advance: vec![w], cmap: HashMap::new(), kern: HashMap::new(), class_kern: Vec::new() });
+        let mut m = HashMap::new();
+        m.insert(variant_key("a", false, false), f(1));
+        m.insert(variant_key("a", true, false), f(2));
+        m.insert(variant_key("b", false, false), f(3));
+        m.insert(variant_key("b", false, true), f(4));
+        let set = FontSet::new(m);
+        let adv = |fam: &str, b: bool, i: bool| set.get_styled(fam, b, i).map(|(f, is_bold)| (f.advance[0], is_bold));
+        assert_eq!(adv("a", false, false), Some((1, false)));
+        assert_eq!(adv("a", true, false), Some((2, true)), "the bold face is used and is bold");
+        assert_eq!(adv("a", true, true), Some((2, true)), "no italic bold: the bold one");
+        assert_eq!(adv("a", false, true), Some((1, false)), "no italic: the regular one");
+        assert_eq!(adv("b", true, false), Some((3, false)), "no bold: the regular one, which is not bold, so the caller makes it wider");
+        assert_eq!(adv("b", false, true), Some((4, false)));
+        assert_eq!(adv("c", false, false), None);
+        assert_eq!(adv("", false, false), None);
+    }
+
+    struct Faces(Vec<(&'static str, Vec<u8>)>);
+    impl iyakki_web::Fetch for Faces {
+        fn get(&self, url: &iyakki_web::Url) -> Result<iyakki_web::fetch::Response, String> {
+            match self.0.iter().find(|(p, _)| *p == url.path) {
+                Some((_, b)) => Ok(iyakki_web::fetch::Response { status: 200, content_type: "font/ttf".into(), body: b.clone(), ..Default::default() }),
+                None => Err("offline".into()),
+            }
+        }
+    }
+
+    fn width_with_faces(html: &str) -> f32 {
+        use crate::{run_page_with, Limits, SiteData};
+        // the regular file kerns A V (width 126 at 100 px), the bold one does not (140)
+        let web: std::sync::Arc<dyn iyakki_web::Fetch> = std::sync::Arc::new(Faces(vec![("/f/r.ttf", font()), ("/f/b.ttf", font_with(false, None))]));
+        let data = SiteData { viewport: Some(iyakki_web::css::Viewport { width: 1280.0, height: 720.0, ..Default::default() }), ..SiteData::default() };
+        let mut out = String::new();
+        let res = run_page_with(html, &iyakki_web::Url::parse("https://a.org/").unwrap(), web, |_| true, &data, Limits::default(), |e| {
+            out = e.eval("t", "String(document.getElementById('s').offsetWidth)").unwrap_or_else(|x| format!("THROWN {x}"));
+        });
+        assert_eq!(res.report.failed, 0, "{:?}", res.report.notes);
+        out.parse().unwrap_or_else(|_| panic!("{out}"))
+    }
+
+    #[test]
+    fn bold_text_in_a_page_font_uses_the_pages_bold_face_when_it_has_one_and_a_wider_regular_one_when_it_has_not() {
+        let both = "<style>@font-face{font-family:F;src:url(/f/r.ttf)} @font-face{font-family:F;src:url(/f/b.ttf);font-weight:700} #s{display:inline-block;font-family:F;font-size:100px}</style>";
+        assert_eq!(width_with_faces(&format!("{both}<span id=s>AV</span>")), 126.0, "regular text: the regular face");
+        assert_eq!(width_with_faces(&format!("{both}<b id=s>AV</b>")), 140.0, "bold text: the page's bold face, measured as it is");
+        let regular_only = "<style>@font-face{font-family:F;src:url(/f/r.ttf)} #s{display:inline-block;font-family:F;font-size:100px}</style>";
+        let w = width_with_faces(&format!("{regular_only}<b id=s>AV</b>"));
+        assert!((133.0..=134.0).contains(&w), "no bold face: the regular one 6 percent wider, {w}");
     }
 
     struct Files(Vec<u8>);

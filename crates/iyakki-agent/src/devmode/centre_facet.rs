@@ -23,11 +23,16 @@ fn found_of(f: &Found) -> UpdateFound {
 impl Centre {
     /// This centre as the UI's handle (`iyakki_agent_api::UpdateCentre`).
     pub fn into_facet(self) -> Arc<dyn UpdateCentre> {
-        Arc::new(RealCentre(self))
+        Arc::new(RealCentre(self, None))
+    }
+
+    /// The same with the transport a download goes over (tests give a fake channel; the device uses the plain download transport).
+    pub fn into_facet_with_streamer(self, st: Arc<dyn iyakki_proxy::Streamer>) -> Arc<dyn UpdateCentre> {
+        Arc::new(RealCentre(self, Some(st)))
     }
 }
 
-struct RealCentre(Centre);
+struct RealCentre(Centre, Option<Arc<dyn iyakki_proxy::Streamer>>);
 
 impl RealCentre {
     /// The agent's own record of a pack the UI holds: read again from its folder (the signature is checked again).
@@ -50,6 +55,14 @@ impl UpdateCentre for RealCentre {
     fn open_file(&self, path: &Path) -> Result<UpdateFound, String> {
         let v = self.0.versions();
         let staged = crate::sysupdate::open_for_centre(self.0.data(), path, self.0.key(), &v.running, &v.variant)?;
+        Ok(UpdateFound { dir: staged.dir, version: staged.release.version, variant: staged.release.variant, trust: UpdateTrust::Signed })
+    }
+    fn fetch_file(&self, url: &str) -> Result<UpdateFound, String> {
+        let v = self.0.versions();
+        let st = self.1.clone().unwrap_or_else(iyakki_proxy::https::download_streamer);
+        // the person's apps may hear that the download ended, with the fixed name only (F-SDK-207; the page has no person to tell, so a note)
+        let staged = crate::sysupdate::fetch_for_centre(self.0.data(), &*st, url, self.0.key(), &v.running, &v.variant).inspect_err(|_| crate::appevent_more::note_download_made(self.0.data(), "system update", false))?;
+        crate::appevent_more::note_download_made(self.0.data(), "system update", true);
         Ok(UpdateFound { dir: staged.dir, version: staged.release.version, variant: staged.release.variant, trust: UpdateTrust::Signed })
     }
     fn preview(&self, p: &UpdateFound) -> Result<UpdatePreview, String> {

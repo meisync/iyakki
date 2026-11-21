@@ -23,7 +23,7 @@ pub use iyakki_shared::k3sdev::{Health};
 pub use iyakki_shared::k3sdev::{Alert, Progress, STATE_SCHEMA, State};
 pub use iyakki_shared::k3sdev::{DISK_ALERT_PCT};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -46,6 +46,8 @@ pub const NODE_NET_IF: &str = "iyakki-k8s";
 /// interface (always there; flannel then runs host-gw, a single node needs no tunnel).
 const NODE_NET_KINDS: [&str; 2] = ["dummy", "bridge"];
 const NODE_NET_LO: &str = "lo";
+/// The metric of the offline route: higher than any route DHCP or a person adds, so a real network always wins.
+const OFFLINE_METRIC: &str = "9999";
 /// Node addresses earlier versions used and left on the interface (link-local ones are refused by the API server's endpoint reconciler).
 const OLD_NODE_IPS: [&str; 1] = ["169.254.77.1"];
 
@@ -72,7 +74,7 @@ pub const MIN_FREE: u64 = 3 << 30;
 const NET_GRACE: Duration = Duration::from_secs(90);
 const NET_POLL: Duration = Duration::from_secs(3);
 pub const WAITING_NET: &str = "waiting for the network\u{2026}";
-pub const NO_NET_YET: &str = "no network yet: k3s needs a network interface with a default route; it starts by itself when one appears";
+pub const NO_NET_YET: &str = "no network yet: k3s needs a network interface with a default route; it starts by itself when one appears (a machine that stays offline on purpose: switch on Offline in Settings -> Dev cluster)";
 
 /// A machine whose clock starts in the past (a Mac's RTC reads 2024) must not start k3s before the clock is plausible: its
 /// certificates, made later, are "not yet valid" at the fake date. The start waits until the clock floor was applied
@@ -353,7 +355,7 @@ impl Machine {
             lib_dir: "/var/lib/rancher/k3s".into(),
             bins,
             units: ["/etc/systemd/system/k3s.service", "/etc/systemd/system/k3s-agent.service", "/etc/systemd/system/rke2-server.service", "/etc/init.d/k3s", "/etc/init.d/k3s-agent"].iter().map(PathBuf::from).collect(),
-            proc_dir: "/proc".into(),
+            proc_dir: iyakki_core_local::kernelfacts::PROC.into(),
         }
     }
 }
@@ -912,10 +914,67 @@ impl K3sDev {
         }
     }
 
+    /// A machine that stays offline on purpose (the person said so): give k3s a default route that goes nowhere, on IYAKKI's own dummy
+    /// interface (`iyakki-k8s`, the one that carries the node address), with the highest metric so any real route wins. k3s only checks that
+    /// an interface with a default route exists; nothing is ever sent through it. False: not asked for, or it could not be made.
+    fn offline_route(&self) -> bool {
+        if !self.offline_on_purpose() {
+            return false;
+        }
+        let tmp = std::env::temp_dir();
+        let ip = |args: &[&str]| self.run.run(&tmp, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &[], Duration::from_secs(10), 4096, None);
+        if !self.run.has("ip") {
+            self.audit("system", "devcluster.offline-route-failed", "the `ip` program is missing");
+            return false;
+        }
+        let add = ip(&["ip", "link", "add", NODE_NET_IF, "type", "dummy"]);
+        if !add.ok() && !add.combined().contains("exists") {
+            self.audit("system", "devcluster.offline-route-failed", &format!("no dummy interface ({}); the kernel needs CONFIG_DUMMY", first_line(&add.combined())));
+            return false;
+        }
+        let up = ip(&["ip", "link", "set", NODE_NET_IF, "up"]);
+        let route = ip(&["ip", "route", "replace", "default", "dev", NODE_NET_IF, "metric", OFFLINE_METRIC]);
+        if !up.ok() || !route.ok() {
+            self.audit("system", "devcluster.offline-route-failed", &first_line(&if !up.ok() { up.combined() } else { route.combined() }));
+            return false;
+        }
+        self.audit("system", "devcluster.offline-route", &format!("default route on {NODE_NET_IF} (metric {OFFLINE_METRIC}) because this machine stays offline on purpose"));
+        self.log_line("no network and Offline is on: a default route on the dummy interface lets k3s start");
+        true
+    }
+
+    /// Takes the offline route off again (it is IYAKKI's own and only exists for k3s); nothing to do when it is not there.
+    fn drop_offline_route(&self) {
+        if !self.run.has("ip") {
+            return;
+        }
+        let tmp = std::env::temp_dir();
+        let _ = self.run.run(&tmp, &["ip", "route", "del", "default", "dev", NODE_NET_IF, "metric", OFFLINE_METRIC].iter().map(|s| s.to_string()).collect::<Vec<_>>(), &[], Duration::from_secs(10), 4096, None);
+    }
+
+    /// Settings -> Dev cluster -> Offline: this machine stays offline on purpose. Takes effect at the next start; switching it off takes the route off.
+    pub fn set_offline_on_purpose(&self, on: bool, user: &str) -> Result<(), String> {
+        let mut s = self.installed().ok_or("no cluster is installed by IYAKKI here")?;
+        s.offline_on_purpose = on;
+        save_state(&self.layout, &s)?;
+        if !on {
+            self.drop_offline_route();
+        }
+        self.audit(user, "devcluster.offline", if on { "on (takes effect at the next start)" } else { "off" });
+        Ok(())
+    }
+
+    pub fn offline_on_purpose(&self) -> bool {
+        self.installed().is_some_and(|s| s.offline_on_purpose)
+    }
+
     /// Waits (cancellable by Stop) for a default route; the status line and the log say so. False: cancelled.
     fn await_network(&self, gen: u64) -> bool {
         if self.has_route() {
             return true;
+        }
+        if self.offline_route() {
+            return self.current(gen);
         }
         let grace = lock(&self.over).net_grace.unwrap_or(NET_GRACE);
         let step = lock(&self.over).poll.unwrap_or(NET_POLL).min(NET_POLL);
@@ -1063,12 +1122,12 @@ impl K3sDev {
         if !o_root.unwrap_or_else(|| unsafe { libc::geteuid() } == 0) {
             v.push("IYAKKI is not running as root here (this is a desktop test window, not the machine itself), so k3s cannot start".to_string());
         }
-        if !o_cg.unwrap_or_else(|| Path::new("/sys/fs/cgroup/cgroup.controllers").exists()) {
+        if !o_cg.unwrap_or_else(|| iyakki_core_local::kernelfacts::cgroup_v2()) {
             v.push("the kernel needs cgroup v2 (/sys/fs/cgroup/cgroup.controllers is missing)".to_string());
         }
         let parent = self.layout.root.parent().unwrap_or(Path::new("/")).to_path_buf();
         if lock(&self.over).root.is_none() {
-            if let Some(t) = fs_type_of(&parent, &iyakki_storage::read_mounts().unwrap_or_default()) {
+            if let Some(t) = fs_type_of(&parent, &iyakki_core_local::kernelfacts::mounts_text()) {
                 if matches!(t.as_str(), "tmpfs" | "ramfs" | "rootfs") {
                     v.push(format!("the data folder {} is in memory ({t}), so a cluster would fill the RAM and be lost at every restart; make a data disk first (Settings \u{2192} Storage)", parent.display()));
                 }
@@ -1392,7 +1451,6 @@ impl K3sDev {
     }
 
     fn spawn_native(&self) -> Result<Child, String> {
-        use std::os::unix::process::CommandExt;
         let l = &self.layout;
         if !l.bin().is_file() {
             return Err(format!("{} is missing; reinstall (Uninstall, then Set up)", l.bin().display()));
@@ -1408,18 +1466,12 @@ impl K3sDev {
         let log = std::fs::OpenOptions::new().create(true).append(true).open(l.log()).map_err(io_err)?;
         *lock(&self.spawn_mark) = self.clock_src().map(|c| (c.mono(), log.metadata().map(|m| m.len()).unwrap_or(0)));
         let log2 = log.try_clone().map_err(io_err)?;
-        let mut cmd = Command::new(l.bin());
         *lock(&self.spawn_at) = Some(Instant::now());
         let node_ip = self.prepare_node_ip();
         *lock(&self.node_ip_used) = node_ip.clone();
-        cmd.args(server_args_with(l, &self.inst, node_ip.as_ref()))
-            .env_clear()
-            .env("PATH", format!("{}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", l.root.join("bin").display()))
-            .env("HOME", &l.root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(log2))
-            .process_group(0);
+        let args: Vec<std::ffi::OsString> = server_args_with(l, &self.inst, node_ip.as_ref()).into_iter().map(Into::into).collect();
+        let env = [("PATH", iyakki_core_local::starters_launch::tool_path(&l.root.join("bin")).into()), ("HOME", l.root.clone().into_os_string())];
+        let mut cmd = iyakki_core_local::starters_launch::server_launch(&l.bin(), &args, &env, log, log2).into_command();
         if ramfs && lock(&self.over).ramfs.is_none() {
             crate::cluster::start_in_ram_root_jail(&mut cmd)?;
         }

@@ -70,7 +70,7 @@ mod tests {
         cx.core = core.clone();
         let user = cx.session.user.clone();
         core.cameras_fake().add(FakeCam::new("front", "Front door", &user));
-        let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.settings().clone(), audit: Arc::new(|_, _| {}) };
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.settings(), audit: Arc::new(|_, _| {}) };
         let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
         let defs = t.defs();
         let risk = |n: &str| defs.iter().find(|d| d.spec.name == n).unwrap_or_else(|| panic!("{n}")).risk;

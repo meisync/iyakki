@@ -68,7 +68,7 @@ fn a_machine_is_added_listed_replaced_and_forgotten_from_the_screen_and_the_toke
     let names: Vec<String> = m.list().into_iter().map(|x| x.name).collect();
     assert_eq!(names, ["home", "office"]);
     assert_eq!(m.get("office").unwrap().url, "https://office.example:9443");
-    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
     assert!(audit.contains("flow.remote_machine") && audit.contains("saved office https://office.example:8443"), "{audit}");
     assert!(!std::fs::read_to_string(cx.data_dir().join("flows").join("root").join("remote-machines.json")).unwrap().contains("rootpass12"));
     // forget
@@ -131,6 +131,6 @@ fn a_private_authority_certificate_can_be_pasted_on_one_line_and_a_key_is_refuse
     key(&mut a, &cx, Key::Enter);
     assert!(a.has_modal(), "stays on the form");
     assert!(m.get("evil").is_none());
-    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
     assert!(!audit.contains("SECRETSECRET") && !say(&a).contains("SECRETSECRET"));
 }

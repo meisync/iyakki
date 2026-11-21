@@ -16,7 +16,8 @@ impl DashHost for Services {
         self.dir().to_path_buf()
     }
     fn home_root(&self, user: &str) -> PathBuf {
-        crate::scope::home_root(user, self.dir())
+        // the Dashboards folder is made and written here, so tests (the variable `IYAKKI_NO_HOST_HOME`) never reach a developer's real home
+        crate::scope::home_root_for_writes(user, self.dir())
     }
     fn resolve_secret(&self, user: &str, reference: &str) -> Result<zeroize::Zeroizing<String>, String> {
         match reference.split_once(':') {

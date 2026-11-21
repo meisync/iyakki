@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::mixer::{MixError, SourceKind, SourceWriter};
 pub use iyakki_shared::webmix::{TapState};
@@ -113,12 +113,19 @@ pub struct Tap {
     stop: Arc<AtomicBool>,
     state: Arc<AtomicU8>,
     drop_now: Arc<AtomicBool>,
+    #[cfg_attr(not(test), allow(dead_code))] // read by the tests that wait for the tap to be quiet
+    busy: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Tap {
     /// Make the pipe (an existing pipe is reused, anything else at the path is an error) and start reading it.
     pub fn start(path: &Path, opener: Opener) -> Result<Tap, String> {
+        Self::start_with_clock(path, opener, crate::mixer::MixClock::real())
+    }
+
+    /// The same, measuring its quiet spells (flush after 100 ms, end after 400 ms) on `clock`.
+    pub fn start_with_clock(path: &Path, opener: Opener, clock: crate::mixer::MixClock) -> Result<Tap, String> {
         make_fifo(path)?;
         // read AND write so the open never blocks and the pipe never reports "end" when the engine closes its side
         let file = std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NONBLOCK).open(path).map_err(|e| format!("cannot open the sound pipe: {e}"))?;
@@ -130,14 +137,21 @@ impl Tap {
         let stop = Arc::new(AtomicBool::new(false));
         let state = Arc::new(AtomicU8::new(TapState::Idle.code()));
         let drop_now = Arc::new(AtomicBool::new(false));
-        let (s2, st2, d2) = (stop.clone(), state.clone(), drop_now.clone());
-        let thread = std::thread::Builder::new().name("iyakki-webmix".into()).spawn(move || run(file, opener, s2, st2, d2)).map_err(|e| e.to_string())?;
-        Ok(Tap { path: path.to_path_buf(), stop, state, drop_now, thread: Some(thread) })
+        let busy = Arc::new(AtomicBool::new(false));
+        let (s2, st2, d2, b2) = (stop.clone(), state.clone(), drop_now.clone(), busy.clone());
+        let thread = std::thread::Builder::new().name("iyakki-webmix".into()).spawn(move || run(file, opener, s2, st2, d2, clock, b2)).map_err(|e| e.to_string())?;
+        Ok(Tap { path: path.to_path_buf(), stop, state, drop_now, busy, thread: Some(thread) })
     }
 
     /// Ask the tap to throw away what is queued (ring, pipe) at its next turn.
     pub fn drop_queued(&self) {
         self.drop_now.store(true, Ordering::SeqCst);
+    }
+
+    /// Tests: the thread holds sound that is not yet in the mixer's ring (it read it from the pipe, or is about to).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
     }
 
     pub fn state(&self) -> TapState {
@@ -197,15 +211,19 @@ pub fn drop_queued() {
     }
 }
 
-fn run(mut file: std::fs::File, opener: Opener, stop: Arc<AtomicBool>, state: Arc<AtomicU8>, drop_now: Arc<AtomicBool>) {
+fn run(mut file: std::fs::File, opener: Opener, stop: Arc<AtomicBool>, state: Arc<AtomicU8>, drop_now: Arc<AtomicBool>, clock: crate::mixer::MixClock, busy: Arc<AtomicBool>) {
     let fd = file.as_raw_fd();
     let mut buf = vec![0u8; READ_BYTES];
     let mut carry: Vec<u8> = Vec::new();
     let mut src: Option<SourceWriter> = None;
-    let mut last = Instant::now();
+    // when data last came, on the tap's clock (the mixer's own clock in tests that drive it by hand, so a quiet spell is measured in
+    // the time the test lets pass and not in how long a loaded machine took to run this thread)
+    let mut last = clock.now_us();
+    let idle = |since: u64| Duration::from_micros(clock.now_us().saturating_sub(since));
     let set = |s: TapState| state.store(s.code(), Ordering::SeqCst);
     let mut flushed = true;
     while !stop.load(Ordering::SeqCst) {
+        busy.store(false, Ordering::SeqCst);
         if drop_now.swap(false, Ordering::SeqCst) {
             drop_all(&mut file, &mut carry, &mut src);
             flushed = true;
@@ -213,12 +231,12 @@ fn run(mut file: std::fs::File, opener: Opener, stop: Arc<AtomicBool>, state: Ar
             continue;
         }
         if !wait_readable(fd, 20) {
-            if !flushed && last.elapsed() >= IDLE_FLUSH {
+            if !flushed && idle(last) >= IDLE_FLUSH {
                 // the page stopped or paused: what is still queued would be heard after it
                 drop_all(&mut file, &mut carry, &mut src);
                 flushed = true;
             }
-            if src.is_some() && last.elapsed() >= IDLE_END {
+            if src.is_some() && idle(last) >= IDLE_END {
                 if let Some(s) = src.take() {
                     s.finish();
                 }
@@ -226,11 +244,13 @@ fn run(mut file: std::fs::File, opener: Opener, stop: Arc<AtomicBool>, state: Ar
             }
             continue;
         }
+        // from here until the next turn the tap holds sound that is on its way to the mixer (tests wait for it to be quiet)
+        busy.store(true, Ordering::SeqCst);
         let n = match file.read(&mut buf) {
             Ok(n) if n > 0 => n,
             _ => continue,
         };
-        last = Instant::now();
+        last = clock.now_us();
         flushed = false;
         let pcm = bytes_to_samples(&mut carry, &buf[..n]);
         if pcm.is_empty() {
@@ -272,6 +292,16 @@ static TAP: Mutex<Option<Tap>> = Mutex::new(None);
 /// The state of the process-wide tap (None: it was never started).
 pub fn tap_state() -> Option<TapState> {
     TAP.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(Tap::state)
+}
+
+/// A tap of its own on the global mixer with `label` as the source's name (a Linux sandbox's sound, F-LINAPP-18). `Err` while the mixer is
+/// off: the caller then keeps the old route and says so.
+pub fn start_labelled(path: &Path, label: &'static str) -> Result<Tap, String> {
+    if crate::mixer::global_if_enabled().is_none() {
+        return Err("the sound mixer is off".into());
+    }
+    let opener: Opener = Arc::new(move || crate::mixer::global_if_enabled().ok_or(MixError::Disabled)?.open_live_source(SourceKind::Media, RATE, CHANNELS, label));
+    Tap::start(path, opener)
 }
 
 /// Start the process-wide tap on the global mixer, once per path.
@@ -327,6 +357,7 @@ mod tests {
     use super::*;
     use crate::mixer::{FakeSink, Mixer, MixerCfg};
     use std::io::Write;
+    use std::time::Instant;
 
     fn dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("webmix-{tag}-{}", std::process::id()));
@@ -481,139 +512,167 @@ mod tests {
         assert!(status_text(true, true, Some(TapState::Carrying)).contains("through the mixer"));
     }
 
-    /// A mixer paced like a card (realtime), with the browser numbers of the default configuration (100 ms target).
-    fn paced_mixer() -> (Arc<Mixer>, FakeSink, MixerCfg) {
-        let sink = FakeSink::new();
+    /// A mixer paced like a card on a manual clock, with the browser numbers of the default configuration (100 ms target): it mixes
+    /// only the periods the test lets pass.
+    fn paced_mixer() -> (Arc<Mixer>, FakeSink, MixerCfg, crate::mixer::MixClock) {
+        let clock = crate::mixer::MixClock::manual();
+        let sink = FakeSink::with_clock(&clock);
         let cfg = MixerCfg { raise_priority: false, idle_ms: 20_000, ..MixerCfg::default() }.with_live_target_ms(crate::mixer::DEFAULT_LIVE_TARGET_MS);
-        (Arc::new(Mixer::start(cfg, Box::new(sink.clone()))), sink, cfg)
+        let m = Arc::new(Mixer::start_with_clock(cfg, Box::new(sink.clone()), clock.clone()));
+        m.settle();
+        (m, sink, cfg, clock)
+    }
+
+    /// The page's side of the pipe: opened without blocking, so that "the pipe is full" is an answer and not a wait.
+    fn page_side(fifo: &Path) -> std::fs::File {
+        std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(fifo).unwrap()
+    }
+
+    fn pipe_left(w: &std::fs::File) -> i32 {
+        let mut left: libc::c_int = 0;
+        // SAFETY: FIONREAD on a live fd with a valid int pointer
+        let r = unsafe { libc::ioctl(w.as_raw_fd(), libc::FIONREAD as _, &mut left) };
+        assert_eq!(r, 0);
+        left
+    }
+
+    fn queued(m: &Mixer) -> u32 {
+        m.sources().iter().find(|s| s.label == LABEL).map(|s| s.buffered_ms).unwrap_or(0)
+    }
+
+    /// Everything the page wrote has gone as far as it can: the pipe is empty and the tap waits for more, or the tap holds sound that
+    /// waits for room in a ring that is full (it moves again only when the mixer has played a period).
+    fn settled(tap: &Tap, m: &Mixer, w: &std::fs::File) -> bool {
+        if tap.busy() { queued(m) >= 20 } else { pipe_left(w) == 0 }
+    }
+
+    /// The page writes as fast as the pipeline takes it: writes without blocking, waits until the tap and the ring have taken what they
+    /// can, and tries again, until the pipe itself is full. `next` is the next byte of the page's sound; returns how many it wrote.
+    fn page_fills_everything(tap: &Tap, m: &Mixer, w: &mut std::fs::File, sound: &[u8], next: &mut usize, mut note: impl FnMut(usize)) -> usize {
+        let start = *next;
+        loop {
+            let mut wrote = 0;
+            while *next < sound.len() {
+                match w.write(&sound[*next..(*next + 1920).min(sound.len())]) {
+                    Ok(n) if n > 0 => {
+                        wrote += n;
+                        *next += n;
+                        note(*next);
+                    }
+                    _ => break,
+                }
+            }
+            iyakki_testkit::wait_until(iyakki_testkit::BUDGET, || settled(tap, m, w));
+            if wrote == 0 || *next >= sound.len() {
+                return *next - start;
+            }
+        }
     }
 
     #[test]
     fn the_page_sound_lags_by_less_than_the_bound_during_a_long_stream_with_a_page_that_writes_as_fast_as_the_pipe_allows() {
-        let _rt = crate::mixer::rt_serial();
-        // retried: the bound adds the scheduling delay measured during the run, but a host this busy can still starve the thread in a way the probe misses
-        crate::mixer::retried_under_load(3, || {
-            // The worst case for lag: a page that fills every queue (what alsasink over a clockless `null` slave does). Chunk k carries
-            // the value 1000 + k; the time it was accepted by the pipe is noted, and the time the sink got it plus the device buffer
-            // (the fake card plays a period when the mixer hands it over plus the lead, the real one after its 40 ms buffer) is
-            // when it would be heard.
-            let d = dir("lag");
-            let (m, sink, cfg) = paced_mixer();
-            let fifo = d.join(FIFO_NAME);
-            let tap = Tap::start(&fifo, opener_for_live(&m)).unwrap();
-            let mut w = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
-            let t0 = crate::mixer::engine::now_us() / 1000;
-            let mut accepted: Vec<u64> = Vec::new();
-            let secs = 6;
-            let chunks = secs * 100; // 10 ms each
-            let mut sent = 0usize;
-            // The mixer thread is a normal thread here (no real-time priority): on a loaded machine the scheduler can keep it off the CPU
-            // for longer than the bound, and that delay is the machine's, not the pipeline's. A probe thread measures how late a 5 ms
-            // sleep wakes up while the stream runs; the largest overshoot is added to the bound (about 0 to 1 ms on an idle machine).
-            let probe_stop = Arc::new(AtomicBool::new(false));
-            let probe = {
-                let stop = probe_stop.clone();
-                std::thread::spawn(move || {
-                    let mut worst = 0u64;
-                    while !stop.load(Ordering::Relaxed) {
-                        let t = std::time::Instant::now();
-                        std::thread::sleep(Duration::from_millis(5));
-                        worst = worst.max((t.elapsed().as_millis() as u64).saturating_sub(5));
+        // The worst case for lag: a page that fills every queue (what alsasink over a clockless `null` slave does). Chunk k carries the
+        // value 1000 + k; the time the pipe took its last byte is noted, and the time the sink got it plus the device buffer (the fake
+        // card plays a period when the mixer hands it over plus the lead, the real one after its 40 ms buffer) is when it would be
+        // heard. All of it on the mixer's manual clock: a period passes when the tap and the ring have taken all they can, so the lag
+        // is the depth of the queues (pipe, tap, ring, lead), whatever the machine does meanwhile.
+        let d = dir("lag");
+        let (m, sink, cfg, clock) = paced_mixer();
+        let fifo = d.join(FIFO_NAME);
+        let tap = Tap::start_with_clock(&fifo, opener_for_live(&m), clock.clone()).unwrap();
+        let mut w = page_side(&fifo);
+        let chunks = 6 * 100; // 10 ms each, six seconds
+        let sound: Vec<u8> = (0..chunks).flat_map(|k| pcm_bytes(480, 1000 + k as i16)).collect();
+        let mut accepted: Vec<Option<u64>> = vec![None; chunks];
+        let mut next = 0usize;
+        let step = Duration::from_millis(10);
+        let mut guard = 0;
+        while next < sound.len() || !sink.lock().samples.iter().rev().take(60_000).any(|s| *s == 1000 + chunks as i16 - 1) {
+            guard += 1;
+            assert!(guard < 2_000, "the stream did not reach the sink: {next} of {} bytes taken", sound.len());
+            let now_ms = clock.now_us() / 1000;
+            page_fills_everything(&tap, &m, &mut w, &sound, &mut next, |upto| {
+                for (k, a) in accepted.iter_mut().enumerate() {
+                    if a.is_none() && (k + 1) * 1920 <= upto {
+                        *a = Some(now_ms);
                     }
-                    worst
-                })
-            };
-            // a real page is paced by its sink: keep roughly real time on average but never wait for the queues to drain
-            while sent < chunks {
-                w.write_all(&pcm_bytes(480, 1000 + sent as i16)).unwrap();
-                accepted.push(crate::mixer::engine::now_us() / 1000);
-                sent += 1;
-                // the page can run at most 1 s ahead of the clock: sleeps when ahead, so the whole run takes about `secs` seconds
-                let due = t0 + sent as u64 * 10;
-                let ahead = due.saturating_sub(crate::mixer::engine::now_us() / 1000);
-                if ahead > 1000 {
-                    std::thread::sleep(Duration::from_millis(ahead - 1000));
                 }
-            }
-            until("the mixer to receive the last chunk", || sink.lock().samples.iter().filter(|s| **s == 1000 + chunks as i16 - 1).count() > 0);
-            let lead_ms = (cfg.live_lead_periods * 20) as u64;
-            let l = sink.lock();
-            let mut worst = 0u64;
-            let mut count = 0;
-            for k in 100..chunks {
-                let v = 1000 + k as i16;
-                let Some(pos) = l.samples.iter().position(|s| *s == v) else { continue };
-                let Some(&(t_sink, _)) = l.stamps.iter().rev().find(|(_, at)| *at <= pos) else { continue };
-                let lag = (t_sink + lead_ms).saturating_sub(accepted[k]);
-                worst = worst.max(lag);
-                count += 1;
-            }
-            assert!(count > chunks as usize / 2, "only {count} chunks found in the sink");
-            drop(l);
-            // the 100 ms target plus the 10 ms in which the test notes the time of a chunk
-            eprintln!("worst page-sound lag over {count} chunks: {worst} ms");
-            probe_stop.store(true, Ordering::Relaxed);
-            let jitter = probe.join().unwrap();
-            // The longest time the mixer thread itself went without writing a period (the pace is one period of 20 ms): while it is
-            // off the CPU everything queues up by that much, which the probe above only sees in part.
-            let stall = {
-                let l = sink.lock();
-                l.stamps.windows(2).map(|w| w[1].0.saturating_sub(w[0].0)).max().unwrap_or(0).saturating_sub(20)
-            };
-            eprintln!("worst scheduling overshoot of a 5 ms sleep during the run: {jitter} ms; longest pause of the mixer thread beyond its period: {stall} ms");
-            assert!(worst <= crate::mixer::DEFAULT_LIVE_TARGET_MS as u64 + 10 + jitter + stall, "worst lag {worst} ms is above the bound (plus {jitter} ms of scheduling delay and {stall} ms of mixer-thread pause measured on this machine)");
-            drop(w);
-            drop(tap);
-            m.shutdown();
-            let _ = std::fs::remove_dir_all(&d);
-        });
+            });
+            m.advance(step);
+        }
+        let lead_ms = (cfg.live_lead_periods * 20) as u64;
+        let l = sink.lock();
+        let mut worst = 0u64;
+        let mut count = 0;
+        for k in 100..chunks {
+            let v = 1000 + k as i16;
+            let Some(pos) = l.samples.iter().position(|s| *s == v) else { continue };
+            let Some(&(t_sink, _)) = l.stamps.iter().rev().find(|(_, at)| *at <= pos) else { continue };
+            let Some(acc) = accepted[k] else { continue };
+            let lag = (t_sink + lead_ms).saturating_sub(acc);
+            worst = worst.max(lag);
+            count += 1;
+        }
+        assert!(count > chunks / 2, "only {count} chunks found in the sink");
+        drop(l);
+        eprintln!("worst page-sound lag over {count} chunks: {worst} ms");
+        // the 100 ms target plus the 10 ms in which the test notes the time of a chunk
+        assert!(worst <= crate::mixer::DEFAULT_LIVE_TARGET_MS as u64 + 10, "worst lag {worst} ms is above the bound");
+        drop(w);
+        drop(tap);
+        m.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
     fn the_queue_is_empty_within_a_period_of_a_stop_and_a_pause_does_not_play_on() {
-        let _rt = crate::mixer::rt_serial();
-        // timing of a 20 ms period on a shared host: tried up to three times; a stop that does not drain fails every time
-        crate::mixer::retried_under_load(3, || {
-            let d = dir("stop");
-            let (m, _sink, _cfg) = paced_mixer();
-            let fifo = d.join(FIFO_NAME);
-            let tap = Tap::start(&fifo, opener_for_live(&m)).unwrap();
-            let mut w = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
-            // fill every queue, then stop writing (a pause): the ring is flushed after IDLE_FLUSH, not played for seconds
-            for _ in 0..30 {
-                w.write_all(&pcm_bytes(480, 7000)).unwrap();
-            }
-            until("sound to be carried", || tap.state() == TapState::Carrying);
-            let queued = || m.sources().iter().find(|s| s.label == LABEL).map(|s| s.buffered_ms).unwrap_or(0);
-            let t_pause = Instant::now();
-            until("the ring to be empty after the pause", || queued() == 0);
-            let took = t_pause.elapsed();
-            assert!(took <= IDLE_FLUSH + Duration::from_millis(60), "the queue took {took:?} to empty after the page stopped");
+        let d = dir("stop");
+        let (m, _sink, _cfg, clock) = paced_mixer();
+        let fifo = d.join(FIFO_NAME);
+        let tap = Tap::start_with_clock(&fifo, opener_for_live(&m), clock.clone()).unwrap();
+        let mut w = page_side(&fifo);
 
-            // an explicit stop (the tile is left): within one 20 ms period (plus the tap's 20 ms poll), pipe included
-            let sent = std::thread::spawn(move || {
-                for _ in 0..8 {
-                    if w.write_all(&pcm_bytes(480, 7000)).is_err() {
-                        break;
-                    }
-                }
-                w
-            });
-            let w = sent.join().unwrap();
-            let t_stop = Instant::now();
-            tap.drop_queued();
-            until("the queues to be empty after a stop", || {
-                let mut left: libc::c_int = 0;
-                // SAFETY: FIONREAD on a live fd with a valid int pointer
-                let r = unsafe { libc::ioctl(w.as_raw_fd(), libc::FIONREAD as _, &mut left) };
-                queued() == 0 && r == 0 && left == 0
-            });
-            assert!(t_stop.elapsed() <= Duration::from_millis(60), "the stop took {:?}", t_stop.elapsed());
-            drop(w);
-            drop(tap);
-            m.shutdown();
-            let _ = std::fs::remove_dir_all(&d);
-        });
+        // a pause: the page stops writing with every queue full. Everything that was queued is gone within the flush time plus a little
+        // (the queues are a few tens of ms deep: playing them out is quick, and the tap flushes what is left after IDLE_FLUSH)
+        let sound = pcm_bytes(480 * 30, 7000);
+        let mut next = 0;
+        page_fills_everything(&tap, &m, &mut w, &sound, &mut next, |_| {});
+        assert!(tap.state() == TapState::Carrying && queued(&m) >= 20 && pipe_left(&w) > 0, "every queue is full: ring {} ms, pipe {} bytes", queued(&m), pipe_left(&w));
+        let t_pause = clock.now();
+        while queued(&m) > 0 || pipe_left(&w) > 0 {
+            assert!(clock.now() - t_pause <= IDLE_FLUSH + Duration::from_millis(60), "the queues were not empty {:?} after the page stopped", clock.now() - t_pause);
+            m.advance(Duration::from_millis(20));
+            iyakki_testkit::wait_until(iyakki_testkit::BUDGET, || settled(&tap, &m, &w));
+        }
+
+        // the flush on its own: a little sound in the ring and then silence for IDLE_FLUSH on the tap's clock, while the mixer plays
+        // nothing (its clock stands still): the tap throws it away
+        let (m2, _sink2, _cfg2, _clock2) = paced_mixer();
+        let tap_clock = crate::mixer::MixClock::manual();
+        let tap2 = Tap::start_with_clock(&d.join("second.fifo"), opener_for_live(&m2), tap_clock.clone()).unwrap();
+        let mut w2 = page_side(&d.join("second.fifo"));
+        w2.write_all(&pcm_bytes(240, 5000)).unwrap();
+        iyakki_testkit::wait_until(iyakki_testkit::BUDGET, || queued(&m2) > 0 && !tap2.busy());
+        tap_clock.advance(IDLE_FLUSH);
+        iyakki_testkit::wait_until(iyakki_testkit::BUDGET, || queued(&m2) == 0);
+        drop(w2);
+        drop(tap2);
+        m2.shutdown();
+
+        // an explicit stop (the tile is left): the tap throws the queues away at its next turn, pipe included, which comes when the
+        // mixer has played one period (the tap was waiting for room in the ring)
+        let mut next = 0;
+        page_fills_everything(&tap, &m, &mut w, &sound, &mut next, |_| {});
+        assert!(queued(&m) >= 20 && pipe_left(&w) > 0);
+        let t_stop = clock.now();
+        tap.drop_queued();
+        m.advance(Duration::from_millis(20));
+        iyakki_testkit::wait_until(iyakki_testkit::BUDGET, || queued(&m) == 0 && pipe_left(&w) == 0);
+        assert_eq!(clock.now() - t_stop, Duration::from_millis(20), "the stop took more than one period");
+        drop(w);
+        drop(tap);
+        m.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn opener_for_live(m: &Arc<Mixer>) -> Opener {

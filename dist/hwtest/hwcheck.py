@@ -11,6 +11,8 @@ Verdicts (printed last, one per row):
   PASS         the pass condition was actually observed (text/state/log matched);
                the matched lines are in the evidence folder.
   FAIL         something the row promises was looked for and was not there.
+  NOT-APPLICABLE  the recipe is written for specific hardware (Mac mini 2014 / 2018, a touch screen, Apple hardware) and this
+               device does not have it; skipped with the reason, never counted as FAIL.
   NEEDS-HUMAN  the recipe cannot be judged by a machine (sound heard, light seen, feel,
                an approval, a live model) or the build on the device lacks the feature.
 Evidence goes to ~/iyakki-work/hwtest/<date>/<ID>/ (outside the repo): evidence.txt,
@@ -42,6 +44,20 @@ class Verdict(Exception):
 
 def fail(r): raise Verdict("FAIL", r)
 def human(r): raise Verdict("NEEDS-HUMAN", r)
+def not_applicable(r): raise Verdict("NOT-APPLICABLE", r)
+
+
+def require_hardware(c, key, info=None):
+    """A recipe written for specific hardware ends NOT-APPLICABLE (skipped, with the reason) on any other machine, never FAIL.
+    `key` names the hardware (see hwmatch.REQUIREMENTS); the machine facts are the `dev info` lines the recipes already read.
+    Returns the `dev info` text."""
+    import hwmatch
+    if info is None:
+        info = c.run("info", name="info")[1]
+    ok, why = hwmatch.check(key, info)
+    if not ok:
+        not_applicable(why)
+    return info
 
 
 def dev(*args, timeout=60, check=False):
@@ -85,6 +101,9 @@ class Ctx:
     def expect(self, st, pattern, what=None):
         """PASS evidence: the pattern must match a text line of this state; the lines are logged."""
         m = self.has(st, pattern)
+        if not m and re.search(r"^text: hidden \(a private app", st, re.M):
+            # a private app (CLI, Terminal ...) hides its texts from `dev state`: a machine cannot read it, a person (or the screenshot) must
+            raise Verdict("NEEDS-HUMAN", "this app hides its text from dev state (private app); look at the screenshot for /%s/" % pattern)
         if not m:
             fail("expected text /%s/ not on screen%s" % (pattern, " (%s)" % what if what else ""))
         self.log("MATCH /%s/ -> %s" % (pattern, " | ".join(m[:4])))

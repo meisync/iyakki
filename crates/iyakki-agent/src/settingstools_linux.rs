@@ -92,7 +92,7 @@ pub fn entries(env: &Env, acc: Access) -> Vec<Entry> {
         let (e, e2, a, a2) = (env.clone(), env.clone(), acc2.clone(), acc2);
         let schema = json!({"type": "object", "required": ["name"], "properties": {
             "name": {"type": "string", "description": "The sandbox's name."},
-            "sound": {"type": "boolean", "description": "Give the sandbox sound output (playback only, no microphone). A program that opens the sound card holds it for itself."},
+            "sound": {"type": "boolean", "description": "Give the sandbox sound output (playback only, no microphone). With the sound mixer on, the sandbox plays into a pipe the mixer reads and holds no card; with it off a program that opens the card holds it for itself."},
             "graphics": {"type": "boolean", "description": "Give the sandbox the render nodes of the graphics card (drawing and compute, no control of the screen)."}}});
         let parse = |env: &Env, acc: &Access, a: &Value| -> Result<(String, DevicePolicy), String> {
             if !acc.allowed {

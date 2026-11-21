@@ -315,3 +315,94 @@ fn a_cluster_address_is_resolved_like_dash_does_and_only_that_service_is_used() 
     let c = MatrixChannel::new("Home", "cluster://iyakki-matrix/matrix:8008", Zeroizing::new(TOKEN.into()), seen3.clone(), Arc::new(Cl(Some(lo))));
     assert!(c.whoami().is_err() && seen3.seen.lock().unwrap().is_empty());
 }
+
+#[test]
+fn sending_into_an_encrypted_room_with_the_olm_add_on_looks_up_devices_claims_a_key_and_hands_the_room_key_over_first() {
+    use super::e2ee_olm::OlmAddon;
+    let hs = FakeHs::start();
+    let store = Arc::new(crate::gitkeys::MemStore::default());
+    let alice = Arc::new(OlmAddon::open(store, "acct", "@alice:test", "DEV1").unwrap());
+    let bob = OlmAddon::open(Arc::new(crate::gitkeys::MemStore::default()), "acct", "@bob:test", "BDEV").unwrap();
+    use super::e2ee::E2eeAddon;
+    let up = bob.on_sync(&serde_json::json!({})).unwrap();
+    let (id, k) = up[0].body["one_time_keys"].as_object().unwrap().iter().next().map(|(a, b)| (a.clone(), b.clone())).unwrap();
+    {
+        let mut s = hs.st.lock().unwrap();
+        s.query_answer = serde_json::json!({"device_keys": {"@bob:test": {"BDEV": up[0].body["device_keys"].clone()}}});
+        s.claim_answer = serde_json::json!({"one_time_keys": {"@bob:test": {"BDEV": {id: k}}}});
+    }
+    let c = chan(&hs).with_e2ee(Some(alice));
+    c.send(&out(ENC, "secret words", "k1")).unwrap();
+    let s = hs.st.lock().unwrap();
+    assert_eq!(s.to_device.len(), 1, "the key went to bob's device once");
+    assert!(s.to_device[0].0.starts_with("m.room.encrypted/") && !String::from_utf8_lossy(&s.to_device[0].1).contains("session_key"));
+    assert_eq!(s.events.len(), 1);
+    assert!(!String::from_utf8_lossy(&s.events[0].2).contains("secret words"), "the clear text did not leave");
+    // bob can read it with what arrived
+    let body: serde_json::Value = serde_json::from_slice(&s.to_device[0].1).unwrap();
+    let to_dev = body["messages"]["@bob:test"]["BDEV"].clone();
+    bob.on_sync(&serde_json::json!({"to_device": {"events": [{"type": "m.room.encrypted", "sender": "@alice:test", "content": to_dev}]}})).unwrap();
+    let ev: serde_json::Value = serde_json::from_slice(&s.events[0].2).unwrap();
+    assert_eq!(bob.decrypt(ENC, &serde_json::json!({"event_id": "$x", "content": ev})).unwrap()["body"], "secret words");
+    // a second message needs no new key
+    drop(s);
+    c.send(&out(ENC, "again", "k2")).unwrap();
+    assert_eq!(hs.st.lock().unwrap().to_device.len(), 1);
+}
+
+/// A room key from `sender` for `addon`'s device (what a to-device event of a sync carries) and an encrypted event made with it.
+fn keyed_message(sender: &super::e2ee_olm::OlmAddon, sender_user: &str, to: &super::e2ee_olm::OlmAddon, to_user: &str, text: &str, id: &str) -> (serde_json::Value, serde_json::Value) {
+    use super::e2ee::E2eeAddon;
+    let up = to.on_sync(&serde_json::json!({})).unwrap();
+    let otk = up[0].body["one_time_keys"].as_object().unwrap().values().next().unwrap()["key"].as_str().unwrap().to_string();
+    let key = sender.share_room_key(PLAIN, to_user, &to.curve25519_key(), &to.ed25519_key(), Some(&otk)).unwrap();
+    sender.mark_shared(PLAIN).unwrap();
+    let (ty, content) = sender.encrypt(PLAIN, "m.room.message", &serde_json::json!({"msgtype": "m.text", "body": text})).unwrap();
+    (serde_json::json!({"type": "m.room.encrypted", "sender": sender_user, "content": key}), serde_json::json!({"type": ty, "sender": sender_user, "event_id": id, "origin_server_ts": 5000, "content": content}))
+}
+
+#[test]
+fn a_room_key_that_comes_in_the_same_sync_opens_the_message_of_that_sync() {
+    use super::e2ee_olm::OlmAddon;
+    let hs = FakeHs::start();
+    let mine = Arc::new(OlmAddon::open(Arc::new(crate::gitkeys::MemStore::default()), "acct", "@alice:test", "DEV1").unwrap());
+    let theirs = OlmAddon::open(Arc::new(crate::gitkeys::MemStore::default()), "acct", "@bob:test", "BDEV").unwrap();
+    let (key, event) = keyed_message(&theirs, "@bob:test", &mine, "@alice:test", "read me in the same sync", "$enc1");
+    {
+        let mut s = hs.st.lock().unwrap();
+        s.extra_to_device.push(key);
+        s.extra_sync_events.push(event);
+    }
+    let c = chan(&hs).with_e2ee(Some(mine));
+    c.poll(Duration::from_millis(5)).unwrap();
+    let got = c.poll(Duration::from_millis(5)).unwrap();
+    let m = got.iter().find(|m| m.external_id == "$enc1").expect("the encrypted message came through");
+    assert_eq!((m.text.as_str(), m.unreadable_encrypted), ("read me in the same sync", false), "the key was read before the events: {got:?}");
+}
+
+#[test]
+fn a_message_whose_key_comes_later_is_shown_unreadable_asks_for_its_key_once_and_is_read_when_the_key_arrives() {
+    use super::e2ee_olm::OlmAddon;
+    let hs = FakeHs::start();
+    let mine = Arc::new(OlmAddon::open(Arc::new(crate::gitkeys::MemStore::default()), "acct", "@alice:test", "DEV1").unwrap());
+    let theirs = OlmAddon::open(Arc::new(crate::gitkeys::MemStore::default()), "acct", "@bob:test", "BDEV").unwrap();
+    let (key, event) = keyed_message(&theirs, "@bob:test", &mine, "@alice:test", "late key", "$enc2");
+    hs.st.lock().unwrap().extra_sync_events.push(event);
+    let c = chan(&hs).with_e2ee(Some(mine));
+    c.poll(Duration::from_millis(5)).unwrap();
+    let second = c.poll(Duration::from_millis(5)).unwrap();
+    let m = second.iter().find(|m| m.external_id == "$enc2").unwrap();
+    assert!(m.unreadable_encrypted && m.text.is_empty());
+    let asked = |hs: &FakeHs| hs.st.lock().unwrap().to_device.iter().filter(|(p, _)| p.starts_with("m.room_key_request/")).count();
+    assert_eq!(asked(&hs), 1, "the person's other devices were asked for the key");
+    // the key arrives with a later sync: the waiting event is read now, and not shown as unreadable a second time
+    hs.st.lock().unwrap().extra_to_device.push(key);
+    let third = c.poll(Duration::from_millis(5)).unwrap();
+    let again: Vec<_> = third.iter().filter(|m| m.external_id == "$enc2").collect();
+    assert_eq!(again.len(), 1, "{third:?}");
+    assert_eq!((again[0].text.as_str(), again[0].unreadable_encrypted), ("late key", false));
+    assert_eq!(asked(&hs), 1, "no second request");
+    // later syncs do not return it again
+    let fourth = c.poll(Duration::from_millis(5)).unwrap();
+    assert!(fourth.iter().all(|m| m.external_id != "$enc2"));
+}

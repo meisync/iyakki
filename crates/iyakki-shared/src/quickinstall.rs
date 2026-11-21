@@ -9,7 +9,7 @@ use crate::jobs::Job;
 pub const WORKSPACE: &str = "iyakki-install";
 
 /// Where an item stands on this machine.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Presence {
     Missing,
     /// Installed (by IYAKKI): a short detail (version, place).
@@ -41,7 +41,7 @@ impl Presence {
 pub const LAST_FAILED: &str = "the last attempt failed: ";
 
 /// How a step's job is started: the program (this one, `iyakki`; a script in tests), the data folder it works on.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Launch {
     pub exe: PathBuf,
     pub data: PathBuf,
@@ -173,7 +173,7 @@ impl Group {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Item {
     Node,
     Python,
@@ -218,6 +218,8 @@ pub enum Item {
     GpuVulkan,
     /// Stage 3: NVIDIA's vendor driver (CUDA): open modules from the image, vendor files downloaded at the click (gpu_nvidia.rs).
     GpuNvidia,
+    /// Stage 2 for AMD: ROCm compute in pods (`amd.com/gpu`), AMD's device plugin and a `rocminfo` smoke pod; fails closed until the owner pins the images (gpu_rocm.rs).
+    GpuRocm,
     Ffmpeg,
     /// The audio and video add-on of the browser (H.264, AAC, MP3): FFmpeg's shared libraries, LGPL-only, built for the image's musl, put in
     /// `<data>/addons/ffmpeg` where `avaddon.rs` looks. Installed by the CLI catalogue entry `ffmpeg-libs` (clis.rs) at the person's click.
@@ -246,10 +248,16 @@ pub enum Item {
     /// Python with scikit-learn, NumPy, SciPy and OpenCV in the Linux sandbox's no-network runner, downloaded at the click from the vendors'
     /// pinned files ([`crate::datasci`]); fails closed until the owner fills the pin table (F-FLOW-31).
     DataScience,
+    /// The full web engine of the browser as an optional package (F-BROW-40): fetched from the store the person pinned, checked against its
+    /// key, size and checksum, kept in the data folder (`browserpkg.rs`). The card of the install is read first; removing it leaves the image's own engine.
+    BrowserPackage,
+    /// The video-site extractor (yt-dlp, Unlicense), a program fetched from its vendor at the click and checked against the SHA-256 in `legal/downloads.txt`
+    /// (F-MEDIA-12); nothing is shipped. Installed as `<data>/tools/yt-dlp`.
+    YtDlp,
 }
 
 impl Item {
-    pub const ALL: [Item; 36] = [Item::Node, Item::Python, Item::K3s, Item::DuckDb, Item::Elasticsearch, Item::OpenSearch, Item::Prometheus, Item::ClickHouse, Item::GraphDb, Item::Gitea, Item::Matrix, Item::SeaweedFs, Item::RustFs, Item::Registry, Item::ClaudeCode, Item::Copilot, Item::Kokoro, Item::VoicePack, Item::Lemonade, Item::Ollama, Item::MacHost, Item::GpuVulkan, Item::GpuNvidia, Item::Ffmpeg, Item::FfmpegLibs, Item::MacFirmware, Item::MacCamera, Item::LinuxApps, Item::LinuxWindows, Item::FwQualcommBt, Item::FwRealtekNet, Item::FwBroadcomNet, Item::FwAtheros9170, Item::FwMediatek, Item::FwHardware, Item::DataScience];
+    pub const ALL: [Item; 39] = [Item::Node, Item::Python, Item::K3s, Item::DuckDb, Item::Elasticsearch, Item::OpenSearch, Item::Prometheus, Item::ClickHouse, Item::GraphDb, Item::Gitea, Item::Matrix, Item::SeaweedFs, Item::RustFs, Item::Registry, Item::ClaudeCode, Item::Copilot, Item::Kokoro, Item::VoicePack, Item::Lemonade, Item::Ollama, Item::MacHost, Item::GpuVulkan, Item::GpuNvidia, Item::GpuRocm, Item::Ffmpeg, Item::FfmpegLibs, Item::MacFirmware, Item::MacCamera, Item::LinuxApps, Item::LinuxWindows, Item::FwQualcommBt, Item::FwRealtekNet, Item::FwBroadcomNet, Item::FwAtheros9170, Item::FwMediatek, Item::FwHardware, Item::DataScience, Item::YtDlp, Item::BrowserPackage];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -276,6 +284,7 @@ impl Item {
             Item::MacHost => "mac-host",
             Item::GpuVulkan => "gpu-vulkan",
             Item::GpuNvidia => "gpu-nvidia",
+            Item::GpuRocm => "gpu-rocm",
             Item::Ffmpeg => "ffmpeg",
             Item::FfmpegLibs => crate::avaddon::INSTALL_ITEM,
             Item::MacFirmware => "mac-firmware",
@@ -289,6 +298,8 @@ impl Item {
             Item::FwMediatek => "fw-mediatek",
             Item::FwHardware => crate::fwextra::PACK_ID,
             Item::DataScience => "datasci",
+            Item::BrowserPackage => "browser-package",
+            Item::YtDlp => "ytdlp",
         }
     }
 
@@ -321,6 +332,7 @@ impl Item {
             Item::MacHost => "Use a Mac's GPU (Apple Silicon)",
             Item::GpuVulkan => "GPU for local models (Vulkan)",
             Item::GpuNvidia => "NVIDIA GPU driver (CUDA)",
+            Item::GpuRocm => "AMD GPU compute (ROCm)",
             Item::Ffmpeg => "Media player (ffmpeg)",
             Item::FfmpegLibs => "Browser audio and video (H.264, AAC)",
             Item::MacFirmware => "Mac Wi-Fi and Bluetooth firmware (from your Mac)",
@@ -330,6 +342,8 @@ impl Item {
             Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek => self.fw_def().map_or("Firmware", |d| d.title),
             Item::FwHardware => "Hardware firmware (Wi-Fi, Bluetooth, graphics, ...)",
             Item::DataScience => "Data science toolkit: scikit-learn, NumPy, SciPy, OpenCV",
+            Item::BrowserPackage => "Full web engine for the browser (optional package)",
+            Item::YtDlp => "Video-site downloader (yt-dlp)",
         }
     }
 
@@ -339,8 +353,8 @@ impl Item {
             Item::K3s | Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::SeaweedFs | Item::RustFs | Item::Registry => Group::Cluster,
             Item::ClaudeCode | Item::Copilot => Group::AiCoding,
             Item::Kokoro | Item::VoicePack => Group::Voice,
-            Item::Lemonade | Item::Ollama | Item::MacHost | Item::GpuVulkan | Item::GpuNvidia => Group::LocalModels,
-            Item::Ffmpeg | Item::FfmpegLibs => Group::Media,
+            Item::Lemonade | Item::Ollama | Item::MacHost | Item::GpuVulkan | Item::GpuNvidia | Item::GpuRocm => Group::LocalModels,
+            Item::Ffmpeg | Item::FfmpegLibs | Item::BrowserPackage | Item::YtDlp => Group::Media,
             Item::MacFirmware | Item::MacCamera => Group::Mac,
             Item::LinuxApps | Item::LinuxWindows | Item::DataScience => Group::Linux,
             Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek | Item::FwHardware => Group::Firmware,
@@ -351,6 +365,8 @@ impl Item {
     pub fn about(self) -> &'static str {
         match self {
             Item::DataScience => crate::datasci::ABOUT,
+            Item::BrowserPackage => "The engine that runs pages the built-in reader cannot (a full web engine as a separate program). Not in the base image: fetched at your click from the store you pinned (a store source with its key in Store, Settings), checked against that key, its size and checksum, run in a small private environment, and allowed the network and sound only. The card shows the version and size first; Remove takes it away and the image's own engine, if any, stays",
+            Item::YtDlp => "Saves one video from a page address you give (https only) into your video folder and the media index. Downloads the yt-dlp program from its vendor (github.com/yt-dlp/yt-dlp), checked with the checksum IYAKKI pins; about 3 MB. It runs only when you ask, with no plug-ins and no command execution",
             Item::Node => "JavaScript runtime with npm (node, npm, npx): from nodejs.org, checksum-verified, kept in the data folder (no sudo)",
             Item::Python => "Python 3 with venv and pip (python3), installed through uv into the data folder (no sudo)",
             Item::K3s => "Lightweight Kubernetes on this machine: the managed dev cluster, inside the data partition, checksum-verified",
@@ -373,6 +389,7 @@ impl Item {
             Item::Ollama => ollama_cluster::ABOUT,
             Item::MacHost => "A guide, not an install: use the GPU of a Mac with Apple Silicon (Metal) or of another computer on your network. Shows what to install ON that computer (you do it), tests the connection with tokens per second, adds it to Models and can publish it to the cluster",
             Item::GpuVulkan => "Let pods in k3s use this machine's GPU through Vulkan (AMD, Intel, NVIDIA via nouveau): deploys a small device plugin, tests it with an unprivileged pod and gives Lemonade the GPU. Nothing is downloaded by IYAKKI; the cluster pulls the plugin and a llama.cpp image (about 300 MB)",
+            Item::GpuRocm => "AMD's ROCm for pods (shown when a supported AMD card with the compute interface is found; older Polaris cards stay on Vulkan): deploys AMD's device plugin so pods can ask for amd.com/gpu and tests it with rocminfo. The images are pulled by your cluster and must be pinned by digest first; until then this entry stops with a plain message and changes nothing",
             Item::GpuNvidia => "NVIDIA's own driver for CUDA in pods (shown when an NVIDIA GPU is found; Turing or newer): downloads NVIDIA's user-space libraries and GSP firmware for you from download.nvidia.com (about 400 MB, checksum-verified, never part of an image), loads the open kernel modules of this image, deploys NVIDIA's device plugin so pods can ask for nvidia.com/gpu, and tests it with nvidia-smi",
             Item::MacFirmware => "Downloads Apple's recovery image for this Mac model from Apple (about 1 GB, resumable; for a 2017 MacBook Pro it is the macOS 11 image, the one that keeps the Bluetooth patch), reads the Wi-Fi and Bluetooth firmware out of it with 7-Zip, installs it as a driver pack and loads the drivers. A downloaded image is kept until the files are installed: Retry reads it again and never downloads it twice. The files are Apple's: they stay on this machine, are never uploaded and are not part of IYAKKI. IYAKKI menu \u{2192} Mac drivers also reads them from a folder, a stick or a disk image",
             Item::MacCamera => "MacBook FaceTime HD camera (Broadcom 14e4:1570): downloads Apple's camera firmware from Apple's update server when you click (about 17.6 MB, only the needed parts, resumable, checked), builds the firmware and sensor files, installs them as a driver pack and loads the camera driver module that is already in the Mac image (no compiler and no restart needed). Apple's files stay on this machine, are never uploaded and are not part of IYAKKI",
@@ -393,6 +410,8 @@ impl Item {
     pub fn licence(self) -> &'static str {
         match self {
             Item::DataScience => crate::datasci::LICENCE,
+            Item::BrowserPackage => "as the package's own description says (shown on the card before you install; nothing is installed without it)",
+            Item::YtDlp => "Unlicense (public domain; the program you download from its vendor, IYAKKI does not ship it). Saving a video may need the right-holder's permission: that is your responsibility",
             Item::Node => "MIT (Node.js; npm is Artistic-2.0)",
             Item::Python => "PSF licence (Python); uv is MIT or Apache-2.0",
             Item::K3s => "Apache-2.0",
@@ -415,6 +434,7 @@ impl Item {
             Item::Ollama => ollama_cluster::LICENCE,
             Item::MacHost => "nothing is installed by IYAKKI. On the Mac you choose: Ollama (MIT), llama.cpp (MIT), MLX-LM (MIT) or LM Studio (free to use, proprietary)",
             Item::GpuVulkan => "Mesa (MIT) and llama.cpp (MIT) in the pod image; the device plugin is squat/generic-device-plugin (Apache-2.0), pulled by the cluster; IYAKKI ships no GPU driver code of its own",
+            Item::GpuRocm => "kernel driver (amdgpu, KFD): GPL-2.0 in the image. Device plugin: Apache-2.0. ROCm user space in the container image: MIT and other permissive licences per AMD's image, pulled by your cluster at your click, never shipped",
             Item::GpuNvidia => "kernel modules: MIT / GPL-2.0 (NVIDIA open GPU kernel modules, in the image). User-space libraries, nvidia-smi and GSP firmware: NVIDIA's proprietary driver licence, downloaded by you from NVIDIA, not shipped. Device plugin: Apache-2.0. Pressing Install accepts NVIDIA's licence for the downloaded files",
             Item::MacFirmware => "Apple's firmware files: Apple's own licence, no redistribution, so IYAKKI never ships them; they are fetched for your own Mac at your request. 7-Zip (the reader): GNU LGPL with the unRAR restriction, downloaded from its project when needed",
             Item::MacCamera => "driver: the open facetimehd driver (GPL-2.0, in the Mac image). Firmware and sensor files: Apple's own licence, no redistribution, so IYAKKI never ships them; they are fetched from Apple's CDN for your own Mac at your click",
@@ -430,9 +450,10 @@ impl Item {
     /// What has to be there first.
     pub fn needs(self) -> &'static [Item] {
         match self {
-            Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::SeaweedFs | Item::RustFs | Item::Lemonade | Item::Ollama | Item::Registry | Item::GpuVulkan | Item::GpuNvidia => &[Item::K3s],
+            Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::SeaweedFs | Item::RustFs | Item::Lemonade | Item::Ollama | Item::Registry | Item::GpuVulkan | Item::GpuNvidia | Item::GpuRocm => &[Item::K3s],
             Item::Kokoro | Item::VoicePack => &[Item::Lemonade],
             Item::DataScience => &[Item::LinuxApps],
+            Item::YtDlp => &[],
             _ => &[],
         }
     }
@@ -502,6 +523,7 @@ impl Item {
             Item::MacHost => 0,
             Item::GpuVulkan => 300,
             Item::GpuNvidia => 400,
+            Item::GpuRocm => 6000,
             Item::Ffmpeg => 42,
             Item::FfmpegLibs => 0,
             Item::MacFirmware => 1500,
@@ -513,6 +535,8 @@ impl Item {
             Item::FwBroadcomNet => 3,
             Item::FwHardware => 5,
             Item::DataScience => crate::datasci::total_mb(),
+            Item::BrowserPackage => 90,
+            Item::YtDlp => 3,
         }
     }
 
@@ -520,9 +544,11 @@ impl Item {
     pub fn time_text(self) -> &'static str {
         match self {
             Item::MacHost => "a few minutes (your steps)",
-            Item::Elasticsearch | Item::OpenSearch | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::SeaweedFs | Item::RustFs | Item::Lemonade | Item::Ollama | Item::Kokoro | Item::VoicePack | Item::MacFirmware | Item::GpuNvidia | Item::GpuVulkan => "5 to 15 minutes",
+            Item::Elasticsearch | Item::OpenSearch | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::SeaweedFs | Item::RustFs | Item::Lemonade | Item::Ollama | Item::Kokoro | Item::VoicePack | Item::MacFirmware | Item::GpuNvidia | Item::GpuRocm | Item::GpuVulkan => "5 to 15 minutes",
             Item::K3s => "2 to 5 minutes",
             Item::DataScience => "3 to 8 minutes",
+            Item::BrowserPackage => "a minute or two",
+            Item::YtDlp => "under a minute",
             _ => "about a minute",
         }
     }
@@ -534,7 +560,7 @@ impl Item {
 
     /// Hardware entries: shown only on a machine that has the hardware, and never in cloud mode.
     pub fn is_hardware(self) -> bool {
-        matches!(self, Item::GpuVulkan | Item::GpuNvidia | Item::MacFirmware | Item::MacCamera | Item::FwHardware) || self.fw_def().is_some()
+        matches!(self, Item::GpuVulkan | Item::GpuNvidia | Item::GpuRocm | Item::MacFirmware | Item::MacCamera | Item::FwHardware) || self.fw_def().is_some()
     }
 
     /// Memory (megabytes) a machine should have before this is recommended; 0 = light.
@@ -547,8 +573,9 @@ impl Item {
             Item::Gitea => 1500,
             Item::Matrix => 1500,
             Item::SeaweedFs | Item::RustFs => 2000,
-            Item::Lemonade | Item::Ollama | Item::Kokoro | Item::VoicePack | Item::GpuVulkan | Item::GpuNvidia => 7500,
+            Item::Lemonade | Item::Ollama | Item::Kokoro | Item::VoicePack | Item::GpuVulkan | Item::GpuNvidia | Item::GpuRocm => 7500,
             Item::DataScience => 1500,
+            Item::YtDlp => 100,
             _ => 0,
         }
     }
@@ -568,7 +595,7 @@ impl Item {
 }
 
 /// Whether a newer version exists for an installed item.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Latest {
     /// The vendor publishes this newer version.
     Newer(String),
@@ -613,12 +640,13 @@ pub fn titles_text(titles: &[String]) -> String {
 
 /// What the menu needs to know about this machine, read off the screen's thread (it starts programs for their versions): where
 /// each item stands, which installed tools cannot run, what the catalogue installs under each, and who depends on a runtime.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Facts {
     pub presence: Vec<(Item, Presence)>,
     /// Installed by IYAKKI but not runnable (the plain words of `CliManager::health`): offered Reinstall.
     pub unhealthy: Vec<(Item, String)>,
     /// `CliManager::install_order` minus the item itself: the runtimes (uv, Python, Node.js) installed before it.
+    #[serde(deserialize_with = "crate::serde_static::keyed_words")]
     pub runtimes: Vec<(Item, Vec<&'static str>)>,
     /// A runtime used by installed tools (`CliManager::uninstall_warning`).
     pub used_by: Vec<(Item, String)>,
@@ -690,7 +718,7 @@ pub fn unmark(data: &Path, item: Item) {
 }
 
 /// The registry step's arguments (the managed cluster when `target` is `None`).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RegistryArgs {
     pub target: Option<crate::localreg::Target>,
     pub size_gi: u32,
@@ -714,7 +742,7 @@ pub const LEMONADE_NAMESPACE: &str = "iyakki-ai";
 pub const CAMERA_JOB: &str = "mac-camera";
 
 /// How the hardware-firmware job gets its files (fwextra.rs).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct HwFirmwareOpts {
     /// A folder or stick (a `firmware-extra` folder, an unpacked release, the release tarball, or the staging folder of the developer link).
     pub from: Option<PathBuf>,

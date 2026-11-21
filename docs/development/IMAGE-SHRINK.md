@@ -37,3 +37,10 @@ optional set and its manifest out, gzips every other `.ko` in place, a rerun doe
 `IYAKKI_MODULE_COMPRESS=1` step in `board/iyakki/post-build.sh` (after signing, before `depmod`, off by default) and the kernel
 options in `board/iyakki/linux-modcompress.fragment` (not part of the default kernel: it needs a kernel rebuild and a boot test).
 Still open: the STORE listing of the optional pack, the loader asking for a missing optional module, the measured saving.
+
+## Update 2026-11-18 (alpha.7 lane w2)
+
+`compress_tree` now also leaves `optional-pack/manifest.txt` and `optional-pack/optional.map` (aliases and optional dependencies of
+the moved modules) in the image's module folder. `iyakki_drivers::modpack` is the device side: `needed` (which optional modules a
+device's modalias strings call for), `install` (fetch through an injected function, size and SHA-256 against the manifest before any
+write, whole-file writes, depmod). The download address is not in the code (D-MODPACK-URL). Not wired to the boot step or a chat tool yet.

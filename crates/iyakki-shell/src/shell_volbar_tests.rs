@@ -90,7 +90,7 @@ fn the_settings_icon_has_the_permissions_of_the_tile() {
     assert!(sh.toast_text().is_some_and(|t| t.contains("can't open SETTINGS")), "{:?}", sh.toast_text());
     key(&mut sh, Key::Char('s'));
     assert_eq!(sh.screen_name(), "launcher");
-    let audit = std::fs::read_to_string(sh.env.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(sh.env.audit.path_buf()).unwrap_or_default();
     assert!(audit.contains("app.denied"), "the refusal is audited like the tile's");
 }
 
@@ -110,7 +110,7 @@ fn the_speaker_shows_muted_low_medium_high_and_no_output() {
         let mut gi = Gfx::new(64, 64);
         gi.clear(rgb(0, 0, 0));
         gi.icon(st.icon(), 32.0, 32.0, 48.0, rgb(255, 255, 255));
-        pics.push(gi.pm.data().to_vec());
+        pics.push(gi.pm_mut().data().to_vec());
     }
     for i in 0..pics.len() {
         for j in i + 1..pics.len() {

@@ -14,7 +14,7 @@ fn hub(tag: &str) -> Arc<Hub> {
 }
 
 fn hb(n: u64) -> Heartbeat {
-    Heartbeat { disk_free_mb: 1000 * n, disk_total_mb: 9000, cpu_load_pct: 10 * n as u32, cpus: 4, mem_used_pct: 20 + n as u32, mem_total_mb: 8000, tasks_running: n as u32, models: vec![format!("model-{n}")] }
+    Heartbeat { disk_free_mb: 1000 * n, disk_total_mb: 9000, cpu_load_pct: 10 * n as u32, cpus: 4, mem_used_pct: 20 + n as u32, mem_total_mb: 8000, tasks_running: n as u32, models: vec![format!("model-{n}")], battery_pct: None }
 }
 
 fn src(n: u64) -> Arc<dyn HeartbeatSource> {

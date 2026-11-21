@@ -1,0 +1,9 @@
+{
+  "groups": [
+    { "id": "g1", "label": "School" }
+  ],
+  "placed": { "app:calculator": "g1", "sys:chat": "work" },
+  "order": { "g1": ["app:calculator"] },
+  "app_groups": { "mathpad": { "asked": "Maths", "target": "g1" } },
+  "next_id": 2
+}

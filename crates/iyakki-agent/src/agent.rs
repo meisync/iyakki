@@ -426,6 +426,8 @@ impl Tools for UserTools {
         }
         if p.manage_settings && p.cli == CliLevel::Full {
             d.push(ToolDef { spec: ToolSpec { name: "cluster_start".into(), description: "Start the container cluster (k3s) on this machine; the first start takes a minute or two. Needs k3s installed (install_cli). Asks the user first.".into(), schema: obj(json!({}), &[]) }, risk: Risk::Ask, untrusted: false });
+            d.push(ToolDef { spec: ToolSpec { name: "cluster_offline_status".into(), description: "Whether the local cluster set up by IYAKKI is told that this machine stays offline on purpose (then it gets a route that goes nowhere so it can start without a network). Changes nothing.".into(), schema: obj(json!({}), &[]) }, risk: Risk::Safe, untrusted: false });
+            d.push(ToolDef { spec: ToolSpec { name: "cluster_offline_set".into(), description: "Switch \"offline on purpose\" for the local cluster set up by IYAKKI on or off (`on`). Takes effect at the next start; off takes the route off. Asks the user first.".into(), schema: obj(json!({"on": {"type": "boolean"}}), &["on"]) }, risk: Risk::Ask, untrusted: false });
             d.push(ToolDef { spec: ToolSpec { name: "cluster_stop".into(), description: "Stop the container cluster. Asks the user first.".into(), schema: obj(json!({}), &[]) }, risk: Risk::Ask, untrusted: false });
             d.push(ToolDef { spec: ToolSpec { name: "install_cli".into(), description: "Install a command-line tool from list_clis (downloaded from its vendor over HTTPS and checked against the vendor's checksum where one is published). It installs in the background; ask list_clis for the progress, then use it with run_command. Asks the user first.".into(), schema: obj(json!({"id": {"type": "string"}}), &["id"]) }, risk: Risk::Ask, untrusted: false });
             d.push(ToolDef { spec: ToolSpec { name: "cli_download_list_check".into(), description: "Look for a newer signed download list now (a small file from the address the program knows; nothing is downloaded or installed, and every tool still needs its own install_cli). Ask cli_download_list for the result. Asks the user first.".into(), schema: obj(json!({}), &[]) }, risk: Risk::Ask, untrusted: false });
@@ -532,6 +534,8 @@ impl Tools for UserTools {
         d.extend(crate::store::tools::defs(p));
         d.extend(crate::store::authtools::defs(p));
         d.extend(crate::store::drivers::defs(p));
+        d.extend(crate::browserpkg_tools::defs(p));
+        d.extend(crate::browserproxy::defs(p));
         d.extend(crate::webtools::defs(p));
         d.extend(crate::datatools::defs(p));
         d.extend(crate::dash::tools::defs(p, false));
@@ -617,6 +621,8 @@ impl Tools for UserTools {
             "sandbox_run" => format!("run {} code in a container{}: {}", s("language"), if args.get("network").and_then(Value::as_bool).unwrap_or(false) { " WITH network access" } else { "" }, truncate(&s("code").replace('\n', " ⏎ "), 140)),
             "cluster_start" => "start the container cluster (k3s)".to_string(),
             "cluster_stop" => "stop the container cluster (k3s)".to_string(),
+            "cluster_offline_status" => "say whether the cluster is told the machine is offline on purpose".to_string(),
+            "cluster_offline_set" => format!("switch \"offline on purpose\" {} for the local cluster", if args.get("on").and_then(Value::as_bool) == Some(true) { "on" } else { "off" }),
             "install_cli" => format!("download and install the command-line tool {} from its vendor", s("id")),
             "cli_download_list_check" => "look for a newer signed list of download versions and checksums".to_string(),
             "remove_cli" => format!("remove the command-line tool {}", s("id")),
@@ -635,6 +641,8 @@ impl Tools for UserTools {
             n if crate::store::tools::is_store_tool(n) => crate::store::tools::describe(&self.services, &self.policy, &self.user, n, args).unwrap_or_default(),
             n if crate::store::authtools::is_author_tool(n) => crate::store::authtools::describe_for(&self.services, &self.user, &self.cwd, n, args),
             n if crate::store::drivers::is_driver_tool(n) => crate::store::drivers::describe(&self.services, n, args).unwrap_or_default(),
+            n if crate::browserpkg_tools::is_package_tool(n) => crate::browserpkg_tools::describe(n).unwrap_or_default(),
+            n if crate::browserproxy::is_proxy_tool(n) => crate::browserproxy::describe(n, args).unwrap_or_default(),
             n if crate::webtools::is_web_tool(n) => crate::webtools::describe(&self.services, &self.user, n, args).unwrap_or_default(),
             n if crate::datatools::is_data_tool(n) => crate::datatools::describe(n, args),
             n if crate::dash::tools::is_dash_tool(n) => crate::dash::tools::describe(n, args),
@@ -1054,6 +1062,25 @@ impl UserTools {
                 }
                 Ok("The cluster is starting (the first start takes a minute or two). Ask me for cluster_status to see when it is ready.".into())
             }
+            "cluster_offline_status" => {
+                if p.cli != CliLevel::Full {
+                    return Err("your account may not see the cluster settings".into());
+                }
+                let k = &self.services.k3sdev;
+                Ok(match k.installed() {
+                    None => "No cluster is installed by IYAKKI here.".to_string(),
+                    Some(_) if k.offline_on_purpose() => "Offline on purpose is ON: with no network the cluster gets a route on IYAKKI's own dummy interface so it can start.".to_string(),
+                    Some(_) => "Offline on purpose is OFF: the cluster waits for a real network route before it starts.".to_string(),
+                })
+            }
+            "cluster_offline_set" => {
+                if !p.manage_settings || p.cli != CliLevel::Full {
+                    return Err("only administrators may change the cluster settings".into());
+                }
+                let on = args.get("on").and_then(Value::as_bool).ok_or("`on` must be true or false")?;
+                self.services.k3sdev.set_offline_on_purpose(on, &self.user)?;
+                Ok(if on { "Offline on purpose is on; it takes effect at the next start of the cluster.".into() } else { "Offline on purpose is off.".into() })
+            }
             "cluster_stop" => {
                 crate::devcluster::guard("k3s-killall.sh", &[])?;
                 if !p.manage_settings || p.cli != CliLevel::Full {
@@ -1268,6 +1295,8 @@ impl UserTools {
             n if crate::store::tools::is_store_tool(n) => crate::store::tools::call(n, args, &self.services, p, u),
             n if crate::store::authtools::is_author_tool(n) => crate::store::authtools::call(n, args, &self.services, p, u, &self.cwd),
             n if crate::store::drivers::is_driver_tool(n) => crate::store::drivers::call(n, args, &self.services, p, u),
+            n if crate::browserpkg_tools::is_package_tool(n) => crate::browserpkg_tools::call(n, args, &self.services, p, u),
+            n if crate::browserproxy::is_proxy_tool(n) => crate::browserproxy::call(n, args, &self.services, p),
             n if crate::webtools::is_web_tool(n) => crate::webtools::call(n, args, &self.services, p, u),
             n if crate::datatools::is_data_tool(n) => crate::datatools::call(n, args, p, u, &self.cwd, self.services.dir()),
             n if crate::dash::tools::is_dash_tool(n) => crate::dash::tools::standalone_call(n, args, &self.services, p, u),
@@ -2091,7 +2120,7 @@ mod tests {
     #[test]
     fn tools_offered_follow_the_role() {
         let w = world("defs1", Role::User, |_, _| {});
-        assert_eq!(tool_names(&w.tools), vec!["alarm_delete", "alarm_list", "alarm_set", "app_bump_version", "app_preflight", "app_scaffold", "ask_user", "browser_console", "browser_failed_requests", "browser_headers", "browser_page", "browser_status", "browser_timings", "calendar_add", "calendar_delete", "calendar_list", "cli_download_list", "cluster_status", "dash_describe", "dash_explain", "dash_panel_add", "dash_query", "dash_sources", "data_append", "data_create", "data_describe", "data_export", "data_open", "data_query", "driver_install", "driver_status", "fetch_url", "flow_apply_to_runs", "flow_assist_activity", "flow_assist_settings", "flow_assist_stop_all", "flow_cancel", "flow_create", "flow_delete", "flow_drop_version", "flow_edit", "flow_explain_failure", "flow_failure_help", "flow_get", "flow_list", "flow_logs", "flow_outside_messages", "flow_outside_messages_policy", "flow_outside_messages_set", "flow_prune_history", "flow_publish", "flow_rollback", "flow_run", "flow_run_status", "flow_runs", "flow_set_heal_policy", "flow_trial", "generate_image", "http_request", "list_clis", "list_dir", "list_models", "media_download", "media_download_cancel", "media_download_remove", "media_download_retry", "media_downloads", "media_mode", "media_next", "media_play", "media_playlist_add", "media_playlist_delete", "media_playlist_remove", "media_playlists", "media_previous", "media_rate", "media_search", "media_stop", "media_tag", "notify", "now", "pause_media", "play_media", "publisher_keys", "quiz_answer", "quiz_create", "quiz_delete", "quiz_list", "quiz_next", "quiz_open", "quiz_report", "quiz_results", "radio_add", "radio_forget_certificate", "radio_pause", "radio_play", "radio_remove", "radio_resume", "radio_save", "radio_search", "radio_status", "radio_stop", "radio_trust_certificate", "radio_volume", "read_file", "remote_flow_run", "remote_machine_add", "remote_machine_remove", "remote_machines", "resume_media", "run_wasm", "search_documents", "show_image", "show_svg", "stock_quote", "stop_media", "store_add_licence", "store_buy", "store_data_migrate", "store_data_restore", "store_data_snapshots", "store_info", "store_install", "store_outdated", "store_publish", "store_remove", "store_rollback", "store_search", "store_server_status", "store_update", "store_validate", "study_export_pdf", "study_lesson_open", "study_plan_calendar_remove", "study_plan_create", "study_plan_delete", "study_plan_list", "study_plan_progress", "study_plan_to_calendar", "system_my_processes", "system_process_stop", "task_add", "task_list", "task_update", "terminal", "tile_pack", "tile_scaffold", "tile_ship", "tile_test", "tile_validate", "vault_request", "weather", "web_feed", "web_fetch", "web_links", "web_research", "web_search", "webhook_create", "webhook_disable", "webhook_enable", "webhook_list", "webhook_public", "webhook_regenerate", "write_file"]);
+        assert_eq!(tool_names(&w.tools), vec!["alarm_delete", "alarm_list", "alarm_set", "app_bump_version", "app_preflight", "app_scaffold", "ask_user", "browser_console", "browser_failed_requests", "browser_headers", "browser_package_install", "browser_package_remove", "browser_package_status", "browser_page", "browser_proxy_set", "browser_proxy_status", "browser_status", "browser_timings", "calendar_add", "calendar_delete", "calendar_list", "cli_download_list", "cluster_status", "dash_describe", "dash_explain", "dash_panel_add", "dash_query", "dash_sources", "data_append", "data_create", "data_describe", "data_export", "data_open", "data_query", "driver_install", "driver_status", "fetch_url", "flow_apply_to_runs", "flow_assist_activity", "flow_assist_settings", "flow_assist_stop_all", "flow_cancel", "flow_create", "flow_delete", "flow_drop_version", "flow_edit", "flow_explain_failure", "flow_failure_help", "flow_get", "flow_list", "flow_logs", "flow_outside_messages", "flow_outside_messages_policy", "flow_outside_messages_set", "flow_prune_history", "flow_publish", "flow_rollback", "flow_run", "flow_run_status", "flow_runs", "flow_set_heal_policy", "flow_trial", "generate_image", "http_request", "list_clis", "list_dir", "list_models", "media_download", "media_download_cancel", "media_download_remove", "media_download_retry", "media_downloads", "media_mode", "media_next", "media_play", "media_playlist_add", "media_playlist_delete", "media_playlist_remove", "media_playlists", "media_previous", "media_rate", "media_search", "media_stop", "media_tag", "notify", "now", "pause_media", "play_media", "publisher_keys", "quiz_answer", "quiz_create", "quiz_delete", "quiz_list", "quiz_next", "quiz_open", "quiz_report", "quiz_results", "radio_add", "radio_forget_certificate", "radio_pause", "radio_play", "radio_remove", "radio_resume", "radio_save", "radio_search", "radio_status", "radio_stop", "radio_trust_certificate", "radio_volume", "read_file", "remote_flow_run", "remote_machine_add", "remote_machine_remove", "remote_machines", "resume_media", "run_wasm", "search_documents", "show_image", "show_svg", "stock_quote", "stop_media", "store_add_licence", "store_bundle_members", "store_buy", "store_data_migrate", "store_data_restore", "store_data_snapshots", "store_info", "store_install", "store_outdated", "store_publish", "store_remove", "store_rollback", "store_search", "store_server_status", "store_update", "store_validate", "study_export_pdf", "study_lesson_open", "study_plan_calendar_remove", "study_plan_create", "study_plan_delete", "study_plan_list", "study_plan_progress", "study_plan_to_calendar", "system_my_processes", "system_process_stop", "task_add", "task_list", "task_update", "terminal", "tile_pack", "tile_scaffold", "tile_ship", "tile_test", "tile_validate", "vault_request", "weather", "web_feed", "web_fetch", "web_links", "web_research", "web_search", "webhook_create", "webhook_disable", "webhook_enable", "webhook_list", "webhook_public", "webhook_regenerate", "write_file"]);
         let risk = |n: &str| w.tools.defs().into_iter().find(|d| d.spec.name == n).unwrap().risk;
         assert_eq!((risk("read_file"), risk("list_dir"), risk("search_documents")), (Risk::Safe, Risk::Safe, Risk::Safe));
         assert_eq!((risk("write_file"), risk("fetch_url"), risk("run_wasm")), (Risk::Ask, Risk::Ask, Risk::Ask));
@@ -2598,6 +2627,20 @@ mod tests {
         assert!(admin.call("remove_cli", &json!({"id": "kubectl"})).is_ok());
         assert!(admin.call("run_command", &json!({"program": "kubectl"})).unwrap_err().contains("not available"));
         assert!(admin.call("install_cli", &json!({"id": "no-such-tool"})).unwrap_err().contains("not in the list"));
+    }
+
+    #[test]
+    fn the_chat_reads_and_switches_offline_on_purpose_for_an_administrator_and_asks_first() {
+        let (admin, svc, _m, _home) = models_world("offl1", &[], true);
+        assert_eq!(admin.defs().into_iter().find(|d| d.spec.name == "cluster_offline_status").unwrap().risk, Risk::Safe);
+        assert_eq!(admin.defs().into_iter().find(|d| d.spec.name == "cluster_offline_set").unwrap().risk, Risk::Ask);
+        assert_eq!(admin.describe("cluster_offline_set", &json!({"on": true})), "switch \"offline on purpose\" on for the local cluster");
+        assert_eq!(admin.describe("cluster_offline_set", &json!({"on": false})), "switch \"offline on purpose\" off for the local cluster");
+        // nothing installed by IYAKKI here: the status says so and the switch is refused in words, changing nothing
+        assert!(admin.call("cluster_offline_status", &json!({})).unwrap().contains("No cluster is installed"));
+        assert!(admin.call("cluster_offline_set", &json!({"on": true})).unwrap_err().contains("no cluster is installed"));
+        assert!(admin.call("cluster_offline_set", &json!({})).unwrap_err().contains("true or false"));
+        assert!(!svc.k3sdev.offline_on_purpose());
     }
 
     #[test]
@@ -3581,12 +3624,16 @@ mod hard_ask_review_tests {
             ("linux_devices_set", json!({"name": "dev", "sound": true})),
             ("linuxapp_image", json!({"name": "app"})),
             ("image_build", json!({"name": "app"})),
+            ("image_builder_set", json!({"image": "x@sha256:1"})),
             ("linuxapp_pod_start", json!({"name": "app"})),
             ("linux_sandbox_create", json!({"name": "dev", "release": "debian-12"})),
             ("linux_sandbox_delete", json!({"name": "dev"})),
             ("cloud_mode_set", json!({"mode": "on"})),
             ("startup_disk_register", json!({})),
             ("install_shrink", json!({"disk": "sda", "part": 2, "to_mib": 100, "confirm": "sda"})),
+            ("install_to_disk", json!({"disk": "sda", "confirm_name": "sda", "confirm_size": "500 GB"})),
+            ("install_bios", json!({"disk": "sda", "confirm": "sda"})),
+            ("secureboot_enroll", json!({"folder": "mine", "confirm": "enrol keys"})),
             ("startup_disk_set", json!({"action": "first"})),
             ("pod_tls_create", json!({"name": "app"})),
             ("pod_tls_rotate", json!({"name": "app", "what": "ca"})),

@@ -26,8 +26,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use iyakki_drivers::pack::{self};
-use iyakki_drivers::apply;
+use iyakki_core_local::driver_packs::pack::{self};
+use iyakki_core_local::driver_packs::apply;
 pub use iyakki_shared::fwpack::*;
 
 
@@ -244,7 +244,7 @@ pub struct RealEnv {
 
 impl RealEnv {
     pub fn new(data: &Path, streamer: std::sync::Arc<dyn iyakki_proxy::Streamer>) -> RealEnv {
-        RealEnv { data: data.to_path_buf(), streamer, sys: "/sys".into() }
+        RealEnv { data: data.to_path_buf(), streamer, sys: iyakki_core_local::kernelfacts::SYS.into() }
     }
 }
 
@@ -262,7 +262,7 @@ impl Env for RealEnv {
         crate::k3sdev::space(dir).map(|s| s.0)
     }
     fn data_in_memory(&self) -> bool {
-        crate::macfw::in_memory(&iyakki_storage::read_mounts().unwrap_or_default(), &self.data)
+        crate::macfw::in_memory(&iyakki_core_local::kernelfacts::mounts_text(), &self.data)
     }
     fn fetch(&mut self, url: &str, want: u64, dest: &Path) -> Result<(), String> {
         let st = self.streamer.clone();
@@ -270,7 +270,7 @@ impl Env for RealEnv {
     }
     fn install(&mut self, def: &Def, version: &str, source: &str, p: &pack::Pack) -> Result<apply::Report, String> {
         let (fs, real) = apply::Fs::for_data(&self.data);
-        let run: Box<dyn iyakki_drivers::run::Runner> = if real { Box::new(iyakki_drivers::run::System) } else { Box::new(iyakki_drivers::run::Dry) };
+        let run = iyakki_core_local::kmodpack::runner(real);
         install_checked(&fs, run.as_ref(), def.pack_id, version, def.licence_id, source, p)
     }
     fn module_state(&self, name: &str) -> ModState {
@@ -289,4 +289,4 @@ impl Env for RealEnv {
 mod tests;
 
 #[cfg(test)]
-use iyakki_drivers::pack::sha256_hex;
+use iyakki_core_local::kmodpack::sha256_hex;

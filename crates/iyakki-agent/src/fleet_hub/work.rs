@@ -395,6 +395,24 @@ impl Hub {
                 Reply::ok("ok", Value::Null)
             }
             "base_chunk" => self.handle_base_chunk(i, env, fid, &plain),
+            "base_have" => {
+                // how far a base got on this computer (the sender resumes there): the same trust rule as the chunks themselves
+                if i.config.accept == Accept::Never || (i.config.accept == Accept::Members && !i.config.trusted.contains(&env.from)) {
+                    return Reply::err("this computer does not take a base from that member");
+                }
+                let (commit, sha, size) = (plain["commit"].as_str().unwrap_or(""), plain["sha256"].as_str().unwrap_or(""), plain["size"].as_u64().unwrap_or(0));
+                if !hexish(commit, &[40, 64]) || !hexish(sha, &[64]) || size == 0 || size > MAX_BUNDLE {
+                    return Reply::ok("have", json!({"chunks": 0, "done": false}));
+                }
+                let dir = self.fd().join("bases");
+                let whole = dir.join(format!("{commit}.bundle"));
+                if whole.is_file() && std::fs::metadata(&whole).map(|m| m.len()).ok() == Some(size) && sha_file(&whole).ok().as_deref() == Some(sha) {
+                    return Reply::ok("have", json!({"chunks": size.div_ceil(CHUNK as u64), "done": true}));
+                }
+                let same = std::fs::read_to_string(dir.join(format!("{commit}.partmeta"))).is_ok_and(|m| m.trim() == format!("{sha} {size}"));
+                let len = std::fs::metadata(dir.join(format!("{commit}.part"))).map(|m| m.len()).unwrap_or(0);
+                Reply::ok("have", json!({"chunks": if same { len / CHUNK as u64 } else { 0 }, "done": false}))
+            }
             "task_answer" => {
                 // the planner answers a question of the task it sent: kept for the task, and only from the member that sent the task
                 let id = plain["id"].as_str().unwrap_or("").to_string();
@@ -463,14 +481,28 @@ impl Hub {
         }
         let sha = sha_file(bundle)?;
         let total = size.div_ceil(CHUNK as u64) as u32;
+        // a base that stopped partway (either side restarted, a link dropped) is carried on from where the worker's copy ends; a base the worker
+        // already holds whole is not sent again. A worker that does not answer is sent the whole base.
+        let (have, done) = match self.send_member(fleet, to, "base_have", &json!({"commit": commit, "sha256": sha, "size": size})).ok() {
+            Some(v) => (v["chunks"].as_u64().unwrap_or(0).min(total.saturating_sub(1) as u64) as u32, v["done"].as_bool() == Some(true)),
+            None => (0, false),
+        };
+        if done {
+            self.audit("fleet.base.out", &format!("commit={} bytes={size} already_there=yes", &commit[..12]));
+            return Ok(());
+        }
         let mut f = std::fs::File::open(bundle).map_err(|e| e.to_string())?;
-        for n in 0..total {
+        {
+            use std::io::{Seek, SeekFrom};
+            f.seek(SeekFrom::Start(have as u64 * CHUNK as u64)).map_err(|e| e.to_string())?;
+        }
+        for n in have..total {
             let want = (size - n as u64 * CHUNK as u64).min(CHUNK as u64) as usize;
             let mut c = vec![0u8; want];
             std::io::Read::read_exact(&mut f, &mut c).map_err(|e| e.to_string())?;
             self.send_member(fleet, to, "base_chunk", &json!({"commit": commit, "sha256": sha, "size": size, "index": n, "total": total, "data": hex(&c)}))?;
         }
-        self.audit("fleet.base.out", &format!("commit={} bytes={size} chunks={total}", &commit[..12]));
+        self.audit("fleet.base.out", &format!("commit={} bytes={size} chunks={total} resumed_at={have}", &commit[..12]));
         Ok(())
     }
 
@@ -493,6 +525,14 @@ impl Hub {
         let dir = self.fd().join("bases");
         let part = dir.join(format!("{commit}.part"));
         let key = format!("base:{commit}");
+        // a restart lost the count in memory: the part file and its note say how far the same base got
+        if index > 0 && !i.assembly.contains_key(&key) {
+            let same = std::fs::read_to_string(dir.join(format!("{commit}.partmeta"))).is_ok_and(|m| m.trim() == format!("{sha} {size}"));
+            let len = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+            if same && len == index as u64 * CHUNK as u64 {
+                i.assembly.insert(key.clone(), Assembly { next: index, got: len });
+            }
+        }
         let a = i.assembly.entry(key.clone()).or_insert(Assembly { next: 0, got: 0 });
         if index == 0 {
             *a = Assembly { next: 0, got: 0 };
@@ -505,6 +545,9 @@ impl Hub {
         let wrote = (|| -> Result<(), String> {
             use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
             std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).map_err(|e| e.to_string())?;
+            if index == 0 {
+                write_private(&dir.join(format!("{commit}.partmeta")), &format!("{sha} {size}")).map_err(|e| e.to_string())?;
+            }
             let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(index == 0).append(index != 0).mode(0o600).open(&part).map_err(|e| e.to_string())?;
             f.write_all(&data).map_err(|e| e.to_string())
         })();
@@ -520,6 +563,7 @@ impl Hub {
         }
         let complete = a.got == size;
         i.assembly.remove(&key);
+        let _ = std::fs::remove_file(dir.join(format!("{commit}.partmeta")));
         if !complete || sha_file(&part).ok().as_deref() != Some(sha.as_str()) {
             let _ = std::fs::remove_file(&part);
             return Reply::err("the base does not match its checksum");

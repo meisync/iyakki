@@ -139,7 +139,7 @@ struct Live {
 pub type Why = String;
 
 /// Runs the server until `stop` is set. `view` is updated with the phones connected whenever they change.
-pub fn serve(stop: &AtomicBool, allowed: &AtomicBool, view: &Mutex<Vec<(String, bool)>>) -> Result<(), Why> {
+pub fn serve(stop: &AtomicBool, allowed: &AtomicBool, see_each_other: &AtomicBool, view: &Mutex<Vec<(String, bool)>>) -> Result<(), Why> {
     use crate::bthid::Channel;
     let listener = crate::bthid_sys::Listener::open_with(bnep::PSM, 2, Some(bnep::MIN_MTU)).map_err(|e| format!("The Bluetooth network port could not be opened ({e}); this needs administrator rights and a powered controller."))?;
     let tap = crate::bt_pan::Tap::open_named(crate::BT_NAP_IFACE)?;
@@ -151,6 +151,7 @@ pub fn serve(stop: &AtomicBool, allowed: &AtomicBool, view: &Mutex<Vec<(String, 
     let mut shown: Vec<(String, bool)> = Vec::new();
     while !stop.load(Ordering::SeqCst) {
         hub.set_allowed(allowed.load(Ordering::SeqCst));
+        hub.phones_see_each_other(see_each_other.load(Ordering::SeqCst));
         let mut fds = vec![libc::pollfd { fd: listener.raw(), events: libc::POLLIN, revents: 0 }, libc::pollfd { fd: tap.fd.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
         fds.extend(live.iter().map(|l| libc::pollfd { fd: l.sock.raw(), events: libc::POLLIN, revents: 0 }));
         // SAFETY: valid pollfds
@@ -242,22 +243,38 @@ struct Inner {
     why_not: String,
 }
 
+/// The NAP record the service puts into the service-discovery server while it is on (`bnep_nap::sdp_record` with its UUIDs).
+pub fn nap_extra_record() -> crate::a2dp::ExtraRecord {
+    crate::a2dp::ExtraRecord {
+        handle: crate::bnep_nap::SDP_NAP_HANDLE,
+        uuids: vec![crate::bnep::UUID_NAP, 0x0100, 0x000f, 0x1002],
+        attrs: crate::bnep_nap::sdp_record(crate::bnep_nap::SDP_NAP_HANDLE, "IYAKKI network sharing", "Share this computer's internet with a phone over Bluetooth"),
+    }
+}
+
 /// The one Bluetooth sharing service of this program.
 pub struct NapService {
     inner: Mutex<Inner>,
     allowed: Arc<AtomicBool>,
+    /// Phones may reach each other (off by default: the isolation setting of sharing).
+    see_each_other: Arc<AtomicBool>,
     view: Arc<Mutex<Vec<(String, bool)>>>,
 }
 
 static SERVICE: OnceLock<Arc<NapService>> = OnceLock::new();
 
 pub fn service() -> Arc<NapService> {
-    SERVICE.get_or_init(|| Arc::new(NapService { inner: Mutex::new(Inner::default()), allowed: Arc::new(AtomicBool::new(false)), view: Arc::new(Mutex::new(Vec::new())) })).clone()
+    SERVICE.get_or_init(|| Arc::new(NapService { inner: Mutex::new(Inner::default()), allowed: Arc::new(AtomicBool::new(false)), see_each_other: Arc::new(AtomicBool::new(false)), view: Arc::new(Mutex::new(Vec::new())) })).clone()
 }
 
 impl NapService {
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether phones may reach each other (sharing's isolation setting says no); takes effect on the running loop.
+    pub fn set_phones_see_each_other(&self, on: bool) {
+        self.see_each_other.store(on, Ordering::SeqCst);
     }
 
     /// Switch sharing on: starts the loop once. Off: the loop ends, the TAP goes, the phones are dropped.
@@ -268,12 +285,17 @@ impl NapService {
             if g.stop.is_some() {
                 return;
             }
+            // a phone looks for the NAP service in the service-discovery server before it connects: put the record there and make sure
+            // that server runs (it is the audio hub's, one server on the one channel)
+            let _ = crate::a2dp::sdp_register_extra(nap_extra_record());
+            #[cfg(target_os = "linux")]
+            crate::a2dp_sys::audio_hub().ensure_started();
             let stop = Arc::new(AtomicBool::new(false));
             g.stop = Some(stop.clone());
             g.why_not.clear();
             let me = self.clone();
             std::thread::spawn(move || {
-                let r = serve(&stop, &me.allowed, &me.view);
+                let r = serve(&stop, &me.allowed, &me.see_each_other, &me.view);
                 let mut g = me.lock();
                 // a stop that someone else already replaced is not ours to clear
                 if g.stop.as_ref().is_some_and(|s| Arc::ptr_eq(s, &stop)) {
@@ -285,6 +307,7 @@ impl NapService {
             });
         } else {
             self.allowed.store(false, Ordering::SeqCst);
+            crate::a2dp::sdp_unregister_extra(crate::bnep_nap::SDP_NAP_HANDLE);
             if let Some(s) = g.stop.take() {
                 s.store(true, Ordering::SeqCst);
             }

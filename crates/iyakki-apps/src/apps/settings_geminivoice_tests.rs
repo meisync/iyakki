@@ -189,3 +189,36 @@ fn the_page_draws_at_every_size_and_text_scale_with_every_row_and_button_inside_
         }
     }
 }
+
+#[test]
+fn the_language_row_steps_from_automatic_through_the_list_is_saved_audited_and_for_administrators_only() {
+    let cx = admin("gv-lang");
+    let mut a = SettingsApp::new(&cx);
+    a.go_to(Tab::GeminiVoice);
+    on(&mut a, geminivoice_page::GvRow::Language);
+    assert_eq!(vcfg(&cx).language, "", "automatic by default");
+    let (title, detail) = a.gv_row_text(&cx, geminivoice_page::GvRow::Language);
+    assert!(title == "Language" && detail.starts_with("automatic"), "{detail}");
+    key(&mut a, &cx, Key::Char('l'));
+    assert_eq!(vcfg(&cx).language, "en-US", "English comes first");
+    key(&mut a, &cx, Key::Char('l'));
+    assert_eq!(vcfg(&cx).language, "en-GB");
+    assert!(status(&a).contains("English (UK)"), "{}", status(&a));
+    key(&mut a, &cx, Key::Char('-'));
+    key(&mut a, &cx, Key::Char('-'));
+    assert_eq!(vcfg(&cx).language, "");
+    key(&mut a, &cx, Key::Char('-'));
+    assert_eq!(vcfg(&cx).language, "", "the start does not wrap");
+    for _ in 0..20 {
+        key(&mut a, &cx, Key::Char('+'));
+    }
+    assert_eq!(vcfg(&cx).language, "ko-KR", "the end does not wrap");
+    assert!(a.gv_row_text(&cx, geminivoice_page::GvRow::Status).1.contains("Language: Korean"), "the meter names it");
+    assert!(cx.audit.recent(40).iter().any(|l| l.contains("settings.gemini_voice") && l.contains("Korean")));
+    let ucx = plain_user("gv-lang-user");
+    let mut u = SettingsApp::new(&ucx);
+    u.go_to(Tab::GeminiVoice);
+    on(&mut u, geminivoice_page::GvRow::Language);
+    key(&mut u, &ucx, Key::Char('l'));
+    assert_eq!(vcfg(&ucx).language, "");
+}

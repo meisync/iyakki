@@ -76,7 +76,13 @@ fn the_files_have_no_outside_address_no_inline_script_and_no_unsafe_calls() {
     // every script is a file of ours; there is no inline script, no inline style, no inline handler
     let scripts: Vec<&str> = html.match_indices("<script").map(|(i, _)| &html[i..i + html[i..].find('>').unwrap()]).collect();
     let n_js = ui::ASSETS.iter().filter(|a| a.0.ends_with(".js")).count();
-    assert_eq!(scripts.len(), n_js, "every script file is loaded by the page, and the page loads no other");
+    // the two renderer files are loaded by tiles.js when the Tiles page opens, so that the sign-in page stays small (KI-993)
+    let lazy = ["/ui/displaylist.js", "/ui/tilerender.js"];
+    let tiles_js = ui::ASSETS.iter().find(|a| a.0 == "/ui/tiles.js").unwrap().2;
+    for name in lazy {
+        assert!(tiles_js.contains(&format!("\"{name}\"")) && !html.contains(&format!("\"{name}\"")), "{name} is loaded by tiles.js only");
+    }
+    assert_eq!(scripts.len(), n_js - lazy.len(), "every script file is loaded by the page, and the page loads no other");
     for s in &scripts {
         assert!(s.contains("src=\"/ui/") && !s.contains("type=\"text/javascript\"") || s.contains("src=\"/ui/"), "{s}");
     }
@@ -89,6 +95,19 @@ fn the_files_have_no_outside_address_no_inline_script_and_no_unsafe_calls() {
         assert!(html.contains(&format!("\"{name}\"")), "{name}");
         assert!(ui::ASSETS.iter().any(|a| a.0 == name));
     }
+}
+
+#[test]
+fn the_sign_in_page_carries_less_than_300_kb_of_html_script_and_style() {
+    // KI-993: the real-Chrome check budget; the script files the page names (not the ones tiles.js loads later) plus the page and the stylesheet
+    let html = ui::ASSETS.iter().find(|a| a.0 == "/ui/").unwrap().2;
+    let mut total = html.len() + ui::ASSETS.iter().find(|a| a.0 == "/ui/app.css").unwrap().2.len();
+    for a in ui::ASSETS.iter().filter(|a| a.0.ends_with(".js")) {
+        if html.contains(&format!("\"{}\"", a.0)) {
+            total += a.2.len();
+        }
+    }
+    assert!(total < 300 * 1024, "the sign-in page is {total} bytes");
 }
 
 #[test]

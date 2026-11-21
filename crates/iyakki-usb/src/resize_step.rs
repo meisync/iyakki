@@ -50,12 +50,20 @@ pub enum Stage {
 pub struct ShrinkFlow {
     located: Located,
     tool: Box<dyn FsTool>,
+    /// The folder of the machine's device nodes: the chosen partition's node is looked up in it (the boot-time pages).
+    dev: Option<std::path::PathBuf>,
     pub stage: Stage,
 }
 
 impl ShrinkFlow {
     pub fn new(located: Located, tool: Box<dyn FsTool>) -> ShrinkFlow {
-        ShrinkFlow { located, tool, stage: Stage::Pick }
+        ShrinkFlow { located, tool, dev: None, stage: Stage::Pick }
+    }
+
+    /// Look the chosen partition's device node up in `dev` (the machine's `/dev`) when the partition is picked.
+    pub fn with_device_folder(mut self, dev: std::path::PathBuf) -> ShrinkFlow {
+        self.dev = Some(dev);
+        self
     }
 
     pub fn candidates(&self) -> Vec<Candidate> {
@@ -64,6 +72,10 @@ impl ShrinkFlow {
 
     /// The person picked a partition and a new size in MiB: make the plan (reads only). A refusal stays on the pick page.
     pub fn choose(&mut self, part: u32, to_mib: u64) -> Result<&ShrinkPlan, String> {
+        if let Some(dev) = &self.dev {
+            let name = self.located.model.part(part).map(|p| p.name.clone()).ok_or_else(|| format!("{} has no partition number {part}", self.located.model.name))?;
+            self.located.node = Some(dev.join(name));
+        }
         let plan = self.located.plan(part, to_mib, self.tool.as_ref())?;
         self.stage = Stage::Plan(Box::new(plan));
         match &self.stage {

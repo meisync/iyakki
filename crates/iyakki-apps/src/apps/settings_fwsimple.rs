@@ -82,6 +82,7 @@ pub(super) fn preset_words(p: Preset) -> (&'static str, &'static str) {
         Preset::StoreNodePort => ("Private app store", "Your local network can open the private app store (port 30301)."),
         Preset::DnsService => ("Name server (DNS)", "Your local network can ask this computer to look up names (port 53)."),
         Preset::WebServer => ("Web server", "Your local network can open this computer's web pages (ports 80 and 443)."),
+        Preset::MediaServer => ("Media server", "TVs, phones and speakers on your local network can find and play your shared audio and video (ports 1900 and 8181-8190)."),
     }
 }
 
@@ -129,10 +130,11 @@ pub(super) fn items(c: &Config) -> Vec<Item> {
 pub(super) const PORT_TAG: &str = "Port ";
 
 /// What the Add list offers.
-pub(super) const SERVICES: [(&str, Option<Preset>); 7] = [
+pub(super) const SERVICES: [(&str, Option<Preset>); 8] = [
     ("Web server: web pages on ports 80 and 443", Some(Preset::WebServer)),
     ("SSH: a remote command line (port 22)", Some(Preset::Ssh)),
     ("File sharing: the folders you share", Some(Preset::SharedFolders)),
+    ("Media server: TVs and phones play your shared audio and video", Some(Preset::MediaServer)),
     ("Remote desktop: use this computer from a browser", Some(Preset::RemoteDesktop)),
     ("Kubernetes (k3s): the cluster API (port 6443)", Some(Preset::K3sApi)),
     ("Custom port…", None),

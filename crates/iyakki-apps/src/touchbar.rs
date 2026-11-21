@@ -1,5 +1,5 @@
 //! The Touch Bar strip: what the 2170 x 60 display shows and what a touch on it does. Pure model, layout, drawing and touch handling;
-//! nothing here talks to the device (that is `touchbar_host.rs`, over `iyakki_drivers::touchbar`).
+//! nothing here talks to the device (that is `touchbar_host.rs`, over `iyakki_core_api::device_types::driver_packs::touchbar`).
 //!
 //! Four strips, cycled with the chip next to Esc: **System** (volume with mute, brightness, keyboard light, play/pause, clock),
 //! **Recent** (the last apps), **AI** (the agent's state, Chat, Ask, Stop, Approve / Deny) and **App** (up to six items the focused app
@@ -666,8 +666,8 @@ impl Picture {
     }
 
     /// The smallest rectangle holding every pixel that differs from `old` (all of it when the sizes differ or there is no old one).
-    pub fn damage(&self, old: Option<&Picture>) -> Option<iyakki_drivers::touchbar::Rect> {
-        use iyakki_drivers::touchbar::Rect;
+    pub fn damage(&self, old: Option<&Picture>) -> Option<iyakki_core_api::device_types::driver_packs::touchbar::Rect> {
+        use iyakki_core_api::device_types::driver_packs::touchbar::Rect;
         let Some(o) = old.filter(|o| o.w == self.w && o.h == self.h) else {
             return Some(Rect { x: 0, y: 0, w: self.w, h: self.h });
         };

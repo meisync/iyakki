@@ -8,7 +8,7 @@
 
 use super::*;
 use iyakki_shared::clientlink as cl;
-use iyakki_shared::clientmedia::{DEVICE_PERMISSIONS};
+use iyakki_shared::clientmedia::{DEVICE_PERMISSIONS, DEVICE_ROLES};
 use iyakki_shared::clientmedia::permission_capability;
 
 /// The link on show: the text, its QR code and when it stops working.
@@ -63,6 +63,7 @@ impl SettingsApp {
                 for (i, (_, on)) in self.remote.connect.perm_buttons.iter().enumerate().take(5) {
                     v.push((LABELS[i], if *on { OK } else { TEXT }, (b'1' + i as u8) as char));
                 }
+                v.push(("Next role", ACCENT, 'r'));
                 v.push(("Back to the devices", TEXT, 'd'));
             } else {
                 v.push(("Device permissions", TEXT, 'd'));
@@ -88,6 +89,12 @@ impl SettingsApp {
                 }
                 Key::Char('d') => {
                     self.remote.connect.perm = None;
+                    return true;
+                }
+                Key::Char('r') => {
+                    if self.admin(cx) {
+                        self.connect_role_next(cx);
+                    }
                     return true;
                 }
                 _ => {}
@@ -195,6 +202,25 @@ impl SettingsApp {
         }
     }
 
+    /// Put the device on show on the next role of the table (viewer, listener, presenter, full, then viewer again). A device whose switches
+    /// were set one by one (`custom`) starts at the first role. Same function as the chat tool `client_device_role`; audited, never a card
+    /// (a role only says what the device may ASK for: the hard asks stay cards at every use).
+    fn connect_role_next(&mut self, cx: &AppCx) {
+        let Some((id, name)) = self.remote.connect.perm.clone() else { return };
+        let now_role = cx.agent.client_media().device_role(cx.data_dir(), &id);
+        let next = match DEVICE_ROLES.iter().position(|r| r.0 == now_role) {
+            Some(i) => DEVICE_ROLES[(i + 1) % DEVICE_ROLES.len()],
+            None => DEVICE_ROLES[0],
+        };
+        match cx.agent.client_media().set_device_role(cx.data_dir(), &id, next.0, &cx.session.user, now()) {
+            Ok(()) => {
+                cx.audit.record(&cx.session.user, "settings.client_role", &format!("{} {name} {id}", next.0));
+                self.ok(format!("{name} is on the role {}: it {}. It counts from the device's next request; a card still comes up on the machine at every hard ask.", next.0, next.1));
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
     fn connect_revoke(&mut self, cx: &AppCx, index: usize) {
         let _svc = Self::svc(cx);
         let Some(d) = cl::list_devices(cx.data_dir()).into_iter().filter(|d| d.active()).nth(index) else {
@@ -250,6 +276,9 @@ impl SettingsApp {
             if let Some((id, name)) = self.remote.connect.perm.clone() {
                 if devices.iter().any(|d| d.id == id && d.active()) {
                     let held = cx.agent.client_media().device_holds(cx.data_dir(), &id);
+                    let role = cx.agent.client_media().device_role(cx.data_dir(), &id);
+                    let what = DEVICE_ROLES.iter().find(|r| r.0 == role).map_or("has its switches set one by one", |r| r.1);
+                    lines.push((format!("Role of {name}: {role}, it {what}. Press r for the next role (it sets every switch of the role at once)."), 13.0, TEXT, Face::Sans));
                     lines.push((format!("Permissions of {name} (press 1 to 5 to switch one, d to go back):"), 13.0, TEXT, Face::Bold));
                     for (i, (perm, cap, what)) in DEVICE_PERMISSIONS.iter().enumerate() {
                         let on = held.iter().any(|c| c == cap);

@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// What the person is shown before anything is downloaded or written, and what an approval is bound to.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Review {
     pub text: String,
     /// Identifies exactly this plan (store, channel, release, every part with its version and hashes).

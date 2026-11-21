@@ -243,6 +243,19 @@ pub fn plan(item: Item, ctx: &PlanCtx) -> Plan {
                 notes: vec!["Models run on the processor again.".into()],
             }
         }
+        Item::GpuRocm => Plan {
+            item,
+            steps: vec![
+                plain(Op::Hook(Hook::LemonadeUnpatch), "the GPU settings of the Lemonade Deployment (when it exists)"),
+                plain(Op::Hook(Hook::OllamaUnpatch), "the GPU settings of the Ollama Deployment (when it exists)"),
+                plain(Op::Kube { ns: Some("kube-system"), kind: "daemonset", name: "iyakki-amd-gpu-device-plugin".into() }, "AMD's device plugin iyakki-amd-gpu-device-plugin in kube-system"),
+            ],
+            data_requires: false,
+            always_stays: vec!["the label iyakki.dev/amd-compute on the node (harmless; it only selects where the plugin runs)".into(), "the ROCm image of Ollama, if one was set: reinstall Ollama to go back to the plain image".into()],
+            claim_gb: 0,
+            data_bytes: 0,
+            notes: vec!["Models run on the processor or the Vulkan GPU again.".into()],
+        },
         Item::GpuNvidia => {
             let l = crate::gpu_nvidia::Layout::new(data);
             let base = data.join("gpu/nvidia");
@@ -319,6 +332,19 @@ pub fn plan(item: Item, ctx: &PlanCtx) -> Plan {
             claim_gb: 0,
             data_bytes: dir_bytes(&data.join("linuxapps").join("gui")),
             notes: vec!["The sandbox is the item and also your data in it: tick the box to confirm.".into()],
+        },
+        Item::BrowserPackage => {
+            let dir = crate::browserpkg::root(data);
+            Plan { item, steps: vec![plain(Op::Path { path: dir.clone(), root: dir.clone() }, "the browser package (folder addons/browser)")], data_requires: false, always_stays: vec!["the engine of the system image, if it carries one".into(), "your browser profile and bookmarks".into()], claim_gb: 0, data_bytes: dir_bytes(&dir), notes: vec![] }
+        }
+        Item::YtDlp => Plan {
+            item,
+            steps: vec![plain(Op::Hook(Hook::YtDlp), "the program tools/yt-dlp")],
+            data_requires: false,
+            always_stays: vec!["the videos it saved".into()],
+            claim_gb: 0,
+            data_bytes: crate::ytdlp::exe_path(data).metadata().map_or(0, |m| m.len()),
+            notes: vec![],
         },
         Item::DataScience => Plan {
             item,
@@ -398,7 +424,7 @@ pub fn check_step(s: &Step, data: &Path) -> Result<(), String> {
             match (ns, *kind) {
                 (None, "clusterrole" | "clusterrolebinding") if name == "iyakki-prometheus" => Ok(()),
                 (None, _) => Err(format!("refused: the cluster-wide object {kind} {name} is not one of IYAKKI's")),
-                (Some("kube-system"), "daemonset") if name == "nvidia-device-plugin" => Ok(()),
+                (Some("kube-system"), "daemonset") if name == "nvidia-device-plugin" || name == "iyakki-amd-gpu-device-plugin" => Ok(()),
                 (Some(n), "namespace") if EXCLUSIVE_NAMESPACES.contains(n) && name == n => Ok(()),
                 (Some(_), "namespace") => Err(format!("refused: the namespace {name} is not one only IYAKKI's item uses")),
                 (Some(n), _) if OWN_NAMESPACES.contains(n) || *n == REGISTRY_NS => Ok(()),
@@ -624,7 +650,7 @@ pub fn real_ctx(svc: &crate::services::Services, user: &str, item: Item) -> Plan
     });
     let model_hosts = if item == Item::MacHost { crate::modelhost::Hosts::new(&data).list().into_iter().map(|h| h.id).collect() } else { vec![] };
     let cli_warning = item.cli_id().and_then(|id| svc.clis.uninstall_warning(id));
-    let volatile = iyakki_storage::data_location(&iyakki_storage::Roots::real(), &data) == iyakki_storage::DataLocation::Memory;
+    let volatile = iyakki_core_local::kernelfacts::data_in_memory(&data);
     PlanCtx { data, gitea, model_hosts, cli_warning, volatile }
 }
 
@@ -762,6 +788,13 @@ impl UninstallEnv for RealEnv {
                 }
                 crate::fwpack::remove(&data, def).map(|r| r.lines.join(" "))
             }
+            Hook::YtDlp => {
+                let p = crate::ytdlp::exe_path(&data);
+                if !p.is_file() {
+                    return say_none("the program");
+                }
+                std::fs::remove_file(&p).map(|()| "the program was removed".to_string()).map_err(|e| format!("{}: {e}", p.display()))
+            }
             Hook::DataScience => {
                 let d = iyakki_shared::datasci::dir(&data);
                 if !d.exists() {
@@ -777,11 +810,11 @@ impl UninstallEnv for RealEnv {
                 crate::fwextra::remove(&data).map(|r| r.lines.join(" "))
             }
             Hook::DriverPack(id) => {
-                let (fs, _) = iyakki_drivers::apply::Fs::for_data(&data);
-                if iyakki_drivers::apply::read_record(&fs, id).is_none() {
+                let drivers = iyakki_core_local::LocalDrivers::system(&data);
+                if iyakki_core_api::drivers::Drivers::pack_files(&drivers, id).is_none() {
                     return say_none(id);
                 }
-                iyakki_drivers::apply::remove_pack(&fs, id).map(|r| r.lines.join(" "))
+                iyakki_core_api::drivers::Drivers::remove_pack(&drivers, id)
             }
             Hook::Sandbox(name) => {
                 let exe = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;

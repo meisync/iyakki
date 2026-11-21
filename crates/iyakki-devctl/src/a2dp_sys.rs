@@ -260,7 +260,7 @@ impl AudioHub {
                 lost: s.lost,
             }
         });
-        AudioView { ready: g.running, why_not: g.why_not.clone(), pairing_open: hub().pairing_open(), device }
+        AudioView { ready: g.running, why_not: g.why_not.clone(), pairing_open: hub().pairing_open(), device, aac_note: crate::a2dp_aac::note_line() }
     }
 }
 
@@ -288,7 +288,9 @@ fn serve_sdp(mut sock: L2Sock) {
 
 /// One connected phone: signalling, the media channel when it opens, and the audio path, until the link ends or we are told to stop.
 fn run_session(mut sig: L2Sock, media_rx: Receiver<L2Sock>, name: &str, stop: &AtomicBool, shared: &Mutex<Shared>) {
-    let mut sink = Sink::new();
+    // an AAC endpoint is offered only while the add-on that decodes it is installed (checked at each connection)
+    let aac = crate::a2dp_aac::ready_backend();
+    let mut sink = if aac.is_some() { Sink::new().with_aac() } else { Sink::new() };
     let mut re = Reassembler::default();
     let mut path = AudioPath::new(make_factory(), name);
     let mut media: Option<L2Sock> = None;
@@ -312,6 +314,8 @@ fn run_session(mut sig: L2Sock, media_rx: Receiver<L2Sock>, name: &str, stop: &A
         }
         // SAFETY: valid pollfds for their count
         unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 250) };
+        path.poll();
+        publish(&path, shared);
         if fds[0].revents != 0 {
             // everything that is waiting
             loop {
@@ -326,7 +330,14 @@ fn run_session(mut sig: L2Sock, media_rx: Receiver<L2Sock>, name: &str, stop: &A
                         }
                         for a in acts {
                             match a {
+                                Action::ConfiguredAac(c) => {
+                                    if let Some(b) = aac.clone() {
+                                        path.set_aac(c, b);
+                                    }
+                                    shared.lock().unwrap_or_else(|e| e.into_inner()).codec = crate::a2dp_aac::codec_text(&c);
+                                }
                                 Action::Configured(p) => {
+                                    path.set_sbc();
                                     shared.lock().unwrap_or_else(|e| e.into_inner()).codec = codec_text(&p);
                                 }
                                 Action::Started => path.start(),
@@ -350,7 +361,10 @@ fn run_session(mut sig: L2Sock, media_rx: Receiver<L2Sock>, name: &str, stop: &A
             if let Some(m) = media.as_mut() {
                 loop {
                     match m.recv(Duration::ZERO) {
-                        Ok(Recv::Data(d)) => path.on_media(&d),
+                        Ok(Recv::Data(d)) => {
+                            path.on_media(&d);
+                            path.poll();
+                        }
                         Ok(Recv::Timeout) => break,
                         _ => {
                             closed = true;

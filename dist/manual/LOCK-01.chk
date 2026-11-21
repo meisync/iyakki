@@ -1,0 +1,19 @@
+scenario: LOCK-01
+title: Lock screen and automatic lock
+area: Security
+rows: F-LOCK-01, F-LOCK-03
+machines: any
+needs: person
+prereq: Signed in with a password.
+step: Press Super+L (Control+Command+L on the Mac profile).
+expect: The screen is covered by a password prompt and apps keep running behind it.
+clause: F-LOCK-01.lock
+step: Type a wrong password.
+expect: A plain message says it was wrong and the screen stays locked.
+clause: F-LOCK-01.wrong
+step: Type the right password.
+expect: The screen opens on exactly what you had open.
+clause: F-LOCK-01.unlock
+step: In Settings choose automatic lock after 5 minutes, then leave the keyboard alone for 5 minutes.
+expect: The screen locks by itself after about five minutes.
+clause: F-LOCK-03.auto

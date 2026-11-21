@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 const FIRST_BYTES_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A refusal with its HTTP status and a stable code.
+#[derive(Debug)]
 pub struct Fail {
     pub status: u16,
     pub code: &'static str,
@@ -59,7 +60,7 @@ pub struct Shared {
     pub tokens: Tokens,
     pub runs: RunManager,
     /// WASM tiles run for browsers (`tiles.rs`).
-    pub tiles: super::tiles::TileHost,
+    pub tiles: Arc<super::tiles::TileHost>,
     /// Data imports waiting for the person's approval on the web page (`dataimport.rs`).
     pub(super) imports: super::dataimport::DataImports,
     /// Counters for `GET /metrics` (`metrics.rs`).
@@ -119,11 +120,16 @@ pub fn start(chk: &Checked, deps: Arc<Deps>, tls: Identity) -> Result<Service, S
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let l = cfg.limits.clone();
     let store = if cfg.token_store.is_empty() { None } else { Some(std::path::PathBuf::from(&cfg.token_store)) };
-    let tiles = super::tiles::TileHost::new(super::tiles::builtin());
+    let tiles = Arc::new(super::tiles::TileHost::new(super::tiles::builtin()));
     let kept = tiles.load_packages(&super::tiles::packages_dir(&cfg.data_dir), &|l| crate::qeprintln!("tile host: {l}"));
     if kept > 0 {
         crate::qeprintln!("tile host: {kept} installed tile(s) loaded");
     }
+    let bundles = tiles.bundles.load(&super::webbundle::bundles_dir(&cfg.data_dir), &|l| crate::qeprintln!("tile host: {l}"));
+    if bundles > 0 {
+        crate::qeprintln!("tile host: {bundles} web-bundle tile(s) loaded");
+    }
+    let deps_audit = deps.audit.clone();
     let shared = Arc::new(Shared {
         profile: chk.profile,
         deps: deps.clone(),
@@ -145,6 +151,10 @@ pub fn start(chk: &Checked, deps: Arc<Deps>, tls: Identity) -> Result<Service, S
         cfg,
     });
     crate::cloudmembers::register(Arc::new(SharedSessions(Arc::downgrade(&shared))));
+    if chk.profile == Profile::TileHost {
+        // the chat tools that put web-bundle tiles on this host (administrators only; each install and removal asks): bundletools.rs
+        shared.runs.set_tool_wrap(super::bundletools::wrap(shared.tiles.clone(), shared.cfg.data_dir.clone(), deps_audit));
+    }
     let s = shared.clone();
     let w = shared.clone();
     let _ = std::thread::Builder::new().name("iyakki-svc-runwatch".into()).spawn(move || watch_saved_runs(w));
@@ -164,7 +174,7 @@ impl Shared {
             deps: deps.clone(),
             tokens: Tokens::new(None, Duration::from_secs(l.token_idle_secs), l.token_lifetime_secs),
             runs: RunManager::new(deps, Duration::from_secs(l.approval_timeout_secs)),
-            tiles: super::tiles::TileHost::new(super::tiles::builtin()),
+            tiles: Arc::new(super::tiles::TileHost::new(super::tiles::builtin())),
             imports: Default::default(),
             metrics: Default::default(),
             allowed_tools,
@@ -339,6 +349,8 @@ fn connection(stream: TcpStream, peer: SocketAddr, shared: &Shared) {
         }
         // the live event stream: a WebSocket that signs in by its first message (events.rs)
         Ok(head) if super::events::is_events_head(&head) && super::events::serve(shared, &mut conn, &head, peer.ip()) => {}
+        // a web-bundle tile's bridge: a WebSocket that signs in by its first message (tilebridge.rs)
+        Ok(head) if super::tilebridge::bridge_head(&head).is_some() && super::tilebridge::serve(shared, &mut conn, &head, peer.ip()) => {}
         // binary uploads and downloads are streamed, never held whole in memory (files.rs); anything it does not take goes the ordinary way
         Ok(head) if super::files::is_stream_head(&head) && super::files::serve_stream(shared, &mut conn, &head, peer.ip()) => {}
         Ok(head) => {
@@ -533,6 +545,25 @@ fn handle_inner(sh: &Shared, req: &Request, peer: IpAddr) -> Response {
         if !ok {
             return decorate(error_response(429, "rate_limited", "too many sign-in tries").header("Retry-After", &wait.to_string()), &allow_origin);
         }
+    }
+    if route.id == "tile_bundle_file" {
+        // a web-bundle tile's own file: static, public, under the bundle policy (webbundle.rs)
+        return decorate(super::tiles::bundle_file(sh, &params), &allow_origin);
+    }
+    if route.id == "tile_bridge" {
+        // the WebSocket upgrade is answered before this point (tilebridge.rs); a plain request gets told how to ask
+        return decorate(error_response(400, "invalid_input", "this address is a WebSocket"), &allow_origin);
+    }
+    if let Some((ctype, body)) = super::bundlewrap::kind_of(route.id) {
+        // the wrapper page of a web-bundle tile: static, public, framed by nobody; it holds the token, the frame of the bundle does not
+        return decorate(Response::new(200, ctype, body.as_bytes().to_vec()).header("Content-Security-Policy", super::bundlewrap::CSP).header("X-Content-Type-Options", "nosniff").header("Referrer-Policy", "no-referrer").header("Cache-Control", "no-store"), &allow_origin);
+    }
+    if route.id == "tile_bridge_js" {
+        return decorate(Response::new(200, "text/javascript; charset=utf-8", super::webbundle::BRIDGE_JS.as_bytes().to_vec()).header("Content-Security-Policy", super::webbundle::CSP).header("X-Content-Type-Options", "nosniff").header("Referrer-Policy", "no-referrer").header("Cache-Control", "no-store"), &allow_origin);
+    }
+    if let Some((ctype, body)) = super::tilepage::kind_of(route.id) {
+        // a tile's page: static, public, the same bytes for everyone; framing, sniffing and referrers are switched off
+        return decorate(Response::new(200, ctype, body.as_bytes().to_vec()).header("Content-Security-Policy", super::tilepage::CSP).header("X-Content-Type-Options", "nosniff").header("Referrer-Policy", "no-referrer").header("Cache-Control", "no-store"), &allow_origin);
     }
     if !req.body.is_empty() && route.id != "files_upload" && req.header("content-type").is_none_or(|c| !c.to_ascii_lowercase().starts_with("application/json")) {
         return decorate(error_response(400, "invalid_input", "send application/json"), &allow_origin);

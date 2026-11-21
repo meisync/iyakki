@@ -33,7 +33,7 @@ impl ConsentDialog {
 
     /// Give the answer to the waiting tool; audited by what it allows, never by the page's content.
     pub fn answer(&self, cx: &AppCx, a: Answer) -> Result<(), String> {
-        let r = cx.browser().consent.resolve(&cx.session.user, &self.req.id, a);
+        let r = cx.browser_consent().resolve(&cx.session.user, &self.req.id, a);
         if r.is_ok() && self.req.kind == ConsentKind::Permission {
             // the person's own answer to a flow's permission request: carried out by the flows engine (audited there, without secrets)
             return match cx.flows_facet().answer_permission(&cx.session.user, &cx.session.policy, &self.req, a) {
@@ -41,7 +41,7 @@ impl ConsentDialog {
                 Err(e) => {
                     // nothing was done: the request comes back so the person can answer again
                     if a != Answer::NotNow {
-                        let _ = cx.browser().consent.create_permission(&self.req.user, &self.req.domain, &self.req.title, &self.req.text, &self.req.payload, self.req.since);
+                        let _ = cx.browser_consent().create_permission(&self.req.user, &self.req.domain, &self.req.title, &self.req.text, &self.req.payload, self.req.since);
                     }
                     Err(e)
                 }
@@ -157,8 +157,8 @@ mod tests {
 
     fn req(kind: ConsentKind) -> ConsentRequest {
         let cx = cx_with_admin_store("consentdlg");
-        let id = cx.browser().consent.create("root", kind, "a.test", &willingness_text("a.test", None), "click button \"Send\"", 1).unwrap();
-        cx.browser().consent.get("root", &id).unwrap()
+        let id = cx.browser_consent().create("root", kind, "a.test", &willingness_text("a.test", None), "click button \"Send\"", 1).unwrap();
+        cx.browser_consent().get("root", &id).unwrap()
     }
 
     #[test]
@@ -179,8 +179,8 @@ mod tests {
     #[test]
     fn the_dialog_shows_the_willingness_text_and_exactly_the_three_choices() {
         let cx = cx_with_admin_store("consentdlg2");
-        let id = cx.browser().consent.create("root", ConsentKind::Interact, "gemini.google.com", &willingness_text("gemini.google.com", None), "", 1).unwrap();
-        let d = ConsentDialog::new(cx.browser().consent.get("root", &id).unwrap());
+        let id = cx.browser_consent().create("root", ConsentKind::Interact, "gemini.google.com", &willingness_text("gemini.google.com", None), "", 1).unwrap();
+        let d = ConsentDialog::new(cx.browser_consent().get("root", &id).unwrap());
         let mut g = Gfx::new(1000, 700);
         d.render(&mut g, R::new(0.0, 0.0, 1000.0, 700.0), 1.0);
         let labels: Vec<String> = g.hits.iter().map(|h| h.label.clone()).collect();
@@ -192,7 +192,7 @@ mod tests {
         assert!(d.req.text.starts_with("Are you willing to let the assistant act on your behalf on gemini.google.com? It will be able to click, type and submit in your signed-in browser session. You can stop it at any time."));
         // answering ends the wait and is audited
         d.answer(&cx, Answer::OneByOne).unwrap();
-        assert_eq!(cx.browser().consent.wait(&id, std::time::Duration::from_millis(10)), Some(Answer::OneByOne));
+        assert_eq!(cx.browser_consent().wait(&id, std::time::Duration::from_millis(10)), Some(Answer::OneByOne));
         assert!(d.answer(&cx, Answer::Deny).is_err(), "only once");
     }
 }

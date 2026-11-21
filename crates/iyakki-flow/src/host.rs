@@ -287,7 +287,7 @@ pub struct BrowserOpResult {
 }
 
 /// What the run view shows next to the "Browser session" badge.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BrowserSessionInfo {
     pub run_id: String,
     pub hosts: Vec<String>,

@@ -6,7 +6,7 @@
 use std::path::Path;
 
 /// Where the name is kept for the next starts.
-pub const CONF_PATH: &str = iyakki_zram::CONF_PATH;
+pub const CONF_PATH: &str = iyakki_core_api::device_types::zram::CONF_PATH;
 
 /// Shown next to the field.
 pub const HINT: &str = "Lower-case letters a-z, digits 0-9 and '-', up to 63 characters; it cannot start or end with '-'.";
@@ -17,7 +17,7 @@ pub fn current(fallback: &str) -> String {
     if let Some(n) = TEST_NAME.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         return n;
     }
-    iyakki_devctl::current_hostname(fallback)
+    iyakki_core_api::device_types::devctl::current_hostname(fallback)
 }
 
 /// Tests: the name `current` answers instead of this computer's own (so a screen test does not depend on the machine it runs on).
@@ -44,7 +44,7 @@ pub fn check(input: &str) -> Result<String, String> {
     if n.starts_with('-') || n.ends_with('-') {
         return Err("A host name cannot start or end with '-'.".into());
     }
-    if !iyakki_usb::install::valid_hostname(n) {
+    if !iyakki_core_api::installer::valid_hostname(n) {
         return Err(format!("Only letters a-z, digits and '-' are allowed. {HINT}"));
     }
     Ok(n.to_string())
@@ -52,24 +52,24 @@ pub fn check(input: &str) -> Result<String, String> {
 
 /// The boot option that fixes the name, when there is one (`iyakki.hostname=` on the kernel command line).
 pub fn locked_by(cmdline: &str) -> Option<String> {
-    cmdline.split_whitespace().find_map(|t| t.strip_prefix("iyakki.hostname=")).filter(|n| iyakki_usb::install::valid_hostname(n)).map(str::to_string)
+    cmdline.split_whitespace().find_map(|t| t.strip_prefix("iyakki.hostname=")).filter(|n| iyakki_core_api::installer::valid_hostname(n)).map(str::to_string)
 }
 
 /// The name saved for the next boots (`hostname=` in `system.conf`), if there is a valid one.
 pub fn saved(conf: &Path) -> Option<String> {
-    iyakki_zram::config::parse_conf(&std::fs::read_to_string(conf).ok()?).get("hostname").filter(|h| iyakki_usb::install::valid_hostname(h)).cloned()
+    iyakki_core_api::device_types::zram::config::parse_conf(&std::fs::read_to_string(conf).ok()?).get("hostname").filter(|h| iyakki_core_api::installer::valid_hostname(h)).cloned()
 }
 
 /// Keep `name` for the next boots, leaving the other keys of the file as they are.
 pub fn save(conf: &Path, name: &str) -> Result<(), String> {
     let name = check(name)?;
-    iyakki_zram::set_conf_key(conf, "hostname", Some(&name))
+    iyakki_core_api::device_types::zram::set_conf_key(conf, "hostname", Some(&name))
 }
 
 /// Change the name of the running system and write `/etc/hostname`.
 pub fn apply(name: &str, etc_hostname: &Path) -> Result<(), String> {
     let name = check(name)?;
-    iyakki_devctl::apply_hostname(&name, etc_hostname)
+    iyakki_core_api::device_types::devctl::apply_hostname(&name, etc_hostname)
 }
 
 #[cfg(test)]

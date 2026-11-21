@@ -1,6 +1,5 @@
 use super::*;
-use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::{Condvar, Mutex};
 
 /// A made-up output: records what it was given, takes `delay` to "play" it, and may have no output at all.
 struct Fake {
@@ -8,11 +7,24 @@ struct Fake {
     ready: Result<(), String>,
     played: Mutex<Vec<usize>>,
     fail: Option<String>,
+    /// While `Some(false)` the output does not finish: it plays when the test opens the gate (a slow output without a stopwatch).
+    gate: Option<Mutex<bool>>,
+    gate_cv: Condvar,
 }
 
 impl Fake {
     fn new(delay_ms: u64) -> Arc<Fake> {
-        Arc::new(Fake { delay: Duration::from_millis(delay_ms), ready: Ok(()), played: Mutex::new(vec![]), fail: None })
+        Arc::new(Fake { delay: Duration::from_millis(delay_ms), ready: Ok(()), played: Mutex::new(vec![]), fail: None, gate: None, gate_cv: Condvar::new() })
+    }
+    /// An output that takes as long as the test wants: it finishes after `release`.
+    fn gated() -> Arc<Fake> {
+        Arc::new(Fake { delay: Duration::ZERO, ready: Ok(()), played: Mutex::new(vec![]), fail: None, gate: Some(Mutex::new(false)), gate_cv: Condvar::new() })
+    }
+    fn release(&self) {
+        if let Some(g) = &self.gate {
+            *g.lock().unwrap() = true;
+            self.gate_cv.notify_all();
+        }
     }
 }
 
@@ -22,6 +34,12 @@ impl CueOut for Fake {
     }
     fn play(&self, wav: &[u8]) -> Result<(), String> {
         std::thread::sleep(self.delay);
+        if let Some(g) = &self.gate {
+            let mut open = g.lock().unwrap();
+            while !*open {
+                open = self.gate_cv.wait(open).unwrap();
+            }
+        }
         self.played.lock().unwrap().push(wav.len());
         self.fail.clone().map_or(Ok(()), Err)
     }
@@ -100,20 +118,19 @@ fn the_defaults_load_from_an_old_settings_file_and_the_range_is_checked() {
 
 #[test]
 fn a_cue_plays_in_the_background_and_a_slow_output_never_holds_sign_out_back() {
-    let slow = Fake::new(2000);
-    let t0 = Instant::now();
+    // an output that does not finish until the test lets it: starting must not wait for it, and waiting for it must give up at its bound
+    let slow = Fake::gated();
     let h = start(&SystemSounds::default(), &SoundSettings::default(), Cue::Logout, slow.clone());
-    assert!(t0.elapsed() < Duration::from_millis(100), "starting returns at once");
-    // sign-out waits for its cue, but never longer than the bound
-    let w0 = Instant::now();
+    // sign-out waits for its cue, but never longer than the bound: both waits come back with "still playing" while the output is held
     assert_eq!(h.wait(Duration::from_millis(150)), None, "still playing");
     assert_eq!(h.wait(LOGOUT_WAIT.min(Duration::from_millis(200))), None);
-    assert!(w0.elapsed() < Duration::from_millis(600), "{:?}", w0.elapsed());
     assert!(slow.played.lock().unwrap().is_empty(), "the slow output has not finished: sign-out went on");
+    slow.release();
+    assert_eq!(h.wait(iyakki_testkit::BUDGET), Some(Outcome::Played), "it plays on once the output is free");
     // a quick output finishes inside the wait
-    let quick = Fake::new(30);
+    let quick = Fake::new(0);
     let h = start(&SystemSounds::default(), &SoundSettings::default(), Cue::Logout, quick.clone());
-    assert_eq!(h.wait(LOGOUT_WAIT), Some(Outcome::Played));
+    assert_eq!(h.wait(iyakki_testkit::BUDGET), Some(Outcome::Played));
     assert_eq!(h.wait(Duration::ZERO), Some(Outcome::Played), "asking again gives the same answer");
     let sent = quick.played.lock().unwrap().clone();
     assert_eq!(sent.len(), 1);
@@ -125,18 +142,18 @@ fn nothing_plays_when_switched_off_muted_or_without_an_output() {
     let out = Fake::new(0);
     let sound = SoundSettings::default();
     let off = SystemSounds { enabled: false, ..Default::default() };
-    assert!(matches!(start(&off, &sound, Cue::Login, out.clone()).wait(Duration::from_secs(1)), Some(Outcome::Off(_))));
+    assert!(matches!(start(&off, &sound, Cue::Login, out.clone()).wait(iyakki_testkit::BUDGET), Some(Outcome::Off(_))));
     let one = SystemSounds { notify: false, ..Default::default() };
-    assert!(matches!(start(&one, &sound, Cue::Notify, out.clone()).wait(Duration::from_secs(1)), Some(Outcome::Off(_))));
+    assert!(matches!(start(&one, &sound, Cue::Notify, out.clone()).wait(iyakki_testkit::BUDGET), Some(Outcome::Off(_))));
     let muted = SoundSettings { muted: true, ..Default::default() };
-    assert!(matches!(start(&SystemSounds::default(), &muted, Cue::Login, out.clone()).wait(Duration::from_secs(1)), Some(Outcome::Off(m)) if m.contains("muted")));
-    let none = Arc::new(Fake { delay: Duration::ZERO, ready: Err("no sound output: connect a monitor".into()), played: Mutex::new(vec![]), fail: None });
+    assert!(matches!(start(&SystemSounds::default(), &muted, Cue::Login, out.clone()).wait(iyakki_testkit::BUDGET), Some(Outcome::Off(m)) if m.contains("muted")));
+    let none = Arc::new(Fake { delay: Duration::ZERO, ready: Err("no sound output: connect a monitor".into()), played: Mutex::new(vec![]), fail: None, gate: None, gate_cv: Condvar::new() });
     let h = start(&SystemSounds::default(), &sound, Cue::Login, none.clone());
-    assert!(matches!(h.wait(Duration::from_secs(1)), Some(Outcome::NoOutput(_))));
+    assert!(matches!(h.wait(iyakki_testkit::BUDGET), Some(Outcome::NoOutput(_))));
     assert!(out.played.lock().unwrap().is_empty() && none.played.lock().unwrap().is_empty(), "no sound was made");
     // a failing player is reported, not raised
-    let bad = Arc::new(Fake { delay: Duration::ZERO, ready: Ok(()), played: Mutex::new(vec![]), fail: Some("aplay: no such device".into()) });
-    assert!(matches!(start(&SystemSounds::default(), &sound, Cue::Login, bad).wait(Duration::from_secs(1)), Some(Outcome::Failed(_))));
+    let bad = Arc::new(Fake { delay: Duration::ZERO, ready: Ok(()), played: Mutex::new(vec![]), fail: Some("aplay: no such device".into()), gate: None, gate_cv: Condvar::new() });
+    assert!(matches!(start(&SystemSounds::default(), &sound, Cue::Login, bad).wait(iyakki_testkit::BUDGET), Some(Outcome::Failed(_))));
 }
 
 #[test]
@@ -144,11 +161,11 @@ fn a_preview_ignores_the_switches_but_not_mute_or_a_missing_output() {
     let out = Fake::new(0);
     let off = SystemSounds { enabled: false, ..Default::default() };
     let h = preview(&off, &SoundSettings::default(), Cue::JobDone, out.clone());
-    assert_eq!(h.wait(Duration::from_secs(1)), Some(Outcome::Played));
+    assert_eq!(h.wait(iyakki_testkit::BUDGET), Some(Outcome::Played));
     let muted = SoundSettings { muted: true, ..Default::default() };
-    assert!(matches!(preview(&off, &muted, Cue::JobDone, out.clone()).wait(Duration::from_secs(1)), Some(Outcome::Off(_))));
-    let none = Arc::new(Fake { delay: Duration::ZERO, ready: Err("no card".into()), played: Mutex::new(vec![]), fail: None });
-    let m = preview(&off, &SoundSettings::default(), Cue::Login, none).wait(Duration::from_secs(1)).unwrap().say(Cue::Login);
+    assert!(matches!(preview(&off, &muted, Cue::JobDone, out.clone()).wait(iyakki_testkit::BUDGET), Some(Outcome::Off(_))));
+    let none = Arc::new(Fake { delay: Duration::ZERO, ready: Err("no card".into()), played: Mutex::new(vec![]), fail: None, gate: None, gate_cv: Condvar::new() });
+    let m = preview(&off, &SoundSettings::default(), Cue::Login, none).wait(iyakki_testkit::BUDGET).unwrap().say(Cue::Login);
     assert_eq!(m, Err("No sound output: no card".to_string()));
 }
 

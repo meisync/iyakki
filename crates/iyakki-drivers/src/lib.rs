@@ -18,6 +18,7 @@ pub mod ihex;
 pub mod known;
 pub mod macboard;
 pub mod modinfo;
+pub mod modpack;
 pub mod modsplit;
 pub mod pack;
 pub mod packfit;

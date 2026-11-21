@@ -92,6 +92,12 @@ impl View {
     }
 }
 
+/// The certificate the browser's own connection to `host:port` was given, read like [`probe`]'s answer; `None` when the browser has not
+/// completed a handshake with that site over its in-house HTTPS client (see [`crate::certseen`]).
+pub fn seen(host: &str, port: u16, now: i64) -> Option<Result<View, String>> {
+    crate::certseen::latest(host, port).map(|chain| view(host, &chain, now, public_roots()))
+}
+
 /// Asks the site at `host:port` for its certificates and reads them (the real network).
 pub fn probe(host: &str, port: u16, now: i64) -> Result<View, String> {
     let chain = crate::pintls::peer_chain(host, port)?;

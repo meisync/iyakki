@@ -28,6 +28,17 @@ impl Probe {
             Probe::Seen(_) => "not installed".into(),
         }
     }
+    /// The chip of a service row that has no install record of its own: running outside Store when the cluster shows it, an honest "no
+    /// cluster chosen" (or "cluster not answering") when the cluster was never asked, otherwise "not installed". (A Gitea put in by Store ->
+    /// Setup read "not installed" on a machine whose account had no cluster choice, while the Registry row said "no cluster chosen".)
+    pub fn service_chip(&self, service: &str) -> (String, bool) {
+        match self {
+            Probe::NoCluster => ("no cluster chosen".into(), false),
+            Probe::Failed(_) => ("cluster not answering".into(), false),
+            Probe::Seen(_) if self.has(service) => ("running (installed outside Store)".into(), true),
+            Probe::Seen(_) => ("not installed".into(), false),
+        }
+    }
     /// Is the service with this id (`gitea`, the private store's id) running in the cluster?
     pub fn has(&self, service: &str) -> bool {
         match self {
@@ -74,6 +85,13 @@ pub fn probe(run: Arc<dyn Runner>, choice: Option<&Choice>) -> Probe {
     }
     let has = |ns: &str| o.stdout.lines().any(|l| l.trim() == ns);
     Probe::Seen(Seen { gitea: has(GITEA_NS), store: has(STORE_NS), registry: has(REGISTRY_NS) })
+}
+
+/// The cluster the Platform services list reads: the person's saved choice, else the cluster IYAKKI manages on this machine when its
+/// kubeconfig exists. Without this fallback a Gitea running in the machine's own k3s read "not installed" on every computer where
+/// nobody had saved a choice (hardware run 2026-11-20, F-APPS-50). The context stays empty: kubectl uses the file's own current one.
+pub fn effective_choice(saved: Option<Choice>, machine_kubeconfig: Option<&std::path::Path>) -> Option<Choice> {
+    saved.or_else(|| machine_kubeconfig.filter(|p| p.is_file()).map(|p| Choice { kubeconfig: p.display().to_string(), context: String::new() }))
 }
 
 /// A probe kept for [`FRESH`].
@@ -141,6 +159,32 @@ mod tests {
         let p = probe(Arc::new(Fake(Out::default())), None);
         assert_eq!(p, Probe::NoCluster);
         assert_eq!(p.registry_text(), "no cluster chosen");
+    }
+    #[test]
+    fn no_saved_choice_falls_back_to_the_machine_cluster_when_its_kubeconfig_exists() {
+        let d = std::env::temp_dir().join(format!("iyakki-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let k = d.join("kubeconfig");
+        std::fs::write(&k, "x").unwrap();
+        let c = effective_choice(None, Some(&k)).unwrap();
+        assert_eq!(c.kubeconfig, k.display().to_string());
+        assert_eq!(c.context, "");
+        // a saved choice always wins; no file and no choice means no cluster
+        assert_eq!(effective_choice(Some(ch()), Some(&k)), Some(ch()));
+        assert_eq!(effective_choice(None, Some(&d.join("missing"))), None);
+        assert_eq!(effective_choice(None, None), None);
+        // and the probe on that fallback sees the Gitea the cluster runs
+        let p = probe(Arc::new(Fake(ok("iyakki-gitea\nkube-system\n"))), effective_choice(None, Some(&k)).as_ref());
+        assert!(p.has("gitea"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    #[test]
+    fn a_service_row_does_not_say_not_installed_when_the_cluster_was_never_asked() {
+        assert_eq!(Probe::NoCluster.service_chip("gitea"), ("no cluster chosen".to_string(), false));
+        assert_eq!(Probe::Failed("timed out".into()).service_chip("gitea").0, "cluster not answering");
+        let seen = |gitea| Probe::Seen(Seen { gitea, store: false, registry: false });
+        assert_eq!(seen(true).service_chip("gitea"), ("running (installed outside Store)".to_string(), true));
+        assert_eq!(seen(false).service_chip("gitea"), ("not installed".to_string(), false));
     }
     #[test]
     fn freshness() {

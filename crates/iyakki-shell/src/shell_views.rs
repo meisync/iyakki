@@ -5,8 +5,8 @@
 //! How a switch works: the shell has one live "screen" (the open app or the launcher), a workspace of panes when the person split the
 //! display, and one app kept aside for Back. Those three are the *content* of a view. Switching moves them into the view being
 //! left, and installs the target view's (or a fresh launcher the first time, with the apps of its template). Nothing is closed: the
-//! apps of the other views stay as they are and come back as they were. Apps of a hidden view are not drawn and get no heartbeat;
-//! work they started (a download, a run) goes on in the background.
+//! apps of the other views stay as they are and come back as they were. Apps of a hidden view are not drawn and get a slow heartbeat
+//! (one tick in twenty); work they started (a download, a run) goes on in the background. The other displays' panes switch with the view.
 //!
 //! Keys: Ctrl+Alt+Super+1..9 jump, Ctrl+Alt+PageUp / PageDown (browser-style) and Control+Command+Left / Right (Mac-style) step. The
 //! person picks which step set is on in Settings, Desktop views. None of them is the lock and sign-out chords (Control+Command+L and Q) or a pane key.
@@ -31,7 +31,13 @@ struct Slot {
     custom_open: Option<String>,
     custom_at: u64,
     stash: Option<(Box<dyn App>, PApp)>,
+    /// The working spaces of the other displays (the working display's own is `ws`).
+    others: (Vec<Option<panes_impl::Workspace>>, usize),
 }
+
+/// A view that is not showing gets one heartbeat in this many shell ticks (it is not drawn): enough for an app to move its own state
+/// along (a finished download, a changed list), little enough to cost nothing.
+const HIDDEN_BEAT_EVERY: u64 = 20;
 
 impl Shell {
     /// Every app held by a view that is not showing (its screen, its panes and its stash).
@@ -46,6 +52,47 @@ impl Shell {
             if let Some(ws) = &mut slot.ws {
                 ws.each_app(f);
             }
+            for ws in slot.others.0.iter_mut().flatten() {
+                ws.each_app(f);
+            }
+        }
+    }
+
+    /// The slow heartbeat of the apps of the views that are not showing (every [`HIDDEN_BEAT_EVERY`] ticks): one `Tick` each, no
+    /// drawing. An app that panics on it is closed (its place becomes a launcher or an empty pane) and said so, as for a shown app.
+    pub(super) fn views_hidden_beat(&mut self) {
+        if self.session.is_none() || self.tick % HIDDEN_BEAT_EVERY != 0 || self.views.slots.is_empty() {
+            return;
+        }
+        let Some(cx) = self.cx() else { return };
+        let mut crashed: Vec<&'static str> = Vec::new();
+        let beat = |app: &mut Box<dyn App>| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.handle(&Event::Tick, &cx))).is_ok();
+        for slot in self.views.slots.values_mut() {
+            if let Screen::App(app, _) = &mut slot.screen {
+                if !beat(app) {
+                    crashed.push("an app of another view");
+                    slot.screen = Screen::Launcher;
+                }
+            }
+            if let Some((app, _)) = &mut slot.stash {
+                if !beat(app) {
+                    crashed.push("an app of another view");
+                    slot.stash = None;
+                }
+            }
+            for ws in slot.ws.iter_mut().chain(slot.others.0.iter_mut().flatten()) {
+                ws.each_content(&mut |c| {
+                    if let Some((app, _)) = c {
+                        if !beat(app) {
+                            crashed.push("an app of another view");
+                            *c = None;
+                        }
+                    }
+                });
+            }
+        }
+        if !crashed.is_empty() {
+            self.say_info("An app in another view stopped and was closed");
         }
     }
 }
@@ -61,6 +108,14 @@ pub(super) struct ViewsUi {
     restoring: bool,
 }
 
+#[cfg(test)]
+impl ViewsUi {
+    /// Whether view `id` holds content that is not showing (a test reads it).
+    pub(super) fn has_slot_for_test(&self, id: u32) -> bool {
+        self.slots.contains_key(&id)
+    }
+}
+
 impl Default for ViewsUi {
     fn default() -> ViewsUi {
         ViewsUi { model: Views::default(), cur: 1, slots: HashMap::new(), pending: None, restoring: false }
@@ -74,12 +129,14 @@ impl Shell {
     pub(super) fn views_sign_in(&mut self) {
         let Some(s) = self.session.as_ref() else { return };
         let model = Views::load(self.env.data_dir(), &s.user);
+        crate::panes::set_custom_step(model.custom_keys.as_ref().map(|c| (c.prev.as_str(), c.next.as_str())));
         self.views = ViewsUi { cur: model.active, model, slots: HashMap::new(), pending: None, restoring: false };
         self.views_show_content(self.views.cur);
     }
 
     /// Forget the live apps of every view (they are dropped, the saved views stay).
     pub(super) fn views_sign_out(&mut self) {
+        crate::panes::set_custom_step(None);
         self.views = ViewsUi::default();
     }
 
@@ -91,6 +148,7 @@ impl Shell {
         if model == self.views.model {
             return;
         }
+        crate::panes::set_custom_step(model.custom_keys.as_ref().map(|c| (c.prev.as_str(), c.next.as_str())));
         self.views.slots.retain(|id, _| model.get(*id).is_some());
         if model.get(self.views.cur).is_none() {
             self.views.cur = model.views[0].id;
@@ -114,10 +172,54 @@ impl Shell {
         let Some(user) = self.session.as_ref().map(|s| s.user.clone()) else { return };
         let dir = self.env.data_dir().to_path_buf();
         let to = iyakki_shared::views::take_switch(&dir, &user);
+        let share = iyakki_shared::views::take_share(&dir, &user);
         self.views_reload();
+        if let Some(id) = share {
+            self.views_share(id);
+        }
         if let Some(id) = to {
             self.views_goto(id);
         }
+    }
+
+    /// Show the app that is open full screen now in view `to` as well (F-VIEW-02): one instance, two views. The live app is wrapped in a shared
+    /// holder (`SharedApp`) that both views draw from, so what is typed in one is there in the other, and the views take turns on the one
+    /// instance. Refused, with a sentence, when no app is open full screen, when `to` is this view, or when `to` already has an app open.
+    /// An app that sits in a pane of a split window is not shared (only the full-screen app is).
+    pub(super) fn views_share(&mut self, to: u32) {
+        if self.session.is_none() || self.lockui.active {
+            return;
+        }
+        let Some(target) = self.views.model.get(to).map(|v| v.name.clone()) else { return self.say_info("There is no such view") };
+        if to == self.views.cur {
+            return self.say_info("That view is the one showing");
+        }
+        if !matches!(self.screen, Screen::App(..)) {
+            return self.say_info("Open an app first, then share it");
+        }
+        if let Some(slot) = self.views.slots.get(&to) {
+            if matches!(slot.screen, Screen::App(..)) {
+                return self.say_info(format!("{target} already has an app open: close it there first"));
+            }
+        }
+        let Screen::App(app, papp) = std::mem::replace(&mut self.screen, Screen::Launcher) else { return };
+        let (mine, other): (Box<dyn App>, Box<dyn App>) = match app.share_handle() {
+            Some(other) => (app, other),
+            None => crate::apps::shared_app::SharedApp::pair(app),
+        };
+        let id = papp.id();
+        self.screen = Screen::App(mine, papp);
+        match self.views.slots.get_mut(&to) {
+            Some(slot) => slot.screen = Screen::App(other, papp),
+            None => {
+                self.views.slots.insert(to, Slot { ws: None, screen: Screen::App(other, papp), custom_open: None, custom_at: 0, stash: None, others: (Vec::new(), 0) });
+            }
+        }
+        if let Some(s) = &self.session {
+            self.env.audit.record(&s.user, "view.share", &format!("{id} in {target}"));
+        }
+        self.say_info(format!("{} is shown in {target} as well", id.to_uppercase()));
+        mark_stale!(self);
     }
 
     pub(super) fn views_save(&self) {
@@ -139,6 +241,15 @@ impl Shell {
                 let set = self.views.model.key_set;
                 if (mac && !set.mac()) || (!mac && !set.browser()) {
                     return self.say_info("That key is off (Settings, Desktop views, Keys)");
+                }
+                match self.views.model.step(back) {
+                    Some(id) => id,
+                    None => return self.say_info("Only one view"),
+                }
+            }
+            LayoutKey::ViewStepCustom { back } => {
+                if self.views.model.custom_keys.is_none() {
+                    return self.say_info("Your own step keys are off (Settings, Desktop views, or ask the assistant)");
                 }
                 match self.views.model.step(back) {
                     Some(id) => id,
@@ -204,7 +315,9 @@ impl Shell {
         if let Some(l) = Self::panes_describe(ws.as_ref(), &screen) {
             self.views.model.remember(from, l);
         }
-        let leaving = Slot { ws, screen, custom_open: self.custom_open.take(), custom_at: std::mem::take(&mut self.custom_at), stash: self.stash.take() };
+        let leaving = Slot { ws, screen, custom_open: self.custom_open.take(), custom_at: std::mem::take(&mut self.custom_at), stash: self.stash.take(), others: self.others_take() };
+        // the other displays keep their own panes per view; the new view starts with an empty working space on each of them
+        let displays = leaving.others.0.len();
         self.views.slots.insert(from, leaving);
         self.ctx = None;
         self.help = false;
@@ -219,8 +332,10 @@ impl Shell {
                 self.custom_at = slot.custom_at;
                 self.stash = slot.stash;
                 self.panes_put_for_view(slot.ws);
+                self.others_put(Some(slot.others), displays);
             }
             None => {
+                self.others_put(None, displays);
                 self.panes_put_for_view(None);
                 self.views_show_content(to);
             }
@@ -279,6 +394,19 @@ impl Shell {
             if self.views.model.remember(cur, l) {
                 self.views_save();
             }
+        }
+    }
+
+    /// A refresh of the resume ticket also keeps the arrangement showing now, so a shell that is killed (no sign-out) is put back with its
+    /// window panes (F-SHELL-65). Written only when it differs from what the file holds; a no-op when remembering is off.
+    pub(super) fn views_remember_for_resume(&mut self) {
+        if self.session.is_none() || !self.views.model.remember_layout {
+            return;
+        }
+        let Some(l) = Self::panes_describe(self.panes.ws.as_ref(), &self.screen) else { return };
+        let cur = self.views.cur;
+        if self.views.model.get(cur).and_then(|v| v.layout.as_ref()) != Some(&l) && self.views.model.remember(cur, l) {
+            self.views_save();
         }
     }
 

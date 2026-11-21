@@ -391,7 +391,6 @@ fn the_reason_there_is_no_hotspot_is_said_in_words_and_a_usable_card_says_nothin
     // two unusable radios give at most two distinct sentences, joined
     let r = hotspot_unavailable(&[one(no_ap_card()), one(brcmfmac()), one(no_ap_card())], "US", false).unwrap();
     assert!(r.contains("cannot work as an access point") && r.contains("passphrase"), "{r}");
-    // the software-handshake card (Intel here) is a card of its own only: said so
-    let r = hotspot_unavailable(&[one(intel_world())], "US", false).unwrap();
-    assert!(r.contains("handshake") || r.contains("same time"), "{r}");
+    // the software-handshake card (Intel here): this computer runs the handshake and SAE (`wifi_ap_sw`), so it is available
+    assert_eq!(hotspot_unavailable(&[one(intel_world())], "US", false), None);
 }

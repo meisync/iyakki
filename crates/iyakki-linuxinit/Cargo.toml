@@ -1,0 +1,16 @@
+[package]
+name = "iyakki-linuxinit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Base-layer parts of the Linux apps sandbox that the shared crate and the core-local crate both need: the program side (linuxapp-init), the sandbox network plan, the device node choice, the IPv4 forwarding switch and the never-panicking print macros."
+
+[dependencies]
+iyakki-fw = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+
+[features]
+# test-only hooks for the tests of other crates (forces the move way of the sandbox root); never on in a product build
+testing = []

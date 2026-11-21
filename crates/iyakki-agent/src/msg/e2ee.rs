@@ -21,6 +21,36 @@ pub struct AddonRequest {
     pub body: Value,
 }
 
+/// One device verification (SAS) as the person sees it: who, how far it got and, once both keys are in, the strings to compare with the
+/// other device (seven emoji with their English names, or three numbers). The strings are not secret: they are meant to be read aloud.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Verification {
+    pub txn: String,
+    pub user: String,
+    pub device: String,
+    /// One short sentence: asked, waiting for you, compare the strings, verified, cancelled (with the reason).
+    pub state: String,
+    /// What the person may do next: `accept`, `confirm`, or nothing.
+    pub next: &'static str,
+    pub emoji: Vec<(String, String)>,
+    pub decimals: Option<[u16; 3]>,
+}
+
+/// Another device of the same person asked this one for the key to a room's messages (`m.room_key_request`). Nothing is sent before the
+/// person says yes on a card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyAsk {
+    /// What the answer names (device and request together).
+    pub id: String,
+    pub device: String,
+    pub room: String,
+    pub state: String,
+    /// `answer` while the person's yes or no is awaited, else nothing.
+    pub next: &'static str,
+    /// Did this device verify the asking device by SAS?
+    pub verified: bool,
+}
+
 pub trait E2eeAddon: Send + Sync {
     /// Shown in Settings ("Matrix end-to-end encryption add-on 0.3").
     fn name(&self) -> String;
@@ -30,6 +60,79 @@ pub trait E2eeAddon: Send + Sync {
     fn decrypt(&self, room_id: &str, event: &Value) -> Result<Value, String>;
     /// Look at a whole sync response (to-device events, device lists, one-time-key counts) and say what the homeserver should be told.
     fn on_sync(&self, sync: &Value) -> Result<Vec<AddonRequest>, String>;
+    /// Does this add-on share the room key with the members' devices itself (it then wants [`prepare_send`](Self::prepare_send) and
+    /// [`on_response`](Self::on_response) used before a message goes into an encrypted room)?
+    fn shares_keys(&self) -> bool {
+        false
+    }
+    /// Before a message goes into an encrypted room: what must be asked of the homeserver so that every device of the joined `members`
+    /// has the room's key (device lookup, one-time key claim, delivery). Empty when nothing is needed.
+    fn prepare_send(&self, _room_id: &str, _members: &[String]) -> Result<Vec<AddonRequest>, String> {
+        Ok(Vec::new())
+    }
+    /// Undecryptable `event` of `room_id` (its key has not arrived): what to ask the person's own other devices so that one of them sends
+    /// the key (`m.room_key_request`). At most once per session in a run. Empty when the add-on does not ask.
+    fn key_requests(&self, _room_id: &str, _event: &Value) -> Vec<AddonRequest> {
+        Vec::new()
+    }
+    /// The verifications in progress or finished in this run (newest last).
+    fn verifications(&self) -> Vec<Verification> {
+        Vec::new()
+    }
+    /// Ask one device of `user` to verify (`m.key.verification.request`); the messages go out with the next sync.
+    fn verify_start(&self, _user: &str, _device: &str) -> Result<(), String> {
+        Err("this add-on does not verify devices".into())
+    }
+    /// The person accepts a verification the other device asked for.
+    fn verify_accept(&self, _txn: &str) -> Result<(), String> {
+        Err("this add-on does not verify devices".into())
+    }
+    /// The person says the strings do match (`true`) or do not (`false`: the verification is cancelled as mismatched).
+    fn verify_confirm(&self, _txn: &str, _matches: bool) -> Result<(), String> {
+        Err("this add-on does not verify devices".into())
+    }
+    /// The person ends a verification.
+    fn verify_cancel(&self, _txn: &str) -> Result<(), String> {
+        Err("this add-on does not verify devices".into())
+    }
+    /// Make this person's cross-signing keys on this device and upload them (the homeserver asks for the account password again: it is
+    /// typed by the person on the screen and passed here, never through the chat). The messages go out with the next sync.
+    fn cross_signing_setup(&self, _password: &str) -> Result<(), String> {
+        Err("this add-on does not make cross-signing keys".into())
+    }
+    /// Sign another person's master key with the user-signing key (the person has checked that key some other way) and upload the signature
+    /// with the next sync; their devices then count as verified through the chain while that master key stays the same.
+    fn cross_signing_trust_user(&self, _user: &str) -> Result<(), String> {
+        Err("this add-on does not sign other people's keys".into())
+    }
+    /// One sentence on the cross-signing keys of this device.
+    fn cross_signing_state(&self) -> String {
+        "this add-on does not use cross-signing".into()
+    }
+    /// Requests of the person's other devices for a room key, waiting for the person or answered.
+    fn key_asks(&self) -> Vec<KeyAsk> {
+        Vec::new()
+    }
+    /// The person's answer to a [`KeyAsk`]: `true` sends the key (encrypted to that device only, with the next sync), `false` refuses.
+    fn key_ask_answer(&self, _id: &str, _allow: bool) -> Result<(), String> {
+        Err("this add-on does not answer key requests".into())
+    }
+    /// Whether this device verified that device of that user (kept in the vault).
+    fn is_verified(&self, _user: &str, _device: &str) -> bool {
+        false
+    }
+    /// The room key export file under a passphrase (the person typed it on the screen).
+    fn export_keys(&self, _passphrase: &str, _rounds: u32) -> Result<String, String> {
+        Err("this add-on cannot export keys".into())
+    }
+    /// Read an export file; returns how many sessions were added or improved.
+    fn import_keys(&self, _passphrase: &str, _text: &str) -> Result<usize, String> {
+        Err("this add-on cannot import keys".into())
+    }
+    /// The homeserver's answer (`status`, JSON body) to a request the add-on made; it may ask for the next one.
+    fn on_response(&self, _request: &AddonRequest, _status: u16, _response: &Value) -> Result<Vec<AddonRequest>, String> {
+        Ok(Vec::new())
+    }
 }
 
 static INSTALLED: RwLock<Option<Arc<dyn E2eeAddon>>> = RwLock::new(None);

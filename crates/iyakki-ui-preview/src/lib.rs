@@ -94,6 +94,7 @@ fn answer<A: UiApp>(req: Req, port: u16, session: &mut Session<A>) -> Answer {
         ("GET", "/displaylist.js") => (200, "text/javascript; charset=utf-8", RENDERER.as_bytes().to_vec()),
         // the client engine module and its glue, for the page's `?engine=wasm` mode (F-SDK-29)
         ("GET", "/engine.js") => (200, "text/javascript; charset=utf-8", iyakki_client_engine::GLUE_JS.as_bytes().to_vec()),
+        ("GET", "/uidisplay.js") => (200, "text/javascript; charset=utf-8", iyakki_client_engine::UIDISPLAY_JS.as_bytes().to_vec()),
         ("GET", "/engine.wasm") => (200, "application/wasm", iyakki_client_engine::WASM.to_vec()),
         ("GET", "/frame") => (200, TEXT, session.frame().into_bytes()),
         ("POST", "/event") => {

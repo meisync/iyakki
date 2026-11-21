@@ -1,0 +1,4 @@
+generate_image_traced
+media_index  # an Arc<Mutex<MediaIndex>> of the core: not data
+undo_all_parts  # a StoryStore of the UI is an argument
+use_all_parts

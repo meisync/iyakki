@@ -171,6 +171,12 @@ impl iyakki_agent_api::RadioApi for crate::radio::RadioPlayer {
     fn play(&self, station: &Station, allow: Arc<dyn Fn(&str) -> bool + Send + Sync>, play_cmd: &str) {
         crate::radio::RadioPlayer::play(self, station, allow, play_cmd)
     }
+    fn play_in(&self, station: &Station, allow: Arc<dyn Fn(&str) -> bool + Send + Sync>, play_cmd: &str, around: iyakki_tile_api::radio::Around) {
+        crate::radio::RadioPlayer::play_in(self, station, allow, play_cmd, around)
+    }
+    fn notice(&self) -> Option<String> {
+        crate::radio::RadioPlayer::notice(self)
+    }
     fn resume(&self) -> bool {
         crate::radio::RadioPlayer::resume(self)
     }

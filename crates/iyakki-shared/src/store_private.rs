@@ -1,7 +1,7 @@
 //! What the Private store card shows (data only). Reading the install and the store config stays in `iyakki_agent::store::privatestore`.
 
 /// What the Private store card shows.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StatusInfo {
     /// The deployed instance, if any (`id`, catalog address, state word).
     pub instance: Option<(String, String)>,

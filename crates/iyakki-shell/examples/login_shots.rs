@@ -74,7 +74,7 @@ fn main() {
     store.create_first_admin("root", "rootpass12").unwrap();
     let up: Arc<dyn Upstream> = Arc::new(Offline);
     let env = ShellEnv {
-        store: Arc::new(Mutex::new(store)),
+        store: iyakki_shell::accounts::UsersRef::of_store(&Arc::new(Mutex::new(store))),
         audit: Arc::new(AuditLog::new(&d.join("audit.log"))),
         host: Arc::new(Host),
         cfg: iyakki_agent::config::AiConfig::parse("").unwrap(),

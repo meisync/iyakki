@@ -1,10 +1,10 @@
 //! The shell's side of the drive banner: reading the watcher's state on the heartbeat, the buttons (Reconnect now, Restart, Check the
 //! drive, Minimise) and writing the RAM event list to the audit log once the drive is back. What the card looks like is
-//! `lossbar.rs`; the states and the wording are `iyakki_storage::loss`'s.
+//! `lossbar.rs`; the states and the wording are `iyakki_core_local::storage::loss`'s.
 
 use crate::stale_stats::mark_stale;
 use super::*;
-use iyakki_storage::loss;
+use iyakki_core_local::storage::loss;
 
 impl Shell {
     /// The heartbeat's work (about twice a second): look at the published state, notice a change, flush the RAM events.

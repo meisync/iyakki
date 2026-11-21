@@ -299,6 +299,12 @@ impl StoreServer {
         }
         let Ok(mut f) = std::fs::File::open(self.blob_path(sha)) else { return none(404, "no such blob") };
         let Ok(len) = f.metadata().map(|m| m.len()) else { return none(404, "no such blob") };
+        // a person with their own read token is named in the audit log for the start of a download (not for each resumed piece, not HEAD)
+        if r.method == "GET" && r.headers.get("range").is_none_or(|h| h.trim().starts_with("bytes=0-")) {
+            if let Some(who) = self.reader(r).filter(|w| !matches!(w.as_str(), "" | "shared" | "publisher")) {
+                self.audit(peer, &who, "blob.read", &format!("{sha} {len}"), "200");
+            }
+        }
         let etag = format!("\"{sha}\"");
         let mut headers = vec![("Accept-Ranges", "bytes".to_string()), ("ETag", etag.clone()), ("Cache-Control", "public, max-age=31536000, immutable".to_string()), ("X-Content-Type-Options", "nosniff".to_string())];
         let ranged = r.headers.get("range").filter(|_| r.headers.get("if-range").is_none_or(|v| v.trim() == etag));

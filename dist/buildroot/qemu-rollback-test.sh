@@ -16,6 +16,10 @@
 #         release N+1 stamped with a newer schema is read, not rewritten and not moved aside.
 # Boot 5  NEW again: nothing is rewritten (idempotent).
 #
+# REQUIRE_MIGRATION=1 makes boot 3 FAIL when NEW changed no schema file (a pair with no migration proves nothing about `.pre-v1`: use a pair where
+# a store changed shape, for example an alpha.1 or alpha.2 image as OLD). The copies are checked again after boot 4: running the previous version
+# must not remove or change a `.pre-v1` original (it is what a rollback of the DATA would restore).
+#
 # Exit codes: 0 PASS, 1 FAIL, 2 SKIP (an image lacks the `upgrade` stage), 3 not runnable here (no QEMU, missing image files, repack running).
 # Never writes to an image or to a real drive: the disk is a temporary file made with mke2fs -d. Needs qemu-system-x86_64, mke2fs, debugfs, e2fsck.
 set -eu
@@ -81,6 +85,8 @@ for f in $(cd "$W/snap2" && find . -type f ! -name '*.pre-v1' | sed 's|^\./||');
   dump "$f.pre-v1" | cmp -s - "$W/snap2/$f" || fail "NEW changed $f but $f.pre-v1 is missing or is not the original" "$W/l3"
 done
 echo "  after boot 3: $checked files checked, $changed changed by NEW, every changed .json file has its .pre-v1 original${others:+; other files changed (runtime stamps):$others}"
+if [ -n "${REQUIRE_MIGRATION:-}" ] && [ "$changed" -eq 0 ]; then fail "REQUIRE_MIGRATION is set but NEW changed no schema file: this build pair has no migration" "$W/l3"; fi
+migrated="$(cd "$W/snap2" && find . -type f ! -name '*.pre-v1' -name '*.json' | sed 's|^\./||')"
 echo "boot 3 ok"
 
 echo "--- boot 4: OLD again, on the volume NEW touched (the previous version in the boot menu)"
@@ -90,6 +96,11 @@ boot "$OLD" upgrade "$W/l4"
 if grep -aq 'IYAKKI-SELFTEST upgrade end' "$W/l4"; then reads "$W/l4"; fi
 clean "boot 4" "$W/l4"
 dump settings.json | cmp -s - "$W/settings.new" || fail "OLD rewrote settings.json that NEW stamped (a newer file must be read, not rewritten)" "$W/l4"
+# the originals NEW kept are still there and still byte for byte what they were: the previous version did not touch them
+for f in $migrated; do
+  dump "$f.pre-v1" >"$W/pre.tmp"
+  if [ -s "$W/pre.tmp" ]; then cmp -s "$W/pre.tmp" "$W/snap2/$f" || fail "$f.pre-v1 changed while the previous version ran" "$W/l4"; fi
+done
 echo "boot 4 ok"
 
 echo "--- boot 5: NEW again, nothing is rewritten"

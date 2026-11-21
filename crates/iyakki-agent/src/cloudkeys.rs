@@ -37,9 +37,8 @@ fn unhex32(s: &str) -> Option<[u8; 32]> {
 
 /// Random bytes from the system.
 pub fn random<const N: usize>() -> Result<[u8; N], String> {
-    use std::io::Read;
     let mut b = [0u8; N];
-    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).map_err(|e| format!("no random numbers: {e}"))?;
+    iyakki_sec::random_fill(&mut b).map_err(|e| format!("no random numbers: {e}"))?;
     Ok(b)
 }
 

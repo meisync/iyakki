@@ -75,6 +75,11 @@ pub trait ServicesFacetB5: Send + Sync {
     fn lab_frames(&self) -> Arc<dyn iyakki_shared::lab::FrameSource> {
         Arc::new(NoFrames)
     }
+    /// LAB: the video frame source for one person. Over the core socket the source runs in the core and judges every file by that person's file
+    /// rules (D-SPLIT-03-APPS2); in process it is the plain source.
+    fn lab_frames_for(&self, _user: &str) -> Arc<dyn iyakki_shared::lab::FrameSource> {
+        self.lab_frames()
+    }
     /// TALES pictures: an external agent (Claude Code and the like) used as a plain text model, one request in and one text out.
     #[allow(clippy::too_many_arguments)]
     fn scene_agent_chat(
@@ -205,6 +210,9 @@ pub trait DevCluster: Send + Sync {
     fn set_fixed_node_ip(&self, on: bool, user: &str) -> Result<(), String>;
     fn fixed_node_ip_enabled(&self) -> bool;
     fn set_autostart(&self, on: bool, user: &str) -> Result<(), String>;
+    /// This machine stays offline on purpose: k3s gets a default route on IYAKKI's own dummy interface when no real one exists.
+    fn set_offline_on_purpose(&self, on: bool, user: &str) -> Result<(), String>;
+    fn offline_on_purpose(&self) -> bool;
     /// `kubectl` on this cluster (read only calls, the usual output limit).
     fn kubectl(&self, args: &[&str]) -> iyakki_shared::wsexec::Out;
     /// The same cluster as the explorer of the model hosts sees it.

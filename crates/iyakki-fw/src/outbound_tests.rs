@@ -170,3 +170,137 @@ fn the_typed_settings_become_table_specs_with_ranges_reject_counter_dnat_and_inv
     let bad = OutConfig { enabled: true, block_by_default: true, ..Default::default() };
     assert!(to_table_specs(&bad).is_err());
 }
+
+fn many(dests: &[&str], verdict: Verdict) -> OutConfig {
+    let mut c = OutConfig { enabled: true, block_by_default: true, ..Default::default() };
+    for (i, d) in dests.iter().enumerate() {
+        c.rules.push(rule(i as u32 + 1, verdict, d, Proto::Tcp, "443"));
+    }
+    c
+}
+
+#[test]
+fn neighbouring_rules_that_differ_only_in_destination_become_one_interval_set() {
+    use crate::nl::tablegen::{encode_apply, Expr};
+    let cfg = many(&["192.0.2.1", "192.0.2.2", "198.51.100.0/24", "203.0.113.5-203.0.113.9", "198.51.100.128/25", "2001:db8::/32", "2001:db9::1", "2001:dba::1", "2001:dbb::1"], Verdict::Allow);
+    let specs = to_table_specs(&cfg).unwrap();
+    let t = &specs[0];
+    assert_eq!(t.sets.len(), 2);
+    let v4 = t.sets.iter().find(|s| s.v4).unwrap();
+    // 192.0.2.1 and .2 touch and join; the /25 lies inside the /24; the range stays
+    assert_eq!(v4.ranges.len(), 3);
+    assert_eq!(v4.ranges[0], ("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap()));
+    assert_eq!(v4.ranges[1], ("198.51.100.0".parse().unwrap(), "198.51.100.255".parse().unwrap()));
+    let rules = &t.chains[0].rules;
+    let used: Vec<_> = rules.iter().filter(|r| r.iter().any(|e| matches!(e, Expr::DaddrSet(_)))).collect();
+    assert_eq!(used.len(), 2);
+    assert!(used.iter().all(|r| r.contains(&Expr::L4(6)) && r.contains(&Expr::Dport(443)) && r.last() == Some(&Expr::Accept)));
+    assert!(!rules.iter().any(|r| r.iter().any(|e| matches!(e, Expr::Daddr(..) | Expr::DaddrRange(..)))));
+    let (b, acks) = encode_apply(t, 1).unwrap();
+    assert!(!b.is_empty() && acks > 3);
+}
+
+#[test]
+fn a_short_run_a_different_verdict_or_a_gap_keeps_the_rules_as_typed() {
+    use crate::nl::tablegen::Expr;
+    let three = to_table_specs(&many(&["192.0.2.1", "192.0.2.2", "192.0.2.3"], Verdict::Allow)).unwrap();
+    assert!(three[0].sets.is_empty());
+    // an allow in the middle of blocks stops the run: order is first match wins
+    let mut c = many(&["192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4", "192.0.2.5"], Verdict::Block);
+    c.rules[2].verdict = Verdict::Allow;
+    let s = to_table_specs(&c).unwrap();
+    assert!(s[0].sets.is_empty());
+    let dests: Vec<_> = s[0].chains[0].rules.iter().filter_map(|r| r.iter().find_map(|e| if let Expr::Daddr(a, 32) = e { Some(a.to_string()) } else { None })).collect();
+    assert_eq!(dests, ["192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4", "192.0.2.5"]);
+}
+
+#[test]
+fn the_set_pass_keeps_every_address_it_was_given_and_adds_none() {
+    let (rules, sets) = merge_into_interval_sets(Vec::new());
+    assert!(rules.is_empty() && sets.is_empty());
+    let u = union_spans(vec![("10.0.0.5".parse().unwrap(), "10.0.0.9".parse().unwrap()), ("10.0.0.0".parse().unwrap(), "10.0.0.4".parse().unwrap()), ("10.0.1.0".parse().unwrap(), "10.0.1.0".parse().unwrap())]);
+    assert_eq!(u, vec![("10.0.0.0".parse().unwrap(), "10.0.0.9".parse().unwrap()), ("10.0.1.0".parse().unwrap(), "10.0.1.0".parse().unwrap())]);
+    assert_eq!(span_of(&crate::nl::tablegen::Expr::Daddr("0.0.0.0".parse().unwrap(), 0)).unwrap().1.to_string(), "255.255.255.255");
+}
+
+fn pairs(items: &[(&str, &str)], verdict: Verdict) -> OutConfig {
+    let mut c = OutConfig { enabled: true, block_by_default: true, ..Default::default() };
+    for (i, (d, p)) in items.iter().enumerate() {
+        c.rules.push(rule(i as u32 + 1, verdict, d, Proto::Tcp, p));
+    }
+    c
+}
+
+fn has(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+#[test]
+fn neighbouring_rules_that_differ_in_address_and_port_become_one_address_and_port_set() {
+    use crate::nl::tablegen::{encode_apply, Expr};
+    let cfg = pairs(&[("192.0.2.1", "22"), ("192.0.2.2", "80"), ("198.51.100.0/24", "8000-8100"), ("203.0.113.5-203.0.113.9", "443"), ("2001:db8::1", "22"), ("2001:db8::2", "22"), ("2001:db8::3", "80"), ("2001:db8::4", "443")], Verdict::Allow);
+    let specs = to_table_specs(&cfg).unwrap();
+    let t = &specs[0];
+    let pair_sets: Vec<_> = t.sets.iter().filter(|s| !s.concat.is_empty()).collect();
+    assert_eq!(pair_sets.len(), 2, "one per family");
+    let v4 = pair_sets.iter().find(|s| s.v4).unwrap();
+    assert_eq!(v4.concat.len(), 4);
+    assert!(v4.concat.contains(&(("198.51.100.0".parse().unwrap(), "198.51.100.255".parse().unwrap()), (8000, 8100))));
+    assert!(v4.concat.contains(&(("192.0.2.1".parse().unwrap(), "192.0.2.1".parse().unwrap()), (22, 22))));
+    let rules = &t.chains[0].rules;
+    let used: Vec<_> = rules.iter().filter(|r| r.iter().any(|e| matches!(e, Expr::DaddrDportSet(_)))).collect();
+    assert_eq!(used.len(), 2);
+    // the protocol step stays before the lookup, the verdict stays last, no address or port step is left beside it
+    for r in &used {
+        let l4 = r.iter().position(|e| *e == Expr::L4(6)).unwrap();
+        let look = r.iter().position(|e| matches!(e, Expr::DaddrDportSet(_))).unwrap();
+        assert!(l4 < look && r.last() == Some(&Expr::Accept));
+        assert!(!r.iter().any(|e| matches!(e, Expr::Daddr(..) | Expr::DaddrRange(..) | Expr::Dport(_) | Expr::DportRange(..))));
+    }
+    // it all encodes, and the set and the lookup are the ones the kernel wants
+    let (b, acks) = encode_apply(t, 1).unwrap();
+    assert!(acks > 5);
+    let m = crate::nl::split_messages(&b);
+    let newsets: Vec<_> = m.iter().filter(|(ty, _)| ty & 0xff == 9).map(|(_, p)| *p).collect();
+    assert_eq!(newsets.len(), 2);
+    assert!(newsets.iter().all(|s| has(s, &[8, 0, 3, 0, 0, 0, 0, 0x84])), "flags interval + concatenation");
+    let rule_bytes: Vec<_> = m.iter().filter(|(ty, _)| ty & 0xff == 6).map(|(_, p)| *p).collect();
+    // IPv4: the address into register 8, the port into register 9
+    assert!(rule_bytes.iter().any(|r| has(r, &[8, 0, 1, 0, 0, 0, 0, 9, 8, 0, 2, 0, 0, 0, 0, 2, 8, 0, 3, 0, 0, 0, 0, 2, 8, 0, 4, 0, 0, 0, 0, 2])));
+    // IPv6: the address takes four words, so the port goes into register 12
+    assert!(rule_bytes.iter().any(|r| has(r, &[8, 0, 1, 0, 0, 0, 0, 12, 8, 0, 2, 0, 0, 0, 0, 2, 8, 0, 3, 0, 0, 0, 0, 2, 8, 0, 4, 0, 0, 0, 0, 2])));
+    assert!(rule_bytes.iter().any(|r| has(r, b"lookup\0")));
+}
+
+#[test]
+fn a_run_with_overlapping_pairs_a_short_run_or_another_verdict_stays_as_typed() {
+    use crate::nl::tablegen::Expr;
+    let none = |c: &OutConfig| to_table_specs(c).unwrap()[0].sets.iter().all(|s| s.concat.is_empty());
+    // the same address twice with overlapping ports: the kernel's set would refuse it
+    assert!(none(&pairs(&[("192.0.2.1", "80-90"), ("192.0.2.1", "85-95"), ("192.0.2.2", "22"), ("192.0.2.3", "22"), ("192.0.2.4", "22")], Verdict::Allow)));
+    // three are too few
+    assert!(none(&pairs(&[("192.0.2.1", "22"), ("192.0.2.2", "80"), ("192.0.2.3", "443")], Verdict::Allow)));
+    // an allow in the middle of blocks stops the run (first match wins)
+    let mut c = pairs(&[("192.0.2.1", "22"), ("192.0.2.2", "80"), ("192.0.2.3", "443"), ("192.0.2.4", "53"), ("192.0.2.5", "25")], Verdict::Block);
+    c.rules[2].verdict = Verdict::Allow;
+    assert!(none(&c));
+    let kept = &to_table_specs(&c).unwrap()[0].chains[0].rules;
+    assert_eq!(kept.iter().filter(|r| r.iter().any(|e| matches!(e, Expr::Daddr(_, 32)))).count(), 5);
+}
+
+#[test]
+fn the_writer_refuses_a_lookup_without_its_set_or_its_protocol_and_a_set_in_the_wrong_family() {
+    use crate::nl::tablegen::{ChainKind, ChainSpec, Expr, Hook, SetSpec, TableSpec};
+    let mk = |sets: Vec<SetSpec>, rule: Vec<Expr>| TableSpec { name: "t_pairs".into(), sets, chains: vec![ChainSpec { name: "output".into(), kind: ChainKind::Filter, hook: Hook::Output, priority: 0, policy_accept: true, rules: vec![rule] }] };
+    let ip = |s: &str| -> IpAddr { s.parse().unwrap() };
+    let good = SetSpec { name: "p".into(), v4: true, timeout: false, members: vec![], ranges: vec![], concat: vec![((ip("10.0.0.1"), ip("10.0.0.1")), (80, 80))] };
+    assert!(mk(vec![good.clone()], vec![Expr::L4(6), Expr::DaddrDportSet("p".into()), Expr::Accept]).check().is_ok());
+    assert!(mk(vec![], vec![Expr::L4(6), Expr::DaddrDportSet("p".into()), Expr::Accept]).check().is_err(), "no such set");
+    assert!(mk(vec![good.clone()], vec![Expr::DaddrDportSet("p".into()), Expr::Accept]).check().is_err(), "no protocol first");
+    let plain = SetSpec { concat: vec![], ..good.clone() };
+    assert!(mk(vec![plain], vec![Expr::L4(6), Expr::DaddrDportSet("p".into()), Expr::Accept]).check().is_err(), "not an address and port set");
+    let wrong_family = SetSpec { concat: vec![((ip("::1"), ip("::1")), (80, 80))], ..good.clone() };
+    assert!(mk(vec![wrong_family], vec![Expr::Accept]).check().is_err());
+    let backwards = SetSpec { concat: vec![((ip("10.0.0.1"), ip("10.0.0.1")), (90, 80))], ..good };
+    assert!(mk(vec![backwards], vec![Expr::Accept]).check().is_err());
+}

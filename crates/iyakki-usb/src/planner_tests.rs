@@ -134,7 +134,16 @@ fn model_of(path: &Path, name: &str, size: u64, ss: u32, mounts: &str, usb: bool
 
 /// A template with a real FAT32 boot volume (kernel, RAM disk, boot menu).
 fn src(dir: &Path) -> SourceInfo {
-    let fat = mini_fat(512, 1, 40 * MIB, &[("BOOT/BZIMAGE", pseudo(700_001, 3)), ("BOOT/INITRD", pseudo(1_500_000, 4)), ("BOOT/GRUB/GRUB.CFG", b"menuentry \"IYAKKI\" {\n\tlinux /boot/bzImage console=tty0 quiet\n\tinitrd /boot/initrd\n}\n".to_vec())]);
+    src_with(dir, &[("BOOT/BZIMAGE", pseudo(700_001, 3)), ("BOOT/INITRD", pseudo(1_500_000, 4)), ("BOOT/GRUB/GRUB.CFG", b"menuentry \"IYAKKI\" {\n\tlinux /boot/bzImage console=tty0 quiet\n\tinitrd /boot/initrd\n}\n".to_vec())])
+}
+
+/// The same template for the aarch64 image: `Image` (an EFI stub) and `rootfs.cpio.gz` at the root of the boot volume, no GRUB.
+fn src_arm(dir: &Path) -> SourceInfo {
+    src_with(dir, &[("Image", pseudo(900_001, 5)), ("rootfs.cpio.gz", pseudo(1_200_000, 6))])
+}
+
+fn src_with(dir: &Path, files: &[(&str, Vec<u8>)]) -> SourceInfo {
+    let fat = mini_fat(512, 1, 40 * MIB, files);
     let path = dir.join("t.img");
     let mut t = template(&path);
     let p1_sectors = (fat.len() / 512) as u32;
@@ -156,21 +165,35 @@ fn spec(s: &SourceInfo) -> SourceSpec {
     apply::source_spec(s).unwrap()
 }
 
-/// A 40 MiB FAT32 volume like another system's EFI System Partition: `mkfs.fat` when installed, else a hand-made one.
+/// A 40 MiB FAT32 volume like another system's EFI System Partition, always hand-made (a host `mkfs.fat` writes its FSInfo sector
+/// differently from host to host: KI-706), with the other system's loaders added with our own writer.
 fn foreign_esp(dir: &Path) -> Vec<u8> {
     let p = dir.join("esp.img");
     let f = std::fs::File::create(&p).unwrap();
     f.set_len(40 * MIB).unwrap();
     drop(f);
-    let ok = std::process::Command::new("mkfs.fat").args(["-F", "32", "-s", "1", "-S", "512", "-n", "SYSTEM"]).arg(&p).output().map(|o| o.status.success()).unwrap_or(false);
-    let mut img = if ok {
-        std::fs::read(&p).unwrap()
-    } else {
-        eprintln!("mkfs.fat is not installed: using a hand-made FAT32");
-        let mut v = mini_fat(512, 1, 40 * MIB, &[]);
-        v[82..90].copy_from_slice(b"FAT32   ");
-        v
-    };
+    let mut img = mini_fat(512, 1, 40 * MIB, &[]);
+    img[82..90].copy_from_slice(b"FAT32   ");
+    // what a real formatter also writes: the extended boot signature (so the label in the boot sector counts), a backup of the boot
+    // sector (sector 6) and the FSInfo sector (sector 1) with the TRUE free-cluster count (the writer adjusts it by what it allocates)
+    img[66] = 0x29;
+    img[48..50].copy_from_slice(&1u16.to_le_bytes());
+    img[50..52].copy_from_slice(&6u16.to_le_bytes());
+    let (reserved, fatsz, total) = (u16::from_le_bytes([img[14], img[15]]) as usize, u32::from_le_bytes(img[36..40].try_into().unwrap()) as usize, u32::from_le_bytes(img[32..36].try_into().unwrap()) as usize);
+    let clusters = (total - reserved - 2 * fatsz) / img[13] as usize;
+    let entry = |i: usize| u32::from_le_bytes(img[reserved * 512 + 4 * i..][..4].try_into().unwrap()) & 0x0FFF_FFFF;
+    let free = (2..clusters + 2).filter(|i| entry(*i) == 0).count() as u32;
+    let next = (2..clusters + 2).find(|i| entry(*i) == 0).unwrap() as u32;
+    let mut fsinfo = vec![0u8; 512];
+    fsinfo[0..4].copy_from_slice(&0x4161_5252u32.to_le_bytes());
+    fsinfo[484..488].copy_from_slice(&0x6141_7272u32.to_le_bytes());
+    fsinfo[488..492].copy_from_slice(&free.to_le_bytes());
+    fsinfo[492..496].copy_from_slice(&next.to_le_bytes());
+    fsinfo[508..512].copy_from_slice(&[0, 0, 0x55, 0xAA]);
+    img[512..1024].copy_from_slice(&fsinfo);
+    let boot = img[..512].to_vec();
+    img[6 * 512..7 * 512].copy_from_slice(&boot);
+    img[7 * 512..8 * 512].copy_from_slice(&fsinfo);
     // the other system's loaders, added with our own writer (the same code the real install uses)
     let f = std::fs::OpenOptions::new().read(true).write(true).open(&p).unwrap();
     f.write_all_at(&img, 0).unwrap();
@@ -909,6 +932,78 @@ fn keep_esp_adds_only_our_folder_and_our_boot_entry() {
     assert_eq!(whole_file_hash(&path), h, "nothing changed");
 }
 
+#[test]
+fn an_aarch64_image_installs_beside_another_system_and_on_a_whole_disk_with_its_own_boot_files() {
+    let (dir, _guard) = scratch("apply-arm");
+    let s = src_arm(&dir);
+    assert_eq!(crate::imagearch::boot_files(["/Image", "/rootfs.cpio.gz"]).unwrap().arch, crate::imagearch::Arch::Aarch64);
+    // the long-named RAM disk counts as payload when the space is worked out (a reader of short aliases would miss it)
+    assert_eq!(spec(&s).payload_bytes, 900_001 + 1_200_000);
+    // beside another system: our folder on its ESP holds the aarch64 kernel stub and RAM disk, nothing else changes
+    let (path, old) = gpt_disk(&dir, "ka.img", 4 * GIB, 512, &[ps(1, 100, EFI, "EFI system partition", Fill::Raw(foreign_esp(&dir))), ps(101, 1000, MSDATA, "windows", Fill::Ntfs)]);
+    let before = old_partition_bytes(&path, &old, 512);
+    let esp_before: Vec<_> = {
+        let mut h = std::fs::File::open(&path).unwrap();
+        Fat32::open(&mut h, MIB).unwrap().walk().unwrap()
+    };
+    let efivars = dir.join("efivars");
+    std::fs::create_dir_all(&efivars).unwrap();
+    let m = model_of(&path, "sda", 4 * GIB, 512, "", false);
+    let req = Request { keep_esp: true, ..free_req() };
+    let plan = build_plan(&m, &req, &spec(&s), true).unwrap();
+    assert!(plan.internal && plan.keep_esp);
+    let env = ApplyEnv { efivars: Some(efivars), ..Default::default() };
+    run_apply(&path, &m, &req, &s, Some(&plan.digest()), &env).unwrap();
+    let mut h = std::fs::File::open(&path).unwrap();
+    let mut vol = Fat32::open(&mut h, MIB).unwrap();
+    let after = vol.walk().unwrap();
+    for it in &esp_before {
+        assert!(after.contains(it), "{} is unchanged", it.path);
+    }
+    let kernel = after.iter().find(|i| i.path == "/EFI/IYAKKI/KERNEL.EFI").unwrap().clone();
+    assert_eq!(vol.read_file(&kernel).unwrap(), pseudo(900_001, 5), "the aarch64 kernel stub arrived intact");
+    let initrd = after.iter().find(|i| i.path == "/EFI/IYAKKI/INITRD").unwrap().clone();
+    assert_eq!(vol.read_file(&initrd).unwrap(), pseudo(1_200_000, 6));
+    assert_eq!(old_partition_bytes(&path, &old, 512)[1], before[1], "the other system's partition is untouched");
+    // a whole disk: the boot volume of the new disk keeps both files under their long names
+    let (path, _) = gpt_disk(&dir, "wa.img", 5 * GIB, 512, &[ps(1, 1000, MSDATA, "old", Fill::Ntfs)]);
+    let m = model_of(&path, "sda", 5 * GIB, 512, "", true);
+    let req = Request { mode: Mode::WholeDisk, table: TableChoice::Gpt, ..Request::default() };
+    let plan = build_plan(&m, &req, &spec(&s), true).unwrap();
+    let rep = run_apply(&path, &m, &req, &s, Some(&plan.digest()), &ApplyEnv::default()).unwrap();
+    assert!(rep.verified);
+    let p = parsed(&path, 512, 5 * GIB);
+    let b = p.table.entries.iter().find(|e| e.name == "IYAKKI-BOOT").unwrap();
+    let mut h = std::fs::File::open(&path).unwrap();
+    let mut vol = Fat32::open(&mut h, b.first_lba * 512).unwrap();
+    let items = vol.walk_long().unwrap();
+    let img = items.iter().find(|i| i.path == "/Image").expect("the kernel stub keeps its name").clone();
+    assert_eq!(vol.read_file(&img).unwrap(), pseudo(900_001, 5));
+    let rd = items.iter().find(|i| i.path == "/rootfs.cpio.gz").expect("the RAM disk keeps its long name").clone();
+    assert_eq!(vol.read_file(&rd).unwrap(), pseudo(1_200_000, 6));
+}
+
+#[test]
+fn an_aarch64_image_in_free_space_gets_a_firmware_entry_for_its_own_loader() {
+    let (dir, _guard) = scratch("apply-arm-entry");
+    let s = src_arm(&dir);
+    let (path, _) = gpt_disk(&dir, "ke.img", 4 * GIB, 512, &[ps(1, 1000, MSDATA, "windows", Fill::Ntfs)]);
+    let efivars = dir.join("efivars");
+    std::fs::create_dir_all(&efivars).unwrap();
+    let m = model_of(&path, "sda", 4 * GIB, 512, "", false);
+    let req = free_req();
+    let plan = build_plan(&m, &req, &spec(&s), true).unwrap();
+    assert!(!plan.keep_esp);
+    let env = ApplyEnv { efivars: Some(efivars.clone()), ..Default::default() };
+    let rep = run_apply(&path, &m, &req, &s, Some(&plan.digest()), &env).unwrap();
+    let name = rep.boot_entry.clone().unwrap_or_else(|| panic!("a boot entry was added: {:?}", rep.notes));
+    let entry = std::fs::read(efivars.join(format!("{name}-{}", efi_guid()))).unwrap();
+    let utf16 = |s: &str| s.encode_utf16().flat_map(|c| c.to_le_bytes()).collect::<Vec<u8>>();
+    let has = |needle: &[u8]| entry.windows(needle.len()).any(|w| w == needle);
+    assert!(has(&utf16("\\EFI\\BOOT\\BOOTAA64.EFI")), "the entry names the aarch64 loader");
+    assert!(!has(&utf16("BOOTX64")), "and not the x86 one");
+}
+
 fn efi_guid() -> &'static str {
     crate::efi::GLOBAL_GUID
 }
@@ -992,6 +1087,74 @@ fn the_fat_writer_extends_a_full_directory_matches_long_names_and_refuses_to_ove
     }
     assert!(crate::fatwrite::short_name("KERNEL.EFI").is_ok());
     assert!(crate::fatwrite::short_name("kernel.efi").is_err() && crate::fatwrite::short_name("TOOLONGNAME.EFI").is_err());
+}
+
+#[test]
+fn the_fat_writer_creates_long_names_with_short_aliases_and_the_reader_and_fsck_agree() {
+    let (dir, _guard) = scratch("fatlfn");
+    let img = foreign_esp(&dir);
+    let p = dir.join("v.img");
+    std::fs::write(&p, &img).unwrap();
+    let f = std::fs::OpenOptions::new().read(true).write(true).open(&p).unwrap();
+    let mut rw = Fat32Rw::open(&f, 0, img.len() as u64).unwrap();
+    let (d, _) = rw.mkdir_p(&["EFI", "Long Dir".replace(' ', "-").as_str()]).unwrap();
+    let names = ["rootfs.cpio.gz", "rootfs.cpio.xz", "Image", "vmlinuz-6.12.112", "rootfs.cpio.gz.sig", "a.b.c.d", "UPPER.LONGEXT"];
+    for (i, n) in names.iter().enumerate() {
+        rw.create_file(d, n, 20 + i as u64, &mut std::io::Cursor::new(vec![i as u8 + 1; 20 + i]), &mut |_| {}).unwrap();
+    }
+    // lookups are case-insensitive on the long name, and a second file of the same name is refused
+    assert!(rw.find(d, "ROOTFS.CPIO.GZ").unwrap().is_some() && rw.find(d, "image").unwrap().is_some());
+    assert!(rw.create_file(d, "Rootfs.Cpio.Gz", 1, &mut std::io::Cursor::new(vec![1]), &mut |_| {}).unwrap_err().contains("already exists"));
+    // names that are not creatable
+    for bad in ["two words", ".hidden", "trailing.", "star*name", "a/b", ""] {
+        assert!(!crate::fatwrite::can_create(bad), "{bad}");
+        assert!(rw.create_file(d, bad, 1, &mut std::io::Cursor::new(vec![1]), &mut |_| {}).is_err(), "{bad}");
+    }
+    assert!(crate::fatwrite::can_create("rootfs.cpio.gz") && crate::fatwrite::can_create("KERNEL.EFI"));
+    rw.flush().unwrap();
+    rw.write_fsinfo().unwrap();
+    drop(rw);
+    let mut h = std::fs::File::open(&p).unwrap();
+    let mut vol = Fat32::open(&mut h, 0).unwrap();
+    let items = vol.walk_long().unwrap();
+    for (i, n) in names.iter().enumerate() {
+        let it = items.iter().find(|x| x.path == format!("/EFI/LONG-DIR/{n}")).unwrap_or_else(|| panic!("{n} missing: {:?}", items.iter().map(|x| x.path.clone()).collect::<Vec<_>>())).clone();
+        assert_eq!(vol.read_file(&it).unwrap(), vec![i as u8 + 1; 20 + i], "{n}");
+    }
+    // the short aliases are distinct and well formed: aliases differ in the extension, so each gets ~1
+    let shorts: Vec<String> = vol.walk().unwrap().into_iter().filter(|x| x.path.starts_with("/EFI/LONG-DIR/") && !x.dir).map(|x| x.path.rsplit('/').next().unwrap().to_string()).collect();
+    assert_eq!(shorts.len(), names.len());
+    assert!(shorts.contains(&"ROOTFS~1.GZ".to_string()) && shorts.contains(&"ROOTFS~1.XZ".to_string()) && shorts.contains(&"IMAGE".to_string()), "{shorts:?}");
+    assert!(shorts.iter().collect::<std::collections::BTreeSet<_>>().len() == shorts.len());
+    if let Some((ok, out)) = tool("fsck.vfat", &["-n", p.to_str().unwrap()]) {
+        assert!(ok, "fsck.vfat:\n{out}");
+    }
+}
+
+#[test]
+fn long_name_entries_carry_the_checksum_of_their_alias_and_a_directory_grows_for_them() {
+    let (dir, _guard) = scratch("fatlfn2");
+    let img = foreign_esp(&dir);
+    let p = dir.join("v.img");
+    std::fs::write(&p, &img).unwrap();
+    let f = std::fs::OpenOptions::new().read(true).write(true).open(&p).unwrap();
+    let mut rw = Fat32Rw::open(&f, 0, img.len() as u64).unwrap();
+    let (d, _) = rw.mkdir_p(&["EFI", "MANY2"]).unwrap();
+    // 30 names of 2 long-name entries each in a directory that starts with one cluster (16 slots): the directory must grow and no
+    // name may be split over two clusters
+    for i in 0..30 {
+        rw.create_file(d, &format!("long-file-name-{i:03}.bin"), 1, &mut std::io::Cursor::new(vec![i as u8]), &mut |_| {}).unwrap();
+    }
+    rw.flush().unwrap();
+    rw.write_fsinfo().unwrap();
+    drop(rw);
+    let mut h = std::fs::File::open(&p).unwrap();
+    let mut vol = Fat32::open(&mut h, 0).unwrap();
+    let items = vol.walk_long().unwrap();
+    assert_eq!(items.iter().filter(|x| x.path.starts_with("/EFI/MANY2/long-file-name-")).count(), 30, "every long name is read back whole (the reader refuses a wrong checksum or order)");
+    if let Some((ok, out)) = tool("fsck.vfat", &["-n", p.to_str().unwrap()]) {
+        assert!(ok, "fsck.vfat:\n{out}");
+    }
 }
 
 #[test]
@@ -2026,6 +2189,57 @@ fn the_terminal_loop_on_a_real_pseudo_terminal_reads_arrows_and_esc_cancels_with
 
 // ---- legacy BIOS boot of a shared disk (F-INST-13), end to end on image files
 
+#[test]
+fn the_pages_offer_legacy_bios_boot_for_a_shared_disk_and_choose_a_fresh_save_file() {
+    let (dir, _guard) = scratch("wiz-bios");
+    let s = src(&dir);
+    let path = mbr_disk(&dir, "wb.img", 4 * GIB, &[(1, 1000, 0x07, Fill::Ntfs)]);
+    let before = whole_file_hash(&path);
+    let m = model_of(&path, "sda", 4 * GIB, 512, "", true);
+    let mut w = Wizard::new(vec![m], spec(&s), true);
+    w.bios_save_dir = dir.clone();
+    w.handle(WKey::Enter);
+    assert_eq!(w.page, Page::Mode);
+    assert_eq!(w.mode(), Mode::FreeSpace);
+    // off by default; l turns it on, r allows replacing another system's boot code (only while it is on)
+    w.handle(WKey::Char('r'));
+    assert!(!w.req.bios_replace, "r does nothing while legacy BIOS boot is off");
+    assert!(w.render(100).contains("l (off)"));
+    w.handle(WKey::Char('l'));
+    w.handle(WKey::Char('r'));
+    assert!(w.req.bios && w.req.bios_replace);
+    assert!(w.render(100).contains("l (ON)") && w.render(100).contains("(ON)"));
+    // whole-disk mode sets BIOS boot up on its own: l is ignored there
+    w.mode_sel = 0;
+    assert_eq!(w.mode(), Mode::WholeDisk);
+    w.handle(WKey::Char('l'));
+    assert!(w.req.bios, "l is ignored in whole-disk mode");
+    w.mode_sel = 1;
+    w.handle(WKey::Enter);
+    assert_eq!(w.page, Page::Choose);
+    w.handle(WKey::Enter);
+    assert_eq!(w.page, Page::Plan, "{:?}", w.error);
+    let plan = w.plan.clone().unwrap();
+    assert!(matches!(plan.bios, Some(crate::biosshared::Method::MbrGap { .. })), "{:?}", plan.bios);
+    let save = std::path::PathBuf::from(&plan.request.bios_save);
+    assert!(save.starts_with(&dir) && save.file_name().unwrap().to_str().unwrap().starts_with("iyakki-bios-save-sda-"), "{}", save.display());
+    assert!(!save.exists(), "the pages write nothing, not even the save file");
+    let text = w.render(100);
+    assert!(text.contains("Legacy BIOS boot") && text.contains("iyakki-bios-save-sda-"), "{text}");
+    // a name that exists is never chosen again
+    std::fs::write(&save, b"x").unwrap();
+    assert_ne!(w.fresh_bios_save(), save.display().to_string());
+    // turning it off clears the permission; without the permission a foreign boot code refuses the plan in words
+    w.handle(WKey::Esc);
+    w.handle(WKey::Esc);
+    w.handle(WKey::Char('r'));
+    assert!(!w.req.bios_replace);
+    w.handle(WKey::Enter);
+    w.handle(WKey::Enter);
+    assert!(w.error.as_deref().is_some_and(|e| e.contains("boot code")), "{:?}", w.error);
+    assert_eq!(whole_file_hash(&path), before, "the pages never write the disk");
+}
+
 fn bios_req(dir: &Path, name: &str) -> Request {
     Request { bios: true, bios_replace: true, bios_save: dir.join(name).display().to_string(), ..free_req() }
 }
@@ -2240,11 +2454,15 @@ fn an_update_that_cannot_be_written_whole_is_refused_before_anything_is_written(
     let stick = stick_with_boot_files(&dir);
     let from = update_folder(&dir);
     let before = std::fs::read(&stick).unwrap();
-    // a new file with a long name cannot be created by the writer: the whole plan is refused
+    // a new file with a long name is created by the writer (long-name entries and a short alias): the plan holds it
     std::fs::write(from.join("boot/vmlinuz-6.12.112"), b"x").unwrap();
-    let e = plan(&stick, &from).unwrap_err();
-    assert!(e.contains("8.3") && e.contains("vmlinuz-6.12.112") && e.contains("Nothing was written"), "{e}");
+    assert!(plan(&stick, &from).unwrap().steps.iter().any(|s| s.path == "boot/vmlinuz-6.12.112"));
     std::fs::remove_file(from.join("boot/vmlinuz-6.12.112")).unwrap();
+    // a name with a space is still refused whole, before anything is written
+    std::fs::write(from.join("boot/two words.bin"), b"x").unwrap();
+    let e = plan(&stick, &from).map(|_| String::new()).unwrap_or_else(|e| e);
+    assert!(e.contains("two words.bin") && (e.contains("Nothing was written") || e.contains("not safe")), "{e}");
+    std::fs::remove_file(from.join("boot/two words.bin")).unwrap();
     // a link, an unsafe name and an empty folder are refused
     std::os::unix::fs::symlink("/etc/passwd", from.join("boot/LINK.BIN")).unwrap();
     assert!(plan(&stick, &from).unwrap_err().contains("link"));
@@ -2307,4 +2525,120 @@ fn free_space_inside_an_extended_partition_is_named_but_not_offered_and_a_plan_t
     assert!(e.contains("no free space"), "{e}");
     // the container here has no logical partitions at all: its whole inside is free, and the message says where it is
     assert!(e.contains("inside an extended partition") && e.contains("the installer does not use it"), "{e}");
+}
+
+// ---- legacy BIOS boot on 4096-byte sectors (F-INST-29)
+
+fn code_4k(dir: &Path, name: &str, stock: bool) -> String {
+    let mut c = vec![0x90u8; 440];
+    if !stock {
+        c[424..].copy_from_slice(crate::bios4kn::MARKER);
+    }
+    let p = dir.join(name);
+    std::fs::write(&p, &c).unwrap();
+    p.display().to_string()
+}
+
+#[test]
+fn bios_on_4096_byte_sectors_is_refused_in_words_without_the_4k_boot_code_and_planned_with_it_and_a_bios_boot_partition() {
+    let (dir, _guard) = scratch("bios-4k");
+    let s = src(&dir);
+    let bios_part = ps(1, 1, gpt::TYPE_BIOS_BOOT, "bios", Fill::Blank);
+    let (path, _) = gpt_disk(&dir, "k.img", 3 * GIB, 4096, &[bios_part, ps(2, 1024, MSDATA, "other", Fill::Ntfs)]);
+    let m = model_of(&path, "nvme1n1", 3 * GIB, 4096, "", false);
+    let base = Request { bios: true, bios_replace: true, bios_save: dir.join("ksave.bin").display().to_string(), ..free_req() };
+    // no code file: the plain refusal
+    let e = build_plan(&m, &base, &spec(&s), true).unwrap_err();
+    assert!(e.contains("4096-byte-sector boot code") && e.contains("UEFI"), "{e}");
+    // GRUB's stock code does not say it reads 4096-byte sectors
+    let e = build_plan(&m, &Request { bios_4k_code: code_4k(&dir, "stock.bin", true), ..base.clone() }, &spec(&s), true).unwrap_err();
+    assert!(e.contains("512-byte sectors"), "{e}");
+    // our code and an empty BIOS boot partition: planned
+    let plan = build_plan(&m, &Request { bios_4k_code: code_4k(&dir, "ours.bin", false), ..base.clone() }, &spec(&s), true).unwrap();
+    assert!(matches!(plan.bios, Some(crate::biosshared::Method::BiosBootPartition { .. })), "{:?}", plan.bios);
+    // the code file's name is kept in the plan file
+    let r = Request { bios_4k_code: "/x/4k.bin".into(), ..base };
+    assert_eq!(Request::from_json(&r.to_json()).unwrap().bios_4k_code, "/x/4k.bin");
+    assert!(!dir.join("ksave.bin").exists(), "planning writes nothing");
+    // applied to the image file: sector 0 names the core image in 4096-byte units, the core image has its block list rewritten, the save undoes it
+    let req = Request { bios_4k_code: code_4k(&dir, "ours2.bin", false), ..Request { bios: true, bios_replace: true, bios_save: dir.join("ksave.bin").display().to_string(), ..free_req() } };
+    let plan = build_plan(&m, &req, &spec(&s), true).unwrap();
+    let start = plan.bios.unwrap().core_lba();
+    let rep = run_apply(&path, &m, &req, &s, Some(&plan.digest()), &ApplyEnv::default()).unwrap();
+    assert!(rep.notes.iter().any(|n| n.contains("4096-byte sectors") && n.contains("ksave.bin")), "{:?}", rep.notes);
+    let s0 = bytes_at(&path, 0, 4096);
+    assert_eq!(u64::from_le_bytes(s0[0x5C..0x64].try_into().unwrap()), start);
+    let first = bytes_at(&path, start * 4096, 4096);
+    assert_eq!(u64::from_le_bytes(first[500..508].try_into().unwrap()), start + 1);
+    assert_eq!(u16::from_le_bytes(first[510..512].try_into().unwrap()) % 0x100, 0, "the load segment follows a whole 4096-byte sector");
+    crate::biosshared::restore_file(&dir.join("ksave.bin"), &path).unwrap();
+    assert!(bytes_at(&path, start * 4096, 4096).iter().all(|b| *b == 0), "the BIOS boot partition is empty again");
+}
+
+#[test]
+fn prepare_and_write_prepared_plan_without_a_screen_and_write_only_after_the_drive_name_with_the_builtin_4k_code() {
+    use crate::plan_cli::{prepare, write_prepared, Machine};
+    let (dir, _guard) = scratch("bios-4k-prepared");
+    let s = src(&dir);
+    let bios_part = ps(1, 1, gpt::TYPE_BIOS_BOOT, "bios", Fill::Blank);
+    let (path, _) = gpt_disk(&dir, "k.img", 3 * GIB, 4096, &[bios_part, ps(2, 1024, MSDATA, "other", Fill::Ntfs)]);
+    let machine = Machine { sys: "/nonexistent".into(), dev: "/nonexistent".into(), proc_mounts: String::new(), swaps: String::new() };
+    let save = dir.join("psave.bin").display().to_string();
+    let (p, t) = (path.display().to_string(), s.path.display().to_string());
+    let args: Vec<String> = ["--plan", "--disk", "testfile", "--mode", "free-space", "--bios", "--bios-replace-boot-code", "--bios-4k-boot-code", "builtin", "--bios-save", &save, "--sector-size", "4096", "--target-file", &p, "--template", &t].iter().map(|x| x.to_string()).collect();
+    let h0 = whole_file_hash(&path);
+    let prep = prepare(&args, &machine).unwrap();
+    assert!(matches!(prep.plan.bios, Some(crate::biosshared::Method::BiosBootPartition { .. })), "{:?}", prep.plan.bios);
+    assert_eq!(whole_file_hash(&path), h0, "planning writes nothing");
+    let e = write_prepared(&prep, &machine, "sda", &mut |_| {}).err().unwrap();
+    assert!(e.contains("nothing was written"), "{e}");
+    assert_eq!(whole_file_hash(&path), h0);
+    let rep = write_prepared(&prep, &machine, "testfile", &mut |_| {}).unwrap();
+    assert!(rep.notes.iter().any(|n| n.contains("4096-byte sectors")), "{:?}", rep.notes);
+    assert_ne!(whole_file_hash(&path), h0);
+    // without the 4096-byte-sector boot code the planner refuses in words
+    let (path2, _) = gpt_disk(&dir, "k2.img", 3 * GIB, 4096, &[ps(1, 1, gpt::TYPE_BIOS_BOOT, "bios", Fill::Blank), ps(2, 1024, MSDATA, "other", Fill::Ntfs)]);
+    let mut a2 = args.clone();
+    let i = a2.iter().position(|x| x == "--bios-4k-boot-code").unwrap();
+    a2.drain(i..i + 2);
+    let k = a2.iter().position(|x| x == &p).unwrap();
+    a2[k] = path2.display().to_string();
+    let j = a2.iter().position(|x| x == &save).unwrap();
+    a2[j] = dir.join("psave2.bin").display().to_string();
+    let e = prepare(&a2, &machine).err().unwrap();
+    assert!(e.contains("4096-byte-sector boot code"), "{e}");
+}
+
+/// F-INST-12: the Windows disk (`windisk::DiskCore` over the sector-aligned Win32 calls, here a file standing in for the drive) gives the
+/// planner's readers exactly what a plain file gives them, for both sector sizes, and a table-sized write at odd offsets lands exactly.
+#[test]
+fn the_windows_disk_reads_tables_and_models_like_a_file_and_takes_unaligned_writes() {
+    use crate::windisk::DiskCore;
+    use crate::windows::FileDisk;
+    for ss in [512u32, 4096] {
+        let (dir, _guard) = scratch(&format!("windisk-{ss}"));
+        let size = 3 * GIB;
+        let (path, old) = gpt_disk(&dir, "w.img", size, ss, &[ps(1, 100, EFI, "EFI system partition", Fill::Raw(foreign_esp(&dir))), ps(101, 16, MSR, "Microsoft reserved", Fill::Blank), ps(117, 1024, MSDATA, "Basic data partition", Fill::Ntfs)]);
+        let file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let fd = FileDisk { file, elevated: true, sector: ss as u64, events: vec![] };
+        let mut core = DiskCore::open(fd, r"\\.\PhysicalDrive7", ss, size, &[r"E:\".to_string()]).unwrap();
+        let via_file = parsed(&path, ss, size);
+        let via_disk = gpt::read_gpt(&mut core, ss, size / ss as u64).unwrap();
+        assert_eq!(via_disk.table, via_file.table);
+        assert_eq!(via_disk.table, old);
+        assert!(via_disk.primary_ok && via_disk.backup_ok);
+        // the planner's own model of the disk is the same
+        let meta = DiskMeta { name: "PhysicalDrive7".into(), path: r"\\.\PhysicalDrive7".into(), ..Default::default() };
+        let mut f = std::fs::File::open(&path).unwrap();
+        let a = read_model(&mut f, &meta, size, ss, &[], None);
+        let b = read_model(&mut core, &meta, size, ss, &[], None);
+        assert_eq!(a.fingerprint, b.fingerprint);
+        assert_eq!(a.parts.len(), b.parts.len());
+        // pieces of a table's size at odd offsets through the disk are what a positional write puts in the file
+        let piece = pseudo(5000, 3);
+        let at = 117 * MIB + 3;
+        core.disk.write_at(at, &piece).unwrap();
+        drop(core);
+        assert_eq!(bytes_at(&path, at, piece.len()), piece);
+    }
 }

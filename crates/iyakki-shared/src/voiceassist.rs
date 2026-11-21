@@ -32,7 +32,7 @@ impl Default for Config {
 }
 
 /// What the screen shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     Idle,
     Muted,
@@ -59,7 +59,7 @@ impl State {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingApproval {
     pub id: String,
     pub name: String,
@@ -86,7 +86,7 @@ impl MicGlyph {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Status {
     pub state: State,
     pub muted: bool,

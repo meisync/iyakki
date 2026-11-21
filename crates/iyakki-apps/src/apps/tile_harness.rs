@@ -215,7 +215,7 @@ mod tests {
         h.assert_no_overlap_at_standard_sizes();
         assert_eq!(h.size, (1280, 720));
         h.draw_at(480, 600);
-        assert_eq!(h.draw().pm.width(), 480);
+        assert_eq!(h.draw().pm_ref().width(), 480);
         h.draw_at_standard_sizes();
     }
 

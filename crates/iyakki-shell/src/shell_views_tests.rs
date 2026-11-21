@@ -68,7 +68,7 @@ fn chord(sh: &mut Shell, k: LayoutKey) {
 }
 
 fn audit_text(sh: &Shell) -> String {
-    std::fs::read_to_string(sh.env.audit.path()).unwrap_or_default()
+    std::fs::read_to_string(sh.env.audit.path_buf()).unwrap_or_default()
 }
 
 #[test]
@@ -137,6 +137,27 @@ fn previous_and_next_wrap_around_and_a_missing_number_says_so() {
     chord(&mut sh, LayoutKey::View(7));
     assert_eq!(sh.view_name(), "C");
     assert!(sh.toast.as_ref().is_some_and(|t| t.0.contains("no view 7")), "{:?}", sh.toast);
+}
+
+#[test]
+fn the_persons_own_step_keys_step_through_the_views_and_say_so_when_they_are_off() {
+    let (mut sh, _g) = signed_in("vw-own-keys", "alice");
+    add_view(&mut sh, "B", None);
+    add_view(&mut sh, "C", None);
+    let next = LayoutKey::ViewStepCustom { back: false };
+    let prev = LayoutKey::ViewStepCustom { back: true };
+    // off: nothing moves and the toast says how to turn them on
+    chord(&mut sh, next);
+    assert_eq!(sh.view_name(), "Main");
+    assert!(sh.toast.as_ref().is_some_and(|t| t.0.contains("own step keys are off")), "{:?}", sh.toast);
+    // on, independent of the set choice (the set can have both of its own pairs off)
+    sh.views.model.custom_keys = Some(iyakki_shared::views::CustomKeys { prev: "KeyJ".into(), next: "KeyK".into() });
+    sh.views.model.key_set = KeySet::Mac;
+    chord(&mut sh, next);
+    assert_eq!(sh.view_name(), "B");
+    chord(&mut sh, prev);
+    chord(&mut sh, prev);
+    assert_eq!(sh.view_name(), "C", "previous wraps to the last");
 }
 
 #[test]
@@ -432,7 +453,7 @@ fn the_strip_is_a_visible_bar_and_the_home_hint_says_to_click() {
     sh.render(&mut g);
     let h = sh.hits().iter().find(|h| h.label == "view 2 Media").unwrap().clone();
     // the bar around the chips is lighter at its edge than the wall beside it, and the idle chip is not the old near-black
-    let px = |x: f32, y: f32| g.pm.pixels()[(y as usize) * 1920 + x as usize];
+    let px = |x: f32, y: f32| g.pm_ref().pixels()[(y as usize) * 1920 + x as usize];
     let chip = px(h.rect.x + 3.0, h.rect.y + h.rect.h / 2.0);
     assert!(chip.red() as u32 + chip.green() as u32 + chip.blue() as u32 > 3 * 28 + 40, "idle chip is clearly lighter than the wall");
     let edge = px(h.rect.x + h.rect.w + 7.0, h.rect.y + h.rect.h / 2.0);
@@ -517,4 +538,117 @@ fn the_one_window_rule_goes_to_the_open_app_in_a_pane_or_another_view_and_is_off
     sh.render(&mut g);
     assert_eq!(sh.view_name(), "Main", "went to the view that has it");
     assert_eq!(sh.screen_name(), "app:calendar");
+}
+
+/// Counts the heartbeats it gets.
+struct Beat {
+    ticks: Arc<AtomicUsize>,
+}
+
+impl App for Beat {
+    fn title(&self) -> &'static str {
+        "BEAT"
+    }
+    fn icon(&self) -> Icon {
+        Icon::Chat
+    }
+    fn accent(&self) -> [u8; 4] {
+        [90, 140, 220, 255]
+    }
+    fn hint(&self) -> String {
+        "beat".into()
+    }
+    fn handle(&mut self, ev: &Event, _cx: &AppCx) -> Flow {
+        if matches!(ev, Event::Tick) {
+            self.ticks.fetch_add(1, Ordering::SeqCst);
+        }
+        Flow::Stay
+    }
+    fn render(&mut self, _g: &mut Gfx, _area: R, _s: f32, _cx: &AppCx, _tick: u64) {}
+}
+
+#[test]
+fn the_other_displays_switch_with_the_view_and_a_hidden_view_gets_a_slow_heartbeat() {
+    use crate::display::outputs::{DispSpec, DisplayConfig};
+    let (mut sh, mut g) = signed_in("vw-displays", "alice");
+    sh.set_displays(&[DispSpec { name: "eDP-1".into(), w: 1280, h: 720, x: 0, y: 0 }, DispSpec { name: "HDMI-A-1".into(), w: 1024, h: 600, x: 1280, y: 0 }], &DisplayConfig::default());
+    sh.render(&mut g);
+    let closed = Arc::new(AtomicUsize::new(0));
+    let ticks = Arc::new(AtomicUsize::new(0));
+    add_view(&mut sh, "Docs", None);
+    sh.display_put_for_test(1, 0, dummy("SECOND", &closed), PApp::Radio);
+    sh.display_put_for_test(0, 0, Box::new(Beat { ticks: ticks.clone() }), PApp::Chat);
+    assert_eq!(sh.display_titles_for_test(1), vec!["SECOND".to_string()]);
+    chord(&mut sh, LayoutKey::View(2));
+    assert_eq!(sh.view_name(), "Docs");
+    assert_eq!(sh.display_titles_for_test(1), vec!["Home".to_string()], "the other display shows the new view's own (empty) space");
+    assert_eq!(closed.load(Ordering::SeqCst), 0, "nothing was closed by the switch");
+    // the hidden view's apps: one heartbeat in twenty ticks, not one per tick
+    let before = ticks.load(Ordering::SeqCst);
+    for _ in 0..40 {
+        sh.handle(&Event::Tick);
+    }
+    let beats = ticks.load(Ordering::SeqCst) - before;
+    assert!((1..=3).contains(&beats), "a slow heartbeat of the hidden app: {beats}");
+    chord(&mut sh, LayoutKey::View(1));
+    sh.render(&mut g);
+    assert_eq!(sh.display_titles_for_test(1), vec!["SECOND".to_string()], "the other display's app came back with its view");
+    assert_eq!(closed.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn one_app_can_be_shown_in_two_views_as_the_same_instance_and_is_closed_once_when_the_last_view_goes() {
+    let (mut sh, mut g) = signed_in("vw-share", "alice");
+    let closed = Arc::new(AtomicUsize::new(0));
+    let docs = add_view(&mut sh, "Docs", None);
+    let third = add_view(&mut sh, "Third", None);
+    // nothing open: nothing to share
+    sh.views_share(docs);
+    assert!(!sh.views.has_slot_for_test(docs));
+    sh.show_app_for_test(dummy("ALPHA", &closed), PApp::Chat);
+    // the view that is showing, and a view that does not exist, are refused
+    sh.views_share(sh.views.cur);
+    sh.views_share(999);
+    assert!(!sh.views.has_slot_for_test(docs));
+    sh.views_share(docs);
+    assert_eq!(sh.screen_name(), "app:chat", "the app stays open in this view");
+    // Docs shows it as well: the same app, nothing closed or copied
+    chord(&mut sh, LayoutKey::View(2));
+    sh.render(&mut g);
+    assert_eq!(sh.view_name(), "Docs");
+    assert_eq!(sh.screen_name(), "app:chat");
+    assert_eq!(closed.load(Ordering::SeqCst), 0);
+    // a third view takes a handle of the app that is already shared
+    sh.views_share(third);
+    chord(&mut sh, LayoutKey::View(3));
+    assert_eq!(sh.screen_name(), "app:chat");
+    // a view that has an app open of its own is not overwritten
+    let fourth = add_view(&mut sh, "Fourth", None);
+    chord(&mut sh, LayoutKey::View(4));
+    sh.show_app_for_test(dummy("DELTA", &closed), PApp::Radio);
+    chord(&mut sh, LayoutKey::View(1));
+    sh.views_share(fourth);
+    chord(&mut sh, LayoutKey::View(4));
+    assert_eq!(sh.screen_name(), "app:radio");
+    assert_eq!(closed.load(Ordering::SeqCst), 0);
+    // signing out drops every view: the shared instance is closed once (three views), the other app once
+    chord(&mut sh, LayoutKey::View(1));
+    sh.sign_out();
+    assert_eq!(closed.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_request_from_the_assistant_shows_the_open_app_in_the_named_view_and_is_taken_once() {
+    let (mut sh, _g) = signed_in("vw-share-req", "alice");
+    let closed = Arc::new(AtomicUsize::new(0));
+    let docs = add_view(&mut sh, "Docs", None);
+    sh.show_app_for_test(dummy("ALPHA", &closed), PApp::Chat);
+    let dir = sh.env.data_dir().to_path_buf();
+    iyakki_shared::views::request_share(&dir, "alice", docs);
+    sh.views_poll();
+    assert!(sh.views.has_slot_for_test(docs));
+    assert_eq!(iyakki_shared::views::take_share(&dir, "alice"), None, "the request was taken");
+    assert!(audit_text(&sh).contains("view.share"));
+    chord(&mut sh, LayoutKey::View(2));
+    assert_eq!(sh.screen_name(), "app:chat");
 }

@@ -1,0 +1,19 @@
+scenario: RADIO-EAR-01
+title: Radio stations by ear
+area: Radio
+rows: F-RADIO-01, F-RADIO-02
+machines: any
+needs: person
+prereq: Internet connection and working speakers.
+step: Open RADIO and choose a language from the list on the left, then a station.
+expect: The station starts playing within ten seconds and the player shows its name.
+clause: F-RADIO-02.play
+step: Listen for thirty seconds.
+expect: The sound is continuous and clean, without dropouts, and the loudness is the same as other sounds on the machine.
+clause: F-RADIO-01.quality
+step: Press Stop, then Play.
+expect: Stopping is immediate, and the station resumes after Play.
+clause: F-RADIO-02.stop-play
+step: Add a station of your own (a name and a stream address) and play it.
+expect: The new station is saved, appears under My stations and plays.
+clause: F-RADIO-01.add

@@ -46,12 +46,42 @@ impl ShellSpawner for SystemShell {
         let env: Vec<(String, String)> = env.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
         let opts = SpawnOpts { cwd: Some(dir), uid: ident.uid, gid: ident.gid };
         let link = iyakki_vt::session::PtyLink::spawn_with("/bin/sh", &["-i".to_string()], &env, cols, rows, &opts).map_err(|e| format!("could not start the terminal: {e}"))?;
-        Ok(Box::new(link))
+        // the shell is the person's in SYSTEM's "My processes" for as long as the session lives (KI-131)
+        let pid = link.pid();
+        Ok(claimed(Box::new(link), pid, user, "terminal"))
     }
 
     #[cfg(not(unix))]
     fn spawn(&self, _user: &str, _cols: usize, _rows: usize) -> Result<Box<dyn Link + Send>, String> {
         Err("a terminal needs a Unix system".into())
+    }
+}
+
+/// A link whose program is claimed for a person (`procowner`) until the link is dropped.
+pub struct ClaimedLink {
+    inner: Box<dyn Link + Send>,
+    _claim: crate::procowner::ClaimGuard,
+}
+
+pub fn claimed(inner: Box<dyn Link + Send>, pid: u32, user: &str, what: &str) -> Box<dyn Link + Send> {
+    Box::new(ClaimedLink { inner, _claim: crate::procowner::claim(pid, user, what) })
+}
+
+impl Link for ClaimedLink {
+    fn read(&mut self, out: &mut Vec<u8>) -> iyakki_vt::LinkState {
+        self.inner.read(out)
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        self.inner.write(bytes)
+    }
+    fn resize(&mut self, cols: u16, rows: u16) {
+        self.inner.resize(cols, rows)
+    }
+    fn exit_code(&mut self) -> Option<i32> {
+        self.inner.exit_code()
+    }
+    fn close(&mut self) {
+        self.inner.close()
     }
 }
 
@@ -256,6 +286,60 @@ mod tests {
         fn close(&mut self) {
             *lk(&self.done) = Some(129);
         }
+    }
+
+    #[test]
+    fn ki131_a_terminal_shell_is_claimed_for_the_person_while_the_session_lives() {
+        let who = "ki131-term-user";
+        let link = iyakki_vt::session::PtyLink::spawn("/bin/sh", &["-c".to_string(), "read x".to_string()], &[("PATH".to_string(), "/usr/bin:/bin".to_string())], 80, 24).unwrap();
+        let pid = link.pid();
+        let mut boxed = claimed(Box::new(link), pid, who, "terminal");
+        let mine = crate::procowner::claims().into_iter().filter(|c| c.user == who).collect::<Vec<_>>();
+        assert_eq!(mine.len(), 1);
+        assert_eq!((mine[0].pid, mine[0].what.as_str()), (pid, "terminal"));
+        boxed.close();
+        drop(boxed);
+        assert!(crate::procowner::claims().iter().all(|c| c.user != who), "the claim ended with the session");
+    }
+
+    /// Runs `f(gate)` as `who` on another thread and returns the claims `who` had while it ran (polled until one shows, never a fixed wait).
+    /// The program `f` starts must wait for the `gate` file (`iyakki_testkit::wait_gate_snippet`): it is created once a claim was seen.
+    fn claims_seen_while(who: &str, f: impl FnOnce(&str) + Send + 'static) -> Vec<crate::procowner::Claim> {
+        let w = who.to_string();
+        let gate = crate::testdir::unique("claims", who).join("open");
+        let g = gate.to_string_lossy().to_string();
+        let t = std::thread::spawn(move || crate::procowner::as_user(&w, move || f(&g)));
+        let mut seen = Vec::new();
+        while !t.is_finished() && seen.is_empty() {
+            seen = crate::procowner::claims().into_iter().filter(|c| c.user == who).collect();
+            std::thread::yield_now();
+        }
+        std::fs::write(&gate, b"").unwrap();
+        t.join().unwrap();
+        seen
+    }
+
+    #[test]
+    fn ki131_the_store_install_path_claims_its_program_while_it_runs() {
+        let who = "ki131-install-user";
+        let seen = claims_seen_while(who, |gate| {
+            let script = iyakki_testkit::wait_gate_snippet(std::path::Path::new(gate));
+            let _ = crate::clis::run_quiet("/bin/sh", &["-c", &script], 20);
+        });
+        assert_eq!(seen.first().map(|c| c.what.as_str()), Some("sh"));
+        assert!(crate::procowner::claims().iter().all(|c| c.user != who), "a finished program leaves no claim");
+    }
+
+    #[test]
+    fn ki131_the_cluster_call_path_claims_kubectl_while_it_runs() {
+        let who = "ki131-kube-user";
+        let seen = claims_seen_while(who, |gate| {
+            let k = crate::sandbox::kube::Kubectl { program: "/bin/sh".into(), kubeconfig: None, timeout: std::time::Duration::from_secs(20) };
+            let script = iyakki_testkit::wait_gate_snippet(std::path::Path::new(gate));
+            let _ = k.run(&["-c", &script], None, 1024);
+        });
+        assert_eq!(seen.first().map(|c| c.what.as_str()), Some("kubectl"));
+        assert!(crate::procowner::claims().iter().all(|c| c.user != who));
     }
 
     #[derive(Default)]

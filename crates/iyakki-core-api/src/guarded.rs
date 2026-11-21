@@ -27,8 +27,15 @@ pub const READ: &str = "system.read";
 pub const RADIO_SET: &str = "system.radio.set";
 pub const BRIGHTNESS_SET: &str = "system.brightness.set";
 pub const VOLUME_SET: &str = "system.volume.set";
+pub const LINK_SET: &str = "system.link.set";
 pub const MEMORY_SET: &str = "system.memory.set";
+pub const DISK_INSTALL: &str = "system.disk.install";
+pub const DISK_MOUNT: &str = "system.disk.mount";
+pub const DISK_PARTITION: &str = "system.disk.partition";
+pub const DISK_UNLOCK: &str = "system.disk.unlock";
 pub const HOSTNAME_SET: &str = "system.hostname.set";
+pub const BLUETOOTH_USE: &str = "bluetooth.use";
+pub const STARTUP_SET: &str = "system.startup.set";
 pub const CRASHLOG_WRITE: &str = "system.crashlog.write";
 pub const NET_SCAN: &str = "net.scan";
 pub const ROUTER_USE: &str = "router.use";
@@ -303,6 +310,47 @@ impl Net for GuardedNet {
     }
 }
 
+struct GuardedAudioRoute {
+    gate: Arc<Gate>,
+    inner: Arc<dyn crate::audioroute::AudioRoute>,
+}
+
+impl GuardedAudioRoute {
+    fn ok(&self, what: &str) -> bool {
+        self.gate.check(READ, what).is_ok()
+    }
+}
+
+impl crate::audioroute::AudioRoute for GuardedAudioRoute {
+    fn asound_text(&self, rel: &str) -> Option<String> {
+        self.ok("sound card facts").then(|| self.inner.asound_text(rel)).flatten()
+    }
+    fn asound_dir(&self, rel: &str) -> Vec<String> {
+        if self.ok("sound card facts") { self.inner.asound_dir(rel) } else { Vec::new() }
+    }
+    fn asound_has(&self, rel: &str) -> bool {
+        self.ok("sound card facts") && self.inner.asound_has(rel)
+    }
+    fn product_name(&self) -> Option<String> {
+        self.ok("machine model").then(|| self.inner.product_name()).flatten()
+    }
+    fn pcm_holders(&self, card: u32, device: u32) -> Vec<crate::audioroute::PcmHolder> {
+        if self.ok("who plays on a sound device") { self.inner.pcm_holders(card, device) } else { Vec::new() }
+    }
+    fn is_machine(&self) -> bool {
+        self.inner.is_machine()
+    }
+    fn process_parent(&self, pid: u32) -> Option<u32> {
+        self.ok("who runs a program").then(|| self.inner.process_parent(pid)).flatten()
+    }
+    fn process_name(&self, pid: u32) -> Option<String> {
+        self.ok("who runs a program").then(|| self.inner.process_name(pid)).flatten()
+    }
+    fn mixer_contents(&self, card: u32) -> Option<String> {
+        self.ok("mixer controls").then(|| self.inner.mixer_contents(card)).flatten()
+    }
+}
+
 impl Os for GuardedOs {
     fn sysinfo(&self) -> &dyn Sysinfo {
         &self.sysinfo
@@ -321,6 +369,30 @@ impl Os for GuardedOs {
     }
     fn hardware(&self) -> Arc<dyn Hardware> {
         Arc::new(GuardedHardware { gate: self.gate.clone(), inner: self.inner.hardware() })
+    }
+    fn installer(&self) -> Arc<dyn crate::installer::Installer> {
+        Arc::new(GuardedInstaller { gate: self.gate.clone(), inner: self.inner.installer() })
+    }
+    fn audio_route(&self) -> Arc<dyn crate::audioroute::AudioRoute> {
+        Arc::new(GuardedAudioRoute { gate: self.gate.clone(), inner: self.inner.audio_route() })
+    }
+    fn drivers(&self) -> Arc<dyn crate::drivers::Drivers> {
+        Arc::new(GuardedDrivers { gate: self.gate.clone(), inner: self.inner.drivers() })
+    }
+    fn disk_engine(&self) -> Arc<dyn crate::diskmodel::DiskEngine> {
+        Arc::new(GuardedDiskEngine { gate: self.gate.clone(), inner: self.inner.disk_engine() })
+    }
+    fn screen_facts(&self) -> Arc<dyn crate::screenfacts::ScreenFacts> {
+        Arc::new(GuardedScreenFacts { gate: self.gate.clone(), inner: self.inner.screen_facts() })
+    }
+    fn output_state(&self) -> Arc<dyn crate::soundctl::OutputState> {
+        Arc::new(GuardedOutputState { gate: self.gate.clone(), inner: self.inner.output_state() })
+    }
+    fn bt_audio(&self) -> Arc<dyn crate::btaudio::BtAudio> {
+        Arc::new(GuardedBtAudio { gate: self.gate.clone(), inner: self.inner.bt_audio() })
+    }
+    fn startup_disk(&self) -> Arc<dyn crate::startupdisk::StartupDisk> {
+        Arc::new(GuardedStartupDisk { gate: self.gate.clone(), inner: self.inner.startup_disk() })
     }
     fn crashlog(&self) -> Arc<dyn crate::crashlog::CrashLog> {
         Arc::new(GuardedCrashLog { gate: self.gate.clone(), inner: self.inner.crashlog() })
@@ -392,6 +464,16 @@ impl crate::router::Router for GuardedRouter {
         self.gate.check(ROUTER_STRATEGY_SET, name).map_err(|d| d.to_string())?;
         self.inner.allow_strategy(name)
     }
+    fn models(&self) -> Vec<crate::router::RouteModel> {
+        match self.gate.check(READ, "the models the router may use") {
+            Ok(()) => self.inner.models(),
+            Err(_) => Vec::new(),
+        }
+    }
+    fn route(&self, need: &crate::router::RouteNeed) -> crate::router::RouteDecision {
+        // the decision is made here over the list the guard lets through, so a caller without the capability gets an empty answer
+        crate::router::choose(&self.models(), need)
+    }
     fn record(&self, what: &str, detail: &str) {
         // only a caller that holds the capability writes lines, and only after a run was let start
         if self.gate.note(ROUTER_USE, &format!("{what} {detail}")) {
@@ -415,6 +497,139 @@ impl crate::netscan::NetScan for GuardedNetScan {
     fn start(&self, targets: Vec<std::net::Ipv4Addr>, opts: crate::netscan::Options, cancel: Arc<std::sync::atomic::AtomicBool>, tx: std::sync::mpsc::Sender<crate::netscan::Event>) -> Result<(), String> {
         self.gate.check(NET_SCAN, "scan the local network").map_err(|d| d.to_string())?;
         self.inner.start(targets, opts, cancel, tx)
+    }
+}
+
+struct GuardedScreenFacts {
+    gate: Arc<Gate>,
+    inner: Arc<dyn crate::screenfacts::ScreenFacts>,
+}
+
+impl crate::screenfacts::ScreenFacts for GuardedScreenFacts {
+    fn connectors(&self) -> Vec<crate::screenfacts::Connector> {
+        match self.gate.check(READ, "the display connectors") {
+            Ok(()) => self.inner.connectors(),
+            Err(_) => Vec::new(),
+        }
+    }
+    fn signature(&self) -> String {
+        match self.gate.check(READ, "the display signature") {
+            Ok(()) => self.inner.signature(),
+            Err(_) => String::new(),
+        }
+    }
+    fn fb_signature(&self, fb_path: &str) -> Option<String> {
+        self.gate.check(READ, "the firmware screen").ok()?;
+        self.inner.fb_signature(fb_path)
+    }
+    fn card_with(&self, at_least: usize) -> Option<String> {
+        self.gate.check(READ, "the graphics cards").ok()?;
+        self.inner.card_with(at_least)
+    }
+}
+
+struct GuardedOutputState {
+    gate: Arc<Gate>,
+    inner: Arc<dyn crate::soundctl::OutputState>,
+}
+
+impl crate::soundctl::OutputState for GuardedOutputState {
+    fn device(&self) -> Option<String> {
+        self.gate.check(READ, "which sound output plays").ok()?;
+        self.inner.device()
+    }
+    fn generation(&self) -> u64 {
+        match self.gate.check(READ, "whether the sound output changed") {
+            Ok(()) => self.inner.generation(),
+            Err(_) => 0,
+        }
+    }
+    fn gain(&self) -> u32 {
+        // a refused read leaves the sound at full volume: it must never silence a player
+        match self.gate.check(READ, "the sound volume") {
+            Ok(()) => self.inner.gain(),
+            Err(_) => 100,
+        }
+    }
+}
+
+struct GuardedBtAudio {
+    gate: Arc<Gate>,
+    inner: Arc<dyn crate::btaudio::BtAudio>,
+}
+
+impl crate::btaudio::BtAudio for GuardedBtAudio {
+    fn receive_view(&self) -> crate::btaudio::AudioView {
+        match self.gate.check(READ, "the Bluetooth audio state") {
+            Ok(()) => self.inner.receive_view(),
+            Err(d) => crate::btaudio::AudioView { why_not: d.to_string(), ..Default::default() },
+        }
+    }
+    fn send_view(&self) -> crate::btaudio::SendView {
+        match self.gate.check(READ, "the Bluetooth sound sending state") {
+            Ok(()) => self.inner.send_view(),
+            Err(d) => crate::btaudio::SendView { why: d.to_string(), ..Default::default() },
+        }
+    }
+    fn sinks(&self) -> Vec<(String, String)> {
+        match self.gate.check(READ, "the paired headphones") {
+            Ok(()) => self.inner.sinks(),
+            Err(_) => Vec::new(),
+        }
+    }
+    fn sound_line(&self) -> String {
+        match self.gate.check(READ, "where the sound goes") {
+            Ok(()) => self.inner.sound_line(),
+            Err(d) => d.to_string(),
+        }
+    }
+    fn remembered(&self) -> Option<(String, bool)> {
+        self.gate.check(READ, "the remembered headphones").ok()?;
+        self.inner.remembered()
+    }
+    fn plan(&self, action: &crate::btaudio::BtAudioAction) -> Result<String, String> {
+        self.gate.check(BLUETOOTH_USE, &format!("plan a Bluetooth audio change ({})", action.tool())).map_err(|d| d.to_string())?;
+        self.inner.plan(action)
+    }
+    fn apply(&self, action: &crate::btaudio::BtAudioAction) -> Result<String, String> {
+        self.gate.check(BLUETOOTH_USE, &format!("change Bluetooth audio ({})", action.tool())).map_err(|d| d.to_string())?;
+        self.inner.apply(action)
+    }
+    fn clear_remote(&self) {
+        // only ever takes something away: the keys of a phone stop acting
+        self.inner.clear_remote();
+    }
+}
+
+struct GuardedStartupDisk {
+    gate: Arc<Gate>,
+    inner: Arc<dyn crate::startupdisk::StartupDisk>,
+}
+
+impl crate::startupdisk::StartupDisk for GuardedStartupDisk {
+    fn status_lines(&self, reboot_setting: bool) -> Vec<String> {
+        match self.gate.check(READ, "the firmware's startup entries") {
+            Ok(()) => self.inner.status_lines(reboot_setting),
+            Err(d) => vec![d.to_string()],
+        }
+    }
+    fn status_line(&self, reboot_setting: bool) -> String {
+        match self.gate.check(READ, "the startup disk") {
+            Ok(()) => self.inner.status_line(reboot_setting),
+            Err(d) => d.to_string(),
+        }
+    }
+    fn plan(&self, action: crate::startupdisk::StartupAction, administrator: bool) -> Result<crate::startupdisk::StartupPlan, String> {
+        self.gate.check(STARTUP_SET, &format!("plan the startup disk change `{}`", action.name())).map_err(|d| d.to_string())?;
+        self.inner.plan(action, administrator)
+    }
+    fn apply(&self, action: crate::startupdisk::StartupAction, administrator: bool) -> Result<String, String> {
+        self.gate.check(STARTUP_SET, &format!("change the startup disk: {}", action.name())).map_err(|d| d.to_string())?;
+        self.inner.apply(action, administrator)
+    }
+    fn before_dev_reboot(&self, setting_on: bool) -> Option<String> {
+        self.gate.check(STARTUP_SET, "start IYAKKI at the next restart").ok()?;
+        self.inner.before_dev_reboot(setting_on)
     }
 }
 
@@ -450,6 +665,157 @@ impl crate::crashlog::CrashLog for GuardedCrashLog {
     fn copy_to_folder(&self, dir: &std::path::Path, name: &str, dest_dir: &std::path::Path, now_unix: i64) -> Result<std::path::PathBuf, String> {
         self.gate.check(CRASHLOG_WRITE, "copy a kernel log to a folder").map_err(|d| d.to_string())?;
         self.inner.copy_to_folder(dir, name, dest_dir, now_unix)
+    }
+}
+
+struct GuardedInstaller {
+    gate: Arc<Gate>,
+    inner: Arc<dyn crate::installer::Installer>,
+}
+
+impl crate::installer::Installer for GuardedInstaller {
+    fn disks(&self) -> Vec<crate::installer::DiskInfo> {
+        match self.gate.check(READ, "list the disks") {
+            Ok(()) => self.inner.disks(),
+            Err(_) => Vec::new(),
+        }
+    }
+    fn source(&self, disks: &[crate::installer::DiskInfo]) -> Result<crate::installer::SourceInfo, String> {
+        self.gate.check(READ, "find what to install from").map_err(|d| d.to_string())?;
+        self.inner.source(disks)
+    }
+    fn uefi(&self) -> bool {
+        self.gate.check(READ, "see how the computer started").is_ok() && self.inner.uefi()
+    }
+    fn execute(&self, plan: &crate::installer::Plan, progress: &mut dyn FnMut(crate::installer::Progress)) -> Result<crate::installer::InstallReport, String> {
+        self.gate.check(DISK_INSTALL, &format!("erase {} and install IYAKKI on it", plan.target.drive.path)).map_err(|d| d.to_string())?;
+        self.inner.execute(plan, progress)
+    }
+}
+
+struct GuardedDiskEngine {
+    gate: Arc<Gate>,
+    inner: Arc<dyn crate::diskmodel::DiskEngine>,
+}
+
+impl crate::diskmodel::DiskEngine for GuardedDiskEngine {
+    fn scan(&self) -> crate::diskmodel::Snapshot {
+        match self.gate.check(READ, "look at the drives") {
+            Ok(()) => self.inner.scan(),
+            Err(_) => Default::default(),
+        }
+    }
+    fn fingerprint(&self) -> u64 {
+        match self.gate.check(READ, "see whether a drive came or went") {
+            Ok(()) => self.inner.fingerprint(),
+            Err(_) => 0,
+        }
+    }
+    fn forget(&self) {
+        if self.gate.check(READ, "look at the drives again").is_ok() {
+            self.inner.forget()
+        }
+    }
+    fn users_of(&self, mountpoint: &str) -> Vec<(u32, String)> {
+        match self.gate.check(READ, "see who uses a drive") {
+            Ok(()) => self.inner.users_of(mountpoint),
+            Err(_) => Vec::new(),
+        }
+    }
+    fn mounted_in(&self, home: &str) -> Vec<(String, String)> {
+        match self.gate.check(READ, "see which drives are open") {
+            Ok(()) => self.inner.mounted_in(home),
+            Err(_) => Vec::new(),
+        }
+    }
+    fn plan_mount(&self, snap: &crate::diskmodel::Snapshot, who: &crate::diskmodel::Actor, part: &str, opts: &crate::diskmodel::MountOpts) -> Result<crate::diskmodel::MountPlan, String> {
+        self.gate.check(READ, &format!("see what opening {part} would do")).map_err(|d| d.to_string())?;
+        self.inner.plan_mount(snap, who, part, opts)
+    }
+    fn mount(&self, who: &crate::diskmodel::Actor, part: &str, opts: &crate::diskmodel::MountOpts, audit: crate::diskmodel::AuditFn) -> Result<crate::diskmodel::Mounted, String> {
+        self.gate.check(DISK_MOUNT, &format!("open the drive {part}")).map_err(|d| d.to_string())?;
+        self.inner.mount(who, part, opts, audit)
+    }
+    fn unmount(&self, who: &crate::diskmodel::Actor, part: &str, audit: crate::diskmodel::AuditFn) -> Result<String, String> {
+        self.gate.check(DISK_MOUNT, &format!("close the drive {part}")).map_err(|d| d.to_string())?;
+        self.inner.unmount(who, part, audit)
+    }
+    fn eject(&self, who: &crate::diskmodel::Actor, disk: &str, audit: crate::diskmodel::AuditFn) -> Result<String, String> {
+        self.gate.check(DISK_MOUNT, &format!("eject the drive {disk}")).map_err(|d| d.to_string())?;
+        self.inner.eject(who, disk, audit)
+    }
+    fn at_sign_out(&self, who: &crate::diskmodel::Actor, audit: crate::diskmodel::AuditFn) -> Option<String> {
+        // closing the person's drives at sign-out is a change: without the capability nothing is closed and nothing is said
+        self.gate.check(DISK_MOUNT, "close the drives of the person who signs out").ok()?;
+        self.inner.at_sign_out(who, audit)
+    }
+    fn refusal(&self, who: &crate::diskmodel::Actor, d: &crate::diskmodel::Disk) -> Option<String> {
+        match self.gate.check(READ, "see whether a drive may be changed") {
+            Ok(()) => self.inner.refusal(who, d),
+            Err(denied) => Some(denied.to_string()),
+        }
+    }
+    fn plan_partition(&self, who: &crate::diskmodel::Actor, disk: &str, op: &crate::diskmodel::PartOp) -> Result<crate::diskmodel::Plan, String> {
+        self.gate.check(READ, &format!("see what changing the drive {disk} would do")).map_err(|d| d.to_string())?;
+        self.inner.plan_partition(who, disk, op)
+    }
+    fn apply_partition(&self, who: &crate::diskmodel::Actor, disk: &str, op: &crate::diskmodel::PartOp, confirm: &crate::diskmodel::Confirm, audit: crate::diskmodel::AuditFn) -> Result<String, String> {
+        self.gate.check(DISK_PARTITION, &format!("change the partitions of the drive {disk} ({})", op.name())).map_err(|d| d.to_string())?;
+        self.inner.apply_partition(who, disk, op, confirm, audit)
+    }
+    fn plan_unlock(&self, snap: &crate::diskmodel::Snapshot, who: &crate::diskmodel::Actor, part: &str) -> Result<iyakki_diskcrypt::CryptKind, String> {
+        self.gate.check(READ, &format!("see whether {part} can be unlocked")).map_err(|d| d.to_string())?;
+        self.inner.plan_unlock(snap, who, part)
+    }
+    fn unlock(&self, who: &crate::diskmodel::Actor, part: &str, secret: &iyakki_diskcrypt::Secret, audit: crate::diskmodel::AuditFn) -> Result<crate::diskmodel::Mounted, String> {
+        self.gate.check(DISK_UNLOCK, &format!("unlock the drive {part}")).map_err(|d| d.to_string())?;
+        self.inner.unlock(who, part, secret, audit)
+    }
+    fn allow_writing(&self, who: &crate::diskmodel::Actor, part: &str, audit: crate::diskmodel::AuditFn) -> Result<crate::diskmodel::Mounted, String> {
+        self.gate.check(DISK_UNLOCK, &format!("open the unlocked drive {part} for writing")).map_err(|d| d.to_string())?;
+        self.inner.allow_writing(who, part, audit)
+    }
+    fn lock(&self, who: &crate::diskmodel::Actor, part: &str, audit: crate::diskmodel::AuditFn) -> Result<String, String> {
+        self.gate.check(DISK_UNLOCK, &format!("lock the drive {part}")).map_err(|d| d.to_string())?;
+        self.inner.lock(who, part, audit)
+    }
+    fn take_format_request(&self, dir: &Path, user: &str) -> Option<crate::diskmodel::FormatRequest> {
+        self.gate.check(READ, "the assistant's request to format or resize").ok()?;
+        self.inner.take_format_request(dir, user)
+    }
+    fn use_programs(&self, bin_dir: &str) {
+        if self.gate.check(READ, "tell the drive engine where the installed programs are").is_ok() {
+            self.inner.use_programs(bin_dir)
+        }
+    }
+}
+
+struct GuardedDrivers {
+    gate: Arc<Gate>,
+    inner: Arc<dyn crate::drivers::Drivers>,
+}
+
+impl crate::drivers::Drivers for GuardedDrivers {
+    fn machine(&self) -> crate::drivers::Machine {
+        match self.gate.check(READ, "see what this machine is") {
+            Ok(()) => self.inner.machine(),
+            Err(_) => Default::default(),
+        }
+    }
+    fn rows(&self) -> Vec<crate::drivers::Row> {
+        match self.gate.check(READ, "list the drivers of this machine") {
+            Ok(()) => self.inner.rows(),
+            Err(_) => Vec::new(),
+        }
+    }
+    fn installed(&self) -> Vec<crate::drivers::Record> {
+        match self.gate.check(READ, "list the installed driver packs") {
+            Ok(()) => self.inner.installed(),
+            Err(_) => Vec::new(),
+        }
+    }
+    fn is_disabled(&self, id: &str) -> bool {
+        self.gate.check(READ, "see whether a driver pack is off").is_ok() && self.inner.is_disabled(id)
     }
 }
 
@@ -545,6 +911,26 @@ impl Hardware for GuardedHardware {
             Err(_) => Screen { framebuffer: None, outputs: Vec::new(), backlights: Vec::new() },
         }
     }
+    fn volume(&self, card: u32) -> Option<Volume> {
+        self.gate.check(READ, "the volume of a sound card").ok()?;
+        self.inner.volume(card)
+    }
+    fn set_volume(&self, card: u32, percent: u32) -> Result<Volume, String> {
+        self.gate.check(VOLUME_SET, "change the sound volume").map_err(|d| d.to_string())?;
+        self.inner.set_volume(card, percent)
+    }
+    fn change_volume(&self, card: u32, delta: Option<i32>) -> Result<Volume, String> {
+        self.gate.check(VOLUME_SET, if delta.is_some() { "change the sound volume" } else { "mute or unmute the sound" }).map_err(|d| d.to_string())?;
+        self.inner.change_volume(card, delta)
+    }
+    fn set_link(&self, name: &str, up: bool) -> Result<(), String> {
+        self.gate.check(LINK_SET, &format!("switch the network connection {name} {}", if up { "on" } else { "off" })).map_err(|d| d.to_string())?;
+        self.inner.set_link(name, up)
+    }
+    fn dhcp(&self, name: &str) -> Result<(), String> {
+        self.gate.check(LINK_SET, &format!("ask for an address on {name}")).map_err(|d| d.to_string())?;
+        self.inner.dhcp(name)
+    }
     fn set_brightness(&self, name: &str, percent: u32) -> Result<(), String> {
         self.gate.check(BRIGHTNESS_SET, "set the screen brightness").map_err(|d| d.to_string())?;
         self.inner.set_brightness(name, percent)
@@ -586,5 +972,11 @@ impl Hardware for GuardedHardware {
     fn cs8409_line(&self) -> Option<String> {
         self.gate.check(READ, "sound chip").ok()?;
         self.inner.cs8409_line()
+    }
+    fn request_class(&self, class: &str, who: &str) -> String {
+        match self.gate.check(READ, "load the drivers of a hardware class") {
+            Ok(()) => self.inner.request_class(class, who),
+            Err(d) => d.to_string(),
+        }
     }
 }

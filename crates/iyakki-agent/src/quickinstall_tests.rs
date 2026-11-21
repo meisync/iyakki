@@ -333,7 +333,7 @@ fn every_item_has_a_section_a_licence_and_the_pairs_say_pick_one_or_both() {
         assert!(!items_of(g).is_empty(), "{g:?}");
     }
     assert_eq!(items_of(Group::Voice), [Item::Kokoro, Item::VoicePack]);
-    assert_eq!(items_of(Group::LocalModels), [Item::Lemonade, Item::Ollama, Item::MacHost, Item::GpuVulkan, Item::GpuNvidia]);
+    assert_eq!(items_of(Group::LocalModels), [Item::Lemonade, Item::Ollama, Item::MacHost, Item::GpuVulkan, Item::GpuNvidia, Item::GpuRocm]);
     assert_eq!(items_of(Group::AiCoding), [Item::ClaudeCode, Item::Copilot]);
     assert!(Group::Voice.note().contains("pick one or both") && Group::LocalModels.note().contains("pick one or both"));
     for i in Item::ALL {
@@ -369,7 +369,7 @@ fn coding_agents_install_from_the_catalogue_and_servers_ask_to_be_started_and_co
     let mut f = Fake::default();
     run_step(Item::Ffmpeg, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap();
     assert_eq!(f.calls, ["cli ffmpeg"]);
-    assert_eq!(items_of(Group::Media), [Item::Ffmpeg, Item::FfmpegLibs]);
+    assert_eq!(items_of(Group::Media), [Item::Ffmpeg, Item::FfmpegLibs, Item::YtDlp, Item::BrowserPackage]);
     assert_eq!((Group::Media.title(), Item::Ffmpeg.title()), ("Media", "Media player (ffmpeg)"));
     assert!(Item::Ffmpeg.about().contains("GPLv3") && Item::Ffmpeg.about().contains("checksum"));
     // the browser's audio and video add-on (the bar's Install button opens this item): supplied by the administrator, LGPL, nothing shipped or hosted by IYAKKI
@@ -757,9 +757,9 @@ fn a_firmware_pack_item_reads_as_installed_from_its_driver_pack_record() {
     let svc = services_here(&t);
     assert_eq!(presence(&svc, Item::FwRealtekNet), Presence::Missing);
     let d = Item::FwRealtekNet.fw_def().unwrap();
-    let (fs, _) = iyakki_drivers::apply::Fs::for_data(svc.dir());
+    let (fs, _) = iyakki_core_local::driver_packs::apply::Fs::for_data(svc.dir());
     let p = crate::fwpack::build_pack(crate::fwpack::table(), d, &[("rtl_nic/rtl8168h-2.fw".into(), vec![1, 2, 3])], &[("LICENSE.r8169".into(), vec![4])]);
-    iyakki_drivers::apply::install_pack(&fs, &iyakki_drivers::run::Dry, d.pack_id, "linux-firmware 1a935bfb33", d.licence_id, "test", "local", &p).unwrap();
+    iyakki_core_local::driver_packs::apply::install_pack(&fs, &iyakki_core_local::driver_packs::run::Dry, d.pack_id, "linux-firmware 1a935bfb33", d.licence_id, "test", "local", &p).unwrap();
     match presence(&svc, Item::FwRealtekNet) {
         Presence::Installed(w) => assert!(w.starts_with("1 files"), "{w}: the licence text is not counted as a firmware file"),
         other => panic!("{other:?}"),

@@ -83,7 +83,7 @@ fn overlay_text(a: &SettingsApp) -> String {
     a.dc.overlay.as_ref().map(|o| o.log.lines.iter().map(|l| l.0.clone()).collect::<Vec<_>>().join("\n")).unwrap_or_default()
 }
 fn audit_has(cx: &AppCx, what: &str) -> bool {
-    std::fs::read_to_string(cx.audit.path()).unwrap_or_default().contains(what)
+    std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default().contains(what)
 }
 
 /// Two kubeconfigs on a made-up machine: this machine's k3s (answers, local) and a remote production-looking cluster from `$KUBECONFIG`.

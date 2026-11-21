@@ -22,6 +22,22 @@ pub trait RelayLink: Send + Sync {
     fn fetch(&self, mailbox: &str) -> Result<Vec<Vec<u8>>, String>;
 }
 
+/// The link to the owner's relay for an address and a certificate fingerprint. Fails closed: an https address needs the fingerprint and is
+/// then trusted for exactly that certificate (no certificate authority is consulted); an https address without one gives an error and
+/// no connection is ever made. A plain `http://` address (a relay on a trusted local network, every body sealed anyway) uses `plain`.
+pub fn link_for(url: &str, pin: &str, plain: Arc<dyn Upstream>) -> Result<HttpLink, String> {
+    let u = url.trim();
+    if u.starts_with("https://") {
+        if pin.trim().is_empty() {
+            return Err("the relay's certificate fingerprint is not set, so the https relay is not used".into());
+        }
+        let up: Arc<dyn Upstream> = Arc::new(iyakki_proxy::pintls::PinnedUpstream::new(pin)?);
+        HttpLink::new(up, u)
+    } else {
+        HttpLink::new(plain, u)
+    }
+}
+
 /// A relay at an address, over any HTTP transport (the real one, or a fake in a test).
 pub struct HttpLink {
     pub up: Arc<dyn Upstream>,

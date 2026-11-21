@@ -48,7 +48,7 @@ fn the_page_lists_accesses_and_takes_one_away_by_key_and_by_click_and_the_broker
     assert_eq!(broker.decide(&Call { caller: &caller, capability: "camera.view", unit: Some("usb:video0"), label: "HD Webcam" }), Err(Denial::Revoked));
     assert_eq!(broker.decide(&Call { caller: &caller, capability: "notify", unit: None, label: "" }), Ok(()));
     // audited
-    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
     assert!(audit.contains("access.revoke") && audit.contains("notes 1.2 camera.view"), "the revoke is in the audit chain: {audit}");
     // the revoked one moves below the ones still held; by click on the chip of the first row (notify)
     let g = t.draw_at(1280, 720);
@@ -76,7 +76,7 @@ fn the_log_is_shown_with_allowed_and_refused_lines_and_can_be_cleared_and_audite
     assert_eq!(log.recent(10).len(), 2);
     t.send(Event::Key(Key::Char('c')));
     assert!(FileLog::open(cx.data_dir()).recent(10).is_empty());
-    assert!(std::fs::read_to_string(cx.audit.path()).unwrap_or_default().contains("access.log.clear"));
+    assert!(std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default().contains("access.log.clear"));
 }
 
 #[test]
@@ -105,4 +105,44 @@ fn the_walk_over_all_keys_does_not_panic_with_and_without_rows() {
         t.send(Event::Key(k));
     }
     let _ = t.draw_at(480, 300);
+}
+
+#[test]
+fn a_time_limit_is_set_from_the_page_shown_taken_off_and_the_broker_refuses_after_the_end() {
+    let cx = admin("appacc-limit");
+    approve(&cx, "tile/user/root/notes", "notes", &["camera.view", "notify"]);
+    let mut t = TileHarness::new(SettingsApp::new(&cx), cx.clone());
+    t.app.go_to(Tab::AppAccess);
+    assert!(t.app.appaccess_buttons().iter().any(|b| b.0 == "Time limit…"));
+    t.send(Event::Key(Key::Char('e')));
+    let Some(Modal::Form(FormKind::AppAccessLimit(inst, cap), _)) = &t.app.modal else { panic!("the limit form is not open") };
+    assert_eq!((inst.as_str(), cap.as_str()), ("tile/user/root/notes", "camera.view"));
+    let submit = |t: &mut TileHarness<SettingsApp>, text: &str| {
+        let mut f = Form::new("x").text("h", "", "");
+        f.set_value(0, text);
+        t.app.appaccess_limit_submit(&cx, "tile/user/root/notes", "camera.view", &f)
+    };
+    for bad in ["0", "abc", "9000", "-1"] {
+        assert!(submit(&mut t, bad).is_err(), "{bad}");
+    }
+    assert!(submit(&mut t, "24").unwrap().contains("24 more hour"));
+    let held = ab::held_list(cx.data_dir());
+    let end = held[0].ends.get("camera.view").copied().expect("the end is stored");
+    assert!(held[0].ends.get("notify").is_none());
+    assert!(end > iyakki_clock::now_unix() + 23 * 3600);
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
+    assert!(audit.contains("access.limit") && audit.contains("camera.view 24 h"), "{audit}");
+    // while it runs the broker allows it; the limit can be taken off again
+    let (broker, _log) = ab::local(cx.data_dir(), None);
+    let caller = Caller { app: "notes".into(), kind: CallerKind::Store { installation: "tile/user/root/notes".into() }, person: "root".into(), device: "box".into() };
+    let call = || Call { caller: &caller, capability: "camera.view", unit: Some("usb:video0"), label: "HD Webcam" };
+    assert_eq!(broker.decide(&call()), Ok(()));
+    assert!(submit(&mut t, "").unwrap().contains("no time limit"));
+    assert!(ab::held_list(cx.data_dir())[0].ends.is_empty());
+    // a limit that has already run out (written with a clock two days back) is refused at the broker's next call
+    iyakki_agent::accessbroker_revoke::limit(cx.data_dir(), "tile/user/root/notes", "camera.view", Some(1), iyakki_clock::now_unix() - 2 * 86_400).unwrap();
+    assert!(broker.decide(&call()).is_err());
+    assert_eq!(broker.decide(&Call { caller: &caller, capability: "notify", unit: None, label: "" }), Ok(()));
+    // a capability that is not held cannot be limited
+    assert_eq!(iyakki_agent::accessbroker_revoke::limit(cx.data_dir(), "tile/user/root/notes", "files.read", Some(1), 0), Ok(false));
 }

@@ -91,6 +91,19 @@ fn gain_changes_ramp_across_the_period_without_a_jump() {
 }
 
 #[test]
+fn a_source_whose_volume_is_set_after_the_mixer_added_it_sounds_at_that_volume_from_its_first_sample() {
+    // a player opens its source, the mixer adds it, and only then does the player set its volume: the first sound must not ramp from
+    // the volume the source had when it was added (a quiet or muted player would leak a period of full sound)
+    let mut e = Engine::new(cfg());
+    let a = src(&mut e, SourceKind::Media, 48_000, 2);
+    run(&mut e, 3); // periods go by with nothing to play
+    a.set_gain(0.25);
+    a.write_f32(&vec![0.4; 960 * 2 * 2]);
+    let o = run(&mut e, 1);
+    assert!(o.iter().all(|v| (v - 0.1).abs() < 1e-3), "0.4 * 0.25 = 0.1 from the first sample, got {} .. {}", o[0], o[o.len() - 1]);
+}
+
+#[test]
 fn master_gain_ramps_and_mutes() {
     let mut e = Engine::new(cfg());
     let a = src(&mut e, SourceKind::Media, 48_000, 2);
@@ -347,9 +360,12 @@ fn the_ring_is_bounded_and_a_waiting_write_is_paced_by_the_reader() {
     assert_eq!(a.write_f32(&big), 0);
     let t = std::thread::spawn(move || {
         let pcm = vec![100i16; 48_000 * 2];
-        a.write_i16_wait(&pcm, Duration::from_secs(5))
+        a.write_i16_wait(&pcm, iyakki_testkit::BUDGET)
     });
-    for _ in 0..80 {
+    // the reader goes on until the writer has got all of it in (a starved writer thread is only late, it is not refused)
+    let t0 = Instant::now();
+    while !t.is_finished() {
+        assert!(t0.elapsed() < iyakki_testkit::BUDGET, "the waiting write never finished");
         let mut out = Vec::new();
         e.mix_period(1.0, &mut out);
         std::thread::sleep(Duration::from_millis(1));
@@ -415,42 +431,48 @@ fn the_service_plays_a_source_to_the_sink_and_lets_the_card_go_when_idle() {
     let sink = FakeSink::new();
     let m = Mixer::start(fast(), Box::new(sink.clone()));
     let w = m.open_source(SourceKind::Media, 48_000, 2).unwrap();
-    w.write_i16_wait(&vec![8000i16; 48_000 / 5 * 2], Duration::from_secs(2)).unwrap();
-    wait_for("samples", || sink.lock().samples.len() >= 960 * 2 * 5);
+    w.write_i16_wait(&vec![8000i16; 48_000 / 5 * 2], iyakki_testkit::BUDGET).unwrap();
+    // the card is pre-rolled with silence at once, so "some samples" says nothing: wait for the sound itself
+    wait_for("the sound", || sink.lock().samples.iter().any(|&s| s > 7000));
     assert_eq!(sink.lock().opens, 1);
     assert_eq!(sink.lock().rate, 48_000);
-    assert!(sink.lock().samples.iter().any(|&s| s > 7000));
-    assert!(w.finish_and_wait(Duration::from_secs(3)));
+    assert!(w.finish_and_wait(iyakki_testkit::BUDGET));
     wait_for("the sink to close after the idle time", || !sink.is_open_now());
     assert_eq!(sink.lock().closes, 1);
     let st = m.stats();
     assert!(!st.sink_open && st.periods > 0 && st.cpu_percent < 50.0, "{st:?}");
     // a later source opens it again
     let w2 = m.open_source(SourceKind::Notification, 44_100, 1).unwrap();
-    w2.write_i16_wait(&vec![5000i16; 4410], Duration::from_secs(2)).unwrap();
+    w2.write_i16_wait(&vec![5000i16; 4410], iyakki_testkit::BUDGET).unwrap();
     wait_for("a second open", || sink.lock().opens == 2);
     m.shutdown();
 }
 
 #[test]
 fn a_change_of_the_sound_output_moves_what_is_playing_to_the_new_device() {
-    let _rt = crate::mixer::rt_serial();
-    // a station that plays on and on: the card is opened again when the chosen output changes, the stream goes on, nothing is dropped
+    // a station that plays on and on: the card is opened again when the chosen output changes, the stream goes on, nothing is dropped.
+    // The mixer runs on a manual clock: it mixes one period for each step the test lets pass.
+    let clock = MixClock::manual();
     let sink = FakeSink::new();
-    let m = Mixer::start(fast(), Box::new(sink.clone()));
+    let m = Mixer::start_with_clock(fast(), Box::new(sink.clone()), clock);
+    m.settle();
     let w = m.open_source(SourceKind::Radio, 48_000, 2).unwrap();
-    let feed = |n: usize| w.write_i16_wait(&vec![6000i16; 960 * 2 * n], Duration::from_secs(2)).unwrap();
-    feed(10);
-    wait_for("the first open", || sink.lock().opens == 1);
-    assert_eq!(sink.lock().closes, 0);
+    assert_eq!(w.write_i16(&vec![6000i16; 960 * 2 * 100]), 960 * 2 * 100, "two seconds of the station");
+    m.settle();
+    let (opens, closes) = {
+        let l = sink.lock();
+        (l.opens, l.closes)
+    };
+    assert_eq!((opens, closes), (1, 0));
     sink.lock().stale = true; // Settings → Sound chose another output
-    feed(10);
-    wait_for("the second open on the new device", || sink.lock().opens == 2);
-    let closes = sink.lock().closes;
+    m.advance(Duration::from_millis(20));
     let before = sink.lock().samples.len();
-    assert_eq!(closes, 1, "the old device was let go once");
-    feed(10);
-    wait_for("sound after the move", || sink.lock().samples.len() > before);
+    assert_eq!(sink.lock().opens, 2, "the second open on the new device");
+    assert_eq!(sink.lock().closes, 1, "the old device was let go once");
+    for _ in 0..5 {
+        m.advance(Duration::from_millis(20));
+    }
+    assert!(sink.lock().samples.len() > before, "sound after the move");
     assert_eq!(sink.lock().opens, 2, "and it stays on the new one");
     m.shutdown();
 }
@@ -529,9 +551,9 @@ fn shutdown_joins_the_thread_and_ends_the_sources() {
     let w = m.open_source(SourceKind::Media, 48_000, 2).unwrap();
     w.write_f32(&vec![0.1; 960 * 2 * 5]);
     wait_for("playing", || sink.lock().writes > 0);
-    let t0 = Instant::now();
+    // `shutdown` joins the thread: it returns when the thread has ended (a thread that did not end would hang here, which the harness
+    // reports; how long it took on a busy machine says nothing)
     m.shutdown();
-    assert!(t0.elapsed() < Duration::from_secs(2));
     assert!(w.is_done());
     assert!(!sink.lock().open);
     assert_eq!(w.write_f32(&[0.1, 0.1]), 0);
@@ -770,5 +792,76 @@ fn a_live_source_makes_the_mixer_reopen_the_device_with_a_small_buffer_and_the_o
     let (opens, aborts) = seen.expect("the device was opened with the small buffer");
     assert!(opens >= 2 && aborts >= 1, "the device was dropped (not played out) and opened small: {opens} opens, {aborts} aborts");
     drop(l);
+    m.shutdown();
+}
+
+// ---- the per-person buses (F-CLIENT-03)
+
+#[test]
+fn each_owner_gets_a_bus_of_only_their_own_sounds_with_the_same_gain_and_master_and_the_main_mix_is_unchanged() {
+    let mut e = Engine::new(cfg());
+    let (a, b, m) = (src(&mut e, SourceKind::Media, 48_000, 2), src(&mut e, SourceKind::Media, 48_000, 2), src(&mut e, SourceKind::Media, 48_000, 2));
+    a.set_owner("ann");
+    b.set_owner("bob");
+    // m has no owner: a sound of the machine
+    a.write_f32(&vec![0.25; 960 * 2]);
+    b.write_f32(&vec![0.125; 960 * 2]);
+    m.write_f32(&vec![0.0625; 960 * 2]);
+    // off by default: no bus is built and the main mix is as before
+    let mut out = Vec::new();
+    e.mix_period(1.0, &mut out);
+    assert!(e.bus_out.is_empty());
+    let main_without_buses = out.clone();
+    a.write_f32(&vec![0.25; 960 * 2]);
+    b.write_f32(&vec![0.125; 960 * 2]);
+    m.write_f32(&vec![0.0625; 960 * 2]);
+    e.set_buses(true);
+    e.mix_period(1.0, &mut out);
+    assert_eq!(out.iter().map(|v| *v as f32 / 32768.0).fold(0.0, f32::max).round_to(3), (0.25 + 0.125 + 0.0625f32).round_to(3), "the main mix is every sound");
+    let bus = |who: &str| e.bus_out.iter().find(|(o, _)| o == who).map(|(_, p)| p[0] as f32 / 32768.0);
+    assert_eq!(bus("ann").map(|v| v.round_to(3)), Some(0.25), "ann hears her own sound, nothing of bob's");
+    assert_eq!(bus("bob").map(|v| v.round_to(3)), Some(0.125));
+    assert!(bus("").is_some_and(|v| (v - 0.0625).abs() < 0.001), "the machine's own sounds are a bus of their own");
+    assert_eq!(e.bus_out.len(), 3);
+    assert!(main_without_buses.iter().all(|v| *v != 0), "(sanity) the first period had sound");
+    // a person with nothing playing has no bus; switching off clears them
+    a.write_f32(&vec![0.25; 960 * 2]);
+    e.mix_period(1.0, &mut out);
+    assert_eq!(e.bus_out.iter().map(|(o, _)| o.as_str()).collect::<Vec<_>>(), ["ann"]);
+    e.set_buses(false);
+    assert!(e.bus_out.is_empty());
+}
+
+trait RoundTo {
+    fn round_to(self, n: i32) -> f32;
+}
+impl RoundTo for f32 {
+    fn round_to(self, n: i32) -> f32 {
+        let k = 10f32.powi(n);
+        (self * k).round() / k
+    }
+}
+
+#[test]
+fn the_mixer_hands_the_buses_to_its_tap_only_while_somebody_wants_them() {
+    use std::sync::atomic::{AtomicBool, Ordering as O};
+    use std::sync::{Arc, Mutex};
+    let want = Arc::new(AtomicBool::new(false));
+    let got: Arc<Mutex<Vec<(String, usize)>>> = Arc::default();
+    let (w, g) = (want.clone(), got.clone());
+    let m = Mixer::start_with_clock(fast(), Box::new(FakeSink::new()), MixClock::manual());
+    m.settle();
+    m.set_bus_tap(BusTap { wanted: Box::new(move || w.load(O::SeqCst)), put: Box::new(move |o, _, _, p| g.lock().unwrap().push((o.to_string(), p.len()))) });
+    let a = m.open_source(SourceKind::Media, 48_000, 2).unwrap();
+    a.set_owner("ann");
+    a.write_f32(&vec![0.2; 960 * 2 * 10]);
+    m.settle();
+    m.advance(Duration::from_millis(100));
+    assert!(got.lock().unwrap().is_empty(), "nobody wants them: nothing was built or given");
+    want.store(true, O::SeqCst);
+    a.write_f32(&vec![0.2; 960 * 2 * 10]);
+    m.advance(Duration::from_millis(100));
+    let g = got.lock().unwrap().clone();
+    assert!(!g.is_empty() && g.iter().all(|(o, n)| o == "ann" && *n == 960 * 2), "{g:?}");
     m.shutdown();
 }

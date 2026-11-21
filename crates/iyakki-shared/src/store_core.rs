@@ -4,7 +4,7 @@ use crate::store_trust::Level;
 use crate::store_trust::Verdict;
 
 /// What a private store's catalog says about itself, shown before it is trusted.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Probe {
     pub name: String,
     pub id: String,
@@ -18,7 +18,7 @@ pub struct Probe {
 }
 
 /// What a look at the network found.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Refresh {
     pub loaded: Vec<Loaded>,
     pub errors: Vec<(String, String)>,
@@ -27,7 +27,7 @@ pub struct Refresh {
     pub disabled: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     Available,
     Installed,
@@ -61,7 +61,7 @@ impl State {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Item {
     pub entry: Entry,
     pub source: String,

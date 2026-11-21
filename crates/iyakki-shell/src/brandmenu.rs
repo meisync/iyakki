@@ -91,6 +91,44 @@ pub enum Page {
     Developer,
     /// Not a page: opens the Cloud dialog (the tenants signed in to, switching, adding one; `shell_tenant.rs`).
     Cloud,
+    /// Not pages: the entries a Look's menu can list besides Settings (F-LAUNCH-25). Each is an action the shell does (`Outcome::Act`).
+    Home,
+    Apps,
+    Files,
+    Chat,
+    Lock,
+    SignOut,
+    Power,
+}
+
+/// The entries a Look's menu can add, in the words the menu shows: the Look's key, the page, title, what it does, the key that opens it.
+/// They are listed only when the person's Look has a menu of its own; the default Look's menu is the eight entries above and nothing else.
+pub const LOOK_ENTRIES: [(iyakki_uikit::look::MenuEntry, Page, &str, &str, char); 7] = [
+    (iyakki_uikit::look::MenuEntry::Home, Page::Home, "Home", "Put away what is open and show the tiles", 'h'),
+    (iyakki_uikit::look::MenuEntry::Apps, Page::Apps, "Apps", "The tiles of every app", 'p'),
+    (iyakki_uikit::look::MenuEntry::Files, Page::Files, "Files", "Open Files", 'f'),
+    (iyakki_uikit::look::MenuEntry::Chat, Page::Chat, "Chat", "Open Chat", 't'),
+    (iyakki_uikit::look::MenuEntry::Lock, Page::Lock, "Lock", "Lock the screen; the vault closes", 'k'),
+    (iyakki_uikit::look::MenuEntry::SignOut, Page::SignOut, "Sign out", "Leave this session", 'o'),
+    (iyakki_uikit::look::MenuEntry::Power, Page::Power, "Power", "Sleep, restart or shut down", 'w'),
+];
+
+/// The first page's entries for a Look's menu list: the machine's own entries stay (the Look reorders or leaves out, never adds a command
+/// of its own), the Look's list decides where Settings and the seven entries above sit and which are shown. The essentials of a Look's
+/// menu (Settings, Lock, Sign out, Power) are in every list (`look::ESSENTIAL_MENU`), so they are never hidden.
+pub fn entries_for_look(list: &[iyakki_uikit::look::MenuEntry]) -> Vec<(Page, &'static str, &'static str, char)> {
+    use iyakki_uikit::look::MenuEntry;
+    let mut out: Vec<(Page, &'static str, &'static str, char)> = ENTRIES.iter().copied().filter(|e| e.0 != Page::Settings).collect();
+    for m in list {
+        if *m == MenuEntry::Settings {
+            if let Some(e) = ENTRIES.iter().find(|e| e.0 == Page::Settings) {
+                out.push(*e);
+            }
+        } else if let Some(e) = LOOK_ENTRIES.iter().find(|e| e.0 == *m) {
+            out.push((e.1, e.2, e.3, e.4));
+        }
+    }
+    out
 }
 
 /// The entries of the first page: page, title, what it is, the key that opens it.
@@ -110,7 +148,7 @@ fn cloud_id(p: Page) -> &'static str {
     match p {
         Page::Media => "media",
         Page::Mac => "mac",
-        Page::Menu | Page::About | Page::Setup | Page::Gpu | Page::Linux | Page::Settings | Page::Developer | Page::Cloud => "",
+        Page::Menu | Page::About | Page::Setup | Page::Gpu | Page::Linux | Page::Settings | Page::Developer | Page::Cloud | Page::Home | Page::Apps | Page::Files | Page::Chat | Page::Lock | Page::SignOut | Page::Power => "",
     }
 }
 
@@ -138,6 +176,8 @@ pub enum Outcome {
     MacBtLoad,
     /// A button of the Linux apps page (the shell starts the job, opens the terminal, asks the cluster).
     Linux(LinuxAction),
+    /// An entry the Look's menu added: the shell does it (Home, Apps, Files, Chat, Lock, Sign out, Power).
+    Act(Page),
 }
 
 /// The media players looked for, in the order MEDIA uses them, with the arguments that keep them quiet.
@@ -205,7 +245,7 @@ pub fn mac_rows_for(snap: Option<&crate::devpop::Snapshot>, t2: bool) -> Vec<Mac
 
 /// The notice at the foot of the Mac drivers page: whose files these are, and what the download would ask Apple for on this model.
 pub fn mac_notice(model: &str, board_name: &str) -> String {
-    let r = iyakki_drivers::macboard::resolve(model, board_name);
+    let r = iyakki_core_local::driver_packs::macboard::resolve(model, board_name);
     let t2 = if r.t2 || model.is_empty() { "" } else { " This Mac has no T2 chip." };
     let m = match (r.table, &r.board_id) {
         (Some(b), Some(id)) => format!(" This Mac: {} ({}), board id {id}{}.{t2}", b.model, b.name, if r.verified { "" } else { ", not yet tried on a real one" }),
@@ -252,6 +292,8 @@ pub struct BrandMenu {
     pub note: Option<(String, bool)>,
     /// Where the panel hangs from (the name in the top bar), set by the shell.
     pub anchor: (f32, f32),
+    /// The entries of the person's Look menu, when the Look has a menu of its own (`None`: the default menu).
+    look_menu: Option<Vec<iyakki_uikit::look::MenuEntry>>,
     /// The person is an administrator (Developer mode is listed only then).
     pub admin: bool,
     /// The GPU page's facts (the shell fills them when the page opens).
@@ -270,7 +312,7 @@ impl Default for BrandMenu {
 
 impl BrandMenu {
     pub fn new() -> BrandMenu {
-        BrandMenu { open: false, page: Page::Menu, sel: 0, list: ScrollList::default(), wrapped: None, about: None, players: Vec::new(), path: TextField::new("/path/to/a/video-or-audio-file", false), mac: None, mac_path: TextField::new("/mnt/usb/iyakki-wifi-firmware  or  /mnt/usb/macOS.dmg", false), mac_focus: false, mac_last: None, mac_busy: false, mac_leftover: 0, mac_cache: String::new(), mac_bt_held: false, mac_model: String::new(), mac_board: String::new(), note: None, anchor: (24.0, 76.0), admin: false, gpu: None, linux: LinuxPage::new(), cloud: iyakki_cloudmode::CloudMode::desktop(), pick: Default::default(), pick_for: PickFor::Video }
+        BrandMenu { open: false, page: Page::Menu, sel: 0, list: ScrollList::default(), wrapped: None, about: None, players: Vec::new(), path: TextField::new("/path/to/a/video-or-audio-file", false), mac: None, mac_path: TextField::new("/mnt/usb/iyakki-wifi-firmware  or  /mnt/usb/macOS.dmg", false), mac_focus: false, mac_last: None, mac_busy: false, mac_leftover: 0, mac_cache: String::new(), mac_bt_held: false, mac_model: String::new(), mac_board: String::new(), note: None, anchor: (24.0, 76.0), admin: false, gpu: None, linux: LinuxPage::new(), cloud: iyakki_cloudmode::CloudMode::desktop(), pick: Default::default(), pick_for: PickFor::Video, look_menu: None }
     }
 
     pub fn toggle(&mut self) {
@@ -296,7 +338,17 @@ impl BrandMenu {
 
     /// The entries of the first page for this person (Developer mode only for administrators).
     pub fn shown(&self) -> Vec<(Page, &'static str, &'static str, char)> {
-        ENTRIES.iter().copied().filter(|e| (e.0 != Page::Developer || self.admin) && !self.cloud.hides_menu(cloud_id(e.0))).collect()
+        let all = match &self.look_menu {
+            Some(list) => entries_for_look(list),
+            None => ENTRIES.to_vec(),
+        };
+        all.into_iter().filter(|e| (e.0 != Page::Developer || self.admin) && !self.cloud.hides_menu(cloud_id(e.0))).collect()
+    }
+
+    /// The Look's menu list, or `None` for the default menu (the shell gives `None` when the Look lists what the default Look lists).
+    pub fn set_look_menu(&mut self, list: Option<Vec<iyakki_uikit::look::MenuEntry>>) {
+        self.look_menu = list;
+        self.sel = 0;
     }
 
     /// Cloud mode for this machine: hidden entries are neither listed nor reachable by key or jump.
@@ -326,6 +378,9 @@ impl BrandMenu {
         }
         if p == Page::Cloud {
             return Outcome::Jump("cloud", String::new());
+        }
+        if matches!(p, Page::Home | Page::Apps | Page::Files | Page::Chat | Page::Lock | Page::SignOut | Page::Power) {
+            return Outcome::Act(p);
         }
         // the old Quick install page is gone: the entry (and its key q) opens the Store on its Setup tab
         if p == Page::Setup {
@@ -729,7 +784,7 @@ impl BrandMenu {
             Page::Mac => self.draw_mac(g, body, s, tick),
             Page::Gpu => self.draw_gpu(g, body, s),
             Page::Linux => self.draw_linux(g, body, s, tick),
-            Page::Settings | Page::Developer | Page::Setup | Page::Cloud => {}
+            Page::Settings | Page::Developer | Page::Setup | Page::Cloud | Page::Home | Page::Apps | Page::Files | Page::Chat | Page::Lock | Page::SignOut | Page::Power => {}
         }
         // the foot: what just happened, else the keys
         let (foot, col) = match &self.note {
@@ -742,7 +797,7 @@ impl BrandMenu {
                     Page::Gpu => "t or Enter: test prompt · r: refresh · i: Store \u{2192} Setup · Esc back",
                     Page::Linux => self.linux_foot(),
                     Page::Mac => "a: download from Apple · f: from the path · l: load Bluetooth anyway · c: copy the prompt · d: STORE \u{2192} Drivers · v: Devices · Esc back",
-                    Page::Settings | Page::Developer | Page::Setup | Page::Cloud => "",
+                    Page::Settings | Page::Developer | Page::Setup | Page::Cloud | Page::Home | Page::Apps | Page::Files | Page::Chat | Page::Lock | Page::SignOut | Page::Power => "",
                 }
                 .to_string(),
                 DIM,
@@ -771,6 +826,9 @@ impl BrandMenu {
                 Page::Developer => Icon::Ide,
                 Page::Cloud => Icon::Mesh,
                 Page::Linux => Icon::Cli,
+                Page::Chat => Icon::Chat,
+                Page::Lock => Icon::Lock,
+                Page::Power => Icon::Power,
                 _ => Icon::Settings,
             };
             let d = 36.0 * s;
@@ -885,7 +943,7 @@ impl BrandMenu {
 
     fn draw_mac(&mut self, g: &mut Gfx, body: R, s: f32, tick: u64) {
         use crate::devpop::Level;
-        let rows = mac_rows_for(self.mac.as_ref(), self.mac_model.is_empty() || iyakki_drivers::macboard::is_t2(&self.mac_model));
+        let rows = mac_rows_for(self.mac.as_ref(), self.mac_model.is_empty() || iyakki_core_local::driver_packs::macboard::is_t2(&self.mac_model));
         // the buttons, laid out in lines that wrap at the panel's width; the page keeps them at the bottom whatever the size
         let size = 14.0 * s;
         let bh = size * 2.1 + 6.0 * s;

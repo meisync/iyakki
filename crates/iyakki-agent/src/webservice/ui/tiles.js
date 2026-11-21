@@ -211,6 +211,23 @@
     return { id: "tiles", title: "Tiles", available: (me) => !!me, render: renderPage };
   }
 
+  // The renderer files are big (about 210 KB): the sign-in page does not carry them, the Tiles page loads them the first time it needs them (KI-993).
+  const LAZY = [["/ui/displaylist.js", "IyakkiDisplayList"], ["/ui/tilerender.js", "IyakkiTileRender"]];
+  function loadScript(doc, src) {
+    return new Promise((resolve, reject) => {
+      const s = doc.createElement("script");
+      s.src = src;
+      s.addEventListener("load", () => resolve());
+      s.addEventListener("error", () => reject(new Error("could not load " + src)));
+      (doc.head || doc.documentElement).appendChild(s);
+    });
+  }
+  async function ensureRenderer(doc) {
+    for (const [src, name] of LAZY) {
+      if (!root[name]) await loadScript(doc, src);
+    }
+  }
+
   async function renderPage(ctx, host) {
     const { api, el, say, doc } = ctx;
     const body = el("div");
@@ -220,6 +237,7 @@
     const tiles = (r.data && r.data.tiles) || [];
     body.appendChild(el("p", { class: "muted", text: "These apps run on the machine you signed in to and are drawn here. What an app may do is decided there, by your permissions: this page adds none." }));
     if (!tiles.length) { body.appendChild(el("p", { class: "card", text: "No tiles are installed on this machine." })); return; }
+    try { await ensureRenderer(doc); } catch (e) { body.appendChild(el("p", { class: "card", text: "The tile drawing code could not be loaded. Reload the page." })); return; }
     const tabs = el("div", { class: "inline" });
     const stage = el("div", { class: "card tile-stage" });
     body.appendChild(tabs);

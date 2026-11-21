@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use iyakki_shared::backup::{self as bk, AreaInfo, Contents, Created, Layout, RestoreReport};
 use iyakki_shared::backup_schedule::Schedule;
+use iyakki_shared::backup_share as bk_share;
 
 use super::*;
 
@@ -17,6 +18,8 @@ pub(super) enum BackupOut {
     /// The file read through and verified: where it is, the passphrase it needed (kept in memory until the file is closed), what is in it.
     Opened(Result<(PathBuf, Option<String>, Contents), String>),
     Restored(Result<RestoreReport, String>),
+    /// A run that ends in one sentence (a share, the machine's own data, a chain link).
+    Said(Result<String, String>),
 }
 
 pub(super) struct Loaded {
@@ -32,9 +35,18 @@ pub(super) enum BackupForm {
     Restore,
     /// The scheduled backup: every N days, the hour, the folder, how many to keep, the passphrase file.
     Schedule,
+    /// One backup written to a network share that is mounted only for the run (F-BACKUP-04).
+    Share,
+    /// The machine's own settings and keys, administrators only, always encrypted (F-BACKUP-05).
+    System,
+    /// One more link of a chain: only what changed since the files named (F-BACKUP-06).
+    Link,
+    /// Put the machine's own data back from a system backup, administrators only (F-BACKUP-05).
+    SystemRestore,
+    /// Put areas back from a chain: the full file and its links in order (F-BACKUP-06).
+    ChainRestore,
 }
 
-#[derive(Default)]
 pub(super) struct BackupPanel {
     /// Areas to back up (all on until the person switches some off).
     off: BTreeSet<String>,
@@ -48,6 +60,14 @@ pub(super) struct BackupPanel {
     layout: Option<Layout>,
     /// How far the backup that is being made has come, and the way to stop it (Settings shows a bar and the S key).
     pub(super) progress: Option<std::sync::Arc<bk::Progress>>,
+    /// What mounts a network share for one backup (the machine's own mount; tests use a fake).
+    mounter: std::sync::Arc<dyn bk_share::Mounter + Send + Sync>,
+}
+
+impl Default for BackupPanel {
+    fn default() -> BackupPanel {
+        BackupPanel { off: Default::default(), pick: Default::default(), preview: None, loaded: None, last_dir: String::new(), first: 0, layout: None, progress: None, mounter: std::sync::Arc::new(bk_share::RealMounter) }
+    }
 }
 
 const WARN: [u8; 4] = [255, 196, 94, 255];
@@ -56,6 +76,12 @@ impl SettingsApp {
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn with_backup_layout(mut self, l: Layout) -> SettingsApp {
         self.backup.layout = Some(l);
+        self
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn with_backup_mounter(mut self, m: std::sync::Arc<dyn bk_share::Mounter + Send + Sync>) -> SettingsApp {
+        self.backup.mounter = m;
         self
     }
 
@@ -94,7 +120,7 @@ impl SettingsApp {
         if self.backup.loaded.is_some() {
             vec![("Restore chosen…", ACCENT, 'r'), ("Choose / skip", TEXT, ' '), ("Close backup", TEXT, 'c'), ("Open another…", TEXT, 'o')]
         } else {
-            let mut v = vec![("Back up…", ACCENT, 'b'), ("Open backup…", TEXT, 'o'), ("Include / leave out", TEXT, ' '), ("Look again", TEXT, 'k'), ("Schedule…", TEXT, 'h'), ("Schedule off", TEXT, 'u')];
+            let mut v = vec![("Back up…", ACCENT, 'b'), ("Open backup…", TEXT, 'o'), ("Include / leave out", TEXT, ' '), ("Look again", TEXT, 'k'), ("Schedule…", TEXT, 'h'), ("Schedule off", TEXT, 'u'), ("To a network share…", TEXT, 'n'), ("Add a link…", TEXT, 'l'), ("Machine data…", TEXT, 'y'), ("Restore machine data…", TEXT, 'z'), ("Restore a chain…", TEXT, 't')];
             if self.backup.progress.is_some() && self.is_busy() {
                 v.insert(0, ("Stop the backup", ERR, 's'));
             }
@@ -130,7 +156,10 @@ impl SettingsApp {
                     .text("From which hour (0 to 23)", &s.hour.to_string(), "a computer that was off runs it when you next sign in")
                     .path("Folder to write to", if s.dest.is_empty() { &self.backup.last_dir } else { &s.dest }, "a folder that exists, for example on your USB stick", crate::filepicker::PathKind::Folder, &[])
                     .text("Keep how many files (1 to 50)", &s.keep.to_string(), "older ones of yours in that folder are removed after a good run")
-                    .path("Passphrase file (empty: NOT encrypted)", &s.passphrase_file, "a file you made; its first line is the passphrase (8 or more characters). Nothing is typed here", crate::filepicker::PathKind::File, &[]);
+                    .path("Passphrase file (empty: NOT encrypted)", &s.passphrase_file, "a file you made; its first line is the passphrase (8 or more characters). Nothing is typed here", crate::filepicker::PathKind::File, &[])
+                    .text("Network share instead of the folder (optional)", &s.share, "smb://host/share/folder or nfs://host/export; mounted only while the backup runs")
+                    .path("Share credentials file (SMB)", &s.credentials_file, "a file you made: user name on the first line, password on the second", crate::filepicker::PathKind::File, &[])
+                    .text("Full file after how many files (0: always full)", &s.full_every.to_string(), "0, or 2 to 50: a full file, then small links that hold only what changed");
                 self.open_form(FormKind::Backup(BackupForm::Schedule), f);
             }
             Key::Char('u') if self.backup.loaded.is_none() => {
@@ -146,6 +175,56 @@ impl SettingsApp {
                     }
                     Err(e) => self.fail(e),
                 }
+            }
+            Key::Char('n') if self.backup.loaded.is_none() => {
+                if self.backup_on().is_empty() {
+                    return self.fail("Everything is switched off: choose at least one thing to include (Space).");
+                }
+                let f = Form::new("Back up to a network share")
+                    .text("Share address", "", "smb://host/share/folder or nfs://host/export")
+                    .path("Credentials file (SMB only)", "", "a file you made: user name on the first line, password on the second; nothing is typed here", crate::filepicker::PathKind::File, &[])
+                    .secret("Passphrase (optional)", "empty: the file is NOT encrypted. 8 or more characters to encrypt it")
+                    .secret("Repeat the passphrase", "only when you typed one above");
+                self.open_form(FormKind::Backup(BackupForm::Share), f);
+            }
+            Key::Char('y') if self.backup.loaded.is_none() => {
+                if !cx.session.policy.manage_settings {
+                    return self.fail("Only an administrator may back up the machine's own settings and keys.");
+                }
+                let f = Form::new("Back up the machine's own settings and keys")
+                    .path("Folder or stick to write to", &self.backup.last_dir, "a folder you choose; nothing is chosen for you", crate::filepicker::PathKind::Folder, &[])
+                    .secret("Passphrase (required, 8 or more characters)", "these files hold keys and tokens: they are never written without a passphrase")
+                    .secret("Repeat the passphrase", "");
+                self.open_form(FormKind::Backup(BackupForm::System), f);
+            }
+            Key::Char('z') if self.backup.loaded.is_none() => {
+                if !cx.session.policy.manage_settings {
+                    return self.fail("Only an administrator may restore the machine's own settings and keys.");
+                }
+                let f = Form::new("Restore the machine's own settings and keys")
+                    .path("System backup file", "", "a file ending in .iybak made with Machine data", crate::filepicker::PathKind::File, &[bk::EXTENSION])
+                    .secret("Passphrase it was made with", "")
+                    .secret("Repeat the passphrase", "")
+                    .text("Type RESTORE to confirm (what is there now is kept as a copy)", "", "RESTORE");
+                self.open_form(FormKind::Backup(BackupForm::SystemRestore), f);
+            }
+            Key::Char('t') if self.backup.loaded.is_none() => {
+                let f = Form::new("Restore from a chain of backups")
+                    .text("The backups, in order", "", "the full file first, then each link, separated by a semicolon")
+                    .text("What to bring back", "", "area names separated by commas, as shown in the list")
+                    .secret("Passphrase the chain was made with (empty: plain files)", "")
+                    .text("Type RESTORE to confirm (what is there now is kept as a copy)", "", "RESTORE");
+                self.open_form(FormKind::Backup(BackupForm::ChainRestore), f);
+            }
+            Key::Char('l') if self.backup.loaded.is_none() => {
+                if self.backup_on().is_empty() {
+                    return self.fail("Everything is switched off: choose at least one thing to include (Space).");
+                }
+                let f = Form::new("Add a link to a chain of backups")
+                    .path("Folder to write the new link to", &self.backup.last_dir, "a folder you choose", crate::filepicker::PathKind::Folder, &[])
+                    .text("The backups so far, in order", "", "the full file first, then each link, separated by a semicolon")
+                    .secret("Passphrase the chain was made with (empty: plain files)", "");
+                self.open_form(FormKind::Backup(BackupForm::Link), f);
             }
             Key::Char('c') if self.backup.loaded.is_some() => {
                 self.backup.loaded = None;
@@ -218,14 +297,128 @@ impl SettingsApp {
                 s.dest = form.value(2).trim().to_string();
                 s.keep = num(3, "Keep", 1, 50)?;
                 s.passphrase_file = form.value(4).trim().to_string();
+                s.share = form.value(5).trim().to_string();
+                s.credentials_file = form.value(6).trim().to_string();
+                s.full_every = form.value(7).trim().parse::<u32>().map_err(|_| "Full file after how many files: 0, or a whole number from 2 to 50.".to_string())?;
                 s.enabled = true;
                 s.validate()?;
-                if !std::path::Path::new(&s.dest).is_dir() {
+                if s.share.is_empty() && !std::path::Path::new(&s.dest).is_dir() {
                     return Err("The folder is not there yet: make it, or plug in the stick, then try again.".into());
                 }
                 s.save(cx.data_dir(), &user)?;
-                cx.audit.record(&user, "backup.schedule", &format!("on, every {} day(s), {}", s.every_days, if s.passphrase_file.is_empty() { "not encrypted" } else { "encrypted" }));
+                cx.audit.record(&user, "backup.schedule", &format!("on, every {} day(s){}, {}", s.every_days, if s.share.is_empty() { "" } else { ", to a share" }, if s.passphrase_file.is_empty() { "not encrypted" } else { "encrypted" }));
                 Ok(s.describe(&iyakki_clock::Zone::system_with(None), now))
+            }
+            BackupForm::Share => {
+                let spec = bk_share::ShareSpec::parse(form.value(0).trim())?;
+                let creds = form.value(1).trim().to_string();
+                let creds = if creds.is_empty() { None } else { Some(bk_share::parse_credentials(&std::fs::read_to_string(&creds).map_err(|e| format!("The credentials file cannot be read: {e}"))?)?) };
+                let pass = form.raw(2);
+                if pass != form.raw(3) {
+                    return Err("The two passphrases differ.".into());
+                }
+                let pass = (!pass.is_empty()).then_some(pass);
+                if pass.as_ref().is_some_and(|p| p.chars().count() < bk::MIN_PASSPHRASE) {
+                    return Err(format!("The passphrase needs at least {} characters (or leave it empty for no encryption).", bk::MIN_PASSPHRASE));
+                }
+                let work = cx.data_dir().join("backup-share-work");
+                let opts = bk::CreateOptions { areas: self.backup_on(), passphrase: pass.clone(), now, release: env!("CARGO_PKG_VERSION").to_string() };
+                cx.audit.record(&user, "backup.share", &format!("{}, {}", spec.source(), if pass.is_some() { "encrypted" } else { "not encrypted" }));
+                let mounter = self.backup.mounter.clone();
+                self.start("Backing up to the share", move || {
+                    let r = (|| {
+                        use std::os::unix::fs::DirBuilderExt;
+                        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&work).map_err(|x| format!("no private folder for the mount: {x}"))?;
+                        bk_share::create_on_share(&layout, &opts, &spec, creds.as_ref().map(|(u, p)| (u.as_str(), p.as_str())), mounter.as_ref(), &work)
+                    })();
+                    JobOut::Backup(BackupOut::Said(r.map(|(name, bytes)| format!("Wrote {name} ({}) to {}. The share was let go again.{}", bk::human(bytes), spec.source(), if opts.passphrase.is_some() { "" } else { " It is not encrypted: anyone who can read the share can read the file." }))))
+                });
+                Ok("Backing up to the share…".into())
+            }
+            BackupForm::System => {
+                let proof = bk::AdminProof::of(cx.session.policy.manage_settings).ok_or("Only an administrator may back up the machine's own settings and keys.")?;
+                let dest = form.value(0).trim().to_string();
+                if dest.is_empty() {
+                    return Err("Choose the folder or stick to write to.".into());
+                }
+                let pass = form.raw(1);
+                if pass != form.raw(2) {
+                    return Err("The two passphrases differ.".into());
+                }
+                if pass.chars().count() < bk::MIN_PASSPHRASE {
+                    return Err(format!("The passphrase needs at least {} characters: the machine's own data is never written without one.", bk::MIN_PASSPHRASE));
+                }
+                self.backup.last_dir = dest.clone();
+                let opts = bk::CreateOptions { areas: Default::default(), passphrase: Some(pass), now, release: env!("CARGO_PKG_VERSION").to_string() };
+                cx.audit.record(&user, "backup.system.create", &dest);
+                self.start("Backing up the machine's data", move || {
+                    JobOut::Backup(BackupOut::Said(bk::create_system(&layout, std::path::Path::new(&dest), &opts, &bk::Progress::default(), proof).map(|c| format!("Wrote {} ({} files, {}), encrypted.", c.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), c.files, bk::human(c.bytes))).map_err(|e| e.to_string())))
+                });
+                Ok("Backing up the machine's data…".into())
+            }
+            BackupForm::Link => {
+                let dest = form.value(0).trim().to_string();
+                let chain: Vec<PathBuf> = form.value(1).split(';').map(str::trim).filter(|x| !x.is_empty()).map(PathBuf::from).collect();
+                if dest.is_empty() || chain.is_empty() || chain.len() > 200 {
+                    return Err("Name the folder and the backups so far (the full file first, then each link, separated by a semicolon).".into());
+                }
+                let pass = Some(form.raw(2)).filter(|p| !p.is_empty());
+                self.backup.last_dir = dest.clone();
+                let opts = bk::CreateOptions { areas: self.backup_on(), passphrase: pass.clone(), now, release: env!("CARGO_PKG_VERSION").to_string() };
+                cx.audit.record(&user, "backup.incremental", &format!("{} file(s) before", chain.len()));
+                self.start("Adding a link", move || {
+                    let r = bk::chain_state(&layout, &chain, pass.as_deref()).and_then(|base| bk::create_incremental(&layout, std::path::Path::new(&dest), &opts, &bk::Progress::default(), &base).map(|c| (base.links, c)));
+                    JobOut::Backup(BackupOut::Said(r.map(|(n, c)| format!("Wrote {} ({} changed files, {}). Keep it after the {n} file(s) before it, in that order.", c.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), c.files, bk::human(c.bytes))).map_err(|e| e.to_string())))
+                });
+                Ok("Adding a link…".into())
+            }
+            BackupForm::SystemRestore => {
+                let proof = bk::AdminProof::of(cx.session.policy.manage_settings).ok_or("Only an administrator may restore the machine's own settings and keys.")?;
+                let file = PathBuf::from(form.value(0).trim());
+                if file.as_os_str().is_empty() {
+                    return Err("Choose the system backup file.".into());
+                }
+                let pass = form.raw(1);
+                if pass != form.raw(2) {
+                    return Err("The two passphrases differ.".into());
+                }
+                if pass.is_empty() {
+                    return Err("The machine's own data is always encrypted: type the passphrase.".into());
+                }
+                if form.value(3).trim() != "RESTORE" {
+                    return Err("Type RESTORE exactly to go on.".into());
+                }
+                cx.audit.record(&user, "backup.system.restore", &file.display().to_string());
+                self.start("Restoring the machine's data", move || {
+                    JobOut::Backup(BackupOut::Said(bk::restore_system(&layout, &file, Some(&pass), now, false, proof).map(|r| format!("Restored {}. The old data was kept as: {}.", r.restored.iter().map(|x| x.label.clone()).collect::<Vec<_>>().join(", "), r.kept.iter().filter_map(|k| k.file_name().map(|n| n.to_string_lossy().into_owned())).collect::<Vec<_>>().join(", "))).map_err(|e| e.to_string())))
+                });
+                Ok("Restoring the machine's data…".into())
+            }
+            BackupForm::ChainRestore => {
+                let chain: Vec<PathBuf> = form.value(0).split(';').map(str::trim).filter(|x| !x.is_empty()).map(PathBuf::from).collect();
+                if chain.is_empty() || chain.len() > 200 {
+                    return Err("Name the backups (the full file first, then each link, separated by a semicolon).".into());
+                }
+                let areas: BTreeSet<String> = form.value(1).split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+                if areas.is_empty() {
+                    return Err("Name the areas to bring back, separated by commas.".into());
+                }
+                if let Some(bad) = areas.iter().find(|a| !bk::AREAS.iter().any(|k| k.0 == a.as_str())) {
+                    return Err(format!("\u{201C}{bad}\u{201D} is not a backup area."));
+                }
+                let pass = Some(form.raw(2)).filter(|p| !p.is_empty());
+                if form.value(3).trim() != "RESTORE" {
+                    return Err("Type RESTORE exactly to go on.".into());
+                }
+                let scratch = cx.data_dir().join("backup-chain-scratch");
+                let req = bk::RestoreRequest { areas, allow_other_account: false, now };
+                cx.audit.record(&user, "backup.chain.restore", &format!("{} area(s) from {} file(s)", req.areas.len(), chain.len()));
+                self.start("Restoring from the chain", move || {
+                    let r = std::fs::create_dir_all(&scratch).map_err(|e| e.to_string()).and_then(|()| bk::restore_chain(&layout, &chain, pass.as_deref(), &scratch, &req).map_err(|e| e.to_string()));
+                    let _ = std::fs::remove_dir(&scratch);
+                    JobOut::Backup(BackupOut::Restored(r))
+                });
+                Ok("Restoring from the chain…".into())
             }
             BackupForm::Open => {
                 let file = PathBuf::from(form.value(0).trim());
@@ -274,7 +467,8 @@ impl SettingsApp {
                 let vault = r.restored.iter().any(|a| a.id == "vault");
                 self.ok(format!("Restored {} thing(s). The data that was there is kept next to it as \u{201C}…before-restore-…\u{201D}.{}", r.restored.len(), if vault { " Sign out and in again to use the restored vault." } else { "" }));
             }
-            BackupOut::Made(Err(e)) | BackupOut::Opened(Err(e)) | BackupOut::Restored(Err(e)) => self.fail(e),
+            BackupOut::Said(Ok(m)) => self.ok(m),
+            BackupOut::Said(Err(e)) | BackupOut::Made(Err(e)) | BackupOut::Opened(Err(e)) | BackupOut::Restored(Err(e)) => self.fail(e),
         }
     }
 

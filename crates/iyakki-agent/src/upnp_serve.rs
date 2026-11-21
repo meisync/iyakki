@@ -45,6 +45,98 @@ pub struct ServeCfg {
     pub audit: Arc<dyn Fn(&str, &str) + Send + Sync>,
     /// The converter for files a player cannot play (the person's own ffmpeg); `None`: files are served as they are.
     pub transcoder: Option<Arc<dyn crate::upnp_transcode::Transcoder>>,
+    /// The networks of the private interfaces (KI-102): a source is answered only when it is inside one of them, whatever its address
+    /// looks like, so a VPN or a container network never counts as local. `None` (tests): the address alone decides.
+    pub lan: Option<Arc<dyn Fn() -> Vec<LanNet> + Send + Sync>>,
+}
+
+/// One private interface network: the address of this computer on it and the prefix length.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LanNet {
+    pub addr: Ipv4Addr,
+    pub prefix: u8,
+}
+
+impl LanNet {
+    pub fn holds(&self, ip: Ipv4Addr) -> bool {
+        let mask = if self.prefix == 0 { 0 } else { u32::MAX << (32 - u32::from(self.prefix.min(32))) };
+        u32::from(self.addr) & mask == u32::from(ip) & mask
+    }
+}
+
+/// Interfaces that carry a VPN, a container or a virtual machine network, never "the local network" of a player.
+pub fn lan_interface_name(name: &str) -> bool {
+    const NOT_LAN: [&str; 17] = ["lo", "wg", "tun", "tap", "ppp", "tailscale", "zt", "docker", "br-", "veth", "cni", "flannel", "cali", "virbr", "vnet", "kube", "cilium"];
+    !NOT_LAN.iter().any(|p| name.starts_with(p))
+}
+
+/// The networks of the interfaces that are up, have a private IPv4 address and are not a VPN, container or virtual interface.
+pub fn lan_nets_of(ifaces: &[(String, Ipv4Addr, u8)]) -> Vec<LanNet> {
+    ifaces.iter().filter(|(n, a, _)| lan_interface_name(n) && (a.is_private() || a.is_link_local())).map(|(_, a, p)| LanNet { addr: *a, prefix: *p }).collect()
+}
+
+fn real_lan() -> Vec<LanNet> {
+    let mut v: Vec<(String, Ipv4Addr, u8)> = Vec::new();
+    // SAFETY: getifaddrs fills a list that is only read, each pointer checked for null, and then freed with freeifaddrs.
+    unsafe {
+        let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut list) != 0 {
+            return Vec::new();
+        }
+        let mut p = list;
+        while !p.is_null() {
+            let a = &*p;
+            p = a.ifa_next;
+            if a.ifa_addr.is_null() || a.ifa_netmask.is_null() || a.ifa_flags & (libc::IFF_UP as u32) == 0 || i32::from((*a.ifa_addr).sa_family) != libc::AF_INET {
+                continue;
+            }
+            let ip = Ipv4Addr::from(u32::from_be((*(a.ifa_addr as *const libc::sockaddr_in)).sin_addr.s_addr));
+            let mask = u32::from_be((*(a.ifa_netmask as *const libc::sockaddr_in)).sin_addr.s_addr);
+            v.push((std::ffi::CStr::from_ptr(a.ifa_name).to_string_lossy().into_owned(), ip, mask.count_ones() as u8));
+        }
+        libc::freeifaddrs(list);
+    }
+    lan_nets_of(&v)
+}
+
+/// How long a search is answered after it arrived: a random part of the `MX` seconds it asked for, so many players searching at once do
+/// not get all their answers in one burst (UPnP Device Architecture 1.1, 1.3.2). `rand` is any random number.
+pub fn mx_delay(mx: u8, rand: u64) -> Duration {
+    Duration::from_millis(rand % (u64::from(mx.clamp(1, 5)) * 1000))
+}
+
+/// Answers waiting for their time.
+#[derive(Default)]
+pub struct Delayed {
+    q: Vec<(Instant, SocketAddr, Vec<u8>)>,
+}
+
+impl Delayed {
+    const MAX: usize = 64;
+
+    /// Hold `datagrams` for `to` until `at`; when the queue is full the answer is dropped (a player searches again).
+    pub fn add(&mut self, at: Instant, to: SocketAddr, datagrams: Vec<Vec<u8>>) {
+        for d in datagrams {
+            if self.q.len() < Self::MAX {
+                self.q.push((at, to, d));
+            }
+        }
+    }
+
+    /// The answers whose time has come (removed from the queue).
+    pub fn due(&mut self, now: Instant) -> Vec<(SocketAddr, Vec<u8>)> {
+        let (ready, wait): (Vec<_>, Vec<_>) = std::mem::take(&mut self.q).into_iter().partition(|(t, _, _)| *t <= now);
+        self.q = wait;
+        ready.into_iter().map(|(_, a, d)| (a, d)).collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.q.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.q.is_empty()
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------- the library
@@ -218,7 +310,19 @@ impl Shared {
     }
 
     fn allowed(&self, ip: IpAddr) -> bool {
-        upnp::may_answer(ip) || (self.cfg.allow_loopback && ip.is_loopback())
+        if self.cfg.allow_loopback && ip.is_loopback() {
+            return true;
+        }
+        if !upnp::may_answer(ip) {
+            return false;
+        }
+        match &self.cfg.lan {
+            None => true,
+            Some(nets) => match ip {
+                IpAddr::V4(a) => nets().iter().any(|n| n.holds(a)),
+                IpAddr::V6(_) => false,
+            },
+        }
     }
 }
 
@@ -306,6 +410,7 @@ fn now_secs() -> i64 {
 fn ssdp_loop(sock: UdpSocket, sh: Arc<Shared>) {
     let mut throttle = Throttle::new();
     let mut buf = [0u8; 2048];
+    let mut delayed = Delayed::default();
     let announce = |alive: bool, sock: &UdpSocket| {
         if !sh.cfg.multicast {
             return;
@@ -322,6 +427,9 @@ fn ssdp_loop(sock: UdpSocket, sh: Arc<Shared>) {
             Ok(x) => x,
             Err(_) => {
                 sh.pump();
+                for (to, d) in delayed.due(Instant::now()) {
+                    let _ = sock.send_to(&d, to);
+                }
                 continue;
             }
         };
@@ -334,9 +442,10 @@ fn ssdp_loop(sock: UdpSocket, sh: Arc<Shared>) {
             IpAddr::V4(a) => format!("http://{a}:{}/upnp/device.xml", sh.http_port),
             IpAddr::V6(a) => format!("http://[{a}]:{}/upnp/device.xml", sh.http_port),
         };
-        for reply in upnp::search_replies(&search, &sh.id.uuid, &location, SERVER, &crate::sharedsite::http_date(now_secs())) {
-            let _ = sock.send_to(&reply, src);
-        }
+        let mut r = [0u8; 8];
+        let _ = iyakki_sec::random_fill(&mut r);
+        let at = Instant::now() + mx_delay(search.mx, u64::from_le_bytes(r));
+        delayed.add(at, src, upnp::search_replies(&search, &sh.id.uuid, &location, SERVER, &crate::sharedsite::http_date(now_secs())));
     }
     announce(false, &sock);
 }
@@ -628,6 +737,25 @@ fn real_transcoder() -> Option<Arc<dyn crate::upnp_transcode::Transcoder>> {
     crate::upnp_transcode::Ffmpeg::probe(Path::new(&p)).map(|f| Arc::new(f) as Arc<dyn crate::upnp_transcode::Transcoder>)
 }
 
+/// The port the media server plays from: the first free one of the firewall preset's range (`iyakki_fw::ruleset::MEDIA_PORTS`), so the
+/// preset "Media server" can name it; 0 (any free port, which the preset does not cover) only when the whole range is taken.
+pub fn media_port() -> u16 {
+    pick_port(iyakki_fw::ruleset::MEDIA_PORTS, |p| TcpListener::bind((Ipv4Addr::UNSPECIFIED, p)).is_ok())
+}
+
+fn pick_port(range: (u16, u16), free: impl Fn(u16) -> bool) -> u16 {
+    (range.0..=range.1).find(|p| free(*p)).unwrap_or(0)
+}
+
+/// Words for the person when the firewall would keep players out of the media server (empty when it would let them in or is not managed).
+pub fn firewall_note(port: u16) -> Option<String> {
+    let e = iyakki_fw::service::try_engine()?;
+    if !e.managed() || e.would_allow_tcp("192.168.0.2".parse().ok()?, port) {
+        return None;
+    }
+    Some(format!("The firewall blocks players on your network from reaching port {port}: switch on the \"Media server\" preset in Settings -> Firewall (it opens UDP 1900 and TCP {}-{} to the local network only).", iyakki_fw::ruleset::MEDIA_PORTS.0, iyakki_fw::ruleset::MEDIA_PORTS.1))
+}
+
 pub fn start_for(data_dir: &Path, user: &str, audit: Arc<dyn Fn(&str, &str) + Send + Sync>) -> Result<String, String> {
     let mut r = registry().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(run) = r.get(user) {
@@ -637,7 +765,7 @@ pub fn start_for(data_dir: &Path, user: &str, audit: Arc<dyn Fn(&str, &str) + Se
     if folders.is_empty() {
         return Err("There is no shared folder to offer: share a folder first (Settings -> Shared folders).".into());
     }
-    let cfg = ServeCfg { name: format!("IYAKKI ({user})"), uuid: uuid_for(data_dir, user)?, http_bind: "0.0.0.0:0".parse().unwrap(), ssdp_bind: "0.0.0.0:1900".parse().unwrap(), multicast: true, folders, deny: crate::sharedfolder::deny_list(data_dir), allow_loopback: false, head_deadline: Duration::from_secs(10), audit, transcoder: real_transcoder() };
+    let cfg = ServeCfg { name: format!("IYAKKI ({user})"), uuid: uuid_for(data_dir, user)?, http_bind: SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), media_port()), ssdp_bind: "0.0.0.0:1900".parse().unwrap(), multicast: true, folders, deny: crate::sharedfolder::deny_list(data_dir), allow_loopback: false, head_deadline: Duration::from_secs(10), audit, transcoder: real_transcoder(), lan: Some(Arc::new(real_lan)) };
     let run = start(cfg)?;
     let msg = format!("The media server is on: {} audio and video files of your shared folders are visible to players on the local network (port {}). It stops when you sign out or switch it off.", run.items(), run.http_addr().port());
     r.insert(user.to_string(), run);
@@ -655,6 +783,15 @@ pub fn cast_source(user: &str, id: &str, toward: IpAddr) -> Option<(String, Stri
     let m = &lib.items[i];
     let me = local_ip_toward(toward)?;
     Some((m.title.clone(), m.mime.clone(), m.video, format!("http://{}/upnp/media/{id}", SocketAddr::new(me, run.http.port()))))
+}
+
+/// The items a person's running media server offers: (id, title, is video), at most `max` of them, for a list to choose from. Empty when
+/// the server is not on.
+pub fn items_for(user: &str, max: usize) -> Vec<(String, String, bool)> {
+    let r = registry().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(run) = r.get(user) else { return Vec::new() };
+    let (lib, _) = run.shared.library();
+    lib.items.iter().enumerate().take(max).map(|(i, m)| (format!("{}{i}", if m.video { 'v' } else { 'a' }), m.title.chars().filter(|c| !c.is_control()).take(80).collect(), m.video)).collect()
 }
 
 /// Switch it off; false when it was not on.
@@ -718,7 +855,7 @@ mod tests {
     }
 
     fn cfg(d: &Path, loopback: bool) -> ServeCfg {
-        ServeCfg { name: "Test <server>".into(), uuid: "6f1c1c0a-1111-4222-8333-444455556666".into(), http_bind: "127.0.0.1:0".parse().unwrap(), ssdp_bind: "127.0.0.1:0".parse().unwrap(), multicast: false, folders: vec![d.join("share")], deny: vec![], allow_loopback: loopback, head_deadline: Duration::from_secs(10), audit: Arc::new(|_, _| {}), transcoder: None }
+        ServeCfg { name: "Test <server>".into(), uuid: "6f1c1c0a-1111-4222-8333-444455556666".into(), http_bind: "127.0.0.1:0".parse().unwrap(), ssdp_bind: "127.0.0.1:0".parse().unwrap(), multicast: false, folders: vec![d.join("share")], deny: vec![], allow_loopback: loopback, head_deadline: Duration::from_secs(10), audit: Arc::new(|_, _| {}), transcoder: None, lan: None }
     }
 
     fn http(addr: SocketAddr, raw: &str) -> (u16, String, Vec<u8>) {
@@ -758,6 +895,60 @@ mod tests {
         v.extend_from_slice(&data.to_le_bytes());
         v.extend(std::iter::repeat_n(0u8, data as usize));
         v
+    }
+
+    #[test]
+    fn ki102_only_the_private_interfaces_count_as_the_local_network() {
+        let ifs = vec![
+            ("enp3s0".to_string(), "192.168.1.20".parse().unwrap(), 24u8),
+            ("wg0".to_string(), "10.8.0.2".parse().unwrap(), 24),
+            ("docker0".to_string(), "172.17.0.1".parse().unwrap(), 16),
+            ("tailscale0".to_string(), "169.254.9.9".parse().unwrap(), 16),
+            ("wlp2s0".to_string(), "203.0.113.5".parse().unwrap(), 24),
+        ];
+        let nets = lan_nets_of(&ifs);
+        assert_eq!(nets, vec![LanNet { addr: "192.168.1.20".parse().unwrap(), prefix: 24 }]);
+        let (d, nets2) = (tree("ki102"), nets.clone());
+        let mut c = cfg(&d, false);
+        c.lan = Some(Arc::new(move || nets2.clone()));
+        let run = start(c).unwrap();
+        assert!(run.shared.allowed("192.168.1.77".parse().unwrap()), "a player on the LAN");
+        assert!(!run.shared.allowed("192.168.2.77".parse().unwrap()), "private but not on this network");
+        assert!(!run.shared.allowed("10.8.0.9".parse().unwrap()), "a VPN peer");
+        assert!(!run.shared.allowed("172.17.0.5".parse().unwrap()), "a container");
+        assert!(!run.shared.allowed("fe80::1".parse().unwrap()), "IPv6 is not served");
+        assert!(!run.shared.allowed("8.8.8.8".parse().unwrap()));
+        run.stop();
+        assert!(LanNet { addr: "10.0.0.1".parse().unwrap(), prefix: 0 }.holds("1.2.3.4".parse().unwrap()) && !LanNet { addr: "10.0.0.1".parse().unwrap(), prefix: 32 }.holds("10.0.0.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn ki102_a_search_is_answered_after_a_random_part_of_mx_and_never_later() {
+        for r in [0u64, 1, 999, 1000, 123_456_789, u64::MAX] {
+            for mx in [0u8, 1, 3, 5, 200] {
+                assert!(mx_delay(mx, r) < Duration::from_secs(u64::from(mx.clamp(1, 5))), "{mx} {r}");
+            }
+        }
+        assert_eq!(mx_delay(2, 1500), Duration::from_millis(1500));
+        let t0 = Instant::now();
+        let to: SocketAddr = "192.168.1.5:50000".parse().unwrap();
+        let mut q = Delayed::default();
+        q.add(t0 + Duration::from_millis(300), to, vec![b"a".to_vec(), b"b".to_vec()]);
+        q.add(t0 + Duration::from_millis(900), to, vec![b"c".to_vec()]);
+        assert!(q.due(t0).is_empty() && q.len() == 3, "nothing before its time");
+        assert_eq!(q.due(t0 + Duration::from_millis(300)).len(), 2);
+        assert_eq!(q.due(t0 + Duration::from_secs(5)), vec![(to, b"c".to_vec())]);
+        assert!(q.is_empty());
+        q.add(t0, to, (0..200).map(|_| vec![1u8]).collect());
+        assert_eq!(q.len(), 64, "a full queue drops, it does not grow");
+    }
+
+    #[test]
+    fn the_media_port_is_the_first_free_one_of_the_firewall_range_and_any_port_only_when_all_are_taken() {
+        let r = iyakki_fw::ruleset::MEDIA_PORTS;
+        assert_eq!(pick_port(r, |_| true), r.0);
+        assert_eq!(pick_port(r, |p| p >= r.0 + 3), r.0 + 3);
+        assert_eq!(pick_port(r, |_| false), 0);
     }
 
     #[test]

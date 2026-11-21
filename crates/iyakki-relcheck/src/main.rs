@@ -1,13 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use iyakki_relcheck::{assets, cpio, features, gate, imagescan, links, profile, sbom, secrets, version};
+use iyakki_relcheck::{assets, cpio, features, gate, imagescan, knownissues, links, profile, sbom, secrets, version};
 
 const USAGE: &str = "iyakki-relcheck <links|secrets|version|features|sbom|licenses> [ROOT] [options]
   links               broken relative links and anchors in README, top-level and docs/ markdown
   secrets [--all]     private keys, tokens, .env/ssh key files; exit 1 on a BLOCK finding; --all also lists REVIEW findings
   version             version consistency (workspace, GUI workspace, lock files, CHANGELOG, release notes)
   features            FEATURES.md totals line against its rows
+  known-issues        KNOWN-ISSUES.md entries (id, class, Closes by, Row), citations, the fixed registry and the UNTRIAGED ratchet; prints the counts
   sbom [--out FILE]   SPDX-lite SBOM from both Cargo.lock files (+ Buildroot legal-info when a build left one)
   licenses            markdown table of the components that are not purely permissive
   licence-check [ROOT] [--strict] [--write] [--verbose] [--no-images] [--image DIR]...
@@ -16,7 +17,8 @@ const USAGE: &str = "iyakki-relcheck <links|secrets|version|features|sbom|licens
                       Buildroot legal-info completeness, and the content scan of target/buildroot-*/images. Exit 1 on FAIL (--strict: also REVIEW).
                       --write refreshes legal/THIRD-PARTY-NOTICES.md and legal/sbom.cdx.json
   image-scan [ROOT] (--image DIR | --cpio FILE|- | --file FILE | --tree DIR | --names FILE) [--base BUILD_DIR]... [--verbose]
-                      scan one image (--file takes a cpio, ISO 9660 or FAT volume image by its content; .zst through dist/release/image-gate.sh): every file mapped to its Buildroot package and licence, vendor blobs and unexplained files reported
+                      scan one image (--file takes a cpio (also .zst, decoded by ruzstd), ISO 9660, FAT or ext2/3/4 volume image or a whole disk with MBR (extended partitions too) or GPT, by its content): every file mapped to its Buildroot package and licence, vendor blobs and unexplained files reported
+  unzstd FILE         write the decoded content of a .zst file to standard output (the image gate's own decoder; no zstd program needed)
   release-image-check [ROOT] [--config FILE]... [--simulate-cpio FILE|-] [--base BUILD_DIR]... [--verbose]
                       the RELEASE image profile without a build (docs/development/RELEASE-IMAGE-PROFILE.md): legal/release-profile.txt against
                       board/iyakki/release-firmware.keep and the two release fragments; each --config (a Buildroot .config) must switch nothing
@@ -34,6 +36,19 @@ fn main() -> ExitCode {
         eprint!("{USAGE}");
         return ExitCode::from(2);
     };
+    if cmd == "unzstd" {
+        let Some(f) = args.get(1) else {
+            eprint!("{USAGE}");
+            return ExitCode::from(2);
+        };
+        return match std::fs::File::open(f).map_err(|e| e.to_string()).and_then(|file| ruzstd::decoding::StreamingDecoder::new(file).map_err(|e| e.to_string())).and_then(|mut d| std::io::copy(&mut d, &mut std::io::stdout().lock()).map_err(|e| e.to_string())) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("unzstd: {f}: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let root = args.iter().enumerate().skip(1).find(|(i, a)| !a.starts_with("--") && Path::new(a).is_dir() && !matches!(args[i - 1].as_str(), "--image" | "--base" | "--cpio" | "--file" | "--tree" | "--names" | "--out" | "--date" | "--config" | "--simulate-cpio")).map(|(_, a)| PathBuf::from(a)).unwrap_or_else(|| PathBuf::from("."));
     let flag = |n: &str| args.iter().position(|a| a == n).and_then(|i| args.get(i + 1)).cloned();
     match cmd {
@@ -72,6 +87,13 @@ fn main() -> ExitCode {
             bad.iter().for_each(|b| println!("{b}"));
             println!("features: {} problem(s); {}", bad.len(), features::summary(&text));
             if bad.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+        }
+        "known-issues" => {
+            let r = knownissues::check_repo(&root);
+            r.problems.iter().for_each(|b| println!("{b}"));
+            r.warnings.iter().for_each(|b| println!("WARN {b}"));
+            println!("known-issues: {} problem(s); {} ({} listed, {} fixed, {} cited ids without an entry)", r.problems.len(), r.counts.line(), r.counts.total(), r.fixed, r.dangling);
+            if r.problems.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
         }
         "licence-check" | "license-check" => {
             let images = args.windows(2).filter(|w| w[0] == "--image").map(|w| PathBuf::from(&w[1])).collect();

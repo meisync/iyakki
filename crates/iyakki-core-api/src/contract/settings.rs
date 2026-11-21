@@ -21,6 +21,9 @@ pub enum SettingKind {
     Text { max_len: u32 },
     /// One of these texts.
     Choice { options: Vec<String> },
+    /// A kind a newer release added: shown read-only, never written (no value is accepted for it).
+    #[serde(other)]
+    Unknown,
 }
 
 impl SettingKind {

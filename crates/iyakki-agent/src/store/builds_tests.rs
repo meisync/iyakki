@@ -238,3 +238,27 @@ fn the_shared_token_and_person_tokens_work_side_by_side_and_the_file_is_checked(
         assert!(parse_person_tokens(bad).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn a_blob_read_with_a_persons_own_token_names_the_person_in_the_audit_log_and_other_readers_are_not_named() {
+    let t = rig("blobaudit", |c, _| c.person_read_tokens = parse_person_tokens(&format!("ann {ANN}\nbob {BOB}\n")).unwrap());
+    let f = t.blob(b"audited bytes");
+    let get = |tok: &str, range: Option<&str>| {
+        let mut r = req("GET", &format!("/v1/blobs/{}", f.sha256), Some(tok), b"");
+        if let Some(x) = range {
+            r.headers.insert("range".into(), x.into());
+        }
+        t.srv.blob_get(&r, "10.0.0.1").status
+    };
+    assert_eq!(get(ANN, None), 200);
+    assert_eq!(get(BOB, Some("bytes=0-3")), 206);
+    assert_eq!(get(BOB, Some("bytes=4-6")), 206, "a resumed piece is served");
+    assert_eq!(get(READ, None), 200, "the shared token");
+    let log = t.srv.audit_lines();
+    let reads: Vec<&String> = log.iter().filter(|l| l.contains("blob.read")).collect();
+    assert_eq!(reads.len(), 2, "{log:?}");
+    assert!(reads.iter().any(|l| l.contains(" ann blob.read")) && reads.iter().any(|l| l.contains(" bob blob.read")), "{reads:?}");
+    assert!(reads.iter().all(|l| l.contains(&f.sha256)));
+    let all = log.join("\n");
+    assert!(!all.contains(ANN) && !all.contains(BOB) && !all.contains(READ), "no token in the log");
+}

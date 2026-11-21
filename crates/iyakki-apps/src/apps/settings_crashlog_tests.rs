@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::apps::tests::{cx_with_admin_store, temp_dir};
-use iyakki_storage::crashlog as cl;
+use iyakki_core_api::device_types::storage::crashlog as cl;
 
 /// A machine whose kept logs are the real folder of the test (the rest is the fake).
 struct RealLogs(Arc<iyakki_core_fake::FakeOs>);

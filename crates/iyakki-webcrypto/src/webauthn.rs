@@ -105,6 +105,7 @@ fn auth_data(rp_id: &str, flags: u8, count: u32, attested: Option<(&[u8], &[u8])
 }
 
 /// What a page gets back from `navigator.credentials.create()` (before it is wrapped in an ArrayBuffer).
+#[derive(Debug)]
 pub struct Created {
     pub credential: Credential,
     pub attestation_object: Vec<u8>,
@@ -115,9 +116,35 @@ pub struct Created {
 /// `existing` that is listed in `exclude`.
 #[allow(clippy::too_many_arguments)]
 pub fn make_credential(rp_id: &str, cd_hash: &[u8; 32], user_handle: &[u8], user_name: &str, algs: &[i64], exclude: &[Vec<u8>], existing: &[Credential], presence: bool, now: u64) -> Result<Created, String> {
-    if !presence {
-        return Err("the person did not confirm".into());
+    make_credential_uv(rp_id, cd_hash, user_handle, user_name, algs, exclude, existing, Check { presence, verified: false, required: false }, now)
+}
+
+/// What the person did and what the site demands (WebAuthn `userVerification`): presence is the card; `verified` is user verification, the
+/// person proving who they are with something more than a tap (their password); `required` is the site's `userVerification: "required"`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Check {
+    pub presence: bool,
+    pub verified: bool,
+    pub required: bool,
+}
+
+impl Check {
+    fn flags(&self) -> Result<u8, String> {
+        if !self.presence {
+            return Err("the person did not confirm".into());
+        }
+        if self.required && !self.verified {
+            return Err("this site requires the person to prove who they are, and that was not done".into());
+        }
+        Ok(FLAG_UP | if self.verified { FLAG_UV } else { 0 })
     }
+}
+
+/// [`make_credential`] with user verification: the UV flag is set in the authenticator data only when `check.verified`, and a site that
+/// requires it never gets a credential without.
+#[allow(clippy::too_many_arguments)]
+pub fn make_credential_uv(rp_id: &str, cd_hash: &[u8; 32], user_handle: &[u8], user_name: &str, algs: &[i64], exclude: &[Vec<u8>], existing: &[Credential], check: Check, now: u64) -> Result<Created, String> {
+    let flags = check.flags()?;
     if !algs.is_empty() && !algs.contains(&ES256) {
         return Err("only ES256 (P-256) is supported".into());
     }
@@ -133,11 +160,12 @@ pub fn make_credential(rp_id: &str, cd_hash: &[u8; 32], user_handle: &[u8], user
     let credential = Credential { id: id.to_vec(), rp_id: rp_id.into(), user_handle: user_handle.to_vec(), user_name: user_name.chars().take(64).collect(), pkcs8: doc.as_ref().to_vec(), sign_count: 0, created: now };
     let _ = cd_hash; // registration signs nothing with attestation none; the hash is the page's to check
     let public = public_key(&credential)?;
-    let ad = auth_data(rp_id, FLAG_UP | FLAG_AT, 0, Some((&id, &public)));
+    let ad = auth_data(rp_id, flags | FLAG_AT, 0, Some((&id, &public)));
     let attestation_object = cbor::encode(&Value::Map(vec![(Value::text("fmt"), Value::text("none")), (Value::text("attStmt"), Value::Map(vec![])), (Value::text("authData"), Value::Bytes(ad))]));
     Ok(Created { credential, attestation_object })
 }
 
+#[derive(Debug)]
 pub struct Assertion {
     pub credential_id: Vec<u8>,
     pub auth_data: Vec<u8>,
@@ -149,9 +177,25 @@ pub struct Assertion {
 /// Finds the credential for `rp_id` (one named in `allow`, or, when the list is empty, `pick` by id or the newest), signs, and raises its
 /// sign count. Refuses without confirmed presence.
 pub fn get_assertion(rp_id: &str, cd_hash: &[u8; 32], allow: &[Vec<u8>], pick: Option<&[u8]>, creds: &mut [Credential], presence: bool) -> Result<Assertion, String> {
-    if !presence {
-        return Err("the person did not confirm".into());
-    }
+    get_assertion_uv(rp_id, cd_hash, allow, pick, creds, Check { presence, verified: false, required: false })
+}
+
+/// The passkeys a sign-in for `rp_id` could use (the allowed ones, or every one of the site when the list is empty), newest first: id, account
+/// name, creation time. A site that lists no credentials (a discoverable-credential sign-in) leaves the choice of account to the person.
+pub fn candidates(rp_id: &str, allow: &[Vec<u8>], creds: &[Credential]) -> Vec<(Vec<u8>, String, u64)> {
+    let mut v: Vec<(Vec<u8>, String, u64)> = creds.iter().filter(|c| c.rp_id == rp_id && (allow.is_empty() || allow.contains(&c.id))).map(|c| (c.id.clone(), c.user_name.clone(), c.created)).collect();
+    v.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+    v
+}
+
+/// The user verification flag of authenticator data (what a site reads to know the person proved who they are).
+pub fn user_verified(auth_data: &[u8]) -> bool {
+    auth_data.get(32).is_some_and(|f| f & FLAG_UV != 0)
+}
+
+/// [`get_assertion`] with user verification (see [`Check`]).
+pub fn get_assertion_uv(rp_id: &str, cd_hash: &[u8; 32], allow: &[Vec<u8>], pick: Option<&[u8]>, creds: &mut [Credential], check: Check) -> Result<Assertion, String> {
+    let flags = check.flags()?;
     let idx = creds
         .iter()
         .enumerate()
@@ -161,7 +205,7 @@ pub fn get_assertion(rp_id: &str, cd_hash: &[u8; 32], allow: &[Vec<u8>], pick: O
         .ok_or("there is no passkey for this site")?;
     let c = &mut creds[idx];
     c.sign_count = c.sign_count.checked_add(1).ok_or("sign count overflow")?;
-    let ad = auth_data(rp_id, FLAG_UP, c.sign_count, None);
+    let ad = auth_data(rp_id, flags, c.sign_count, None);
     let mut msg = ad.clone();
     msg.extend_from_slice(cd_hash);
     let signature = pair(c)?.sign(&SystemRandom::new(), &msg).map_err(|_| "signing failed")?.as_ref().to_vec();
@@ -254,6 +298,45 @@ pub fn verify_assertion(public_key: &[u8], auth_data: &[u8], client_data: &[u8],
 mod tests {
     use super::*;
     const ORIGIN: &str = "https://login.example.com";
+
+    #[test]
+    fn user_verification_sets_the_flag_only_when_done_and_a_site_that_requires_it_gets_nothing_without() {
+        let challenge = [9u8; 32];
+        let cd = client_data_json("webauthn.create", &challenge, ORIGIN);
+        let h = client_data_hash(&cd);
+        let tap = Check { presence: true, verified: false, required: false };
+        let proved = Check { presence: true, verified: true, required: false };
+        let need = Check { presence: true, verified: false, required: true };
+        // only a tap: no UV flag; proved: the flag; required without proof: refused and nothing made
+        let a = make_credential_uv("example.com", &h, b"u", "ana", &[ES256], &[], &[], tap, 1).unwrap();
+        let b = make_credential_uv("example.com", &h, b"u", "ana", &[ES256], &[], &[], proved, 1).unwrap();
+        let ad = |att: &[u8]| cbor::decode_all(att).unwrap().get_text("authData").unwrap().as_bytes().unwrap().to_vec();
+        assert!(!user_verified(&ad(&a.attestation_object)) && user_verified(&ad(&b.attestation_object)));
+        assert!(make_credential_uv("example.com", &h, b"u", "ana", &[ES256], &[], &[], need, 1).unwrap_err().contains("prove who they are"));
+        assert!(make_credential_uv("example.com", &h, b"u", "ana", &[ES256], &[], &[], Check { presence: false, ..proved }, 1).is_err());
+        // sign-in: the same rules, and the assertion still verifies at the relying party
+        let mut creds = vec![b.credential.clone()];
+        let cd2 = client_data_json("webauthn.get", &challenge, ORIGIN);
+        let h2 = client_data_hash(&cd2);
+        assert!(get_assertion_uv("example.com", &h2, &[], None, &mut creds, need).is_err());
+        assert_eq!(creds[0].sign_count, 0, "a refusal does not use the passkey");
+        let x = get_assertion_uv("example.com", &h2, &[], None, &mut creds, Check { required: true, ..proved }).unwrap();
+        assert!(user_verified(&x.auth_data));
+        assert_eq!(verify_assertion(&public_key(&creds[0]).unwrap(), &x.auth_data, cd2.as_bytes(), &x.signature, &challenge, ORIGIN, "example.com", 0), Ok(1));
+        let y = get_assertion_uv("example.com", &h2, &[], None, &mut creds, tap).unwrap();
+        assert!(!user_verified(&y.auth_data));
+    }
+
+    #[test]
+    fn the_candidates_of_a_site_are_its_passkeys_newest_first_or_only_the_allowed_ones() {
+        let mk = |id: u8, rp: &str, name: &str, created: u64| Credential { id: vec![id], rp_id: rp.into(), user_handle: vec![id], user_name: name.into(), pkcs8: vec![], sign_count: 0, created };
+        let creds = vec![mk(1, "a.org", "old", 5), mk(2, "a.org", "new", 9), mk(3, "b.org", "other", 7), mk(4, "a.org", "same time", 9)];
+        let names: Vec<String> = candidates("a.org", &[], &creds).into_iter().map(|c| c.1).collect();
+        assert_eq!(names, ["new", "same time", "old"], "newest first, ties by name");
+        assert_eq!(candidates("a.org", &[vec![1]], &creds).len(), 1);
+        assert!(candidates("c.org", &[], &creds).is_empty());
+        assert!(!user_verified(&[0u8; 10]), "short data has no flag");
+    }
 
     #[test]
     fn registration_and_sign_in_round_trip_through_the_relying_party_checks() {

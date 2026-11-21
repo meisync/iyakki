@@ -14,7 +14,7 @@
 //! cookies and storage live in a private per-person folder under the data directory (`web-profile/<user>`, mode 0700).
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::time::{Duration, Instant};
 pub use iyakki_shared::webengine::{FULL_ENGINE_HELP_HTML, NOT_INSTALLED};
 
@@ -194,26 +194,9 @@ pub fn prepare_devices() -> Result<(), String> {
     };
     let _ = std::fs::create_dir_all("/run/udev");
     let log = std::fs::OpenOptions::new().create(true).append(true).open(LOG).ok();
-    let quiet = |c: &mut Command| {
-        c.stdin(Stdio::null());
-        match log.as_ref().and_then(|f| f.try_clone().ok()) {
-            Some(f) => c.stdout(f),
-            None => c.stdout(Stdio::null()),
-        };
-        match log.as_ref().and_then(|f| f.try_clone().ok()) {
-            Some(f) => c.stderr(f),
-            None => c.stderr(Stdio::null()),
-        };
-    };
-    let mut c = Command::new(&udevd);
-    c.arg("--daemon");
-    quiet(&mut c);
-    c.status().map_err(|e| format!("could not start udevd: {e}"))?;
+    iyakki_core_local::starters::udev_run(&udevd, &["--daemon"], log.as_ref()).map_err(|e| format!("could not start udevd: {e}"))?;
     for args in [&["trigger", "--type=subsystems", "--action=add"][..], &["trigger", "--type=devices", "--action=add"][..], &["settle", "--timeout=10"][..]] {
-        let mut c = Command::new(&udevadm);
-        c.args(args);
-        quiet(&mut c);
-        let _ = c.status();
+        let _ = iyakki_core_local::starters::udev_run(&udevadm, args, log.as_ref());
     }
     Ok(())
 }
@@ -261,7 +244,6 @@ pub fn run_reporting(data: &Path, user: &str, url: &str, stop: &std::sync::atomi
 
 fn run_inner(data: &Path, user: &str, url: &str, stop: &std::sync::atomic::AtomicBool, reg: &crate::startup::Registry) -> Result<i32, String> {
     use std::os::unix::fs::DirBuilderExt;
-    use std::os::unix::process::CommandExt;
     if !available() {
         return Err(NOT_INSTALLED.into());
     }
@@ -274,10 +256,8 @@ fn run_inner(data: &Path, user: &str, url: &str, stop: &std::sync::atomic::Atomi
     }
     let log = std::fs::OpenOptions::new().create(true).append(true).open(LOG).map_err(|e| format!("{LOG}: {e}"))?;
     let argv = cage_argv(&url);
-    let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..]).env_clear().envs(session_env(&profile)).current_dir(&profile);
-    cmd.process_group(0).stdin(Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
-    let mut child = cmd.spawn().map_err(|e| format!("could not start cage: {e}"))?;
+    let envs: Vec<(String, String)> = session_env(&profile);
+    let mut child = iyakki_core_local::starters::webengine_spawn(&argv, &envs, &profile, log).map_err(|e| format!("could not start cage: {e}"))?;
     log::info!("webengine: started cage (pid {}) for {}", child.id(), iyakki_sec::url_host(&url).unwrap_or_default());
     reg.ready("web");
     loop {
@@ -415,6 +395,12 @@ pub fn helper_env(profile: &Path) -> Option<Vec<(String, String)>> {
         v.extend(crate::webgraphics::software_env(cores, &tuned));
     }
     v.extend(tuned);
+    // graphics acceleration parts (compositing, rasterisation, video decoding, WebGL): on where a card and its driver work, off with a
+    // reason where not, and off by the person's or the administrator's switch (webaccel.rs; the per-site switch is added by the Browser)
+    if let Some(d) = data {
+        let plan = crate::webaccel::plan_for(d, Path::new("/"), &crate::webaccel::user_of_profile(profile), "", software);
+        iyakki_shared::webaccel::merge_env(&mut v, &plan.env);
+    }
     // sound: where the sound output is a T2 Mac's, the engine plays through its own PCM (softvol.rs), see web_audio_env
     let asound = std::fs::read_to_string(ASOUND_CONF).unwrap_or_default();
     // the experimental route through the mixer (webmix.rs) replaces the usual one; the card is then shared, so autoplay is not denied
@@ -552,12 +538,7 @@ pub const GL_MARKER: &str = "/usr/share/iyakki/web-gl-drivers";
 
 /// `(vendor, device)` file contents of the graphics cards (`/sys/class/drm/card0..3/device/`), as the files hold them (`0x1002`).
 pub fn drm_gpus() -> Vec<(String, String)> {
-    (0..4)
-        .filter_map(|i| {
-            let v = std::fs::read_to_string(format!("/sys/class/drm/card{i}/device/vendor")).ok()?;
-            Some((v, std::fs::read_to_string(format!("/sys/class/drm/card{i}/device/device")).unwrap_or_default()))
-        })
-        .collect()
+    iyakki_core_local::kernelfacts::drm_gpus()
 }
 
 /// Mesa must be told to use llvmpipe when an Intel GPU is present but this image has no Intel driver in it: otherwise EGL finds the

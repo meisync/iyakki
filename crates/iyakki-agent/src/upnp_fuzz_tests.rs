@@ -133,7 +133,7 @@ impl Site {
         std::fs::write(dir.join("share/.secret.mp3"), b"HIDDEN-SECRET").unwrap();
         std::fs::write(dir.join("outside/leak.mp3"), b"OUTSIDE-SECRET").unwrap();
         std::os::unix::fs::symlink(dir.join("outside/leak.mp3"), dir.join("share/link.mp3")).unwrap();
-        let cfg = ServeCfg { name: "Fuzz".into(), uuid: "6f1c1c0a-1111-4222-8333-444455556666".into(), http_bind: "127.0.0.1:0".parse().unwrap(), ssdp_bind: "127.0.0.1:0".parse().unwrap(), multicast: false, folders: vec![dir.join("share")], deny: vec![], allow_loopback: true, head_deadline: std::time::Duration::from_secs(10), audit: Arc::new(|_, _| {}), transcoder: None };
+        let cfg = ServeCfg { name: "Fuzz".into(), uuid: "6f1c1c0a-1111-4222-8333-444455556666".into(), http_bind: "127.0.0.1:0".parse().unwrap(), ssdp_bind: "127.0.0.1:0".parse().unwrap(), multicast: false, folders: vec![dir.join("share")], deny: vec![], allow_loopback: true, head_deadline: std::time::Duration::from_secs(10), audit: Arc::new(|_, _| {}), transcoder: None, lan: None };
         let lib = upnp_serve::scan(&cfg.folders, &cfg.deny);
         let ids: Vec<(String, Vec<u8>)> = lib.paths.iter().enumerate().map(|(i, p)| (format!("{}{i}", if lib.items[i].video { 'v' } else { 'a' }), std::fs::read(p).unwrap())).collect();
         let server = upnp_serve::start(cfg).unwrap();

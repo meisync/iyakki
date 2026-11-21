@@ -37,6 +37,8 @@ enum Screen {
     /// Add or change a camera (the id when changing).
     Form(Box<Form>, Option<String>),
     Confirm(String),
+    /// The certificate an encrypted camera showed, waiting for the person's yes: the camera id and the fingerprint on show.
+    Trust(String, String),
     /// The recordings page of one camera.
     Rec(Box<rec::RecView>),
     /// The motion page of one camera (zones, privacy masks, alerts, events).
@@ -60,6 +62,10 @@ pub struct CamerasApp {
     rec_ids: Vec<String>,
     /// The cameras whose pictures are being analysed for motion (each gets a MOTION mark on its picture).
     motion_ids: Vec<String>,
+    /// The camera whose sound the person listens to (F-CAM-20), and what it is doing now. Only the enlarged view listens.
+    listening: Option<(String, iyakki_tile_api::cameras::Listen)>,
+    /// The waiting certificate of the camera in the large view, last read at that tick.
+    trust_checked: Option<(String, Option<String>, u64)>,
 }
 
 impl Default for CamerasApp {
@@ -88,7 +94,7 @@ fn status_color(s: &Status) -> [u8; 4] {
 
 impl CamerasApp {
     pub fn new() -> CamerasApp {
-        CamerasApp { screen: Screen::Grid, cams: vec![], last_refresh: None, layout: 4, first: 0, sel: 0, note: None, flash: None, pix: HashMap::new(), tick: 0, privacy: false, shown: vec![], rec_ids: vec![], motion_ids: vec![] }
+        CamerasApp { screen: Screen::Grid, cams: vec![], last_refresh: None, layout: 4, first: 0, sel: 0, note: None, flash: None, pix: HashMap::new(), tick: 0, privacy: false, shown: vec![], rec_ids: vec![], motion_ids: vec![], listening: None, trust_checked: None }
     }
 
     pub fn layout(&self) -> usize {
@@ -130,6 +136,10 @@ impl CamerasApp {
     }
     pub fn asking_to_remove(&self) -> bool {
         matches!(self.screen, Screen::Confirm(_))
+    }
+    /// The card for a camera's waiting certificate is on screen.
+    pub fn asking_to_trust(&self) -> bool {
+        matches!(self.screen, Screen::Trust(..))
     }
     /// The last line shown to the person (a saved snapshot, an error) and whether it was good news.
     pub fn note(&self) -> Option<(&str, bool)> {
@@ -224,6 +234,27 @@ impl CamerasApp {
         }
     }
 
+    /// Stop listening: the speaker is let go.
+    fn stop_listening(&mut self, cx: &TileCx) {
+        if let Some((id, _)) = self.listening.take() {
+            cx.cameras.listen(&id, false);
+        }
+    }
+
+    /// The words next to the Listen button: what the sound is doing.
+    fn listen_words(&self, id: &str) -> Option<String> {
+        use iyakki_tile_api::cameras::Listen;
+        match &self.listening {
+            Some((l, st)) if l == id => Some(match st {
+                Listen::Off => return None,
+                Listen::Playing => "Listening".to_string(),
+                Listen::Waiting => "Listening: no sound from this camera yet".to_string(),
+                Listen::Unavailable(m) => m.clone(),
+            }),
+            _ => None,
+        }
+    }
+
     fn snapshot(&mut self, cx: &TileCx, id: &str) {
         let name = self.cams.iter().find(|c| c.id == id).map_or_else(String::new, |c| c.name.clone());
         match cx.cameras.snapshot(id) {
@@ -240,6 +271,7 @@ impl CamerasApp {
         match ev {
             Event::Key(Key::Esc) | Event::Key(Key::Char('q')) | Event::Key(Key::Backspace) if big.is_some() => self.screen = Screen::Grid,
             Event::Key(Key::Esc) | Event::Key(Key::Char('q')) => {
+                self.stop_listening(cx);
                 cx.cameras.release_local();
                 return Flow::Back;
             }
@@ -265,6 +297,21 @@ impl CamerasApp {
             Event::Key(Key::Char('s')) | Event::Tab(31) => match self.cams.get(self.sel).map(|c| c.id.clone()) {
                 Some(id) => self.snapshot(cx, &id),
                 None => self.say("There is no camera to take a snapshot of.", false),
+            },
+            Event::Key(Key::Char('l')) | Event::Tab(36) => match big.clone().and_then(|i| self.cams.iter().find(|c| c.id == i).cloned()) {
+                Some(c) if self.listening.as_ref().is_some_and(|(l, _)| *l == c.id) => self.stop_listening(cx),
+                Some(c) => {
+                    self.stop_listening(cx);
+                    self.listening = Some((c.id, iyakki_tile_api::cameras::Listen::Waiting));
+                }
+                None => self.say("Open a camera in the large view to listen to it.", false),
+            },
+            Event::Key(Key::Char('t')) | Event::Tab(37) => match big.clone() {
+                Some(id) => match cx.cameras.trust_waiting(&id) {
+                    Some(fp) => self.screen = Screen::Trust(id, fp),
+                    None => self.say("This camera has no certificate waiting for your answer.", false),
+                },
+                None => self.say("Open a camera in the large view first.", false),
             },
             Event::Key(Key::Char('p')) | Event::Tab(34) => {
                 let id = big.clone().or_else(|| self.cams.get(self.sel).map(|c| c.id.clone()));
@@ -320,7 +367,7 @@ impl CamerasApp {
                 let (dw, dh) = (fw * k, fh * k);
                 let (x, y) = (r.x + (r.w - dw) / 2.0, r.y + (r.h - dh) / 2.0);
                 let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
-                g.pm.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(dw / fw, 0.0, 0.0, dh / fh, x, y), None);
+                g.pm_mut().draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(dw / fw, 0.0, 0.0, dh / fh, x, y), None);
                 if let Status::Dark(msg) = &c.status {
                     // a black picture says why, in words, over the picture
                     let tx = r.x + 12.0 * s;
@@ -435,13 +482,27 @@ impl CamerasApp {
             self.screen = Screen::Grid;
             return;
         };
+        // the sound: asked for on every drawn frame while the person listens, so the speaker keeps being fed
+        if self.listening.as_ref().is_some_and(|(l, _)| *l == id) {
+            let st = cx.cameras.listen(id, true);
+            self.listening = Some((id.to_string(), st));
+        }
+        let listening_here = self.listening.as_ref().is_some_and(|(l, _)| l == id);
         let mut bar = vec![("Back (Esc)".to_string(), MUTED, Event::Key(Key::Esc)), ("Snapshot (s)".to_string(), ACCENT, Event::Tab(31))];
+        bar.push((if listening_here { "Stop listening (l)" } else { "Listen (l)" }.to_string(), MUTED, Event::Tab(36)));
         if c.kind == Kind::Network {
+            // an encrypted camera whose certificate waits for the person's answer (read twice a second at most, not on every frame)
+            if self.trust_checked.as_ref().is_none_or(|(i, _, t)| *i != id || self.tick.saturating_sub(*t) >= 30) {
+                self.trust_checked = Some((id.to_string(), cx.cameras.trust_waiting(id), self.tick));
+            }
+            if let Some((_, Some(_), _)) = &self.trust_checked {
+                bar.push(("Check certificate (t)".to_string(), AMBER, Event::Tab(37)));
+            }
             bar.push(("Recordings (p)".to_string(), MUTED, Event::Tab(34)));
             bar.push(("Motion (m)".to_string(), MUTED, Event::Tab(35)));
         }
         let (bar_h, end_x) = g.button_flow(x, y, w, 13.0 * s, 8.0 * s, &bar);
-        let sub = format!("{}{}", c.status.label(), if c.fps > 0.5 { format!(" · {:.0} fps", c.fps) } else { String::new() });
+        let sub = format!("{}{}{}", self.listen_words(id).map(|w| format!("{w} · ")).unwrap_or_default(), c.status.label(), if c.fps > 0.5 { format!(" · {:.0} fps", c.fps) } else { String::new() });
         let sub = format!("{sub}{}", if c.size.0 > 0 { format!(" · {}×{}", c.size.0, c.size.1) } else { String::new() });
         // the state sits after the last button when it fits there, else under the buttons
         let sw = g.text_width(13.0 * s, &sub, Face::Sans);
@@ -484,9 +545,10 @@ impl App for CamerasApp {
     fn hint(&self) -> String {
         match self.screen {
             Screen::Grid => "1 2 4 6 views · arrows select · Enter or click enlarges · s snapshot · a add · e edit · d remove · Esc back".into(),
-            Screen::Big(_) => "s snapshot · ← → other camera · Esc back to the grid".into(),
+            Screen::Big(_) => "s snapshot · l listen · ← → other camera · Esc back to the grid".into(),
             Screen::Form(..) => "Tab next field · Enter save · Esc cancel".into(),
             Screen::Confirm(_) => "y remove · Esc cancel".into(),
+            Screen::Trust(..) => "y trust this certificate · Esc not now".into(),
             Screen::Rec(ref r) => r.hint(),
             Screen::Motion(ref m) => m.hint(),
         }
@@ -518,6 +580,20 @@ impl App for CamerasApp {
                 FormEvent::Cancel => {}
                 FormEvent::Submit => self.submit_form(cx, f, replacing),
                 _ => self.screen = Screen::Form(f, replacing),
+            },
+            Screen::Trust(id, fp) => match ev {
+                Event::Key(Key::Char('y')) => {
+                    match cx.cameras.trust_approve(&id, &fp) {
+                        Ok(m) => {
+                            self.last_refresh = None;
+                            self.say(m, true);
+                        }
+                        Err(e) => self.say(e, false),
+                    }
+                    self.screen = Screen::Big(id);
+                }
+                Event::Key(Key::Esc) | Event::Key(Key::Char('n')) => self.screen = Screen::Big(id),
+                _ => self.screen = Screen::Trust(id, fp),
             },
             Screen::Confirm(id) => match ev {
                 Event::Key(Key::Char('y')) => {
@@ -564,11 +640,34 @@ impl App for CamerasApp {
                 m.render(g, area, s, cx, tick);
                 self.screen = Screen::Motion(m);
             }
+            Screen::Trust(id, fp) => {
+                let name = self.cams.iter().find(|c| c.id == id).map_or("this camera", |c| c.name.as_str()).to_string();
+                self.screen = Screen::Trust(id.clone(), fp.clone());
+                self.draw_big(g, area, s, cx, &id);
+                self.screen = Screen::Trust(id, fp.clone());
+                let p = iyakki_uikit::fx::modal(g, area, s, 640.0 * s, 230.0 * s, ACCENT, false);
+                let t = g.fit(19.0 * s, &format!("Trust the certificate of “{name}”?"), Face::Bold, p.w - 48.0 * s);
+                g.text(p.x + 24.0 * s, p.y + 24.0 * s, 19.0 * s, TEXT, &t, Face::Bold);
+                g.text(p.x + 24.0 * s, p.y + 62.0 * s, 13.0 * s, MUTED, "The camera showed this fingerprint. Compare it with the one on the camera's own page:", Face::Sans);
+                let half = fp.len() / 2;
+                let cut = fp[..half].rfind(':').map_or(half, |i| i + 1);
+                let (l1, l2) = (g.fit(13.0 * s, &fp[..cut], Face::Mono, p.w - 48.0 * s), g.fit(13.0 * s, &fp[cut..], Face::Mono, p.w - 48.0 * s));
+                g.text(p.x + 24.0 * s, p.y + 90.0 * s, 13.0 * s, TEXT, &l1, Face::Mono);
+                g.text(p.x + 24.0 * s, p.y + 110.0 * s, 13.0 * s, TEXT, &l2, Face::Mono);
+                g.button(p.x + 24.0 * s, p.y + p.h - 58.0 * s, 14.0 * s, "Trust it", ACCENT, Event::Key(Key::Char('y')));
+                g.button(p.x + 24.0 * s + 150.0 * s, p.y + p.h - 58.0 * s, 14.0 * s, "Not now", MUTED, Event::Key(Key::Esc));
+            }
             Screen::Confirm(id) => {
                 let name = self.cams.iter().find(|c| c.id == id).map_or("this camera", |c| c.name.as_str()).to_string();
                 self.screen = Screen::Confirm(id);
                 self.draw_grid(g, area, s, cx);
                 render_confirm(g, area, s, &format!("Remove the camera “{name}” and its stored password?"), "Remove");
+            }
+        }
+        // the sound belongs to the enlarged view of its camera: anything else lets the speaker go
+        if let Some((l, _)) = &self.listening {
+            if !matches!(&self.screen, Screen::Big(b) if b == l) {
+                self.stop_listening(cx);
             }
         }
         // what this frame did not draw is not looked at: another page, a smaller layout, the form or the recordings page
@@ -577,7 +676,7 @@ impl App for CamerasApp {
             cx.cameras.release_local_except(&self.shown);
         }
         if let Some((t, ok, at)) = &self.note {
-            if tick.saturating_sub(*at) < 240 && !matches!(self.screen, Screen::Form(..) | Screen::Confirm(_) | Screen::Rec(_) | Screen::Motion(_)) {
+            if tick.saturating_sub(*at) < 240 && !matches!(self.screen, Screen::Form(..) | Screen::Confirm(_) | Screen::Trust(..) | Screen::Rec(_) | Screen::Motion(_)) {
                 let t = g.fit(13.0 * s, t, Face::Sans, area.w - 40.0 * s);
                 g.text(area.x + 20.0 * s, area.y + area.h - 26.0 * s, 13.0 * s, if *ok { OK } else { ERR }, &t, Face::Sans);
             }

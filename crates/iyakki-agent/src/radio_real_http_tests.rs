@@ -58,6 +58,82 @@ fn serve(tag: &str, files: &[(&str, Vec<u8>)]) -> Option<Server> {
     Some(s)
 }
 
+/// A folder of this test's own for the file the play command writes (removed with the guard).
+struct OutDir(PathBuf);
+
+impl OutDir {
+    fn join(&self, n: &str) -> PathBuf {
+        self.0.join(n)
+    }
+}
+
+impl Drop for OutDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn iyakki_testkit_dir(tag: &str) -> OutDir {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let d = std::env::temp_dir().join(format!("iyakki-radio-live-{}-{tag}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+    std::fs::create_dir_all(&d).unwrap();
+    OutDir(d)
+}
+
+/// A live stream: answers a request with the body and then keeps the connection open, like a radio station that goes on sending, until
+/// the test lets it go (drop). A station that closes the connection ends the player's stream at once and the player cuts the sound it
+/// still holds, so a test that waits for the sound to reach the play command needs the stream to stay up; with the file server of
+/// `serve` the result depended on how fast the play command read its pipe.
+struct LiveServer {
+    port: u16,
+    gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl Drop for LiveServer {
+    fn drop(&mut self) {
+        *self.gate.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.gate.1.notify_all();
+    }
+}
+
+fn serve_live(path: &'static str, content_type: &'static str, body: Vec<u8>) -> LiveServer {
+    use std::io::Read;
+    let listener = iyakki_testkit::port().into_listener();
+    let port = listener.local_addr().unwrap().port();
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let g2 = gate.clone();
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut c) = conn else { break };
+            let (g, body) = (g2.clone(), body.clone());
+            std::thread::spawn(move || {
+                let mut head = Vec::new();
+                let mut b = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if c.read(&mut b).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    head.push(b[0]);
+                }
+                let first = String::from_utf8_lossy(&head).lines().next().unwrap_or("").to_string();
+                if !first.contains(path) {
+                    let _ = c.write_all(b"HTTP/1.0 404 Not Found\r\n\r\n");
+                    return;
+                }
+                if c.write_all(format!("HTTP/1.0 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\n\r\n").as_bytes()).is_err() || c.write_all(&body).is_err() {
+                    return;
+                }
+                // the station goes on sending: the connection stays open until the test is done
+                let mut open = g.0.lock().unwrap_or_else(|e| e.into_inner());
+                while !*open {
+                    open = g.1.wait(open).unwrap_or_else(|e| e.into_inner());
+                }
+            });
+        }
+    });
+    LiveServer { port, gate }
+}
+
 fn play_and_collect(station: &Station, out: &std::path::Path, want_bytes: u64) -> Vec<RadioState> {
     // the sound must go to the play command named here, not to a mixer another test turned on
     let _route = crate::mixer::pin_command_route();
@@ -66,19 +142,26 @@ fn play_and_collect(station: &Station, out: &std::path::Path, want_bytes: u64) -
     let allow: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(|_| true);
     p.play(station, allow, &format!("tee {}", out.display()));
     let mut seen: Vec<RadioState> = Vec::new();
-    let t0 = Instant::now();
-    while t0.elapsed() < Duration::from_secs(40) {
+    // the states are collected while waiting for the sound; a loaded machine only makes the wait longer
+    iyakki_testkit::wait_for_state(iyakki_testkit::BUDGET, || {
         let s = p.state();
         if seen.last() != Some(&s) {
             seen.push(s);
         }
-        if std::fs::metadata(out).map_or(0, |m| m.len()) >= want_bytes {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+        let len = std::fs::metadata(out).map_or(0, |m| m.len());
+        if len >= want_bytes { Ok(()) } else { Err(format!("{len} of {want_bytes} bytes; states {seen:?}")) }
+    });
     p.stop();
     seen
+}
+
+/// Waits (wall-clock budget of the testkit) until the play command has been handed `want` bytes; says what the player was doing when it does not.
+fn wait_for_sound(p: &RadioPlayer, out: &std::path::Path, want: u64) {
+    let t0 = Instant::now();
+    iyakki_testkit::wait_for_state(iyakki_testkit::BUDGET, || {
+        let len = std::fs::metadata(out).map_or(0, |m| m.len());
+        if len >= want { Ok(()) } else { Err(format!("{len} of {want} bytes after {:?}; the player: {:?}", t0.elapsed(), p.state())) }
+    });
 }
 
 #[test]
@@ -151,8 +234,9 @@ fn an_ogg_vorbis_stream_from_a_real_http_server_goes_through_the_real_helper_and
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../iyakki-audiodec/tests/fixtures");
     let ogg = std::fs::read(fixtures.join("stereo-22k.ogg")).unwrap();
     let reference: Vec<i16> = std::fs::read(fixtures.join("stereo-22k.ref.s16")).unwrap().chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
-    let Some(srv) = serve("ogg", &[("live.ogg", ogg)]) else { return };
-    let out = srv.dir.join("pcm.wav");
+    let srv = serve_live("/live.ogg", "audio/ogg", ogg);
+    let dir = iyakki_testkit_dir("ogg");
+    let out = dir.join("pcm.wav");
     let _route = crate::mixer::pin_command_route();
     let p = RadioPlayer::default();
     p.set_streamer(Arc::new(iyakki_proxy::https::UreqStreamer::default()));
@@ -160,10 +244,7 @@ fn an_ogg_vorbis_stream_from_a_real_http_server_goes_through_the_real_helper_and
     let allow: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(|_| true);
     p.play(&Station::new("Loopback Ogg", &format!("http://127.0.0.1:{}/live.ogg", srv.port)), allow, &format!("tee {}", out.display()));
     let want = 44 + 2 * 12_000;
-    let t0 = Instant::now();
-    while t0.elapsed() < Duration::from_secs(40) && std::fs::metadata(&out).map_or(0, |m| m.len()) < want {
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_for_sound(&p, &out, want);
     let state = p.state();
     p.stop();
     let bytes = std::fs::read(&out).unwrap();
@@ -196,12 +277,12 @@ fn an_opus_stream_from_a_real_http_server_goes_through_the_real_helper_and_plays
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../iyakki-audiodec/tests/fixtures/opus");
     // a hybrid file (speech layer and CELT together) and a CELT stereo file: the radio finds Opus by the first packet whatever the server says
     for (name, rate_ch) in [("hybrid-mono-fb-20ms", (48000u32, 1u16)), ("celt-stereo-20ms", (48000, 2))] {
-        // a loaded host can starve the player or the mixer for a moment and drop a block of the stream; a real defect fails every attempt
-        crate::mixer::retried_under_load(3, || {
+        {
             let opus = std::fs::read(fixtures.join(format!("{name}.opus"))).unwrap();
             let reference: Vec<i16> = std::fs::read(fixtures.join(format!("{name}.ref.s16"))).unwrap().chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
-            let Some(srv) = serve("opus", &[("live.ogg", opus)]) else { return };
-            let out = srv.dir.join("pcm.wav");
+            let srv = serve_live("/live.ogg", "audio/ogg", opus);
+            let dir = iyakki_testkit_dir(name);
+            let out = dir.join("pcm.wav");
             let _route = crate::mixer::pin_command_route();
             let p = RadioPlayer::default();
             p.set_streamer(Arc::new(iyakki_proxy::https::UreqStreamer::default()));
@@ -210,10 +291,7 @@ fn an_opus_stream_from_a_real_http_server_goes_through_the_real_helper_and_plays
             let allow: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(|_| true);
             p.play(&Station::new("Loopback Opus", &format!("http://127.0.0.1:{}/live.ogg", srv.port)), allow, &format!("tee {}", out.display()));
             let want = 44 + 2 * reference.len() as u64 * 8 / 10;
-            let t0 = Instant::now();
-            while t0.elapsed() < Duration::from_secs(40) && std::fs::metadata(&out).map_or(0, |m| m.len()) < want {
-                std::thread::sleep(Duration::from_millis(20));
-            }
+            wait_for_sound(&p, &out, want);
             let state = p.state();
             p.stop();
             let bytes = std::fs::read(&out).unwrap();
@@ -234,6 +312,6 @@ fn an_opus_stream_from_a_real_http_server_goes_through_the_real_helper_and_plays
             eprintln!("{name} through the helper and the radio: gain {g:.3}, error {:.2} dB below the sound", 10.0 * (sig / resid.max(1e-9)).log10());
             assert!(g > 0.2 && g < 1.5, "{name}: {g}");
             assert!(sig / resid.max(1e-9) > 1e4, "{name}: the sound that played is the reference sound (signal to error {})", sig / resid.max(1e-9));
-        });
+        }
     }
 }

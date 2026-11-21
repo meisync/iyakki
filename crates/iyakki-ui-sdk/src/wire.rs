@@ -175,25 +175,35 @@ impl<A: UiApp> Session<A> {
 
     /// Apply a batch of input lines and return the new frame. A bad batch applies nothing and says why.
     pub fn apply(&mut self, batch: &str) -> Result<String, String> {
-        let inputs = parse_batch(batch)?;
-        // the frame the person saw is the one taps resolve against
-        if !inputs.is_empty() {
-            let _ = self.host.record();
-        }
-        for i in inputs {
-            let flow = match i {
-                Input::Pointer(p) => self.host.pointer(p),
-                Input::Event(e) => self.host.event(&e),
-                Input::Resize(w, h) => {
-                    self.host.resize(w, h);
-                    Flow::Stay
-                }
-                Input::Tick(t) => self.host.tick(t),
-            };
-            if flow == Flow::Back {
-                self.left = true;
-            }
-        }
-        Ok(self.frame())
+        let (frame, left) = apply_batch(&mut self.host, batch)?;
+        self.left |= left;
+        Ok(frame)
     }
+}
+
+/// Apply a batch of input lines to a host and return the new frame as display list text and whether the app answered `Back` (the person left
+/// it). A bad batch applies nothing and says why. The one rule of [`Session::apply`], for a shell that owns the host itself (a client's
+/// display-list mode, F-SDK-29).
+pub fn apply_batch<A: UiApp>(host: &mut Host<A>, batch: &str) -> Result<(String, bool), String> {
+    let inputs = parse_batch(batch)?;
+    // the frame the person saw is the one taps resolve against
+    if !inputs.is_empty() {
+        let _ = host.record();
+    }
+    let mut left = false;
+    for i in inputs {
+        let flow = match i {
+            Input::Pointer(p) => host.pointer(p),
+            Input::Event(e) => host.event(&e),
+            Input::Resize(w, h) => {
+                host.resize(w, h);
+                Flow::Stay
+            }
+            Input::Tick(t) => host.tick(t),
+        };
+        if flow == Flow::Back {
+            left = true;
+        }
+    }
+    Ok((host.record().to_text(), left))
 }

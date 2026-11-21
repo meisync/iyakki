@@ -63,7 +63,7 @@ fn has_label(sh: &Shell, label: &str) -> bool {
 }
 
 fn count_colour(g: &Gfx, c: [u8; 4]) -> usize {
-    g.pm.data().chunks_exact(4).filter(|p| p[..3] == c[..3]).count()
+    g.pm_ref().data().chunks_exact(4).filter(|p| p[..3] == c[..3]).count()
 }
 
 /// Sign in to a remembered tenant through the dialogs.
@@ -689,4 +689,43 @@ fn frame_into(sh: &mut Shell, g: &mut Gfx) {
     // a frame at this graphics size (the shell reads the size from the canvas)
     sh.render(g);
     sh.render(g);
+}
+
+/// A tenant that draws the words it was asked for.
+struct Words;
+impl crate::apps::tile_remote::RemoteFrames for Words {
+    fn frame(&self, id: &str, w: i32, h: i32, _reset: bool, _events: &[serde_json::Value]) -> Result<(bool, serde_json::Value), String> {
+        Ok((true, serde_json::json!({"abi": 1, "width": w, "height": h, "ops": [{"op": "text", "x": 2, "y": 2, "face": 0, "size": 14, "width": 40, "height": 16, "color": "#ffffffff", "text": format!("tile {id}")}]})))
+    }
+}
+
+#[test]
+fn the_tiles_of_the_shown_tenant_join_the_launcher_and_open_with_that_tenants_own_connection() {
+    let n = net();
+    let mut sh = shell("tn-tiles", &n);
+    login(&mut sh, "root", "rootpass12");
+    let (acme, beta) = (FakeDesktop::live(10, 10, GREEN[..3].try_into().unwrap()), FakeDesktop::live(10, 10, [1, 2, 3]));
+    acme.offer_tiles(&[("counter", "Counter", false)], Arc::new(Words));
+    beta.offer_tiles(&[("notes", "Notes", true)], Arc::new(Words));
+    sh.tenants.hub.open(crate::cloudsession::Session::new("Acme", "alice", Box::new(acme)));
+    sh.tenants.hub.open(crate::cloudsession::Session::new("Beta", "alice", Box::new(beta)));
+    // Personal shown: nothing of a tenant in the launcher
+    sh.tenants.hub.show(None);
+    assert!(sh.tenant_tile_entries().is_empty());
+    // Acme shown: its tile only, never Beta's
+    sh.tenants.hub.show(Some(0));
+    let e = sh.tenant_tile_entries();
+    assert_eq!(e.iter().map(|x| x.key.as_str()).collect::<Vec<_>>(), ["cloud/Acme/counter"]);
+    assert_eq!(e[0].title, "Counter");
+    assert_eq!(super::shell_tenant::cloud_key("cloud/Acme/counter"), Some(("Acme".into(), "counter".into())));
+    assert_eq!(super::shell_tenant::cloud_key("tile/user/counter"), None);
+    // opening it puts a tile app on the screen that draws what the tenant sent
+    sh.open_tenant_tile("Acme", "counter", "Counter");
+    assert!(sh.screen_name().starts_with("app:"), "{}", sh.screen_name());
+    // a tile the tenant does not offer (any more), or another name, opens nothing
+    sh.screen = Screen::Launcher;
+    sh.open_tenant_tile("Acme", "notes", "Notes");
+    assert_eq!(sh.screen_name(), "launcher");
+    sh.open_tenant_tile("Nobody", "counter", "Counter");
+    assert_eq!(sh.screen_name(), "launcher");
 }

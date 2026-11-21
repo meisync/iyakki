@@ -13,6 +13,7 @@ iyakki-sec = { workspace = true }
 iyakki-vpn = { path = "../iyakki-vpn" }
 iyakki-drivers = { workspace = true }
 iyakki-web = { workspace = true }
+iyakki-tile-abi = { path = "../iyakki-tile-abi" }
 iyakki-vt = { workspace = true }
 iyakki-cloudmode = { workspace = true }
 iyakki-core-api = { workspace = true }

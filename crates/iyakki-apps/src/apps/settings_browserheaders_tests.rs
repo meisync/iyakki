@@ -14,12 +14,14 @@ impl iyakki_proxy::Upstream for Offline {
 
 const SECRET: &str = "dummy-header-secret-4711";
 
-fn admin(tag: &str) -> AppCx {
+fn admin(tag: &str) -> (AppCx, super::super::browser_headers::Pin) {
     let mut cx = cx_with_admin_store(tag);
     let d = temp_dir(&format!("{tag}-svc"));
     cx.services = services_in(&d, Arc::new(Offline));
     cx.services.on_login("root", "rootpass12", true);
-    cx
+    // the rules the transport reads are one set per process: this test is the only person that may change them while it runs
+    let pin = super::super::browser_headers::Pin::to(&cx);
+    (cx, pin)
 }
 
 fn page(cx: &AppCx) -> SettingsApp {
@@ -63,7 +65,7 @@ fn add(a: &mut SettingsApp, cx: &AppCx, name: &str, header: &str, value: &str, s
 
 #[test]
 fn a_rule_is_added_kept_in_the_vault_and_shown_masked() {
-    let cx = admin("bh1");
+    let (cx, _pin) = admin("bh1");
     let mut a = page(&cx);
     let said = add(&mut a, &cx, "Staging", "X-Api-Key", SECRET, "api.example.test, *.corp.example").unwrap();
     assert!(said.contains("Staging saved"), "{said}");
@@ -80,7 +82,7 @@ fn a_rule_is_added_kept_in_the_vault_and_shown_masked() {
 
 #[test]
 fn apply_hands_the_header_to_the_transport_only_for_matching_sites() {
-    let cx = admin("bh2");
+    let (cx, _pin) = admin("bh2");
     let mut a = page(&cx);
     add(&mut a, &cx, "Staging", "X-Api-Key", SECRET, "hdrtest.example.test").unwrap();
     super::super::browser_headers::apply(&cx);
@@ -106,7 +108,7 @@ fn apply_hands_the_header_to_the_transport_only_for_matching_sites() {
 
 #[test]
 fn refused_names_values_and_filters_say_why_and_save_nothing() {
-    let cx = admin("bh3");
+    let (cx, _pin) = admin("bh3");
     let mut a = page(&cx);
     for h in ["Host", "Content-Length", "Connection", "Transfer-Encoding", "Upgrade", "Proxy-Authorization", "Sec-Fetch-Site"] {
         let e = add(&mut a, &cx, "Bad", h, "v", "a.example.test").unwrap_err();
@@ -125,7 +127,7 @@ fn refused_names_values_and_filters_say_why_and_save_nothing() {
 
 #[test]
 fn edit_keeps_the_value_when_the_field_is_left_empty_and_rules_persist() {
-    let cx = admin("bh4");
+    let (cx, _pin) = admin("bh4");
     let mut a = page(&cx);
     add(&mut a, &cx, "Staging", "X-Api-Key", SECRET, "a.example.test").unwrap();
     press(&mut a, &cx, Key::Char('e'));
@@ -143,7 +145,7 @@ fn edit_keeps_the_value_when_the_field_is_left_empty_and_rules_persist() {
 
 #[test]
 fn mouse_and_keyboard_reach_every_action_and_esc_goes_back() {
-    let cx = admin("bh5");
+    let (cx, _pin) = admin("bh5");
     let mut a = page(&cx);
     add(&mut a, &cx, "One", "X-One", "v1", "one.example.test").unwrap();
     add(&mut a, &cx, "Two", "X-Two", "v2", "two.example.test").unwrap();
@@ -170,7 +172,7 @@ fn mouse_and_keyboard_reach_every_action_and_esc_goes_back() {
 
 #[test]
 fn the_page_draws_inside_the_window_at_the_four_sizes() {
-    let cx = admin("bh6");
+    let (cx, _pin) = admin("bh6");
     let mut a = page(&cx);
     for (w, h) in [(1280u32, 800u32), (1920, 1080), (1024, 600), (640, 360)] {
         let g = draw(&mut a, &cx, w, h);

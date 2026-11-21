@@ -11,43 +11,47 @@
 
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
-/// Armor to bytes (the CRC-24 line is checked when present); input that is not armored is returned unchanged.
+/// Armor to bytes (the CRC-24 line is checked when present); input that is not armored is returned unchanged. Text before a block (comment
+/// lines of a pinned key file) is ignored and several blocks one after the other give their bytes joined (a keyring of armored keys).
 pub fn dearmor(data: &[u8]) -> Result<Vec<u8>, String> {
     let Ok(text) = std::str::from_utf8(data) else { return Ok(data.to_vec()) };
-    if !text.trim_start().starts_with("-----BEGIN PGP") {
+    if !text.lines().any(|l| l.trim_start().starts_with("-----BEGIN PGP")) {
         return Ok(data.to_vec());
     }
+    let mut out = Vec::new();
     let mut lines = text.lines().map(str::trim);
-    lines.by_ref().find(|l| l.starts_with("-----BEGIN PGP"));
-    // header lines (`Version: ...`) end at the first empty line
-    let mut body = String::new();
-    let mut crc: Option<&str> = None;
-    let mut in_body = false;
-    for l in lines {
-        if l.starts_with("-----END PGP") {
-            break;
-        }
-        if !in_body {
-            if l.is_empty() {
-                in_body = true;
+    while lines.by_ref().any(|l| l.starts_with("-----BEGIN PGP")) {
+        // header lines (`Version: ...`) end at the first empty line
+        let mut body = String::new();
+        let mut crc: Option<&str> = None;
+        let mut in_body = false;
+        for l in lines.by_ref() {
+            if l.starts_with("-----END PGP") {
+                break;
             }
-            continue;
+            if !in_body {
+                if l.is_empty() {
+                    in_body = true;
+                }
+                continue;
+            }
+            if let Some(c) = l.strip_prefix('=') {
+                crc = Some(c);
+            } else {
+                body.push_str(l);
+            }
         }
-        if let Some(c) = l.strip_prefix('=') {
-            crc = Some(c);
-        } else {
-            body.push_str(l);
+        let bytes = b64_decode(&body).ok_or("the armored block is not valid base64")?;
+        if let Some(c) = crc {
+            let want = b64_decode(c).filter(|v| v.len() == 3).ok_or("the armor checksum is malformed")?;
+            let got = crc24(&bytes);
+            if want != [(got >> 16) as u8, (got >> 8) as u8, got as u8] {
+                return Err("the armor checksum does not match (the file is damaged)".into());
+            }
         }
+        out.extend_from_slice(&bytes);
     }
-    let bytes = b64_decode(&body).ok_or("the armored block is not valid base64")?;
-    if let Some(c) = crc {
-        let want = b64_decode(c).filter(|v| v.len() == 3).ok_or("the armor checksum is malformed")?;
-        let got = crc24(&bytes);
-        if want != [(got >> 16) as u8, (got >> 8) as u8, got as u8] {
-            return Err("the armor checksum does not match (the file is damaged)".into());
-        }
-    }
-    Ok(bytes)
+    Ok(out)
 }
 
 fn crc24(data: &[u8]) -> u32 {

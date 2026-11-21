@@ -292,7 +292,7 @@ pub(super) fn draw_custom_cell(g: &mut Gfx, e: &iyakki_shared::store_tilehub::Ti
         let kx = side / pic.width().max(pic.height()) as f32;
         let (ox, oy) = (sq.x + (sq.w - pic.width() as f32 * kx) / 2.0, sq.y + (sq.h - pic.height() as f32 * kx) / 2.0);
         let paint = tiny_skia::PixmapPaint { opacity: if allowed { 1.0 } else { 0.4 }, quality: tiny_skia::FilterQuality::Bilinear, ..tiny_skia::PixmapPaint::default() };
-        g.pm.draw_pixmap(0, 0, pic.as_ref().as_ref(), &paint, tiny_skia::Transform::from_translate(ox, oy).pre_scale(kx, kx), None);
+        g.pm_mut().draw_pixmap(0, 0, pic.as_ref().as_ref(), &paint, tiny_skia::Transform::from_translate(ox, oy).pre_scale(kx, kx), None);
     } else {
         let letter: String = e.title.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().collect()).unwrap_or_else(|| "?".into());
         let ls = sq.h * 0.5;

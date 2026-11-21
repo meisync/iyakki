@@ -1,0 +1,9 @@
+{
+  "events": [
+    { "id": "e1", "title": "Dentist", "start": 1790000000, "minutes": 45, "all_day": false },
+    { "id": "e2", "title": "Birthday", "start": 1790121600, "minutes": 0, "all_day": true, "repeat": "yearly", "notes": "bring the cake", "by": "assistant", "remind": 60 }
+  ],
+  "alarms": [
+    { "id": "a1", "label": "Wake up", "hour": 6, "minute": 30, "days": 62, "enabled": true }
+  ]
+}

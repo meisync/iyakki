@@ -133,6 +133,9 @@ pub enum Expr {
     Daddr(IpAddr, u8),
     /// Destination is a member of the named set of the table (family decides the address type).
     DaddrSet(String),
+    /// The destination address and the destination port together are an element of the named `address . port` interval set of the
+    /// table (F-FW-10); needs TCP or UDP named earlier in the rule and a set made from [`SetSpec::concat`].
+    DaddrDportSet(String),
     /// `meta l4proto`: 6 TCP, 17 UDP, 58 ICMPv6.
     L4(u8),
     /// Needs an earlier `L4(6)` or `L4(17)` in the same rule.
@@ -227,6 +230,15 @@ impl TableSpec {
             if s.members.len() > MAX_MEMBERS || s.members.iter().any(|m| m.is_ipv4() != s.v4) {
                 return Err(format!("set {}: too many members or a member of the wrong family", s.name));
             }
+            if !s.concat.is_empty() {
+                let bad = !s.members.is_empty()
+                    || !s.ranges.is_empty()
+                    || s.concat.len() > MAX_MEMBERS
+                    || s.concat.iter().any(|((a, z), (p, q))| a.is_ipv4() != s.v4 || z.is_ipv4() != s.v4 || addr_bytes(a) > addr_bytes(z) || p > q);
+                if bad {
+                    return Err(format!("set {}: an address and port set needs one family, spans in order and nothing else", s.name));
+                }
+            }
         }
         for c in &self.chains {
             if !name_ok(&c.name, 31) {
@@ -299,6 +311,14 @@ impl TableSpec {
                 Expr::DaddrSet(n) => {
                     if !self.sets.iter().any(|s| &s.name == n) {
                         return Err(format!("rule uses the set {n}, which the table does not have"));
+                    }
+                }
+                Expr::DaddrDportSet(n) => {
+                    if !self.sets.iter().any(|s| &s.name == n && !s.concat.is_empty()) {
+                        return Err(format!("rule uses the address and port set {n}, which the table does not have"));
+                    }
+                    if !matches!(l4, Some(6 | 17)) {
+                        return Err("an address and port set needs TCP or UDP named earlier in the rule".into());
                     }
                 }
                 Expr::DaddrRange(a, b) => {
@@ -406,6 +426,19 @@ fn encode_expr(buf: &mut Vec<u8>, e: &Expr, sets: &[SetSpec], l4: &mut u8) {
             nfproto(buf, s.v4);
             let (off, len) = if s.v4 { (16, 4) } else { (24, 16) };
             payload_load(buf, PAYLOAD_NETWORK, off, len);
+            expr(buf, "lookup", |b| {
+                attr(b, 1, &cstr(name)); // SET
+                attr(b, 2, &be32(REG1)); // SREG
+                attr(b, 4, &be32(idx as u32 + 1)); // SET_ID
+            });
+        }
+        Expr::DaddrDportSet(name) => {
+            let (idx, s) = sets.iter().enumerate().find(|(_, s)| &s.name == name).expect("checked");
+            nfproto(buf, s.v4);
+            let (off, len) = if s.v4 { (16, 4) } else { (24, 16) };
+            // the address into the first words of register 1 (the 32-bit register 8), the port into the next word
+            payload_load_to(buf, 8, PAYLOAD_NETWORK, off, len);
+            payload_load_to(buf, 8 + len / 4, PAYLOAD_TRANSPORT, 2, 2);
             expr(buf, "lookup", |b| {
                 attr(b, 1, &cstr(name)); // SET
                 attr(b, 2, &be32(REG1)); // SREG

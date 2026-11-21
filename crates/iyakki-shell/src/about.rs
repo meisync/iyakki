@@ -179,7 +179,7 @@ pub fn lines(facts: &[(String, String)], notes: &[String], groups: &[LicenceGrou
 /// The About row "Secure Boot": the firmware's state (the 5th byte of the `SecureBoot` EFI variable) and the kernel's lockdown mode.
 pub fn secure_boot_fact(secure_boot_var: &[u8], lockdown_file: Option<&str>) -> String {
     let on = secure_boot_var.get(4) == Some(&1);
-    let (mode, _) = iyakki_hwinfo::secure_boot_summary(on, lockdown_file);
+    let (mode, _) = iyakki_core_local::hwinfo::secure_boot_summary(on, lockdown_file);
     format!("{}, kernel lockdown: {mode}", if on { "ON" } else { "off" })
 }
 
@@ -225,20 +225,20 @@ pub fn cloud_fact(c: &iyakki_cloudmode::CloudMode) -> (String, String) {
 /// [`this_machine`], with the machine's Cloud mode row when it is known.
 pub fn this_machine_with(cloud: Option<&iyakki_cloudmode::CloudMode>) -> Vec<(String, Style)> {
     let release = ReleaseInfo::load(std::path::Path::new(iyakki_shared::relinfo::RELEASE_FILE));
-    let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok();
+    let kf = iyakki_core_local::kernelfacts::read();
+    let kernel = kf.osrelease.clone();
     let (notes, groups) = parse_third_party(THIRD_PARTY);
-    let bce = std::path::Path::new("/sys/module/apple_bce").exists();
+    let bce = kf.apple_bce;
     let mut facts = facts_with(release.as_ref(), kernel.as_deref(), bce);
     if let Some(c) = cloud {
         let at = facts.iter().position(|(l, _)| l == "Licence").unwrap_or(facts.len());
         facts.insert(at, cloud_fact(c));
     }
-    if let Ok(var) = std::fs::read("/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c") {
-        let lock = std::fs::read_to_string("/sys/kernel/security/lockdown").ok();
+    if let Some((var, lock)) = kf.secure_boot {
         let at = facts.iter().position(|(l, _)| l == "Licence").unwrap_or(facts.len());
         facts.insert(at, ("Secure Boot".into(), secure_boot_fact(&var, lock.as_deref())));
     }
-    if let Some(t) = std::fs::read_to_string("/proc/sys/kernel/tainted").ok().and_then(|t| t.trim().parse::<u64>().ok()).and_then(taint_fact) {
+    if let Some(t) = kf.taint.and_then(taint_fact) {
         let at = facts.iter().position(|(l, _)| l == "Licence").unwrap_or(facts.len());
         facts.insert(at, ("Kernel flags".into(), t));
     }

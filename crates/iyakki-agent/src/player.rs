@@ -18,7 +18,7 @@
 pub use iyakki_shared::player::{fit};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -68,7 +68,7 @@ pub fn runs(program: &str) -> bool {
     if let Some(v) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return *v;
     }
-    let ok = std::process::Command::new(program).arg("-version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    let ok = iyakki_core_local::starters::accepts_dash_version(program);
     cache.lock().unwrap_or_else(|e| e.into_inner()).insert(key, ok);
     ok
 }
@@ -200,9 +200,7 @@ pub fn audio_args(file: &str, start: f64) -> Vec<String> {
 }
 
 fn spawn(prog: &str, args: &[String], stdin: bool) -> Result<Child, String> {
-    use std::os::unix::process::CommandExt;
-    let mut cmd = Command::new(prog);
-    cmd.args(args).process_group(0).stdin(if stdin { Stdio::piped() } else { Stdio::null() }).stdout(if stdin { Stdio::null() } else { Stdio::piped() }).stderr(Stdio::piped());
+    let mut cmd = iyakki_core_local::starters::player_command(prog, args, stdin);
     crate::aacpipe::spawn_retry(&mut cmd)
         .map_err(|e| format!("could not start {}: {e}", prog.rsplit('/').next().unwrap_or(prog)))
 }
@@ -606,7 +604,7 @@ fn audio_thread(sh: Arc<Shared>, gen: u64, out: Option<std::process::ChildStdout
             }
         }
         // the master volume, when the speaker command is not the softvol chain (gain() is 100 then, and when muted 0)
-        let gain = crate::audioout::global().gain();
+        let gain = crate::audioout::output_state().gain();
         if gain < 100 {
             for c in buf[..n].chunks_exact_mut(2) {
                 let v = (i16::from_le_bytes([c[0], c[1]]) as i32 * gain as i32 / 100) as i16;
@@ -952,7 +950,7 @@ esac
         let Some(ff) = find_program("ffmpeg") else { return };
         let d = dir("real");
         let avi = d.join("cam.avi");
-        let ok = Command::new(&ff).args(["-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15:duration=3", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-c:v", "mjpeg", "-c:a", "pcm_s16le", "-y"]).arg(&avi).status().unwrap().success();
+        let ok = std::process::Command::new(&ff).args(["-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15:duration=3", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-c:v", "mjpeg", "-c:a", "pcm_s16le", "-y"]).arg(&avi).status().unwrap().success();
         assert!(ok);
         // a speaker that takes the sound at real-time speed, as the sound card does
         let slow = d.join("slow-aplay");

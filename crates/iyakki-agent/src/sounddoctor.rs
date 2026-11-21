@@ -88,6 +88,48 @@ pub fn scan(asound: &Path, proc_root: &Path, helper: u32, own_pid: u32, playing:
 }
 
 
+/// [`is_engine`] over an [`AudioRoute`]: the parent chain comes from the route's process facts.
+pub fn is_engine_via(route: &dyn iyakki_core_api::AudioRoute, helper: u32, pid: u32) -> bool {
+    let mut p = pid;
+    for _ in 0..32 {
+        if p == helper {
+            return true;
+        }
+        match route.process_parent(p) {
+            Some(q) if q > 1 && q != p => p = q,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// [`scan`] over an [`AudioRoute`]: the streams, their owners and the owners' names are the route's facts; the decision is this file's.
+pub fn scan_via(route: &dyn iyakki_core_api::AudioRoute, helper: u32, own_pid: u32, playing: bool) -> Obs {
+    let mut engine = Engine::Closed;
+    let mut holder: Option<Holder> = None;
+    for s in crate::quiet::playback_streams_via(route) {
+        if s.state == PcmState::Closed {
+            continue;
+        }
+        let engine_owned = s.owner.is_some_and(|p| is_engine_via(route, helper, p));
+        if engine_owned {
+            engine = match (engine, s.state) {
+                (_, PcmState::Running) => Engine::Running,
+                (Engine::Running, _) => Engine::Running,
+                _ => Engine::Idle,
+            };
+        } else if holder.is_none() {
+            let (pid, name) = match s.owner {
+                Some(p) => (p, route.process_name(p).unwrap_or_else(|| format!("process {p}"))),
+                None => (0, "another program".to_string()),
+            };
+            let name = if pid == own_pid { "the sound agent".to_string() } else { name };
+            holder = Some(Holder { pid, name, running: s.state == PcmState::Running });
+        }
+    }
+    Obs { playing, engine, holder }
+}
+
 /// End an idle holder. Never this process, init, or pid 0 (unknown owner).
 pub fn close_holder(pid: u32, own_pid: u32) -> bool {
     if pid <= 1 || pid == own_pid {
@@ -270,6 +312,28 @@ mod tests {
     #[test]
     fn the_reconnect_script_touches_only_playing_media_and_restores_the_position() {
         assert!(RECONNECT_JS.contains("querySelectorAll('video,audio')") && RECONNECT_JS.contains("m.paused||m.ended") && RECONNECT_JS.contains("currentTime=t") && RECONNECT_JS.contains("m.play()"));
+    }
+
+    #[test]
+    fn the_scan_over_a_route_sees_the_engines_stream_by_its_parent_chain_and_names_an_outside_holder() {
+        let r = iyakki_core_fake::FakeAudioRoute::default();
+        r.put("card0/pcm0p/sub0/status", "state: PREPARED\nowner_pid : 120\n");
+        r.put("card0/pcm1p/sub0/status", "state: RUNNING\nowner_pid : 900\n");
+        r.put("card0/pcm0c/sub0/status", "state: RUNNING\nowner_pid : 5\n");
+        r.set_process(120, 110, "web-child");
+        r.set_process(110, 100, "web-helper");
+        r.set_process(900, 1, "mpv");
+        assert!(is_engine_via(&r, 100, 120) && !is_engine_via(&r, 100, 900));
+        let o = scan_via(&r, 100, 1, true);
+        assert_eq!(o.engine, Engine::Idle, "the engine's own stream is only prepared");
+        assert_eq!(o.holder, Some(Holder { pid: 900, name: "mpv".into(), running: true }));
+        assert!(o.playing);
+        // an unknown owner and the agent's own prime
+        r.put("card0/pcm1p/sub0/status", "state: OPEN\n");
+        assert_eq!(scan_via(&r, 100, 1, false).holder, Some(Holder { pid: 0, name: "another program".into(), running: false }));
+        r.put("card0/pcm1p/sub0/status", "state: OPEN\nowner_pid : 7\n");
+        assert_eq!(scan_via(&r, 100, 7, false).holder.unwrap().name, "the sound agent");
+        assert!(r.calls().iter().any(|c| c == "parent:120"), "the chain was asked of the route");
     }
 }
 

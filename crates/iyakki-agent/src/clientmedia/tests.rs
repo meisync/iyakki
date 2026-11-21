@@ -148,11 +148,17 @@ fn disconnect_gives_the_machines_speakers_back() {
 
 #[test]
 fn a_hung_connection_that_stops_pulling_does_not_keep_the_machine_silent() {
-    let r = AudioRoutes::with_alive(Duration::from_millis(40));
+    // the liveness window runs on a clock the test moves: no sleep, no stopwatch
+    let clock = iyakki_testkit::ManualClock::new(0);
+    let base = Instant::now();
+    let reader = clock.reader();
+    let r = AudioRoutes::with_clock(Duration::from_millis(40), move || base + Duration::from_millis(reader()));
     r.set_audible(|_| true);
     r.open(1, "ann", Side::Client);
     assert!(r.machine_muted());
-    std::thread::sleep(Duration::from_millis(80));
+    clock.advance(Duration::from_millis(40));
+    assert!(r.machine_muted(), "exactly at the window it is still alive");
+    clock.advance(Duration::from_millis(41));
     assert!(!r.machine_muted(), "nobody pulled for longer than the liveness window");
     assert!(!r.tap(48_000, 2, &period(1)), "and nothing is queued for it");
     r.pull(1);
@@ -528,4 +534,76 @@ fn a_program_on_the_machine_takes_a_camera_or_microphone_and_a_remote_client_is_
     drop(hold);
     assert!(l.holders("usb:video0").is_empty(), "the hold goes when the program lets go");
     assert!(l.hold_local("usb:video0", "Recorder", false).is_ok());
+}
+
+#[test]
+fn looking_takes_a_tap_waits_for_one_frame_and_lets_go_and_gives_up_when_nothing_comes() {
+    let v = Arc::new(VirtualSources::new());
+    v.offer(SourceKind::Camera, 1, "dev-1", "Laptop", "ann", "t1").unwrap();
+    v.offer(SourceKind::Microphone, 1, "dev-1", "Laptop", "ann", "t1").unwrap();
+    let jpeg = [0xFF, 0xD8, 9, 0xFF, 0xD9];
+    // the frame arrives while the look waits (the hook plays the client)
+    let v2 = v.clone();
+    let mut feed = move || {
+        assert_eq!(v2.accept(1, SourceKind::Camera, &jpeg), Accepted::Delivered, "a tap is open while it waits");
+        true
+    };
+    let (src, got) = look_at(&v, "laptop CAMERA", "t1", "Chat", &mut feed).unwrap();
+    assert_eq!((src.name.as_str(), got), ("Laptop camera", Look::Picture(jpeg.to_vec())));
+    assert_eq!(v.accept(1, SourceKind::Camera, &jpeg), Accepted::Dropped, "the tap is gone");
+    // sound comes back as a WAV
+    let v3 = v.clone();
+    let mut feed = move || {
+        v3.accept(1, SourceKind::Microphone, &[1, 0, 2, 0]);
+        true
+    };
+    let Look::Sound(w) = look_at(&v, "Laptop microphone", "t1", "Chat", &mut feed).unwrap().1 else { panic!("sound expected") };
+    assert!(w.starts_with(b"RIFF") && &w[8..12] == b"WAVE" && w.ends_with(&[1, 0, 2, 0]) && w.len() == 48);
+    // nothing arrives: the hook says stop
+    let mut calls = 0;
+    let e = look_at(&v, "Laptop camera", "t1", "Chat", &mut || {
+        calls += 1;
+        false
+    })
+    .unwrap_err();
+    assert!(e.contains("nothing arrived") && calls == 1, "{e}");
+    assert!(look_at(&v, "Laptop camera", "other-tenant", "Chat", &mut || false).is_err(), "another tenant's source is never reachable");
+    assert!(look_at(&v, "No such", "t1", "Chat", &mut || false).unwrap_err().contains("no client device"));
+    v.vanish(1);
+}
+
+// ------------------------------------------------------------------------------------------------ per-person sound (F-CLIENT-03)
+
+fn heard(r: &AudioRoutes, session: u64) -> Vec<i16> {
+    r.pull(session).chunks.iter().flat_map(|c| media::decode_audio(&c[..], 2).unwrap().1).collect()
+}
+
+#[test]
+fn in_the_per_person_mode_each_client_hears_only_its_own_persons_sounds_and_the_machines_sounds_go_to_the_audible_person() {
+    let r = routes(); // the machine's sound belongs to ann
+    r.open(1, "ann", Side::Client);
+    r.open(2, "bob", Side::Client);
+    // off (the default): the buses are not used, and the whole mix goes to the audible person as before
+    assert!(!r.tap_bus("bob", 48_000, 2, &period(700)), "a bus is refused while the mode is off");
+    assert!(r.tap(48_000, 2, &period(100)));
+    assert_eq!((heard(&r, 1).first().copied(), heard(&r, 2).len()), (Some(100), 0), "one sound per machine: ann's client only");
+    // on: the whole mix is not used any more, each route gets the bus of its person
+    r.set_per_person(true);
+    assert!(!r.tap(48_000, 2, &period(100)), "the whole mix is not offered to anybody");
+    assert!(r.tap_bus("bob", 48_000, 2, &period(700)));
+    assert_eq!((heard(&r, 2).first().copied(), heard(&r, 1).len()), (Some(700), 0), "bob's sound reaches bob's client, not ann's");
+    assert!(r.tap_bus("ann", 48_000, 2, &period(200)));
+    assert_eq!((heard(&r, 1).first().copied(), heard(&r, 2).len()), (Some(200), 0));
+    // the machine's own sounds (no owner) go to the person the machine's sound belongs to, and to nobody else
+    assert!(r.tap_bus("", 48_000, 2, &period(50)));
+    assert_eq!((heard(&r, 1).first().copied(), heard(&r, 2).len()), (Some(50), 0));
+    // a person with no client open hears nothing anywhere; a wrong rate is never taken
+    assert!(!r.tap_bus("carol", 48_000, 2, &period(9)));
+    assert!(!r.tap_bus("ann", 44_100, 2, &period(9)));
+    // a mono bus is made stereo
+    assert!(r.tap_bus("ann", 48_000, 1, &vec![33i16; 960]));
+    assert_eq!(heard(&r, 1).len(), 1920);
+    // switching back restores the old behaviour
+    r.set_per_person(false);
+    assert!(!r.tap_bus("ann", 48_000, 2, &period(1)) && r.tap(48_000, 2, &period(1)));
 }

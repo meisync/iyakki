@@ -74,6 +74,17 @@ impl UsbProvider for NoUsb {
 /// One open source of pictures.
 pub trait Feed: Send {
     fn next(&mut self) -> Result<Picture, FeedErr>;
+    /// The sound that came with the pictures since the last call, decoded (a camera with a microphone). Default: none.
+    fn take_sound(&mut self) -> Option<Sound> {
+        None
+    }
+}
+
+/// A piece of a camera's sound: 16-bit mono samples at `rate` Hz.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sound {
+    pub rate: u32,
+    pub pcm: Vec<i16>,
 }
 
 /// The cameras plugged into this computer. The shell implements it on top of its shared V4L2 module.

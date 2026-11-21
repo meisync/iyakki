@@ -248,6 +248,13 @@ fn skip_eol(b: &mut Bits) -> bool {
 /// Decode to packed rows of one bit per pixel, white 1 and black 0 (or the other way with `black_is_1`), each row padded to a byte.
 /// Returns the rows and how many were really decoded (the rest are white).
 pub fn decode(data: &[u8], p: &Params, max_pixels: usize) -> (Vec<u8>, usize) {
+    let (out, rows, _) = decode_counting(data, p, max_pixels);
+    (out, rows)
+}
+
+/// As [`decode`], and also the number of bytes the picture took: after the last row the data is taken to the next byte boundary, and an
+/// end-of-facsimile-block (EOFB, two end-of-line codes) is taken with it when one follows (JBIG2 MMR bit planes lie one after the other).
+pub fn decode_counting(data: &[u8], p: &Params, max_pixels: usize) -> (Vec<u8>, usize, usize) {
     let cols = p.columns.clamp(1, 1 << 16);
     let row_bytes = cols.div_ceil(8);
     let max_rows = if p.rows > 0 { p.rows } else { (max_pixels / cols).min(1 << 16) };
@@ -305,5 +312,9 @@ pub fn decode(data: &[u8], p: &Params, max_pixels: usize) -> (Vec<u8>, usize) {
     let have = out.len();
     out.resize(total * row_bytes, fill_white);
     let _ = have;
-    (out, rows)
+    if p.k < 0 && b.left() >= 24 && b.peek(24) == 0x001001 {
+        b.pos += 24;
+    }
+    b.align();
+    (out, rows, (b.pos / 8).min(data.len()))
 }

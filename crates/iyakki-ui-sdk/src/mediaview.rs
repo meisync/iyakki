@@ -148,7 +148,7 @@ impl MediaView {
         }
         // tapping the picture plays or pauses
         if r.h >= m.min_target() {
-            c.hit(r, Hit { action: self.base + A_SURFACE, name: "Picture".into(), role: Role::Image });
+            c.hit(r, Hit { action: self.base + A_SURFACE, name: "Picture".into(), role: Role::Image, ..Default::default() });
         }
     }
 }

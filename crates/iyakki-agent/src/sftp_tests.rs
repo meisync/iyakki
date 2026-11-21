@@ -130,9 +130,16 @@ struct Rig {
     w: World,
     data: PathBuf,
     auth: Arc<FakeAuth>,
+    /// The server's listening port is one process-wide cell (`status_lines` reads it): one test at a time owns it.
+    _listening: iyakki_testkit::Lock,
 }
 
 fn rig(tag: &str) -> Rig {
+    rig_with_clock(tag, Arc::new(crate::clock::now_unix))
+}
+
+fn rig_with_clock(tag: &str, now: Clock) -> Rig {
+    let listening = iyakki_testkit::lock("sftp-listening-port");
     let (w, _j) = world(tag);
     let data = tmp(&format!("{tag}-data"));
     let mut policy = iyakki_sec::policy::Role::User.template();
@@ -142,8 +149,8 @@ fn rig(tag: &str) -> Rig {
     let audit: Log = Arc::default();
     let a2 = audit.clone();
     let fw = Arc::new(FakeFw(Mutex::new(Vec::new()), false));
-    let sftp = Arc::new(Sftp::new(&data, auth.clone(), Arc::new(move |e, d| a2.lock().unwrap().push(format!("{e} {d}"))), fw.clone()).with_home(w.home.clone()));
-    Rig { sftp, fw, audit, w, data, auth }
+    let sftp = Arc::new(Sftp::new(&data, auth.clone(), Arc::new(move |e, d| a2.lock().unwrap().push(format!("{e} {d}"))), fw.clone()).with_home(w.home.clone()).with_clock(now));
+    Rig { sftp, fw, audit, w, data, auth, _listening: listening }
 }
 
 #[test]
@@ -326,24 +333,26 @@ fn the_chat_tool_reads_freely_and_asks_for_every_change() {
 
 #[test]
 fn it_stops_by_itself_when_the_time_is_up_and_closes_the_firewall() {
-    let r = rig("expiry");
+    // the test moves the clock: nothing waits, and a loaded host cannot run the time out early or late
+    let clock = iyakki_testkit::ManualClock::new(1_000_000_000_000);
+    let reader = clock.clone();
+    let r = rig_with_clock("expiry", Arc::new(move || reader.now_secs() as i64));
     r.sftp
         .configure(|c| {
             c.users.push("amy".into());
             c.port = 0;
-            c.expiry_secs = 5; // long enough that a loaded host does not run it out before the ON check below
+            c.expiry_secs = 5;
             Ok(())
         })
         .unwrap();
     add_key(&r.data, "amy", &key_line(1, "k")).unwrap();
     let st = r.sftp.enable("amy").unwrap();
-    assert!(st.running && st.until > 0);
+    assert!(st.running && st.until == 1_000_000_005);
     assert!(status_lines(&r.data)[0].contains("ON at port"));
-    // the expiry is 5 s: wait for it by polling (a loaded machine runs the timer thread late), never a fixed sleep
-    let t0 = std::time::Instant::now();
-    while r.sftp.status().running && t0.elapsed() < std::time::Duration::from_secs(60) {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    // one second before the end it still runs; at the end the next look stops it
+    clock.advance(std::time::Duration::from_secs(4));
+    assert!(r.sftp.status().running, "still inside the time");
+    clock.advance(std::time::Duration::from_secs(1));
     let st = r.sftp.status();
     assert!(!st.running, "the time is up");
     assert!(st.port == 0 || crate::testdir::port_is_closed(st.port));

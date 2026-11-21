@@ -74,6 +74,8 @@ pub enum Event {
     KeySystem(String),
     /// The page's manifest address and text, and its icon (see `FromHelper::PageMeta`).
     PageMeta { manifest_url: String, manifest: String, icon: String },
+    /// The page's headings, links, controls, pictures and landmarks on screen, as the JSON text of `FromHelper::PageAccess`.
+    PageAccess(String),
     /// The helper says its engine failed (it may recover by itself).
     Crashed(String),
     Log(String),
@@ -149,6 +151,7 @@ pub struct WebView {
     ext: Option<crate::ext::ExtBlob>,
     /// The last media policy sent, sent again to a restarted helper.
     media_policy: Option<(u32, bool)>,
+    cache_limit: Option<u32>,
     /// The origins a site app may load (sent again after a restart of the helper).
     scope: Vec<String>,
     focus: bool,
@@ -185,6 +188,7 @@ impl WebView {
             zoom: 100,
             ext: None,
             media_policy: None,
+            cache_limit: None,
             scope: Vec::new(),
             focus: false,
             visible: true,
@@ -246,6 +250,10 @@ impl WebView {
                 self.media_policy = Some((max_height, codecs));
                 ToHelper::MediaPolicy { max_height, codecs }
             }
+            ToHelper::CacheLimit { disk_mb } => {
+                self.cache_limit = Some(disk_mb);
+                ToHelper::CacheLimit { disk_mb }
+            }
             ToHelper::SiteScope(list) => {
                 self.scope = list.clone();
                 ToHelper::SiteScope(list)
@@ -300,6 +308,7 @@ impl WebView {
                     FromHelper::NavigationBlocked(s) => out.push(Event::NavigationBlocked(s)),
                     FromHelper::KeySystem(s) => out.push(Event::KeySystem(s)),
                     FromHelper::PageMeta { manifest_url, manifest, icon } => out.push(Event::PageMeta { manifest_url, manifest, icon }),
+                    FromHelper::PageAccess(s) => out.push(Event::PageAccess(s)),
                     FromHelper::Crashed(s) => out.push(Event::Crashed(s)),
                     FromHelper::Log(s) => out.push(Event::Log(s)),
                 },
@@ -522,6 +531,9 @@ impl WebView {
         }
         if let Some((max_height, codecs)) = self.media_policy {
             self.raw_send(&ToHelper::MediaPolicy { max_height, codecs });
+        }
+        if let Some(disk_mb) = self.cache_limit {
+            self.raw_send(&ToHelper::CacheLimit { disk_mb });
         }
         if !self.scope.is_empty() {
             self.raw_send(&ToHelper::SiteScope(self.scope.clone()));

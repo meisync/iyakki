@@ -81,6 +81,19 @@ pub enum Action {
     Close,
 }
 
+/// What a file dropped on the window means: exactly one regular file becomes the chosen image; anything else is said in words and
+/// changes nothing (a folder, several files, or a path the system did not give).
+pub fn drop_event(dropped: &[Option<PathBuf>]) -> Result<Event, String> {
+    match dropped {
+        [] => Err("nothing was dropped".into()),
+        [Some(p)] if p.is_file() => Ok(Event::ImageChosen(p.clone())),
+        [Some(p)] if p.is_dir() => Err(format!("{} is a folder; drop the image file itself", p.display())),
+        [Some(p)] => Err(format!("{} is not a file this computer can read", p.display())),
+        [None] => Err("the window system did not say where the dropped file is; use the Choose button".into()),
+        _ => Err("drop one image at a time".into()),
+    }
+}
+
 pub struct Window {
     page: Page,
     image: Option<ImageInfo>,
@@ -318,6 +331,22 @@ impl Default for Window {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_drop_is_one_regular_file_and_anything_else_is_said_in_words() {
+        let dir = std::env::temp_dir().join(format!("iyakki-writerwin-drop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.iso");
+        std::fs::write(&f, b"x").unwrap();
+        assert!(matches!(drop_event(&[Some(f.clone())]), Ok(Event::ImageChosen(p)) if p == f));
+        assert!(drop_event(&[Some(dir.clone())]).unwrap_err().contains("folder"));
+        assert!(drop_event(&[Some(dir.join("none.iso"))]).unwrap_err().contains("not a file"));
+        assert!(drop_event(&[Some(f.clone()), Some(f)]).unwrap_err().contains("one image"));
+        assert!(drop_event(&[None]).unwrap_err().contains("Choose"));
+        assert!(drop_event(&[]).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     fn fake(p: &Path) -> Result<ImageInfo, String> {

@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::cache;
+use crate::pack;
 use crate::sha256::Sha256;
 use wasmtime::{Caller, Config, Engine, Extern, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
 
@@ -98,6 +99,25 @@ pub struct JsEngine {
     eval_bytecode_fn: TypedFunc<(u32, u32), i32>,
     profile_fn: TypedFunc<i32, ()>,
     limits: Limits,
+    script_stats: ScriptStats,
+}
+
+/// What this engine did with the scripts it was given, in counts (a count does not move with the machine's load: tests budget on it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScriptStats {
+    /// Scripts whose text was parsed, and the bytes of that text.
+    pub parsed: u64,
+    pub parsed_bytes: u64,
+    /// Scripts that ran from their compiled form (a file of their own or the small-script pack), and the size of that text.
+    pub from_compiled: u64,
+    pub from_compiled_bytes: u64,
+}
+
+impl Drop for JsEngine {
+    /// The small scripts this engine compiled reach the per-user pack file now (a no-op when there is nothing new).
+    fn drop(&mut self) {
+        pack::flush();
+    }
 }
 
 /// Epoch ticks that cover `wall` plus the slack.
@@ -163,8 +183,10 @@ fn shared() -> Result<&'static (Engine, Module), String> {
     .map_err(|e| e.clone())
 }
 
-/// Scripts at least this long keep their compiled form on disk ([`JsEngine::eval_cached`]).
-const SCRIPT_CACHE_MIN: usize = 128 << 10;
+/// Scripts at least this long keep their compiled form on disk ([`JsEngine::eval_cached`]). 16 KiB since alpha.7 (was 128 KiB): measured on
+/// the AMD build host, release build, a function-heavy script runs in 0.8 ms from its compiled form against 2.9 ms parsed at 32 KB and 1.7
+/// ms against 8.5 ms at 100 KB, and a page has dozens of such scripts. The cache is capped by `SCRIPT_CACHE_MAX` and pruned.
+const SCRIPT_CACHE_MIN: usize = 16 << 10;
 /// The scripts of the platform itself (the page object, the window, the extra members: tens of kilobytes each) keep their compiled
 /// form from this length on, so a new page does not parse them again: the bytecode snapshot of the platform scripts.
 const PRELUDE_CACHE_MIN: usize = 2 << 10;
@@ -363,6 +385,7 @@ impl JsEngine {
         // anything else the C library might import traps if it is ever called
         linker.define_unknown_imports_as_traps(module).map_err(|e| e.to_string())?;
 
+        let phase_clock = Instant::now();
         let store_limits = StoreLimitsBuilder::new().memory_size(limits.memory_bytes).instances(1).memories(1).build();
         let mut store = Store::new(engine, Host { modules, result: Vec::new(), deadline: Instant::now() + limits.wall, ticks_left: u64::MAX, out_of_fuel: false, limits: store_limits, stderr: Vec::new(), stats: std::env::var_os("IYAKKI_JS_STATS").map(|_| Default::default()) });
         store.limiter(|h| &mut h.limits);
@@ -372,6 +395,7 @@ impl JsEngine {
         if let Ok(init) = instance.get_typed_func::<(), ()>(&mut store, "_initialize") {
             init.call(&mut store, ()).map_err(|e| e.to_string())?;
         }
+        let instantiated = phase_clock.elapsed();
         let get = |name: &str| format!("the engine lacks {name}");
         let mut e = JsEngine {
             alloc: instance.get_typed_func(&mut store, "jb_alloc").map_err(|_| get("jb_alloc"))?,
@@ -390,6 +414,7 @@ impl JsEngine {
             store,
             memory,
             limits,
+            script_stats: ScriptStats::default(),
         };
         let init: TypedFunc<(u32, u32), i32> = instance.get_typed_func(&mut e.store, "jb_init").map_err(|_| get("jb_init"))?;
         e.arm();
@@ -398,11 +423,23 @@ impl JsEngine {
         if rc != 0 {
             return Err(format!("engine start-up failed ({rc})"));
         }
+        let started = phase_clock.elapsed();
         // each module's globals
         let preludes: Vec<(&'static str, &'static str)> = e.store.data().modules.iter().map(|m| (m.name(), m.prelude())).collect();
+        let mut each: Vec<(&'static str, usize, f64)> = Vec::new();
         for (name, src) in preludes {
             if !src.is_empty() {
+                let t = Instant::now();
                 e.eval_cached_min(&format!("<{name}>"), src, PRELUDE_CACHE_MIN).map_err(|err| format!("the {name} module failed to start: {err}"))?;
+                each.push((name, src.len(), t.elapsed().as_secs_f64() * 1e3));
+            }
+        }
+        if e.store.data().stats.is_some() {
+            // IYAKKI_JS_STATS=1: where a new engine's start goes (F-BROW-99): the wasm instance and `_initialize`, QuickJS's own start, the platform preludes
+            eprintln!("JS-START instance {:.2} ms, quickjs init {:.2} ms, preludes {:.2} ms", instantiated.as_secs_f64() * 1e3, (started - instantiated).as_secs_f64() * 1e3, (phase_clock.elapsed() - started).as_secs_f64() * 1e3);
+            each.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+            for (name, len, ms) in each.iter().take(6) {
+                eprintln!("JS-START   prelude {name}: {len} bytes, {ms:.2} ms");
             }
         }
         Ok(e)
@@ -465,6 +502,8 @@ impl JsEngine {
     /// Run a script in the global scope; the value of its last expression, as text.
     pub fn eval(&mut self, name: &str, source: &str) -> Result<String, JsError> {
         self.arm();
+        self.script_stats.parsed += 1;
+        self.script_stats.parsed_bytes += source.len() as u64;
         // the engine wants both the script and its name to end with a zero byte (not counted in the length)
         let mut src = source.as_bytes().to_vec();
         src.push(0);
@@ -500,7 +539,9 @@ impl JsEngine {
 
     /// [`JsEngine::eval_cached`] for scripts of at least `min` bytes.
     fn eval_cached_min(&mut self, name: &str, source: &str, min: usize) -> Result<String, JsError> {
-        let dir = if source.len() >= min { cache::dir() } else { None };
+        // a script of at least `min` bytes has a file of its own; a smaller one (from `PACK_MIN`) shares the per-user pack (one read per process)
+        let in_pack = source.len() < min && source.len() >= pack::PACK_MIN;
+        let dir = if source.len() >= min || in_pack { cache::dir() } else { None };
         let Some(dir) = dir else { return self.eval(name, source) };
         let digest = match shared() {
             Ok((e, _)) => engine_digest(e),
@@ -511,19 +552,25 @@ impl JsEngine {
         sha.update(&(name.len() as u64).to_le_bytes());
         sha.update(name.as_bytes());
         sha.update(source.as_bytes());
-        let path = dir.join(format!("script-{}.qbc", crate::sha256::hex(&sha.finish())));
-        if let Some(code) = cache::read(&path) {
+        let sum = sha.finish();
+        let path = dir.join(format!("script-{}.qbc", crate::sha256::hex(&sum)));
+        let stored: Option<std::sync::Arc<Vec<u8>>> = if in_pack { pack::get(&dir, digest, &sum) } else { cache::read(&path).map(std::sync::Arc::new) };
+        if let Some(code) = stored {
             self.arm();
             let p = self.put(&code)?;
             let rc = self.eval_bytecode_fn.call(&mut self.store, (p, code.len() as u32));
             let _ = self.free.call(&mut self.store, p);
             let rc = rc.map_err(|t| self.classify(t))?;
             if rc != 2 {
+                self.script_stats.from_compiled += 1;
+                self.script_stats.from_compiled_bytes += source.len() as u64;
                 return self.finish_script(rc);
             }
             // unreadable (an engine from before a format change that kept its name): parse the text
         }
         self.arm();
+        self.script_stats.parsed += 1;
+        self.script_stats.parsed_bytes += source.len() as u64;
         let mut src = source.as_bytes().to_vec();
         src.push(0);
         let s = self.put(&src)?;
@@ -538,8 +585,12 @@ impl JsEngine {
             return self.finish_script(rc);
         }
         let code = self.read_out_bytes();
-        cache::write(&path, &code);
-        cache::prune(&dir, "qbc", SCRIPT_CACHE_MAX);
+        if in_pack {
+            pack::put(&dir, digest, sum, &code);
+        } else {
+            cache::write(&path, &code);
+            cache::prune(&dir, "qbc", SCRIPT_CACHE_MAX);
+        }
         self.arm();
         let rc = self.run_pending_fn.call(&mut self.store, ()).map_err(|t| self.classify(t))?;
         self.finish_script(rc)
@@ -619,6 +670,11 @@ impl JsEngine {
     }
 
     /// Host-call counts and times by `module.op`, when `IYAKKI_JS_STATS` is set (profiling aid).
+    /// Counts of the scripts parsed and the scripts run from their compiled form by this engine.
+    pub fn script_stats(&self) -> ScriptStats {
+        self.script_stats
+    }
+
     pub fn host_stats(&self) -> Vec<(String, u64, Duration)> {
         let mut v: Vec<_> = self.store.data().stats.iter().flatten().map(|(k, (n, t))| (k.clone(), *n, *t)).collect();
         v.sort_by_key(|x| std::cmp::Reverse(x.2));
@@ -756,6 +812,89 @@ mod tests {
     fn qbc_files() -> Vec<std::path::PathBuf> {
         let Some(dir) = cache::dir() else { return Vec::new() };
         std::fs::read_dir(dir).map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "qbc")).collect()).unwrap_or_default()
+    }
+
+    fn pack_files() -> Vec<std::path::PathBuf> {
+        let Some(dir) = cache::dir() else { return Vec::new() };
+        std::fs::read_dir(dir).map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "pack")).collect()).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_page_of_many_scripts_is_parsed_once_and_the_second_visit_parses_nothing_counted_in_scripts_and_bytes() {
+        let _private = cache::use_private_dir_for_this_test();
+        if cache::dir().is_none() {
+            return;
+        }
+        // a heavy page: 60 small inline scripts, 10 of 20 KB and one of 200 KB, each different
+        let mut scripts: Vec<(String, String)> = Vec::new();
+        for i in 0..60 {
+            scripts.push((format!("s{i}.js"), format!("var s{i} = {i}; /* {} */ s{i} + 1", "p".repeat(pack::PACK_MIN + i))));
+        }
+        for i in 0..10 {
+            scripts.push((format!("m{i}.js"), format!("var m{i} = {i}; /* {} */ m{i} + 1", "q".repeat(20 * 1024 + i))));
+        }
+        scripts.push(("big.js".into(), format!("var big = 1; /* {} */ big + 1", "r".repeat(200 * 1024))));
+        let total_bytes: u64 = scripts.iter().map(|(_, s)| s.len() as u64).sum();
+        let visit = |e: &mut JsEngine| {
+            let before = e.script_stats();
+            for (n, s) in &scripts {
+                e.eval_cached(n, s).unwrap();
+            }
+            let after = e.script_stats();
+            (after.parsed - before.parsed, after.parsed_bytes - before.parsed_bytes, after.from_compiled - before.from_compiled, after.from_compiled_bytes - before.from_compiled_bytes)
+        };
+        let mut first = engine();
+        let (parsed, bytes, compiled, _) = visit(&mut first);
+        assert_eq!((parsed, bytes, compiled), (71, total_bytes, 0), "the first visit parses every script once");
+        drop(first);
+        let mut second = engine();
+        let (parsed, bytes, compiled, compiled_bytes) = visit(&mut second);
+        assert_eq!((parsed, bytes), (0, 0), "the second visit parses no script text at all");
+        assert_eq!((compiled, compiled_bytes), (71, total_bytes));
+        // a script that changed by one byte is parsed again, and only that one
+        let mut third = engine();
+        let before = third.script_stats();
+        let mut edited = scripts[5].1.clone();
+        edited.push(' ');
+        third.eval_cached(&scripts[5].0, &edited).unwrap();
+        third.eval_cached(&scripts[6].0, &scripts[6].1).unwrap();
+        let after = third.script_stats();
+        assert_eq!((after.parsed - before.parsed, after.from_compiled - before.from_compiled), (1, 1));
+        let _ = std::fs::remove_dir_all(cache::dir().unwrap());
+    }
+
+    #[test]
+    fn small_scripts_share_one_pack_file_and_a_damaged_pack_falls_back_to_the_text() {
+        let _private = cache::use_private_dir_for_this_test();
+        if cache::dir().is_none() {
+            return;
+        }
+        let one = format!("var packedA = 40 + 2; /* {} */ packedA", "a".repeat(pack::PACK_MIN));
+        let two = format!("var packedB = 6 * 7; /* {} */ packedB", "b".repeat(pack::PACK_MIN * 2));
+        assert!(one.len() < SCRIPT_CACHE_MIN && two.len() < SCRIPT_CACHE_MIN);
+        let mut a = engine();
+        assert_eq!(a.eval_cached("one.js", &one).unwrap(), "42");
+        assert_eq!(a.eval_cached("two.js", &two).unwrap(), "42");
+        drop(a);
+        // two scripts, one pack file, no file of their own
+        let packs = pack_files();
+        assert_eq!(packs.len(), 1, "{packs:?}");
+        assert!(qbc_files().is_empty(), "{:?}", qbc_files());
+        let stored = std::fs::metadata(&packs[0]).unwrap().modified().unwrap();
+        // a second engine runs both again and has nothing new to store
+        let mut b = engine();
+        assert_eq!(b.eval_cached("one.js", &one).unwrap(), "42");
+        assert_eq!(b.eval_cached("two.js", &two).unwrap(), "42");
+        drop(b);
+        assert_eq!(std::fs::metadata(&packs[0]).unwrap().modified().unwrap(), stored, "nothing new, so the pack is not written again");
+        // too small to be worth it: no entry
+        let mut c = engine();
+        assert_eq!(c.eval_cached("tiny.js", "6 * 7").unwrap(), "42");
+        // a damaged pack is a miss: the text is parsed and the answer is the same
+        cache::write(&packs[0], b"not a pack");
+        let mut d = engine();
+        assert_eq!(d.eval_cached("one.js", &one).unwrap(), "42");
+        let _ = std::fs::remove_dir_all(cache::dir().unwrap());
     }
 
     #[test]

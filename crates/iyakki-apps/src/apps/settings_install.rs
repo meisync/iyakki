@@ -8,73 +8,12 @@
 //! explanation; the plan shows the table the disk has now and the layout it gets.
 
 use super::*;
-use iyakki_usb::install::{self, Choices, DiskInfo, SourceInfo, TableChoice};
+use iyakki_core_api::installer::{confirmation_ok, make_plan_with, Choices, DiskInfo, Installer, SourceInfo, TableChoice};
 use std::sync::Mutex;
 
-/// Where the installer looks. Real paths in production, a made-up machine in tests.
-#[derive(Clone)]
-pub struct InstallEnv {
-    pub sys: std::path::PathBuf,
-    pub dev: std::path::PathBuf,
-    pub mounts: std::path::PathBuf,
-    pub swaps: std::path::PathBuf,
-    /// Copy from this template file instead of the boot disk.
-    pub template: Option<std::path::PathBuf>,
-    /// This computer was started through UEFI (what "Auto" looks at, besides the disk).
-    pub uefi: bool,
-}
-
-impl InstallEnv {
-    pub fn real() -> InstallEnv {
-        let p = install::Paths::real();
-        InstallEnv { sys: p.sys, dev: p.dev, mounts: p.mounts, swaps: p.swaps, template: None, uefi: install::booted_uefi() }
-    }
-
-    fn rd(p: &std::path::Path) -> String {
-        std::fs::read_to_string(p).unwrap_or_default()
-    }
-
-    fn disks(&self) -> Vec<DiskInfo> {
-        let mut d = install::list_disks(&self.sys, &self.dev, &Self::rd(&self.mounts), &Self::rd(&self.swaps));
-        install::probe_contents(&mut d, &self.dev);
-        d
-    }
-
-    fn source(&self, disks: &[DiskInfo]) -> Result<SourceInfo, String> {
-        match &self.template {
-            Some(t) => install::read_source(t),
-            None => {
-                // the disk this system runs from is the one to copy (and is never offered as the target); only when that is not an IYAKKI
-                // boot disk does the older rule apply (a removable boot disk wins)
-                let mounts = Self::rd(&self.mounts);
-                if let Some(run) = running_disk(&mounts, &disks.iter().map(|d| d.drive.name.as_str()).collect::<Vec<_>>()) {
-                    if let Ok(s) = install::read_source(&self.dev.join(&run)) {
-                        return Ok(s);
-                    }
-                }
-                install::find_source(disks, &self.dev, None)
-            }
-        }
-    }
-
-    /// Is there anything to install from?
-    pub fn available(&self) -> bool {
-        self.source(&self.disks()).is_ok()
-    }
-}
-
-/// The disk that holds the running system: the one with the IYAKKI boot or data volume mounted from it (`/proc/mounts` text).
-pub(super) fn running_disk(mounts: &str, names: &[&str]) -> Option<String> {
-    let dev = mounts.lines().filter_map(|l| {
-        let mut f = l.split_whitespace();
-        let (src, at) = (f.next()?, f.next()?);
-        matches!(at, "/.stage1/boot" | "/.stage1/data" | "/var/lib/iyakki").then(|| src.rsplit('/').next().unwrap_or(src).to_string())
-    }).next()?;
-    names.iter().find(|d| (1..=16).any(|n| install::partition_name(d, n) == dev)).map(|d| d.to_string())
-}
-
 pub(super) struct InstallPanel {
-    pub(super) env: InstallEnv,
+    /// The machine side: disks, source, writing (`cx.os.installer()`).
+    pub(super) env: Arc<dyn Installer>,
     pub(super) disks: Vec<DiskInfo>,
     pub(super) source: Option<Result<SourceInfo, String>>,
     /// The plan shown by Plan, one line per entry.
@@ -85,9 +24,9 @@ pub(super) struct InstallPanel {
     pub(super) table: TableChoice,
 }
 
-impl Default for InstallPanel {
-    fn default() -> InstallPanel {
-        InstallPanel { env: InstallEnv::real(), disks: Vec::new(), source: None, plan: Default::default(), progress: Default::default(), table: TableChoice::Auto }
+impl InstallPanel {
+    pub(super) fn new(env: Arc<dyn Installer>) -> InstallPanel {
+        InstallPanel { env, disks: Vec::new(), source: None, plan: Default::default(), progress: Default::default(), table: TableChoice::Auto }
     }
 }
 
@@ -114,7 +53,7 @@ fn disk_sizes_are_counted_in_thousands_like_the_installer_program_does() {
 
 impl SettingsApp {
     /// Use another machine's disks (tests). The page appears when something can be installed from.
-    pub fn with_install(mut self, env: InstallEnv) -> SettingsApp {
+    pub fn with_install(mut self, env: Arc<dyn Installer>) -> SettingsApp {
         self.inst.env = env;
         self.inst_refresh();
         if matches!(self.inst.source, Some(Ok(_))) && !self.tabs.contains(&Tab::Install) {
@@ -149,7 +88,7 @@ impl SettingsApp {
     /// Why this disk may not be used, if it may not.
     pub(super) fn inst_refusal(&self, d: &DiskInfo) -> Option<String> {
         match &self.inst.source {
-            Some(Ok(src)) => install::make_plan_with(&self.inst.disks, &d.drive.name, src, &Choices::default(), self.inst.table, self.inst.env.uefi).err().map(|e| e.replacen(&format!("{} cannot be used: ", d.drive.path), "", 1)),
+            Some(Ok(src)) => make_plan_with(&self.inst.disks, &d.drive.name, src, &Choices::default(), self.inst.table, self.inst.env.uefi()).err().map(|e| e.replacen(&format!("{} cannot be used: ", d.drive.path), "", 1)),
             Some(Err(e)) => Some(e.clone()),
             None => Some("not looked yet".into()),
         }
@@ -167,7 +106,7 @@ impl SettingsApp {
             Key::Char('p') | Key::Char('i') if self.admin(cx) => {
                 let Some(d) = self.inst_candidates().get(self.sel()).map(|d| (*d).clone()) else { return self.fail("No disk to use.") };
                 let Some(Ok(src)) = self.inst.source.clone() else { return self.fail("Nothing to copy from: this system was not started from an IYAKKI stick made with iyakki-usb --install.") };
-                let plan = match install::make_plan_with(&self.inst.disks, &d.drive.name, &src, &Choices::default(), self.inst.table, self.inst.env.uefi) {
+                let plan = match make_plan_with(&self.inst.disks, &d.drive.name, &src, &Choices::default(), self.inst.table, self.inst.env.uefi()) {
                     Ok(p) => p,
                     Err(e) => return self.fail(e),
                 };
@@ -208,18 +147,17 @@ impl SettingsApp {
         let hostname = form.value(2).trim().to_string();
         let choices = Choices { zram: form.value(0).trim().to_string(), swapfile: form.value(1).trim().to_string(), hostname: (!hostname.is_empty()).then_some(hostname) };
         let Some(Ok(src)) = self.inst.source.clone() else { return Err("nothing to copy from".into()) };
-        let plan = install::make_plan_with(&self.inst.disks, disk, &src, &choices, self.inst.table, self.inst.env.uefi)?;
-        if !install::confirmation_ok(&form.value(3), &form.value(4), &plan.target.drive) {
+        let plan = make_plan_with(&self.inst.disks, disk, &src, &choices, self.inst.table, self.inst.env.uefi())?;
+        if !confirmation_ok(&form.value(3), &form.value(4), &plan.target.drive) {
             return Err(format!("Type the drive name ({}) and its size ({}) exactly as shown, or press Esc.", plan.target.drive.name, human(plan.target.drive.size_bytes)));
         }
         cx.audit.record(&cx.session.user, "install.disk", &format!("{} table={} zram={} swapfile={}", plan.target.drive.path, plan.table.label(), choices.zram, choices.swapfile));
-        let mounts = self.inst.env.mounts.clone();
+        let env = self.inst.env.clone();
         let prog = self.inst.progress.clone();
         let path = plan.target.drive.path.clone();
         *prog.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = ("Starting".into(), 0, 1);
         self.start("Installing", move || {
-            let mounts_text = std::fs::read_to_string(&mounts).unwrap_or_default();
-            let r = install::execute(&plan, false, &mounts_text, &mut |p| {
+            let r = env.execute(&plan, &mut |p| {
                 *prog.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = (p.phase.label().to_string(), p.done, p.total);
             });
             match r {

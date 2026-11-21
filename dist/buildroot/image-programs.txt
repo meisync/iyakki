@@ -18,6 +18,7 @@ image ps busybox
 image dmesg busybox
 image mknod busybox
 image modprobe busybox
+image depmod BR2_PACKAGE_KMOD_TOOLS
 image mdev busybox
 image udhcpc busybox
 image amixer BR2_PACKAGE_ALSA_UTILS_AMIXER

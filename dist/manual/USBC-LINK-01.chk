@@ -1,0 +1,16 @@
+scenario: USBC-LINK-01
+title: One-cable link to another computer
+area: Network
+rows: F-DEV-10, F-DEV-18
+machines: any
+needs: person
+prereq: A USB-C (or Thunderbolt) cable that carries data and a second computer with a USB-C port.
+step: Connect the cable between the two computers.
+expect: Within thirty seconds the Developer mode page, Connect over USB-C, shows a check list.
+clause: F-DEV-18.checks
+step: Read each line of the check list.
+expect: Each line is green or says in plain words why not (for example the cable carries only power).
+clause: F-DEV-18.words
+step: If every line is green press Pair and confirm on both computers.
+expect: The other computer is seen by name and a speed is reported.
+clause: F-DEV-10.pair

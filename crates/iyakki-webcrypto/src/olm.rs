@@ -613,3 +613,11 @@ mod tests {
         assert!(key.verify(b"{\"a\":1}", &sig).is_ok() && key.verify(b"{\"a\":2}", &sig).is_err());
     }
 }
+
+/// Check an Ed25519 signature made by a device or session: `public` and `signature` are unpadded base64 as Matrix writes them.
+pub fn verify_ed25519(public: &str, message: &[u8], signature: &str) -> Result<(), String> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let key: [u8; 32] = b64::decode(public)?.try_into().map_err(|_| "an Ed25519 key is not 32 bytes".to_string())?;
+    let sig: [u8; 64] = b64::decode(signature)?.try_into().map_err(|_| "an Ed25519 signature is not 64 bytes".to_string())?;
+    VerifyingKey::from_bytes(&key).map_err(|_| "not an Ed25519 key".to_string())?.verify(message, &Signature::from_bytes(&sig)).map_err(|_| "the signature does not match".to_string())
+}

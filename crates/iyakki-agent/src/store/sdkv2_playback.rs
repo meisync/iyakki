@@ -36,6 +36,8 @@ pub enum SoundError {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SoundSpec {
     pub app: String,
+    /// The person whose app plays it (their client hears it in the per-person sound mode).
+    pub user: String,
     /// WAV bytes (a file inside the app, or what the app sent).
     pub wav: Vec<u8>,
     pub volume: f64,
@@ -64,6 +66,8 @@ struct State {
     queue: BTreeMap<(String, String), Vec<String>>,
     /// The sound stream of each app: the backend's id -> the sound path's id.
     sounds: BTreeMap<(String, String), BTreeMap<u32, u32>>,
+    /// The last state and position (seconds) seen of each app's playback, so a look that finds no new event (another reader took them) still answers truly.
+    last: BTreeMap<(String, String), (String, u64)>,
 }
 
 pub struct PlaybackBackend {
@@ -131,6 +135,7 @@ impl PlaybackBackend {
         let mut st = lock(&self.st);
         st.next += 1;
         let id = st.next;
+        st.last.remove(&Self::key(who));
         // an app has one playback at a time, like one audio stream: the earlier one is closed
         let old: Vec<String> = st.sessions.entry(Self::key(who)).or_default().values().cloned().collect();
         st.sessions.entry(Self::key(who)).or_default().clear();
@@ -155,8 +160,10 @@ impl PlaybackBackend {
                 None => return Ok(json!({"state": "stopped", "position": 0})),
             },
         };
-        let mut state = "ready";
-        let mut pos = 0u64;
+        let (mut state, mut pos) = match lock(&self.st).last.get(&Self::key(who)) {
+            Some((st, p)) => (match st.as_str() { "playing" => "playing", "paused" => "paused", "ended" => "ended", "failed" => "failed", _ => "ready" }, *p * 1000),
+            None => ("ready", 0u64),
+        };
         for e in self.media.poll(&who.user, &ses) {
             match e {
                 MediaEvent::State { state: st } => {
@@ -184,6 +191,7 @@ impl PlaybackBackend {
             }
         }
         let _ = pid;
+        lock(&self.st).last.insert(Self::key(who), (state.to_string(), pos / 1000));
         Ok(json!({"state": state, "position": pos / 1000}))
     }
 
@@ -198,7 +206,7 @@ impl PlaybackBackend {
         };
         // an .mp3 (from the app's own files or sent by it) is decoded here with the in-house decoder; the sound path itself only takes WAV
         let wav = if wav.starts_with(b"RIFF") { wav } else { mp3_to_wav(&wav).map_err(|e| SdkError::bad("src", &e))? };
-        let spec = SoundSpec { app: who.app.clone(), wav, volume: a.get("volume").and_then(Value::as_f64).unwrap_or(1.0), looped: a.get("loop").and_then(Value::as_bool).unwrap_or(false), channel: s(a, "channel").to_string() };
+        let spec = SoundSpec { app: who.app.clone(), user: who.user.clone(), wav, volume: a.get("volume").and_then(Value::as_f64).unwrap_or(1.0), looped: a.get("loop").and_then(Value::as_bool).unwrap_or(false), channel: s(a, "channel").to_string() };
         let sid = self.sound.start(&spec).map_err(|e| match e {
             SoundError::Busy { holder } => SdkError::new(code::BUSY, format!("the speaker is in use by {holder}")).with("holder", holder),
             SoundError::Unavailable(w) => unavailable(&w, "Check Settings -> Sound."),
@@ -332,6 +340,7 @@ impl SoundOut for MixerSound {
             crate::mixer::MixError::Busy { holder } => SoundError::Busy { holder },
             other => SoundError::Unavailable(other.to_string()),
         })?;
+        src.set_owner(&spec.user);
         src.set_gain(spec.volume.clamp(0.0, 1.0) as f32);
         let id = {
             let mut n = lock(&self.next);

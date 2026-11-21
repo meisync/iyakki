@@ -50,6 +50,29 @@ pub struct TenantGate {
     pub now: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
+/// The gate a CLOUD caller hands to the cluster tools (F-TCFG-10): the bindings are read from the tenant's folder at every change (an
+/// administrator may bind or unbind a cluster while the service runs) and the requester's rank is read per team from the tenant's roles, so
+/// one gate serves every team and a person is judged by their role in the team the cluster belongs to.
+pub struct PerTeamGate {
+    pub dir: PathBuf,
+    pub vault: Arc<dyn SecretStore>,
+    pub audit: Arc<dyn ConfigAudit>,
+    pub roles: crate::cloudroles::Roles,
+    pub requester: String,
+    pub now: Arc<dyn Fn() -> u64 + Send + Sync>,
+}
+
+impl TeamGate for PerTeamGate {
+    fn through(&self, cluster_id: &str, apply: &mut dyn FnMut(Option<&str>) -> Result<String, String>) -> Option<Result<String, String>> {
+        let bindings = load(&self.dir);
+        let b = bindings.iter().find(|b| b.cluster_id == cluster_id)?;
+        let rank = super::api::Caller { user: &self.requester, roles: Some(&self.roles) }.rank(&b.team);
+        let guest = self.roles.tenant_role(&self.requester).is_none();
+        let one = TenantGate { dir: self.dir.clone(), vault: self.vault.clone(), audit: self.audit.clone(), roles: self.roles.clone(), bindings: vec![b.clone()], requester: self.requester.clone(), rank, guest, now: self.now.clone() };
+        one.through(cluster_id, apply)
+    }
+}
+
 impl TeamGate for TenantGate {
     fn through(&self, cluster_id: &str, apply: &mut dyn FnMut(Option<&str>) -> Result<String, String>) -> Option<Result<String, String>> {
         let b = self.bindings.iter().find(|b| b.cluster_id == cluster_id)?;

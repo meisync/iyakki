@@ -5,7 +5,7 @@ use crate::hookstore::Delivery;
 
 
 /// What a person (or the assistant) may choose when making a webhook.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct HookOpts {
     pub signed: bool,
     pub methods: Vec<String>,
@@ -14,12 +14,15 @@ pub struct HookOpts {
     pub rate_per_min: u32,
 }
 
-/// What making or renewing a hook gives back: shown once on the screen, never to the assistant.
+/// What making or renewing a hook gives back: shown once on the screen, never to the assistant. Over the core socket the secret does
+/// not cross (D-SPLIT-03-SECRETS, D-S5-02): the wire form drops it.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Created {
     pub id: String,
     pub flow: String,
     /// `/hooks/<id>/<token>`.
     pub path: String,
+    #[serde(skip)]
     pub secret: Option<String>,
 }
 
@@ -30,7 +33,7 @@ impl std::fmt::Debug for Created {
 }
 
 /// A hook as the screen and the assistant see it: nothing secret.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct HookView {
     pub id: String,
     pub flow: String,

@@ -32,14 +32,14 @@ pub fn entries(env: &Env) -> Vec<Entry> {
         let schema = json!({"type": "object", "properties": {"camera": {"type": "string", "description": "The camera id from camera_trust_status."}, "action": {"type": "string", "enum": ["approve", "forget"]}}, "required": ["camera", "action"]});
         v.push(Entry::change(TAB, "camera_trust_set", "Approve the certificate a camera showed (the one waiting in camera_trust_status) or forget the saved trust of a camera. The person approves a card first.", schema, |a| format!("{} the certificate of camera {}", if a["action"] == "forget" { "Forget" } else { "Trust" }, a["camera"].as_str().unwrap_or("")), move |a| {
             let (id, action) = (arg_str(a, "camera")?, arg_str(a, "action")?);
-            let mut st = TrustStore::load(&e.dir);
-            let msg = match action.as_str() {
-                "approve" => format!("The certificate of {id} is trusted ({}).", st.approve(&id)?),
-                "forget" if st.forget(&id) => format!("The saved trust of {id} is gone; the next connection asks again."),
-                "forget" => return Err("that camera has no saved trust".into()),
-                _ => return Err("action is approve or forget".into()),
-            };
-            st.save(&e.dir)?;
+            let msg = TrustStore::change(&e.dir, |st| {
+                Ok(match action.as_str() {
+                    "approve" => format!("The certificate of {id} is trusted ({}).", st.approve(&id)?),
+                    "forget" if st.forget(&id) => format!("The saved trust of {id} is gone; the next connection asks again."),
+                    "forget" => return Err("that camera has no saved trust".into()),
+                    _ => return Err("action is approve or forget".into()),
+                })
+            })?;
             e.audit("camera.trust", &format!("{id} {action}"));
             Ok(msg)
         }));

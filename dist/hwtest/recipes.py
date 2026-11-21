@@ -6,7 +6,7 @@ lines are printed with the PASS so nobody flips a whole row on a narrow observat
 Row texts: FEATURES.md; triage: docs/development/PARTIALS-PLAN-2026-11-11-triage.md.
 """
 import os, re, time
-from hwcheck import recipe, fail, human, dev, Verdict, Ctx
+from hwcheck import require_hardware, not_applicable, recipe, fail, human, dev, Verdict, Ctx
 
 
 def _nc(c, text):
@@ -42,6 +42,14 @@ def _kube_ready(c):
     return out
 
 
+
+def _tap_tab(c, name):
+    """Tap the tab called NAME in the top strip (found on screen: the tabs move when a count is added to the first one)."""
+    st = c.state()
+    m = re.search(r"^\s*(\d+),(\d+)\s+%s$" % re.escape(name), st.split("\nbuttons", 1)[0], re.M)
+    if not m: fail("no tab called %r on screen" % name)
+    dev("input", "tap", int(m.group(1)) + 10, int(m.group(2)) + 8); time.sleep(1.5)
+
 @recipe("F-SHELL-13", "responsive display loop measured on the Mac mini: frame stats from the kernel log, idle redraw check")
 def shell13(c):
     """PASS when, on an idle Home screen whose picture does not change (two screenshots seconds apart are byte-identical), the shell draws at most 20 frames per
@@ -51,7 +59,8 @@ def shell13(c):
     a = c.shot("home-before-idle")
     time.sleep(45)  # no dev command at all while the window runs
     lines = _shell_frame_lines(c)
-    if len(lines) < 3: human("fewer than 3 shell frame-stat lines in the kernel log (is the stat line off in this build?)")
+    # KI-1014: the shell logs the frame line to the kernel ring at INFO only for the first window, a slow window and once an hour
+    if len(lines) < 1: human("no shell frame-stat line in the kernel log (is the stat line off in this build?)")
     last = lines[-3:]
     for l in last: c.log("FRAMESTAT " + l[0])
     shots = [c.shot("home-after-idle-%d" % i) for i in range(3)]
@@ -229,7 +238,7 @@ def store10(c):
     st = c.click("Back (Esc)")
     st = c.click("Publishers"); c.shot("publishers")
     c.expect(st, r"^IYAKKI$"); c.expect(st, r"apps ·")
-    dev("input", "tap", 560, 72); time.sleep(1.5); st = c.state("store-settings"); c.shot("settings-tab")
+    _tap_tab(c, "Settings"); st = c.state("store-settings"); c.shot("settings-tab")
     c.expect(st, r"^Built-in catalog$"); c.expect(st, r"^Add a store$"); c.expect(st, r"^Daily check for updates$"); c.expect(st, r"^Install from a file$")
     c.notcovered("trusted keys and licence rows, review dialog and a real install; 1024x600 and 800x480 sizes; whether the layout looks right (look at the screenshots)")
 
@@ -337,7 +346,8 @@ def k8s14(c):
     last reason; View logs opens the service log tail as text; the numbers agree with kubectl (12 pods)."""
     st = c.open_tile("SYSTEM")
     m = c.expect(st, r"^running · v[\d.]+\+k3s\d · node Ready · \d+/\d+ pods$")
-    c.expect(st, r"^data [\d.]+ GB · disk \d+% full · restarted \d+x, last: ")
+    # the restart part is shown only when the cluster restarted (system.rs): a cluster that never restarted ends at "disk N% full"
+    c.expect(st, r"^data [\d.]+ GB · disk \d+% full( · restarted \d+x, last: .*)?$")
     ready, total = map(int, re.search(r"(\d+)/(\d+) pods", m[0]).groups())
     rc, out = c.run("kube", "get", "pods", "-A", "--no-headers", name="pods")
     kt = len([l for l in out.splitlines() if l.strip()])
@@ -377,7 +387,7 @@ def dev02(c):
     addresses, GPU, sound, firmware line), ps (PID 1, k3s), dmesg --grep (only matching lines), logs --system for
     shell/boot/audit/engine, status (table with k3s running); and credentials are hidden: a planted secret-looking string is not
     needed, instead the audit/boot/dmesg output is searched for obvious 'password=' / 'Bearer ' values."""
-    info = c.run("info", name="info")[1]
+    info = require_hardware(c, "macmini2018")
     for pat in (r"device\s+Apple Inc\. Macmini8,1", r"image\s+IYAKKI [\d.a-z-]+ · variant pc-x86_64", r"kernel\s+[\d.]+ · \d+ modules", r"taint\s+\d+",
                 r"memory\s+[\d.]+ GB total", r"firmware\s+UEFI", r"gpu\s+card0 driver i915", r"sound\s+0 \[", r"disk\s+nvme0n1", r"network\s+eth0\s+\d"):
         if not re.search(pat, info): fail("dev info lacks /%s/" % pat)

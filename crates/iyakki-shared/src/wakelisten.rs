@@ -2,14 +2,6 @@
 
 pub const SENSITIVITY: [&str; 3] = ["low", "normal", "high"];
 
-/// The microphone as the listener sees it: open, read what arrived since the last read, close.
-pub trait Mic: Send {
-    fn open(&mut self) -> Result<(), String>;
-    fn is_open(&self) -> bool;
-    /// 16 kHz mono samples since the last call (nothing is kept here).
-    fn drain(&mut self) -> Vec<i16>;
-    /// The capture is still running.
-    fn alive(&mut self) -> bool;
-    /// Close the microphone and drop anything unread.
-    fn close(&mut self);
-}
+/// The microphone as the listener sees it: open, read what arrived since the last read, close. One trait for the wake listener, the
+/// stream to a cloud machine and the connector program (`iyakki-audiolink`).
+pub use iyakki_audiolink::Mic;

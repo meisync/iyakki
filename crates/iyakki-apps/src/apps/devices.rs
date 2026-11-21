@@ -99,6 +99,8 @@ pub enum Target {
     /// Settings -> Sound: mix the sound of several apps (the IYAKKI mixer, experimental).
     SoundMixer,
     SoundWebMix,
+    /// The Bluetooth headphones and speakers row (F-NET-28).
+    SoundBluetooth,
     /// Settings -> Sound, Microphone: one input (its ALSA device, `plughw:2,0`; empty: Automatic).
     SoundMic(String),
     /// Settings -> Sound, Microphone: listen for three seconds and say how loud it was.
@@ -189,7 +191,7 @@ struct Snapshot {
     mac: Vec<hw::mac::MacInfo>,
     /// The Bluetooth hardware (the page itself is `bluetooth_page.rs`; this keeps what the Overview needs).
     bt: hw::btstate::BtState,
-    /// A MacBookPro13,x/14,x or iMac whose CS8409 codec has no driver (`iyakki_drivers::cs8409`): the line to show.
+    /// A MacBookPro13,x/14,x or iMac whose CS8409 codec has no driver (`iyakki_core_api::device_types::driver_packs::cs8409`): the line to show.
     cs8409: Option<String>,
     /// The microphones (capture devices) and whether a T2 sound card's microphones are hidden on purpose.
     mics: Vec<iyakki_shared::voicedesk::Mic>,
@@ -201,6 +203,8 @@ pub struct DevicesPane {
     /// What the pages read and switch on the machine (`LocalHardware` over `env`, or a fake).
     api: std::sync::Arc<dyn Hardware>,
     snap: Option<Snapshot>,
+    /// Hardware classes already asked for from the lazy device broker (once per pane).
+    asked: std::collections::BTreeSet<&'static str>,
     at: u64,
     /// What the private MAC address setting reads and changes.
     mac: hw::mac::MacEnv,
@@ -223,7 +227,7 @@ impl DevicesPane {
         #[cfg(not(any(test, feature = "testing")))]
         let mac = hw::mac::MacEnv { ctl: env.ctl.clone(), roots: env.roots.clone(), ..hw::mac::MacEnv::real() };
         let api: std::sync::Arc<dyn Hardware> = std::sync::Arc::new(iyakki_core_local::LocalHardware::new(env.roots.clone(), env.ctl.clone()));
-        DevicesPane { env, api, snap: None, at: 0, mac, sound: Default::default(), mic_choice: String::new(), advanced: false, request: None, core: None }
+        DevicesPane { env, api, snap: None, asked: Default::default(), at: 0, mac, sound: Default::default(), mic_choice: String::new(), advanced: false, request: None, core: None }
     }
 
     /// Ask the mixer's state through this handle (`cx.core`).
@@ -300,7 +304,11 @@ impl DevicesPane {
             Some(c) => c.sound(),
             None => &iyakki_core_api::NoSound,
         };
-        let outputs = sound.outputs_at(&r.proc_);
+        let route = match &core {
+            Some(c) => c.audio_route_at(&r.proc_, &r.sys),
+            None => std::sync::Arc::new(iyakki_core_api::audioroute::NoAudioRoute),
+        };
+        let outputs = sound.outputs_via(&*route);
         let state = if self.real_sound() { sound.state() } else { Default::default() };
         let soft_card = state.softvol_card;
         let (mix_channels, starting, hw_ignored, busy) = if self.real_sound() {
@@ -310,8 +318,14 @@ impl DevicesPane {
                 (None, None, None, None)
             }
         } else {
-            (None, sound.card_starting(&r.proc_, &r.sys).map(|_| iyakki_shared::audioout::STARTING_LINE.to_string()), None, None)
+            (None, sound.card_starting_via(&*route).map(|_| iyakki_shared::audioout::STARTING_LINE.to_string()), None, None)
         };
+        // first use of Bluetooth and sound: the core's lazy device broker loads their drivers now (a no-op unless `iyakki.lazydrivers=1`)
+        for (class, who) in [("bluetooth", "settings"), ("audio", "core")] {
+            if self.asked.insert(class) {
+                let _ = self.api.request_class(class, who);
+            }
+        }
         let bt = self.api.bluetooth();
         let cs8409 = self.api.cs8409_line();
         self.snap = Some(Snapshot { links: self.api.links(), ips: self.api.ipv4(), rfkill: self.api.rfkill(), bcm_nodriver: self.api.broadcom_wifi_without_driver().then_some(hw::BROADCOM_NO_DRIVER_TEXT), screen: self.api.screen(), cards, outputs, soft_card, mix_channels, starting, hw_ignored, busy, mac, bt, cs8409, mics: crate::agent().voicedesk_list_mics(&r.proc_), mic_t2: iyakki_shared::voicedesk::t2_mic(&r.proc_) });
@@ -368,7 +382,7 @@ impl DevicesPane {
             }
             (Target::Card(i), _) if up || down || matches!(key, Key::Char('m')) => {
                 let delta = if up { Some(5) } else if down { Some(-5) } else { None };
-                Some(match self.env.ctl.change_volume(*i, delta) {
+                Some(match self.api.change_volume(*i, delta) {
                     Ok(v) => Done { result: Ok(if v.muted { "Muted.".to_string() } else { format!("Volume {}%.", v.percent) }), audit: format!("volume card{i}") },
                     Err(e) => Done { result: Err(e), audit: String::new() },
                 })
@@ -392,7 +406,7 @@ impl DevicesPane {
                 Ok(()) => Done { result: Ok(format!("Brightness {v}%.")), audit: format!("brightness {name} {v}") },
                 Err(e) => Done { result: Err(e), audit: String::new() },
             },
-            Target::Card(i) => match self.env.ctl.set_volume(*i, v as u32) {
+            Target::Card(i) => match self.api.set_volume(*i, v as u32) {
                 Ok(vol) => Done { result: Ok(if vol.muted { "Muted.".to_string() } else { format!("Volume {}%.", vol.percent) }), audit: format!("volume card{i}") },
                 Err(e) => Done { result: Err(e), audit: String::new() },
             },
@@ -406,7 +420,7 @@ impl DevicesPane {
         let on = row.chips.iter().any(|c| c.0 == "ON");
         // switching on is a new connection: the private address (if chosen) is set while the link is still down
         let note = if on { String::new() } else { self.private_address_note(name) };
-        let r = if on { self.env.ctl.set_link(name, false) } else { self.env.ctl.set_link(name, true).and_then(|_| self.env.ctl.dhcp(name)) };
+        let r = if on { self.api.set_link(name, false) } else { self.api.set_link(name, true).and_then(|_| self.api.dhcp(name)) };
         match r {
             Ok(()) => Done { result: Ok(format!("Ethernet {name} turned {}.{note}", if on { "off" } else { "on" })), audit: format!("ethernet {name} {}", if on { "off" } else { "on" }) },
             Err(e) => Done { result: Err(e), audit: String::new() },
@@ -418,13 +432,13 @@ impl DevicesPane {
         let mut note = String::new();
         let res = (|| -> Result<(), String> {
             if on {
-                self.env.ctl.set_link(name, false)?;
+                self.api.set_link(name, false)?;
                 ids.iter().try_for_each(|id| self.api.set_rfkill(id, true))
             } else {
                 ids.iter().try_for_each(|id| self.api.set_rfkill(id, false))?;
                 note = self.private_address_note(name);
-                self.env.ctl.set_link(name, true)?;
-                self.env.ctl.dhcp(name)
+                self.api.set_link(name, true)?;
+                self.api.dhcp(name)
             }
         })();
         match res {
@@ -470,6 +484,11 @@ impl DevicesPane {
 
     pub fn take_request(&mut self) -> Option<(String, String)> {
         self.request.take()
+    }
+
+    /// Ask the shell to open app `app` with `arg` (the Network page's sign-in page goes to the Browser).
+    pub fn ask_shell(&mut self, app: &str, arg: String) {
+        self.request = Some((app.to_string(), arg));
     }
 
     /// "Look again": the kernel reads every connected display again (`detect`), a few times in the background; when its mode list becomes
@@ -720,9 +739,24 @@ pub const MIXER_HELP: &str = "Radio, voice, alarms and notifications can play to
 pub const WEB_MIX_TITLE: &str = "Browser sound through the mixer (experimental)";
 pub const WEB_MIX_HELP: &str = "The web browser's sound is sent into the mixer through a pipe instead of opening the sound card itself, so it can play with the radio and be turned down for speech. Needs the mixer above. Applies the next time the web engine starts. Not tested on real hardware yet: if the browser goes silent, turn it off.";
 
+pub const BT_SOUND_TITLE: &str = "Bluetooth headphones and speakers";
+
+/// The row that sends the sound of the whole computer to paired Bluetooth headphones or a speaker (F-NET-28): Enter or B starts it (after a
+/// card) or stops it. The pairing itself is in Settings -> Bluetooth.
+fn bluetooth_row() -> DevRow {
+    let v = crate::agent().sound_probe().bluetooth_sound_view();
+    let help = if v.sinks.is_empty() {
+        "No headphones or speaker are paired: put them in pairing mode and pair them in Settings -> Bluetooth first. Then this row sends all of this computer's sound to them (SBC only) and silences its own speakers until you stop it.".to_string()
+    } else {
+        format!("{} Paired: {}. Press Enter or B to {}; the computer's own speakers are silent while it sends.", v.line, v.sinks.iter().map(|s| s.1.clone()).collect::<Vec<_>>().join(", "), if v.active { "stop sending" } else { "send all sound to them" })
+    };
+    DevRow::new(BT_SOUND_TITLE, help, Target::SoundBluetooth).chip(if v.active { "sending" } else { "off" }, if v.active { OK } else { DIM })
+}
+
 fn mixer_rows(prefs: &iyakki_shared::audioout::SoundSettings, stats: Option<&iyakki_core_api::MixerStats>) -> Vec<DevRow> {
     let mut rows = vec![DevRow::new(MIXER_TITLE, MIXER_HELP, Target::SoundMixer).chip(if prefs.mixer { "on" } else { "off" }, if prefs.mixer { WARN } else { DIM })];
     rows.push(DevRow::new(WEB_MIX_TITLE, WEB_MIX_HELP, Target::SoundWebMix).chip(if prefs.web_mix { "on" } else { "off" }, if prefs.web_mix { WARN } else { DIM }));
+    rows.push(bluetooth_row());
     rows.push(DevRow::new("Browser sound status", crate::agent().sound_probe().web_mix_status_text(prefs.web_mix, prefs.mixer, crate::agent().webmix_tap_state()), Target::Nothing).chip(if prefs.web_mix && prefs.mixer { "on" } else { "off" }, DIM));
     if prefs.mixer {
         let (state, line) = match stats {
@@ -795,6 +829,17 @@ fn card_row(c: &hw::Card, v: Option<&hw::Volume>, soft_card: Option<u32>, ignore
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_first_look_at_bluetooth_and_sound_asks_the_device_broker_once_each() {
+        let fake = std::sync::Arc::new(iyakki_core_fake::FakeHardware::new());
+        let mut pane = DevicesPane::new(DeviceEnv::real());
+        pane.set_hardware(fake.clone());
+        pane.prime(0);
+        pane.prime(1_000_000);
+        let asks: Vec<String> = fake.calls().into_iter().filter(|c| c.starts_with("request_class")).collect();
+        assert_eq!(asks, vec!["request_class(bluetooth,settings)".to_string(), "request_class(audio,core)".to_string()]);
+    }
+
     fn mic(id: &str, label: &str, usb: bool) -> iyakki_shared::voicedesk::Mic {
         iyakki_shared::voicedesk::Mic { id: id.into(), label: label.into(), usb }
     }
@@ -840,7 +885,7 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         calls: Mutex<Vec<String>>,
-        volume: Mutex<Option<iyakki_devctl::Volume>>,
+        volume: Mutex<Option<iyakki_core_api::device_types::devctl::Volume>>,
         fail_links: bool,
     }
 
@@ -855,10 +900,10 @@ mod tests {
         fn ipv4(&self) -> Vec<(String, String)> {
             vec![("eno1".into(), "192.168.1.9".into())]
         }
-        fn volume(&self, _: u32) -> Option<iyakki_devctl::Volume> {
+        fn volume(&self, _: u32) -> Option<iyakki_core_api::device_types::devctl::Volume> {
             self.volume.lock().unwrap().clone()
         }
-        fn change_volume(&self, c: u32, d: Option<i32>) -> Result<iyakki_devctl::Volume, String> {
+        fn change_volume(&self, c: u32, d: Option<i32>) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
             let mut v = self.volume.lock().unwrap();
             let cur = v.as_mut().ok_or("no mixer")?;
             match d {
@@ -868,7 +913,7 @@ mod tests {
             self.calls.lock().unwrap().push(format!("volume {c} {d:?}"));
             Ok(cur.clone())
         }
-        fn set_volume(&self, c: u32, p: u32) -> Result<iyakki_devctl::Volume, String> {
+        fn set_volume(&self, c: u32, p: u32) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
             let mut v = self.volume.lock().unwrap();
             let cur = v.as_mut().ok_or("no mixer")?;
             cur.percent = p.min(100);
@@ -1001,11 +1046,30 @@ mod tests {
     }
 
     #[test]
+    fn the_link_switch_and_the_card_volume_go_through_the_hardware_handle_the_core_gave_and_not_the_control() {
+        use iyakki_core_api::hardware::{Card, Link, LinkKind};
+        let (mut p, _, ctl) = pane("via-hw", true, Arc::new(Fake::default()));
+        let hw = Arc::new(iyakki_core_fake::FakeHardware::new());
+        hw.set(|s| {
+            s.links = vec![Link { name: "eno1".into(), kind: LinkKind::Ethernet, up: true, carrier: true, mac: "aa:bb:cc:00:00:01".into(), speed: Some(1000), driver: String::new() }];
+            s.cards = vec![(Card { index: 0, name: "PCH".into(), long_name: "HDA Intel PCH".into() }, Some(iyakki_core_api::device_types::devctl::Volume { control: "Master".into(), percent: 50, muted: false }))];
+        });
+        p.set_hardware(hw.clone());
+        assert_eq!(p.act(DevTab::Network, 0, &Key::Enter, 0).unwrap().result.unwrap(), "Ethernet eno1 turned off.");
+        assert_eq!(p.act(DevTab::Network, 0, &Key::Char('e'), 1).unwrap().result.unwrap(), "Ethernet eno1 turned on.");
+        let c = p.rows(DevTab::Sound, 2).iter().position(|r| matches!(r.target, Target::Card(0))).unwrap();
+        assert_eq!(p.act(DevTab::Sound, c, &Key::Char('+'), 3).unwrap().result.unwrap(), "Volume 55%.");
+        assert_eq!(p.set_value(DevTab::Sound, c, 20, 4).unwrap().result.unwrap(), "Volume 20%.");
+        assert_eq!(hw.calls().into_iter().filter(|c| !c.starts_with("request_class")).collect::<Vec<_>>(), vec!["set_link(eno1,false)", "set_link(eno1,true)", "dhcp(eno1)", "change_volume(0,Some(5))", "set_volume(0,20)"]);
+        assert!(ctl.calls.lock().unwrap().is_empty(), "the control the environment holds was not used for these: {:?}", ctl.calls.lock().unwrap());
+    }
+
+    #[test]
     fn switching_wifi_off_blocks_the_radio_and_on_unblocks_it() {
         let (mut p, roots, fake) = pane("wifi", true, Arc::new(Fake::default()));
         let d = p.act(DevTab::Network, 1, &Key::Enter, 0).unwrap();
         assert_eq!(d.result.unwrap(), "WiFi wlan0 turned off.");
-        assert!(iyakki_devctl::rfkill_list(&roots).iter().find(|k| k.kind == "wlan").unwrap().soft, "radio blocked");
+        assert!(iyakki_core_api::device_types::devctl::rfkill_list(&roots).iter().find(|k| k.kind == "wlan").unwrap().soft, "radio blocked");
         put(&roots.sys, "class/net/wlan0/flags", "0x1002\n");
         let rows = p.rows(DevTab::Network, 1);
         assert_eq!(rows[1].chips[0].0, "OFF");
@@ -1013,7 +1077,7 @@ mod tests {
         let said = d.result.unwrap();
         // WiFi is private per network by default; this stand-in driver cannot change an address, which is said, not fatal
         assert!(said.starts_with("WiFi wlan0 turned on.") && said.contains("Private MAC address not applied") && said.contains("hardware address is used"), "{said}");
-        assert!(!iyakki_devctl::rfkill_list(&roots).iter().find(|k| k.kind == "wlan").unwrap().soft, "radio free again");
+        assert!(!iyakki_core_api::device_types::devctl::rfkill_list(&roots).iter().find(|k| k.kind == "wlan").unwrap().soft, "radio free again");
         assert!(fake.calls.lock().unwrap().contains(&"dhcp wlan0".to_string()));
     }
 
@@ -1046,14 +1110,36 @@ mod tests {
         m.poll(0);
         assert_eq!(m.view.switch, crate::btmodel::Switch::On);
         assert_eq!(m.set_switch(false).unwrap(), "Bluetooth is off.");
-        assert!(iyakki_devctl::rfkill_list(&roots).iter().find(|k| k.kind == "bluetooth").unwrap().soft);
+        assert!(iyakki_core_api::device_types::devctl::rfkill_list(&roots).iter().find(|k| k.kind == "bluetooth").unwrap().soft);
         assert_eq!(m.set_switch(true).unwrap(), "The Bluetooth radio is on.");
-        assert!(!iyakki_devctl::rfkill_list(&roots).iter().find(|k| k.kind == "bluetooth").unwrap().soft);
+        assert!(!iyakki_core_api::device_types::devctl::rfkill_list(&roots).iter().find(|k| k.kind == "bluetooth").unwrap().soft);
         let (_, r) = machine("btusb", false);
         put(&r.sys, "bus/usb/devices/1-1/bDeviceClass", "e0\n");
         let mut q = crate::btmodel::BtModel::new(Arc::new(Fake::default()), r);
         q.poll(0);
         assert_eq!(q.view.switch, crate::btmodel::Switch::NoDriver);
+    }
+
+    #[test]
+    fn the_phones_audio_is_read_connected_disconnected_and_opened_for_pairing_through_the_cores_handle_not_the_control() {
+        let (_, roots) = machine("btaudio", true);
+        let h = Arc::new(iyakki_core_fake::FakeBtAudio::default());
+        h.set(|s| s.paired = vec![iyakki_core_fake::BtPaired { address: "AA:01".into(), name: "Pixel 8".into(), kind: "phone".into() }]);
+        let mut m = crate::btmodel::BtModel::new(Arc::new(Fake::default()), roots);
+        m.set_bt_audio(h.clone());
+        m.poll(0);
+        assert!(m.audio.ready && m.audio.device.is_none(), "the view is the handle's");
+        assert!(m.audio_toggle("AA:01").unwrap().starts_with("Connecting for audio"));
+        m.poll(1);
+        assert_eq!(m.audio.device.as_ref().map(|d| d.address.as_str()), Some("AA:01"));
+        assert!(m.audio_toggle("AA:01").unwrap().contains("Disconnecting the audio"));
+        m.poll(2);
+        assert!(m.audio_pairing_toggle().unwrap().contains("visible to phones"));
+        m.poll(3);
+        assert!(m.audio.pairing_open && m.audio.device.is_none());
+        assert_eq!(h.calls(), vec!["apply(bluetooth_audio_connect)", "apply(bluetooth_audio_disconnect)", "apply(bluetooth_audio_pairing)"]);
+        // a phone that is not paired is the handle's refusal, and nothing is asked of the control
+        assert!(m.audio_toggle("ZZ:99").unwrap_err().contains("no phone or laptop"));
     }
 
     #[test]
@@ -1064,11 +1150,11 @@ mod tests {
         let bl = rows.iter().position(|r| matches!(r.target, Target::Backlight(_))).unwrap();
         assert!(rows.iter().any(|r| r.title.contains("HDMI-A-1") && r.sub.contains("best 1920x1080")));
         assert_eq!(p.act(DevTab::Display, bl, &Key::Char('+'), 0).unwrap().result.unwrap(), "Brightness 60%.");
-        assert_eq!(iyakki_devctl::screen(&roots).backlights[0].value, 60);
+        assert_eq!(iyakki_core_api::device_types::devctl::screen(&roots).backlights[0].value, 60);
         for t in 1..12 {
             p.act(DevTab::Display, bl, &Key::Char('-'), t);
         }
-        assert_eq!(iyakki_devctl::screen(&roots).backlights[0].value, 5, "the floor is 5 %");
+        assert_eq!(iyakki_core_api::device_types::devctl::screen(&roots).backlights[0].value, 5, "the floor is 5 %");
         assert!(p.act(DevTab::Display, 0, &Key::Char('+'), 20).unwrap().result.is_err(), "the screen row has no brightness");
     }
 
@@ -1096,10 +1182,10 @@ mod tests {
     #[test]
     fn volume_and_mute_go_to_the_card() {
         let fake = Arc::new(Fake::default());
-        *fake.volume.lock().unwrap() = Some(iyakki_devctl::Volume { control: "Master".into(), percent: 50, muted: false });
+        *fake.volume.lock().unwrap() = Some(iyakki_core_api::device_types::devctl::Volume { control: "Master".into(), percent: 50, muted: false });
         let (mut p, _, fake) = pane("snd", true, fake);
         let rows = p.rows(DevTab::Sound, 0);
-        assert_eq!(rows.len(), 9, "the output, IYAKKI's volume, the card, the mixer switch, the browser mixer switch, its status, the mixer status (the mixer is on by default), the Microphone row (no microphone in the test machine), the Advanced switch: {rows:?}");
+        assert_eq!(rows.len(), 10, "the output, IYAKKI's volume, the card, the mixer switch, the browser mixer switch, the Bluetooth headphones row (alpha.7 d5), its status, the mixer status (the mixer is on by default), the Microphone row (no microphone in the test machine), the Advanced switch: {rows:?}");
         let c = rows.iter().position(|r| matches!(r.target, Target::Card(0))).unwrap();
         assert!(rows[c].title.contains("HDA Intel PCH") && rows[c].chips[0].0 == "50%");
         assert_eq!(p.act(DevTab::Sound, c, &Key::Char('+'), 0).unwrap().result.unwrap(), "Volume 55%.");
@@ -1111,9 +1197,9 @@ mod tests {
 
     #[test]
     fn the_card_carrying_iyakkis_software_volume_moves_the_iyakki_volume_and_others_keep_their_mixer() {
-        let t2 = iyakki_devctl::Card { index: 1, name: "AppleT2x1".into(), long_name: "Apple T2 Audio".into() };
+        let t2 = iyakki_core_api::device_types::devctl::Card { index: 1, name: "AppleT2x1".into(), long_name: "Apple T2 Audio".into() };
         let prefs = iyakki_shared::audioout::SoundSettings { volume_pct: 35, ..Default::default() };
-        let soft = iyakki_devctl::Volume { control: iyakki_shared::softvol::CONTROL.into(), percent: 35, muted: false };
+        let soft = iyakki_core_api::device_types::devctl::Volume { control: iyakki_shared::softvol::CONTROL.into(), percent: 35, muted: false };
         // the Mac mini 2018's T2 card: its only control is the softvol, so the row is the IYAKKI volume (mute keeps the level)
         for v in [Some(&soft), None] {
             let r = card_row(&t2, v, Some(1), None, &prefs);
@@ -1124,9 +1210,9 @@ mod tests {
         let muted = iyakki_shared::audioout::SoundSettings { muted: true, ..prefs.clone() };
         assert_eq!(card_row(&t2, Some(&soft), Some(1), None, &muted).chips[0].0, "muted");
         // another card, or a card with a hardware control, keeps its own mixer
-        let pch = iyakki_devctl::Card { index: 0, name: "HDA-Intel".into(), long_name: "HDA Intel PCH".into() };
+        let pch = iyakki_core_api::device_types::devctl::Card { index: 0, name: "HDA-Intel".into(), long_name: "HDA Intel PCH".into() };
         assert!(matches!(card_row(&pch, None, Some(1), None, &prefs).target, Target::Nothing));
-        let master = iyakki_devctl::Volume { control: "Master".into(), percent: 70, muted: false };
+        let master = iyakki_core_api::device_types::devctl::Volume { control: "Master".into(), percent: 70, muted: false };
         assert!(matches!(card_row(&pch, Some(&master), Some(0), None, &prefs).target, Target::Card(0)), "a hardware Master stays the card's own");
         assert!(matches!(card_row(&t2, Some(&soft), None, None, &prefs).target, Target::Card(1)), "without IYAKKI's softvol in use the control is a plain mixer");
     }
@@ -1164,13 +1250,13 @@ mod tests {
     #[test]
     fn display_and_sound_rows_carry_a_slider_and_a_click_on_it_sets_an_exact_value() {
         let fake = Arc::new(Fake::default());
-        *fake.volume.lock().unwrap() = Some(iyakki_devctl::Volume { control: "Master".into(), percent: 50, muted: false });
+        *fake.volume.lock().unwrap() = Some(iyakki_core_api::device_types::devctl::Volume { control: "Master".into(), percent: 50, muted: false });
         let (mut p, roots, fake) = pane("slide", true, fake);
         let rows = p.rows(DevTab::Display, 0);
         let bl = rows.iter().position(|r| matches!(r.target, Target::Backlight(_))).unwrap();
         assert_eq!(rows[bl].slider, Some(SliderVal { value: 50, min: 5, max: 100, step: 5, unit: "%" }));
         assert_eq!(p.set_value(DevTab::Display, bl, 85, 0).unwrap().result.unwrap(), "Brightness 85%.");
-        assert_eq!(iyakki_devctl::screen(&roots).backlights[0].value, 85);
+        assert_eq!(iyakki_core_api::device_types::devctl::screen(&roots).backlights[0].value, 85);
         assert_eq!(p.set_value(DevTab::Display, bl, 0, 1).unwrap().result.unwrap(), "Brightness 5%.", "the lowest brightness is the floor");
         assert!(p.set_value(DevTab::Display, 0, 50, 2).is_none(), "the screen row has no slider");
         let rows = p.rows(DevTab::Sound, 3);
@@ -1232,5 +1318,20 @@ mod tests {
         let r = rows.iter().position(|r| matches!(r.target, Target::Wifi(..))).expect("the fake's WiFi interface is a row");
         p.act(DevTab::Network, r, &Key::Enter, 21).unwrap().result.unwrap();
         assert!(fake.rfkill()[0].soft, "the radio was blocked on the fake machine");
+    }
+    #[test]
+    fn the_output_list_and_the_starting_card_come_from_the_cores_sound_route_not_the_pages_own_reads() {
+        // the page's folders hold no sound at all: whatever it lists is what the core's route said
+        let (_, roots) = machine("route-only", false);
+        let core = Arc::new(iyakki_core_fake::FakeCore::new());
+        let route = core.audio_route_fake();
+        route.put("cards", " 0 [PCH            ]: HDA-Intel - HDA Intel PCH\n");
+        route.put("card0/pcm0p/info", "id: ALC\nname: ALC3234 Analog\nsubdevices_count: 1\n");
+        core.sound_fake().set_route_scanner(|r| iyakki_agent::audioout::scan_via(r, &|_| None));
+        let mut p = DevicesPane::new(DeviceEnv { roots, ctl: Arc::new(Fake::default()) });
+        p.set_core(core.clone());
+        let outs = p.outputs(0);
+        assert!(!outs.is_empty(), "the card named by the route is listed: {outs:?}");
+        assert!(route.calls().iter().any(|c| c == "text:cards"), "the facts were asked of the route: {:?}", route.calls());
     }
 }

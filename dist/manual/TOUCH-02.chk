@@ -1,0 +1,19 @@
+scenario: TOUCH-02
+title: Trackpad, keyboard and Touch Bar of a Mac laptop
+area: Touch
+rows: F-KBD-10, F-KBD-11, F-KBD-14
+machines: macbook
+needs: person
+prereq: A MacBook, signed in, no external mouse.
+step: Move one finger over the trackpad and press it down to click.
+expect: The pointer moves smoothly and the click chooses what is under it.
+clause: F-KBD-10.pointer
+step: Type a line with every row of keys into any text field, including the number keys and the Fn row.
+expect: Every key types the right character with no repeats or missing letters.
+clause: F-KBD-10.keys
+step: If the MacBook has a Touch Bar, look at it and hold Fn.
+expect: The strip shows buttons and changes strips while Fn is held; if there is no Touch Bar write Cannot test for this step.
+clause: F-KBD-14.strip
+step: Press the brightness and volume keys.
+expect: Each key changes what its symbol says.
+clause: F-KBD-11.fnkeys

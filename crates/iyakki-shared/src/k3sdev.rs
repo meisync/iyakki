@@ -22,7 +22,7 @@ impl Backend {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Svc {
     NotInstalled,
     Stopped,
@@ -46,7 +46,7 @@ impl Svc {
 }
 
 /// Where this machine stands (see [`K3sDev::situation`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Situation {
     /// IYAKKI installed a cluster here.
     Managed,
@@ -104,7 +104,7 @@ pub struct NodeNet {
 
 /// Which managed local cluster a [`K3sDev`] is: the first one (`local`, exactly today's names, ports and folder) or an extra one
 /// with its own folder, API port, kubelet ports, node name and address ranges, so two of them never share a port or a range.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Instance {
     pub id: String,
     pub dir_name: String,
@@ -167,7 +167,7 @@ impl Instance {
 }
 
 /// Where everything of the managed cluster lives: one folder inside the IYAKKI data partition.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 pub struct Layout {
     pub root: PathBuf,
 }
@@ -204,7 +204,7 @@ pub fn refusal_text(found: &[String]) -> String {
     format!("This machine already has a cluster, so IYAKKI will not set up another one: {}. Use it instead (Settings \u{2192} Dev cluster lists it and lets you test the connection, set it as the default and choose a registry). Nothing was changed.", found.join("; "))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Plan {
     pub backend: Backend,
     pub version: String,
@@ -383,7 +383,7 @@ pub const FAIL_WINDOW: Duration = Duration::from_secs(600);
 
 
 /// What SYSTEM and the Dev cluster page show.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Health {
     pub installed: bool,
     pub backend: Backend,
@@ -469,12 +469,15 @@ pub struct State {
     pub node_ip_disabled: bool,
     /// The cluster became Ready with the fixed node address at least once on this machine.
     pub node_ip_worked: bool,
+    /// This machine stays offline on purpose: with no default route k3s is given one on IYAKKI's own dummy interface (a route that goes nowhere, so
+    /// k3s starts), instead of waiting for a network that will never come. Off by default; a real route always wins (the offline one has a high metric).
+    pub offline_on_purpose: bool,
 }
 
 /// `state.json`: schema 1 stamps the alpha.1 layout (later fields have serde defaults).
 pub const STATE_SCHEMA: iyakki_schema::Spec = iyakki_schema::Spec { name: "dev cluster state", current: 1, migrations: &[iyakki_schema::Migration { to: 1, what: "stamp the alpha.1 layout", run: |_| {} }] };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Alert {
     /// The cluster stopped unexpectedly (the first exit of an outage; the supervisor is restarting it).
     Down(String),

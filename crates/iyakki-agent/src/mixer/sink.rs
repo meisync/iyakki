@@ -2,7 +2,8 @@
 //! tests, a recording fake.
 
 use std::io::Write;
-use std::process::{Child, Command, Stdio};
+use iyakki_core_local::starters_launch::{Launch, Stream};
+use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -74,7 +75,7 @@ pub struct AplaySink {
 impl AplaySink {
     /// The real one: the device is whatever Settings -> Sound chose, looked at each time the sink opens.
     pub fn system() -> AplaySink {
-        AplaySink { program: crate::player::find_program("aplay"), device: Box::new(|| crate::audioout::global().device()), child: None, label: String::new(), tuned: false, want_low: None, open_low: None, pipe_bytes: 0, generation: || crate::audioout::global().generation(), opened_gen: 0 }
+        AplaySink { program: crate::player::find_program("aplay"), device: Box::new(|| crate::audioout::output_state().device()), child: None, label: String::new(), tuned: false, want_low: None, open_low: None, pipe_bytes: 0, generation: || crate::audioout::output_state().generation(), opened_gen: 0 }
     }
 
     /// The command for these parameters (public for tests).
@@ -103,8 +104,7 @@ impl AplaySink {
 
     fn spawn(args: &[String]) -> Result<Child, String> {
         let args = crate::voice::sound_player_argv(args);
-        let mut cmd = Command::new(&args[0]);
-        cmd.args(&args[1..]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
+        let mut cmd = Launch::new(&args[0]).args(&args[1..]).stdin(Stream::Piped).stdout(Stream::Null).stderr(Stream::Piped).into_command();
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::process::CommandExt;
@@ -273,11 +273,17 @@ pub struct FakeLog {
 #[derive(Clone, Default)]
 pub struct FakeSink {
     pub log: Arc<Mutex<FakeLog>>,
+    /// The clock the write stamps are read on (None: the process clock). A test that runs the mixer on a manual clock gives it here.
+    clock: Option<crate::mixer::MixClock>,
 }
 
 impl FakeSink {
     pub fn new() -> FakeSink {
         FakeSink::default()
+    }
+    /// A fake card whose write stamps are on the mixer's clock `clock`.
+    pub fn with_clock(clock: &crate::mixer::MixClock) -> FakeSink {
+        FakeSink { log: Arc::default(), clock: Some(clock.clone()) }
     }
     pub fn lock(&self) -> std::sync::MutexGuard<'_, FakeLog> {
         self.log.lock().unwrap_or_else(|e| e.into_inner())
@@ -305,7 +311,8 @@ impl Sink for FakeSink {
         }
         l.writes += 1;
         let at = l.samples.len();
-        l.stamps.push((crate::mixer::engine::now_us() / 1000, at));
+        let now_us = self.clock.as_ref().map_or_else(crate::mixer::engine::now_us, |c| c.now_us());
+        l.stamps.push((now_us / 1000, at));
         l.samples.extend_from_slice(pcm);
         Ok(())
     }
@@ -402,7 +409,7 @@ mod tests {
         let mut s = AplaySink { program: Some("/usr/bin/aplay".into()), device: Box::new(|| None), child: None, label: String::new(), tuned: false, want_low: None, open_low: None, pipe_bytes: 0, generation: || 0, opened_gen: 0 };
         s.open(48_000, 2).unwrap();
         let pid = s.child.as_ref().unwrap().id();
-        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+        let comm = iyakki_core_local::procfacts::name(pid).unwrap_or_default();
         assert_ne!(comm.trim(), "aplay", "the sink must use the stand-in under test");
         drop(s);
         assert!(gone(pid, Duration::from_secs(3)));

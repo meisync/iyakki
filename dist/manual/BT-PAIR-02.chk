@@ -1,0 +1,16 @@
+scenario: BT-PAIR-02
+title: Bluetooth of the Mac mini and phone sound in
+area: Bluetooth
+rows: F-NET-11, F-NET-24
+machines: mac mini
+needs: person
+prereq: A phone with Bluetooth and music.
+step: Open Settings, Bluetooth on the Mac mini.
+expect: The adapter is detected with an address and can be switched on.
+clause: F-NET-11.adapter
+step: On the phone, search for Bluetooth devices and choose the Mac mini by name; accept the pairing on both.
+expect: The phone shows connected.
+clause: F-NET-24.pair
+step: Play music on the phone.
+expect: You hear it from the Mac mini's output, clear and in time.
+clause: F-NET-24.sound

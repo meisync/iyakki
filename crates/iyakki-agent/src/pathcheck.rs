@@ -210,11 +210,12 @@ fn mp3_decoder_with(plugin: &Path) -> Verdict {
         if !crate::wsexec::on_path(launch) {
             return Err("the image ships the MP3 plugin but not gst-launch-1.0 to run it".to_string());
         }
-        let out = std::process::Command::new(launch)
-            .args(["-q", "filesrc", &format!("location={}", file.display()), "!", "mpegaudioparse", "!", "iyakkimp3dec", "!", "fakesink"])
-            .env("GST_REGISTRY_1_0", dir.join("registry.bin"))
-            .output()
-            .map_err(|e| format!("cannot run gst-launch-1.0: {e}"))?;
+        let out = iyakki_core_local::starters::gst_run(
+            launch,
+            &["-q", "filesrc", &format!("location={}", file.display()), "!", "mpegaudioparse", "!", "iyakkimp3dec", "!", "fakesink"].map(String::from),
+            &dir.join("registry.bin"),
+        )
+        .map_err(|e| format!("cannot run gst-launch-1.0: {e}"))?;
         if out.status.success() {
             Ok("decoded a 44.1 kHz stereo MP3 through the plugin".to_string())
         } else {
@@ -245,7 +246,7 @@ fn web_recorder_with(marker: &Path, elements: &[&str]) -> Verdict {
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot make a work folder: {e}"))?;
     let mut missing: Vec<&str> = Vec::new();
     for e in elements {
-        let ok = std::process::Command::new(inspect).arg(e).env("GST_REGISTRY_1_0", dir.join("registry.bin")).output().map(|o| o.status.success()).unwrap_or(false);
+        let ok = iyakki_core_local::starters::gst_ok(inspect, &[e.to_string()], &dir.join("registry.bin"));
         if !ok {
             missing.push(e);
         }

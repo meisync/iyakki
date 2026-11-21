@@ -10,11 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 
-use iyakki_shared::providers::{valid_provider_id, Kind as ProviderKind, ProviderCfg};
-use iyakki_shared::settings::ModelChoice;
 use iyakki_core_api::netscan::{net, Event as ScanEvent, HostInfo, Kind, Options, Service};
 
 use super::widgets::{Form, FormEvent};
+use super::scan_port::{host_services, CxPort, ScanPort};
 use super::{blink, App, AppCx, Flow};
 use crate::gfx::{rgb, Face, Gfx, Icon};
 use crate::tooltip::{fit_keep_ip, Tooltip};
@@ -57,10 +56,10 @@ fn kind_color(k: Kind) -> [u8; 4] {
 
 fn matches(f: usize, h: &HostInfo) -> bool {
     match f {
-        1 => h.services.iter().any(|s| s.kind.is_model_server()),
+        1 => host_services(h).iter().any(|s| s.kind.is_model_server()),
         2 => h.has(Kind::Camera),
         3 => h.has(Kind::Media),
-        4 => h.services.iter().any(|s| matches!(s.kind, Kind::Device | Kind::Printer | Kind::SmartHome | Kind::Platform)),
+        4 => host_services(h).iter().any(|s| matches!(s.kind, Kind::Device | Kind::Printer | Kind::SmartHome | Kind::Platform)),
         5 => h.risky(),
         _ => true,
     }
@@ -91,7 +90,12 @@ pub struct ScanApp {
 
 impl ScanApp {
     pub fn new(cx: &AppCx) -> ScanApp {
-        let mut nets: Vec<Network> = cx.os.netscan().subnets().into_iter().map(|s| Network { label: format!("{}  {}  ({} addresses)", s.iface, s.cidr(), net::hosts_of(&s).len()), targets: net::hosts_of(&s) }).collect();
+        ScanApp::with_port(&CxPort(cx))
+    }
+
+    /// The tile over any port (a fake in tests).
+    pub fn with_port(port: &dyn ScanPort) -> ScanApp {
+        let mut nets: Vec<Network> = port.subnets().into_iter().map(|s| Network { label: format!("{}  {}  ({} addresses)", s.iface, s.cidr(), net::hosts_of(&s).len()), targets: net::hosts_of(&s) }).collect();
         nets.push(Network { label: "This machine (127.0.0.1)".into(), targets: vec![Ipv4Addr::LOCALHOST] });
         ScanApp { nets, net_sel: 0, hosts: BTreeMap::new(), filter: 0, sel: 0, svc_sel: 0, running: false, cancel: Arc::new(AtomicBool::new(false)), rx: None, progress: (0, 0), summary: None, mode: Mode::Browse, status: None, ports: None, devices: false, dev_sel: 0, tip: Tooltip::new() }
     }
@@ -116,13 +120,13 @@ impl ScanApp {
         self.shown().get(self.sel).copied()
     }
 
-    fn start(&mut self, cx: &AppCx) {
+    fn start(&mut self, port: &dyn ScanPort) {
         if self.running {
             return;
         }
         let Some(net) = self.nets.get(self.net_sel) else { return };
         // the account's host policy decides which addresses may be touched
-        let blocked = net.targets.iter().find(|ip| !cx.session.policy.allows_host(&ip.to_string()));
+        let blocked = net.targets.iter().find(|ip| !port.allows_host(&ip.to_string()));
         if let Some(ip) = blocked {
             self.status = Some((format!("Your account may not scan {ip}."), false));
             return;
@@ -136,11 +140,11 @@ impl ScanApp {
             opts.announce_wait = None;
         }
         self.cancel = cancel.clone();
-        if let Err(e) = cx.os.netscan().start(targets, opts, cancel, tx) {
+        if let Err(e) = port.start_scan(targets, opts, cancel, tx) {
             self.status = Some((format!("The scan did not start: {e}"), false));
             return;
         }
-        cx.audit.record(&cx.session.user, "netscan.start", &label);
+        port.audit("netscan.start", &label);
         self.rx = Some(rx);
         self.running = true;
         self.hosts.clear();
@@ -155,7 +159,7 @@ impl ScanApp {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
-    fn poll(&mut self, cx: &AppCx) {
+    fn poll(&mut self, port: &dyn ScanPort) {
         let Some(rx) = &self.rx else { return };
         let mut finished = None;
         while let Ok(ev) = rx.try_recv() {
@@ -174,16 +178,16 @@ impl ScanApp {
             self.summary = Some((hosts, services, cancelled));
             // what the scan found also tells the new-device watch who is on the network
             let seen: Vec<iyakki_shared::devwatch::Neighbor> = self.hosts.values().filter_map(|h| Some(iyakki_shared::devwatch::Neighbor { ip: h.ip.to_string(), mac: h.mac.clone()?.to_lowercase(), iface: "scan".into() })).collect();
-            if cx.session.policy.manage_settings {
-                cx.devwatch().observe_scan(&seen, iyakki_clock::now_unix());
+            if port.admin() {
+                port.devwatch().observe_scan(&seen, iyakki_clock::now_unix());
             }
-            cx.audit.record(&cx.session.user, "netscan.done", &format!("{hosts} hosts, {services} services{}", if cancelled { ", stopped" } else { "" }));
+            port.audit("netscan.done", &format!("{hosts} hosts, {services} services{}", if cancelled { ", stopped" } else { "" }));
         }
     }
 
-    fn handle_devices(&mut self, ev: &Event, cx: &AppCx) -> Flow {
-        let admin = cx.session.policy.manage_settings;
-        let list = cx.devwatch().list();
+    fn handle_devices(&mut self, ev: &Event, port: &dyn ScanPort) -> Flow {
+        let admin = port.admin();
+        let list = port.devwatch().list();
         let cur = list.get(self.dev_sel.min(list.len().saturating_sub(1))).cloned();
         let deny = |this: &mut Self| this.status = Some(("Only administrators can change the device list.".into(), false));
         match ev {
@@ -194,8 +198,8 @@ impl ScanApp {
             Event::Tab(112) | Event::Key(Key::Char('t')) => match (admin, cur) {
                 (false, _) => deny(self),
                 (true, Some(d)) => {
-                    cx.devwatch().trust(&d.mac);
-                    cx.audit.record(&cx.session.user, "netsec.trust", &d.mac);
+                    port.devwatch().trust(&d.mac);
+                    port.audit("netsec.trust", &d.mac);
                     self.status = Some((format!("{} is trusted now.", d.mac), true));
                 }
                 _ => {}
@@ -204,8 +208,8 @@ impl ScanApp {
                 if !admin {
                     deny(self);
                 } else {
-                    let n = cx.devwatch().trust_all();
-                    cx.audit.record(&cx.session.user, "netsec.trust_all", &n.to_string());
+                    let n = port.devwatch().trust_all();
+                    port.audit("netsec.trust_all", &n.to_string());
                     self.status = Some((format!("{n} device(s) trusted."), true));
                 }
             }
@@ -217,7 +221,7 @@ impl ScanApp {
             Event::Tab(114) | Event::Key(Key::Char('x')) => match (admin, cur) {
                 (false, _) => deny(self),
                 (true, Some(d)) => {
-                    cx.devwatch().forget(&d.mac);
+                    port.devwatch().forget(&d.mac);
                     self.status = Some((format!("Forgot {}. If it comes back it is new again.", d.mac), true));
                 }
                 _ => {}
@@ -226,9 +230,9 @@ impl ScanApp {
                 if !admin {
                     deny(self);
                 } else {
-                    let on = !cx.devwatch().enabled();
-                    cx.devwatch().set_enabled(on);
-                    cx.audit.record(&cx.session.user, "netsec.watch", if on { "on" } else { "off" });
+                    let on = !port.devwatch().enabled();
+                    port.devwatch().set_enabled(on);
+                    port.audit("netsec.watch", if on { "on" } else { "off" });
                     self.status = Some((if on { "Watching for new devices.".into() } else { "Not watching for new devices.".into() }, true));
                 }
             }
@@ -237,10 +241,10 @@ impl ScanApp {
         Flow::Stay
     }
 
-    fn render_devices(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, y0: f32) {
+    fn render_devices(&mut self, g: &mut Gfx, area: R, s: f32, port: &dyn ScanPort, y0: f32) {
         let (x, w) = (area.x + 24.0 * s, area.w - 48.0 * s);
-        let list = cx.devwatch().list();
-        let on = cx.devwatch().enabled();
+        let list = port.devwatch().list();
+        let on = port.devwatch().enabled();
         let mut y = y0;
         let untrusted = list.iter().filter(|d| !d.trusted).count();
         let head = if !on { "Watching is off (w turns it on).".to_string() } else if untrusted > 0 { format!("{untrusted} device(s) you have not seen before. Trust the ones you know (t), forget the rest (x).") } else { "Every device seen is trusted. A new one raises an alert.".to_string() };
@@ -295,7 +299,7 @@ impl ScanApp {
 
     fn selected_service(&self) -> Option<(Ipv4Addr, Service)> {
         let h = self.current()?;
-        h.services.get(self.svc_sel).map(|s| (h.ip, s.clone()))
+        host_services(h).get(self.svc_sel).map(|s| (h.ip, s.clone()))
     }
 
     fn target_form() -> Form {
@@ -315,13 +319,13 @@ impl ScanApp {
         f
     }
 
-    fn open_add(&mut self, cx: &AppCx) {
+    fn open_add(&mut self, port: &dyn ScanPort) {
         let Some((ip, svc)) = self.selected_service() else { return };
         if !svc.kind.is_model_server() {
             self.status = Some(("Only model servers (Ollama and OpenAI-compatible ones) can be added to Models.".into(), false));
             return;
         }
-        if !cx.session.policy.manage_settings {
+        if !port.admin() {
             self.status = Some(("Only an administrator can add models. Copy the address with c and ask one.".into(), false));
             return;
         }
@@ -338,36 +342,8 @@ impl ScanApp {
 }
 
 /// A Lemonade server found by the scan (it names itself in its health answer).
-fn is_lemonade(svc: &Service) -> bool {
+pub(super) fn is_lemonade(svc: &Service) -> bool {
     svc.kind == Kind::LlmServer && svc.name.starts_with("Lemonade")
-}
-
-/// Add a Lemonade server from the scan: its typed list is read at once so the chat list holds its chat models only, and the
-/// model chosen in the form becomes the chat model when none is set and it is one of those.
-fn add_lemonade(cx: &AppCx, ip: Ipv4Addr, mut cfg: ProviderCfg, model: &str, key: &str) -> Result<String, String> {
-    let id = cfg.id.clone();
-    let key_name = format!("{id}-key");
-    if !key.is_empty() {
-        cfg.key_ref = Some(format!("vault:{key_name}"));
-    }
-    cfg.validate()?;
-    if !key.is_empty() {
-        cx.vault().system_set(&key_name, key).map_err(|e| e.to_string())?;
-        cx.audit.record(&cx.session.user, "vault.system.set", &key_name);
-    }
-    cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).upsert_provider(cfg).map_err(|e| e.to_string())?;
-    cx.audit.record(&cx.session.user, "settings.provider.save", &format!("{id} (Lemonade) from net scan {ip}"));
-    let list = cx.services.refresh_lemonade(&id).unwrap_or_default();
-    let chats: Vec<String> = list.iter().filter(|m| m.downloaded && m.kind.chats()).map(|m| m.id.clone()).collect();
-    let mut note = String::new();
-    let mut st = cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let pick = if chats.iter().any(|m| m == model) { Some(model.to_string()) } else { chats.first().cloned() };
-    if let (None, Some(m)) = (st.get().chat.clone(), pick) {
-        st.set_chat(Some(ModelChoice { provider: id.clone(), model: m.clone() })).map_err(|e| e.to_string())?;
-        note = format!(" It is now the chat model ({m}).");
-    }
-    let others = list.len() - chats.len();
-    Ok(format!("Added {id} (Lemonade) to Models with {} chat model{} and {others} other{} (pictures, speech, embeddings: see Settings → Models).{note}", chats.len(), if chats.len() == 1 { "" } else { "s" }, if others == 1 { "" } else { "s" }))
 }
 
 fn provider_id(ip: Ipv4Addr, svc: &Service) -> String {
@@ -383,52 +359,6 @@ fn base_url(ip: Ipv4Addr, svc: &Service) -> String {
         Kind::LlmServer => svc.url.clone().unwrap_or_else(|| format!("{scheme}://{ip}:{}/v1", svc.port)),
         _ => format!("{scheme}://{ip}:{}", svc.port),
     }
-}
-
-/// Add a found model server to Settings → Models. The API key, if there is one, goes into the system vault and the provider
-/// keeps only a reference to it. If no chat model is chosen yet, this one becomes it. Returns what to tell the person.
-pub fn add_model_server(cx: &AppCx, ip: Ipv4Addr, svc: &Service, id: &str, address: &str, model: &str, key: &str) -> Result<String, String> {
-    if !cx.session.policy.manage_settings {
-        cx.audit.record(&cx.session.user, "settings.denied", "netscan add model");
-        return Err("Only an administrator can add models.".into());
-    }
-    if !valid_provider_id(id) {
-        return Err("Provider name: lowercase letters, digits, - and _; it starts with a letter.".into());
-    }
-    let kind = if svc.kind == Kind::Ollama { ProviderKind::Ollama } else if is_lemonade(svc) { ProviderKind::Lemonade } else { ProviderKind::Compat };
-    let mut cfg = ProviderCfg::new(id, kind);
-    cfg.base_url = Some(address.trim().to_string());
-    if kind == ProviderKind::Lemonade {
-        // Lemonade's list says what each model does: only its chat models go to the chat list (read after it is added)
-        return add_lemonade(cx, ip, cfg, model, key);
-    }
-    cfg.models = svc.models.clone();
-    cfg.default_model = if model.is_empty() { svc.models.first().cloned() } else { Some(model.to_string()) };
-    let key_name = format!("{id}-key");
-    if !key.is_empty() {
-        cfg.key_ref = Some(format!("vault:{key_name}"));
-    }
-    cfg.validate()?; // before touching the vault: a rejected form stores nothing
-    if !key.is_empty() {
-        cx.vault().system_set(&key_name, key).map_err(|e| match e {
-            iyakki_shared::vault::VaultError::Locked => "The system vault is locked. Sign in as an administrator who has access to it.".to_string(),
-            other => other.to_string(),
-        })?;
-        cx.audit.record(&cx.session.user, "vault.system.set", &key_name);
-    }
-    let chosen = cfg.default_model.clone();
-    let mut settings = cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    settings.upsert_provider(cfg).map_err(|e| e.to_string())?;
-    let mut note = String::new();
-    if settings.get().chat.is_none() {
-        if let Some(m) = &chosen {
-            settings.set_chat(Some(ModelChoice { provider: id.to_string(), model: m.clone() })).map_err(|e| e.to_string())?;
-            note = format!(" It is now the chat model ({m}).");
-        }
-    }
-    drop(settings);
-    cx.audit.record(&cx.session.user, "settings.provider.save", &format!("{id} ({}) from net scan {ip}", kind.label()));
-    Ok(format!("Added {id} to Models{}.{note}", if key.is_empty() { String::new() } else { " and its key to the vault".to_string() }))
 }
 
 impl App for ScanApp {
@@ -466,9 +396,10 @@ impl App for ScanApp {
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        let port = &CxPort(cx);
         self.tip.event(ev);
         if matches!(ev, Event::Tick) {
-            self.poll(cx);
+            self.poll(port);
             return Flow::Stay;
         }
         if let Mode::Form(form, kind) = &mut self.mode {
@@ -483,20 +414,20 @@ impl App for ScanApp {
                                     self.nets.insert(0, Network { label: format!("typed: {text}  ({} addresses)", t.len()), targets: t });
                                     self.net_sel = 0;
                                     self.mode = Mode::Browse;
-                                    self.start(cx);
+                                    self.start(port);
                                 }
                                 Err(e) => form.error = Some(e),
                             }
                         }
                         FormKind::RenameDevice(mac) => {
-                            let ok = cx.devwatch().rename(mac, &form.value(0));
+                            let ok = port.devwatch().rename(mac, &form.value(0));
                             self.status = Some((if ok { "Renamed.".into() } else { "That device is no longer listed.".into() }, ok));
                             self.mode = Mode::Browse;
                         }
                         FormKind::AddModel { ip, svc, models } => {
                             let (id, address, key) = (form.value(0), form.value(1), form.raw(2));
                             let model = if models.is_empty() { form.value(3) } else { models.get(form.choice_idx(3)).cloned().unwrap_or_default() };
-                            match add_model_server(cx, *ip, svc, &id, &address, &model, &key) {
+                            match port.add_model_server(*ip, svc, &id, &address, &model, &key) {
                                 Ok(msg) => {
                                     self.status = Some((msg, true));
                                     self.mode = Mode::Browse;
@@ -511,7 +442,7 @@ impl App for ScanApp {
             return Flow::Stay;
         }
         if self.devices {
-            return self.handle_devices(ev, cx);
+            return self.handle_devices(ev,  port);
         }
         match ev {
             Event::Tab(110) => {
@@ -530,7 +461,7 @@ impl App for ScanApp {
                 return Flow::Stay;
             }
             Event::Tab(100) => {
-                self.start(cx);
+                self.start(port);
                 return Flow::Stay;
             }
             Event::Tab(101) => {
@@ -538,7 +469,7 @@ impl App for ScanApp {
                 return Flow::Stay;
             }
             Event::Tab(102) => {
-                self.open_add(cx);
+                self.open_add(port);
                 return Flow::Stay;
             }
             Event::Scroll(d) => {
@@ -557,7 +488,7 @@ impl App for ScanApp {
                 }
                 return Flow::Back;
             }
-            Key::Char('s') | Key::Enter => self.start(cx),
+            Key::Char('s') | Key::Enter => self.start(port),
             Key::Char('x') => self.stop(),
             Key::Char('n') if !self.running => {
                 self.net_sel = (self.net_sel + 1) % self.nets.len().max(1);
@@ -573,7 +504,7 @@ impl App for ScanApp {
             }
             Key::Left => self.svc_sel = self.svc_sel.saturating_sub(1),
             Key::Right => {
-                let m = self.current().map_or(0, |h| h.services.len());
+                let m = self.current().map_or(0, |h| host_services(h).len());
                 self.svc_sel = (self.svc_sel + 1).min(m.saturating_sub(1));
             }
             Key::Char('f') => {
@@ -584,7 +515,7 @@ impl App for ScanApp {
                 self.filter = (*c as u8 - b'1') as usize;
                 self.sel = 0;
             }
-            Key::Char('a') => self.open_add(cx),
+            Key::Char('a') => self.open_add(port),
             Key::Char('d') => self.devices = true,
             Key::Char('c') => self.copy_address(),
             _ => {}
@@ -592,27 +523,34 @@ impl App for ScanApp {
         Flow::Stay
     }
 
-    fn render(&mut self, g: &mut Gfx, area: R, s: f32, _cx: &AppCx, tick: u64) {
+    fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+        let port = &CxPort(cx);
         let x = area.x + 24.0 * s;
         let w = area.w - 48.0 * s;
         let mut y = area.y + 10.0 * s;
         // network and controls
         let label = self.nets.get(self.net_sel).map_or(String::new(), |n| n.label.clone());
-        crate::fx::glass(g, x, y, w, 46.0 * s, 12.0 * s, ACCENT);
-        g.text(x + 16.0 * s, y + 6.0 * s, 11.0 * s, DIM, "NETWORK  (n changes it, t types one)", Face::Bold);
-        let label = g.fit(16.0 * s, &label, Face::Bold, w - 330.0 * s);
+        // a window too narrow for the buttons beside the network name gives them a row of their own under it
+        let own_row = w < 500.0 * s;
+        let bar_h = if own_row { 84.0 } else { 46.0 } * s;
+        crate::fx::glass(g, x, y, w, bar_h, 12.0 * s, ACCENT);
+        // a narrow window has no room for the key hints beside the buttons: the word alone
+        let caption = if !own_row && g.text_width(11.0 * s, "NETWORK  (n changes it, t types one)", Face::Bold) + 32.0 * s <= w - 330.0 * s { "NETWORK  (n changes it, t types one)" } else { "NETWORK" };
+        g.text(x + 16.0 * s, y + 6.0 * s, 11.0 * s, DIM, caption, Face::Bold);
+        let label = g.fit(16.0 * s, &label, Face::Bold, if own_row { w - 32.0 * s } else { w - 330.0 * s });
         g.text(x + 16.0 * s, y + 22.0 * s, 16.0 * s, TEXT, &label, Face::Bold);
-        let bx = x + w - 300.0 * s;
-        if self.running {
-            g.button(bx + 120.0 * s, y + 8.0 * s, 14.0 * s, "Stop (x)", ERR, Event::Tab(101));
-        } else {
-            g.button(bx + 120.0 * s, y + 8.0 * s, 14.0 * s, if self.summary.is_some() { "Scan again (s)" } else { "Scan (s)" }, ACCENT, Event::Tab(100));
-        }
-        let new_devices = _cx.services.devwatch().untrusted_count();
+        let new_devices = port.devwatch().untrusted_count();
         let dlabel = if new_devices > 0 { format!("Devices ({new_devices} new)") } else { "Devices (d)".to_string() };
         let dw = g.text_width(14.0 * s, &dlabel, Face::Bold) + 24.0 * s;
-        g.button(bx - 10.0 * s - dw, y + 8.0 * s, 14.0 * s, &dlabel, if new_devices > 0 { WARN } else { MUTED }, if self.devices { Event::Tab(111) } else { Event::Tab(110) });
-        y += 56.0 * s;
+        let bx = x + w - 300.0 * s;
+        let (by, dev_x, scan_x) = if own_row { (y + 46.0 * s, x + 16.0 * s, x + 16.0 * s + dw + 8.0 * s) } else { (y + 8.0 * s, bx - 10.0 * s - dw, bx + 120.0 * s) };
+        if self.running {
+            g.button(scan_x, by, 14.0 * s, "Stop (x)", ERR, Event::Tab(101));
+        } else {
+            g.button(scan_x, by, 14.0 * s, if self.summary.is_some() { "Scan again (s)" } else { "Scan (s)" }, ACCENT, Event::Tab(100));
+        }
+        g.button(dev_x, by, 14.0 * s, &dlabel, if new_devices > 0 { WARN } else { MUTED }, if self.devices { Event::Tab(111) } else { Event::Tab(110) });
+        y += bar_h + 10.0 * s;
         // progress or the summary
         if self.running {
             let f = (self.progress.0 as f32 / self.progress.1.max(1) as f32).clamp(0.0, 1.0);
@@ -637,7 +575,7 @@ impl App for ScanApp {
             y += 24.0 * s;
         }
         if self.devices {
-            self.render_devices(g, area, s, _cx, y);
+            self.render_devices(g, area, s, port, y);
             if let Mode::Form(f, _) = &self.mode {
                 f.render(g, area, s, ACCENT, blink(tick));
             }
@@ -685,12 +623,12 @@ impl App for ScanApp {
             let head = format!("{}{}", h.ip, h.name.as_ref().map(|n| format!("  {n}")).unwrap_or_default());
             let head_shown = fit_keep_ip(g, 16.0 * s, &head, Face::Bold, list_w - 60.0 * s);
             g.text(x + 16.0 * s, ry + 6.0 * s, 16.0 * s, TEXT, &head_shown, Face::Bold);
-            let summary: Vec<String> = h.services.iter().take(4).map(|s| if s.kind == Kind::Web || s.kind == Kind::Other { format!(":{}", s.port) } else { s.kind.label().to_string() }).collect();
+            let summary: Vec<String> = host_services(h).iter().take(4).map(|s| if s.kind == Kind::Web || s.kind == Kind::Other { format!(":{}", s.port) } else { s.kind.label().to_string() }).collect();
             let sub = g.fit(12.0 * s, &summary.join(" · "), Face::Sans, list_w - 60.0 * s);
             g.text(x + 16.0 * s, ry + 30.0 * s, 12.0 * s, kind_color(k), &sub, Face::Sans);
             if head_shown != head || sub != summary.join(" · ") {
                 // the list is narrow; the right-hand panel has the same facts for the selected machine, and the tooltip for any other
-                let all: Vec<String> = h.services.iter().map(|s| format!("{}/{} {}", s.port, s.proto, s.name)).collect();
+                let all: Vec<String> = host_services(h).iter().map(|s| format!("{}/{} {}", s.port, s.proto, s.name)).collect();
                 self.tip.offer(g, r, sel, &format!("{head}\n{}{}", h.mac.as_deref().map(|m| format!("hardware address {m}\n")).unwrap_or_default(), all.join(", ")));
             }
             if h.risky() {
@@ -708,7 +646,7 @@ impl App for ScanApp {
                 g.text(dx + 18.0 * s, y + 40.0 * s, 12.0 * s, DIM, &sub, Face::Sans);
             }
             let mut sy = y + 64.0 * s;
-            for (i, sv) in h.services.iter().enumerate() {
+            for (i, sv) in host_services(h).iter().enumerate() {
                 let sel = i == self.svc_sel;
                 let lines = g.wrap(12.0 * s, &sv.detail, Face::Sans, dw - 60.0 * s);
                 let risk_lines = sv.risk.as_ref().map(|r| g.wrap(12.0 * s, &format!("⚠ {r}"), Face::Sans, dw - 60.0 * s)).unwrap_or_default();
@@ -760,6 +698,7 @@ impl App for ScanApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iyakki_shared::providers::Kind as ProviderKind;
     use crate::apps::tests::{cx_with_admin_store, services_in, temp_dir, Offline};
     use crate::tooltip::POINTER_DELAY;
     use iyakki_sec::policy::Role;
@@ -869,7 +808,7 @@ mod tests {
         assert_eq!(os.netscan_fake().calls().len(), 1, "the scan was started through the core");
         finish(&mut a, &cx);
         assert!(!a.is_running());
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("netscan.start"), "{log}");
     }
 
@@ -882,7 +821,7 @@ mod tests {
         let s = &hosts[0].services[0];
         assert_eq!((s.port, s.kind, s.name.as_str()), (port, Kind::Ollama, "Ollama 0.5.7"));
         assert_eq!(s.models, vec!["llama3.2:3b", "qwen3:32b"]);
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("netscan.start") && log.contains("netscan.done") && log.contains("1 hosts"), "{log}");
     }
 
@@ -910,7 +849,7 @@ mod tests {
         assert!(cx.vault().system_names().unwrap().contains(&format!("ollama-127-0-0-1-{port}-key")));
         let json = std::fs::read_to_string(cx.data_dir().join("settings.json")).unwrap_or_default();
         assert!(!json.contains("tok-123"), "the key is not in the settings file");
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         assert!(log.contains("settings.provider.save") && log.contains("vault.system.set"));
     }
 
@@ -1027,7 +966,7 @@ mod tests {
         let ip: Ipv4Addr = "192.168.1.50".parse().unwrap();
         assert_eq!(provider_id(ip, &svc), "llm-192-168-1-50");
         assert_eq!(base_url(ip, &svc), "http://192.168.1.50:1234/v1");
-        let msg = add_model_server(&cx, ip, &svc, "lmstudio", &base_url(ip, &svc), "", "").unwrap();
+        let msg = super::super::scan_port::add_model_server(&cx, ip, &svc, "lmstudio", &base_url(ip, &svc), "", "").unwrap();
         assert!(msg.contains("chat model"), "{msg}");
         let s = cx.settings().lock().unwrap();
         assert_eq!((s.get().providers[0].kind, s.get().providers[0].default_model.as_deref()), (ProviderKind::Compat, Some("qwen2-7b")));
@@ -1127,5 +1066,187 @@ mod tests {
         a.handle(&Event::Key(Key::Down), &cx);
         draw(&mut a, &mut g);
         assert!(a.wants_redraw());
+    }
+
+    // ---- the tile on a fake port: no shell context, no real network, no real settings -----------------------------------------------------------
+
+    use iyakki_shared::devwatch::{Device, Neighbor};
+    use std::net::Ipv4Addr as Ip;
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Default)]
+    struct FakeWatch {
+        devices: StdMutex<Vec<Device>>,
+        on: StdMutex<bool>,
+        observed: StdMutex<Vec<Vec<Neighbor>>>,
+        trusted: StdMutex<Vec<String>>,
+        forgotten: StdMutex<Vec<String>>,
+    }
+
+    impl iyakki_agent_api::DevWatchApi for FakeWatch {
+        fn enabled(&self) -> bool {
+            *self.on.lock().unwrap()
+        }
+        fn set_enabled(&self, on: bool) {
+            *self.on.lock().unwrap() = on;
+        }
+        fn observe(&self, _seen: &[Neighbor], _now: i64) -> Vec<Device> {
+            vec![]
+        }
+        fn observe_scan(&self, seen: &[Neighbor], _now: i64) -> Vec<Device> {
+            self.observed.lock().unwrap().push(seen.to_vec());
+            vec![]
+        }
+        fn take_fresh(&self) -> Vec<Device> {
+            vec![]
+        }
+        fn list(&self) -> Vec<Device> {
+            self.devices.lock().unwrap().clone()
+        }
+        fn untrusted_count(&self) -> usize {
+            self.devices.lock().unwrap().iter().filter(|d| !d.trusted).count()
+        }
+        fn trust(&self, mac: &str) -> bool {
+            self.trusted.lock().unwrap().push(mac.into());
+            true
+        }
+        fn trust_all(&self) -> usize {
+            self.devices.lock().unwrap().iter().filter(|d| !d.trusted).count()
+        }
+        fn rename(&self, _mac: &str, _name: &str) -> bool {
+            true
+        }
+        fn forget(&self, mac: &str) -> bool {
+            self.forgotten.lock().unwrap().push(mac.into());
+            true
+        }
+    }
+
+    struct FakePort {
+        admin: bool,
+        allow: bool,
+        start_error: Option<String>,
+        started: StdMutex<Vec<Vec<Ip>>>,
+        watch: Arc<FakeWatch>,
+        audit: StdMutex<Vec<(String, String)>>,
+    }
+
+    impl FakePort {
+        fn new() -> FakePort {
+            FakePort { admin: true, allow: true, start_error: None, started: StdMutex::new(vec![]), watch: Arc::new(FakeWatch::default()), audit: StdMutex::new(vec![]) }
+        }
+        fn audit_text(&self) -> String {
+            self.audit.lock().unwrap().iter().map(|(a, s)| format!("{a} {s}")).collect::<Vec<_>>().join("\n")
+        }
+    }
+
+    impl ScanPort for FakePort {
+        fn subnets(&self) -> Vec<net::Subnet> {
+            vec![net::Subnet { iface: "eth0".into(), addr: Ip::new(192, 168, 7, 5), prefix: 30 }]
+        }
+        fn start_scan(&self, targets: Vec<Ip>, _opts: Options, _cancel: Arc<AtomicBool>, tx: std::sync::mpsc::Sender<ScanEvent>) -> Result<(), String> {
+            if let Some(e) = &self.start_error {
+                return Err(e.clone());
+            }
+            self.started.lock().unwrap().push(targets.clone());
+            // the answers are put on the channel at once: no thread, no clock
+            let mut h = HostInfo::new(targets[0]);
+            h.mac = Some("AA:BB:CC:00:11:22".into());
+            tx.send(ScanEvent::Started { hosts: targets.len(), ports: 1 }).unwrap();
+            tx.send(ScanEvent::Host(h)).unwrap();
+            tx.send(ScanEvent::Finished { hosts: 1, services: 0, cancelled: false }).unwrap();
+            Ok(())
+        }
+        fn allows_host(&self, _ip: &str) -> bool {
+            self.allow
+        }
+        fn admin(&self) -> bool {
+            self.admin
+        }
+        fn devwatch(&self) -> Arc<dyn iyakki_agent_api::DevWatchApi> {
+            self.watch.clone()
+        }
+        fn audit(&self, action: &str, subject: &str) {
+            self.audit.lock().unwrap().push((action.into(), subject.into()));
+        }
+        fn add_model_server(&self, _ip: Ip, _svc: &Service, id: &str, _address: &str, _model: &str, _key: &str) -> Result<String, String> {
+            Ok(format!("Added {id}"))
+        }
+    }
+
+    #[test]
+    fn fake_port_the_networks_come_from_the_port_and_this_machine_is_always_last() {
+        let a = ScanApp::with_port(&FakePort::new());
+        assert_eq!(a.nets.len(), 2);
+        assert!(a.nets[0].label.starts_with("eth0  192.168.7.4/30"), "{}", a.nets[0].label);
+        assert_eq!(a.nets[1].targets, vec![Ip::LOCALHOST]);
+    }
+
+    #[test]
+    fn fake_port_a_scan_asks_the_scanner_audits_start_and_finish_and_tells_the_device_watch_for_administrators() {
+        let port = FakePort::new();
+        let mut a = ScanApp::with_port(&port);
+        a.start(&port);
+        assert!(a.is_running());
+        a.poll(&port);
+        assert!(!a.is_running());
+        assert_eq!(a.hosts().len(), 1);
+        assert_eq!(port.started.lock().unwrap().len(), 1);
+        let t = port.audit_text();
+        assert!(t.contains("netscan.start eth0") && t.contains("netscan.done 1 hosts, 0 services"), "{t}");
+        let seen = port.watch.observed.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0][0].mac, "aa:bb:cc:00:11:22", "the address is lower-cased for the watch");
+    }
+
+    #[test]
+    fn fake_port_an_ordinary_account_does_not_feed_the_device_watch() {
+        let mut port = FakePort::new();
+        port.admin = false;
+        let mut a = ScanApp::with_port(&port);
+        a.start(&port);
+        a.poll(&port);
+        assert!(port.watch.observed.lock().unwrap().is_empty());
+        assert!(port.audit_text().contains("netscan.done"));
+    }
+
+    #[test]
+    fn fake_port_addresses_the_policy_refuses_are_never_scanned() {
+        let mut port = FakePort::new();
+        port.allow = false;
+        let mut a = ScanApp::with_port(&port);
+        a.start(&port);
+        assert!(!a.is_running());
+        assert!(port.started.lock().unwrap().is_empty());
+        assert!(a.status_text().unwrap().starts_with("Your account may not scan 192.168.7."), "{:?}", a.status_text());
+        assert!(port.audit.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fake_port_a_scanner_that_refuses_says_why_and_nothing_is_audited() {
+        let mut port = FakePort::new();
+        port.start_error = Some("net.scan was not allowed".into());
+        let mut a = ScanApp::with_port(&port);
+        a.start(&port);
+        assert!(!a.is_running());
+        assert_eq!(a.status_text(), Some("The scan did not start: net.scan was not allowed"));
+        assert!(port.audit.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fake_port_the_device_list_changes_only_for_administrators_and_each_change_is_audited() {
+        let mut port = FakePort::new();
+        port.watch.devices.lock().unwrap().push(Device { mac: "aa:bb:cc:00:11:22".into(), ip: "192.168.7.4".into(), iface: "eth0".into(), first_seen: 1, last_seen: 2, trusted: false, name: String::new() });
+        let mut a = ScanApp::with_port(&port);
+        a.handle_devices(&Event::Key(Key::Char('t')), &port);
+        assert_eq!(port.watch.trusted.lock().unwrap().as_slice(), ["aa:bb:cc:00:11:22"]);
+        a.handle_devices(&Event::Key(Key::Char('w')), &port);
+        assert!(*port.watch.on.lock().unwrap());
+        let t = port.audit_text();
+        assert!(t.contains("netsec.trust aa:bb:cc:00:11:22") && t.contains("netsec.watch on"), "{t}");
+        port.admin = false;
+        a.handle_devices(&Event::Key(Key::Char('x')), &port);
+        assert!(port.watch.forgotten.lock().unwrap().is_empty());
+        assert_eq!(a.status_text(), Some("Only administrators can change the device list."));
     }
 }

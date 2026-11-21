@@ -315,7 +315,7 @@ fn the_helper_setting_is_off_unless_it_was_turned_on() {
 fn vpn08_policy_routing_goes_through_the_helper_and_odd_numbers_are_refused() {
     let r = rig("policy", PeerPolicy::only(my_uid()));
     let c = RemoteSys::new(&r.helper.path);
-    let ok = PolicyWire { table: 0x4956, mark: 0x4956_0002, priority: 10_000, include: vec!["198.51.100.0/24".into()], exclude: vec!["198.51.100.7/32".into()], uids: vec![4242] };
+    let ok = PolicyWire { table: 0x4956, mark: 0x4956_0002, priority: 10_000, include: vec!["198.51.100.0/24".into()], exclude: vec!["198.51.100.7/32".into()], uids: vec![4242], app_sockets: false };
     c.call(&Req::InstallPolicy { spec: ok.clone() }).unwrap();
     let (nft, add) = r.fake.st.lock().unwrap().policy.clone().expect("installed");
     assert!(nft.contains("meta skuid { 4242 }") && add.iter().any(|a| a.contains(&"fwmark".to_string())));
@@ -326,4 +326,38 @@ fn vpn08_policy_routing_goes_through_the_helper_and_odd_numbers_are_refused() {
         assert!(c.call(&Req::InstallPolicy { spec: bad }).is_err());
     }
     assert!(r.fake.st.lock().unwrap().policy.is_none());
+}
+
+#[test]
+fn vpn05_the_helper_hands_a_marked_socket_to_the_session_only_for_the_mark_of_an_installed_policy() {
+    use std::io::{Read, Write};
+    let r = rig("markedfd", PeerPolicy::only(my_uid()));
+    let c = RemoteSys::new(&r.helper.path);
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    // no policy yet: the mark is nobody's, nothing is connected
+    let e = c.marked_connect_fd(addr, 0x4956_0002, Duration::from_secs(5)).unwrap_err();
+    assert!(e.contains("does not belong"), "{e}");
+    let ok = PolicyWire { table: 0x4956, mark: 0x4956_0002, priority: 10_000, include: vec!["198.51.100.0/24".into()], exclude: vec![], uids: vec![], app_sockets: false };
+    c.call(&Req::InstallPolicy { spec: ok.clone() }).unwrap();
+    // another mark is refused even now, and port 0 is no destination
+    assert!(c.marked_connect_fd(addr, 0x4956_0003, Duration::from_secs(5)).is_err());
+    assert!(c.marked_connect_fd(std::net::SocketAddr::new(addr.ip(), 0), 0x4956_0002, Duration::from_secs(5)).is_err());
+    // the right mark: the open socket arrives and carries bytes both ways
+    let mut s = c.marked_connect_fd(addr, 0x4956_0002, Duration::from_secs(5)).unwrap();
+    let (mut peer, _) = l.accept().unwrap();
+    s.write_all(b"ping").unwrap();
+    let mut b = [0u8; 4];
+    peer.read_exact(&mut b).unwrap();
+    assert_eq!(&b, b"ping");
+    peer.write_all(b"pong").unwrap();
+    s.read_exact(&mut b).unwrap();
+    assert_eq!(&b, b"pong");
+    assert!(r.fake.st.lock().unwrap().calls.iter().any(|x| x.contains("marked connect") && x.contains("0x49560002")));
+    // the Sys method the dial hook uses goes the same way
+    let s2 = crate::vpn_sys::Sys::marked_connect(&c, addr, 0x4956_0002, Duration::from_secs(5)).unwrap();
+    drop(s2);
+    // after the policy is taken out the mark is nobody's again
+    c.call(&Req::RemovePolicy { spec: ok }).unwrap();
+    assert!(c.marked_connect_fd(addr, 0x4956_0002, Duration::from_secs(5)).is_err());
 }

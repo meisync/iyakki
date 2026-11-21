@@ -1,0 +1,6 @@
+# KNOWN-ISSUES.md ratchet (iyakki-relcheck known-issues; transitional rule in crates/iyakki-relcheck/src/knownissues.rs).
+# untriaged: entries without a [BUG|UNPROVEN|LIMIT] class. dangling: distinct KI-nnn cited in FEATURES.md/docs with no entry and no fixed record.
+# Both numbers only go DOWN (lower them by hand when entries are sorted). After the date both must be zero.
+untriaged 0
+dangling 0
+until 2026-12-11

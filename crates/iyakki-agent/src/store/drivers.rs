@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use iyakki_drivers::{apply, facetime, known, run, Availability, Delivery, Fs, Machine, Pack, Roots, Row};
+use iyakki_core_api::drivers::{apply, facetime, known, run, Availability, Delivery, Fs, Machine, Pack, Roots, Row};
 use iyakki_sec::policy::{App, Policy};
 use serde_json::{json, Value};
 
@@ -50,20 +50,25 @@ impl Drivers {
     }
 
     fn runner(&self) -> Box<dyn run::Runner> {
-        if self.real { Box::new(run::System) } else { Box::new(run::Dry) }
+        iyakki_core_local::kmodpack::runner(self.real)
+    }
+
+    /// The core's read side over this machine's roots and driver file system (F-ARCH-05): the agent no longer reads the machine itself.
+    fn core(&self) -> iyakki_core_local::LocalDrivers {
+        iyakki_core_local::LocalDrivers { fs: self.fs.clone(), roots: self.roots.clone() }
     }
 
     pub fn machine(&self) -> Machine {
-        Machine::collect(&self.roots)
+        iyakki_core_api::drivers::Drivers::machine(&self.core())
     }
 
     /// The "Drivers for this machine" list. Empty for a machine none of the entries applies to.
     pub fn rows(&self) -> Vec<Row> {
-        known::for_machine(&self.machine(), &|p| apply::firmware_present(&self.fs, p), &apply::active_ids(&self.fs))
+        iyakki_core_api::drivers::Drivers::rows(&self.core())
     }
 
     pub fn installed(&self) -> Vec<apply::Record> {
-        apply::installed(&self.fs)
+        iyakki_core_api::drivers::Drivers::installed(&self.core())
     }
 
     /// What the review of a driver pack shows, or the reason it must be refused.
@@ -87,8 +92,8 @@ impl Drivers {
                     return Err(format!("Module {} is for kernel {} but this system runs {}. A module only loads into the exact kernel it was built for.", k.name, k.kernel, if m.release.is_empty() { "an unknown release" } else { &m.release }));
                 }
                 // the module's own record of the kernel it was built for, not just what the pack says about it
-                let ko = iyakki_drivers::b64::decode(&k.data).ok_or_else(|| format!("Module {} is not valid base64.", k.name))?;
-                let info = iyakki_drivers::modinfo::check(&ko, &m.release, reference.as_deref()).map_err(|e| format!("Module {}: {e}", k.name))?;
+                let ko = iyakki_core_local::kmodpack::decode_payload(&k.data).ok_or_else(|| format!("Module {} is not valid base64.", k.name))?;
+                let info = iyakki_core_local::kmodpack::check(&ko, &m.release, reference.as_deref()).map_err(|e| format!("Module {}: {e}", k.name))?;
                 if !info.gpl_compatible() {
                     bits.warnings.push(format!("Module {} is NON-FREE software (licence \"{}\"). Loading it marks the kernel as tainted, and nobody outside its vendor can inspect all of it. Install it only if you built it yourself or trust who did.", k.name, info.license));
                 }
@@ -413,7 +418,8 @@ fn install_call(d: &Drivers, args: &Value, svc: &Services, p: &Policy, user: &st
 #[path = "drivers_tests.rs"]
 mod tests;
 
-impl iyakki_agent_api::StoreDrivers for Drivers {
+/// The read side is the core's own (`Os::drivers`): this struct answers it over its roots, so a test points a store tile at a made-up machine.
+impl iyakki_core_api::drivers::Drivers for Drivers {
     fn machine(&self) -> Machine {
         Drivers::machine(self)
     }
@@ -426,6 +432,9 @@ impl iyakki_agent_api::StoreDrivers for Drivers {
     fn is_disabled(&self, id: &str) -> bool {
         apply::is_disabled(&self.fs, id)
     }
+}
+
+impl iyakki_agent_api::StoreDrivers for Drivers {
     fn folder_package(&self, id: &str, dir: &Path, now: i64) -> Result<(String, Vec<String>), String> {
         Drivers::folder_package(self, id, dir, now)
     }

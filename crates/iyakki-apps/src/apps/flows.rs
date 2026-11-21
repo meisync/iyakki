@@ -12,7 +12,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use iyakki_flowsx::failfix::{FailBook, Failure};
-use iyakki_agent_api::{FlowsPanel};
+use iyakki_agent_api::FlowsJobs;
 use iyakki_flowsx::spec::{Open, SharedOpen};
 use iyakki_flow::engine::{ApplyScope, Counts, NodeTest, NodeUpdateInfo};
 use iyakki_flow::kinds::{Issue, Level, Registry};
@@ -277,7 +277,7 @@ impl Default for Geo {
 }
 
 pub struct FlowsApp {
-    pub(super) env: Arc<dyn FlowsPanel>,
+    pub(super) env: Arc<dyn FlowsJobs>,
     pub(super) open: SharedOpen,
     pub(super) reg: Arc<Registry>,
     pub(super) tab: Tab,
@@ -353,24 +353,20 @@ pub struct FlowsApp {
     pub(super) assist_off: bool,
 }
 
-pub(super) fn stamp_of(env: &Arc<dyn FlowsPanel>, id: &str) -> (u64, u128) {
-    let p = env.dir().join(id).join("flow.json");
-    std::fs::metadata(p).map(|m| (m.len(), m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos()))).unwrap_or((0, 0))
+pub(super) fn stamp_of(env: &Arc<dyn FlowsJobs>, id: &str) -> (u64, u128) {
+    env.draft_stamp(id)
 }
 
 impl FlowsApp {
     pub fn new(cx: &AppCx) -> FlowsApp {
-        let env = cx.services.flows_panel(&cx.session.user, &cx.session.policy).expect("the agent core serves flows");
-        // what the engine does goes to the audit log by name and place, never by value
-        let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-        env.set_audit_sink(Arc::new(move |_u: &str, kind: &str, detail: &str| audit.record(&user, kind, detail)));
+        let env = cx.services.flows_jobs(&cx.session.user, &cx.session.policy).expect("the core serves the flows jobs");
+        // what the engine does goes to the core's audit log by name and place, never by value (the core owns the sink)
         FlowsApp::with_env(cx, env)
     }
 
     /// Tests give the tile an environment of their own.
-    pub fn with_env(cx: &AppCx, env: Arc<dyn FlowsPanel>) -> FlowsApp {
-        // script steps run in the in-house JavaScript engine: no network, no files, a time and memory limit
-        env.set_js(js_runner());
+    pub fn with_env(cx: &AppCx, env: Arc<dyn FlowsJobs>) -> FlowsApp {
+        // script steps run in the core's in-house JavaScript engine: no network, no files, a time and memory limit
         let open: SharedOpen = Arc::new(Mutex::new(Open { tab: "design".into(), ..Default::default() }));
         let chat = ChatApp::new().with_agent(cx.session.policy.agent).with_flows(FlowsLink { env: env.chat_handle(), open: open.clone() }).resumed(cx);
         let (tx, rx) = channel();
@@ -503,7 +499,7 @@ impl FlowsApp {
     // ------------------------------------------------------------------------------------------ the open flow
 
     pub(super) fn open_flow(&mut self, id: &str) {
-        match self.env.store().get_draft(id) {
+        match self.env.get_draft(id) {
             Some(f) => {
                 self.flow = f;
                 self.cur = Some(id.to_string());
@@ -605,11 +601,11 @@ impl FlowsApp {
     // ------------------------------------------------------------------------------------------ snapshots from the engine
 
     pub(super) fn refresh_runs(&mut self) {
-        self.runs = self.env.engine().summaries();
-        self.counts = self.env.engine().counts();
-        self.run_rev = self.env.engine().revision();
+        self.runs = self.env.run_summaries();
+        self.counts = self.env.run_counts();
+        self.run_rev = self.env.revision();
         if let Some(id) = self.run_id.clone() {
-            self.run = self.env.engine().get_run(&id);
+            self.run = self.env.get_run(&id);
         }
         // a run that waits for you or failed: its step is the one to look at
         if self.run_node.is_none() {
@@ -631,7 +627,7 @@ impl FlowsApp {
 
     pub(super) fn select_run(&mut self, id: &str, go: bool) {
         self.run_id = Some(id.to_string());
-        self.run = self.env.engine().get_run(id);
+        self.run = self.env.get_run(id);
         self.run_node = None;
         self.rv.shown = Default::default();
         self.rv.fitted_for.clear();
@@ -680,7 +676,7 @@ impl FlowsApp {
 
     pub(super) fn pick_updates(&mut self) {
         self.updates = match &self.cur {
-            Some(id) if self.env.store().published(id).is_some() => self.env.engine().node_updates(id),
+            Some(id) if self.env.published(id).is_some() => self.env.node_updates(id),
             _ => vec![],
         };
         self.updates_at = self.tick;
@@ -742,11 +738,11 @@ impl FlowsApp {
     pub(super) fn start_flow_run(&mut self, draft: bool, inputs: Option<serde_json::Value>) {
         let Some(id) = self.cur.clone() else { return };
         let mut req = StartRequest::new(&id).trigger("manual", &self.env.who());
-        req.draft = draft || self.env.store().published(&id).is_none();
+        req.draft = draft || self.env.published(&id).is_none();
         if let Some(i) = inputs {
             req.inputs = i;
         }
-        match self.env.engine().start_run(req) {
+        match self.env.start_run(req) {
             Ok(o) => {
                 if !o.existing {
                     self.env.report_run(&o.run_id, &id);
@@ -762,7 +758,7 @@ impl FlowsApp {
     pub(super) fn open_publish(&mut self) {
         let Some(id) = self.cur.clone() else { return };
         let blockers: Vec<String> = self.issues.iter().filter(|i| i.level == Level::Error).map(|i| format!("{}{}", i.node.as_ref().map(|n| format!("{n}: ")).unwrap_or_default(), i.msg)).collect();
-        let summary = match self.env.store().published(&id) {
+        let summary = match self.env.published(&id) {
             Some(p) => iyakki_flow::store::diff(&p, &self.flow).text().lines().take(14).map(str::to_string).collect(),
             None => vec![format!("First version: {} steps, {} connections.", self.flow.nodes.len(), self.flow.edges.len())],
         };
@@ -777,11 +773,11 @@ impl FlowsApp {
     pub(super) fn do_publish(&mut self, label: &str, changelog: &str) {
         let Some(id) = self.cur.clone() else { return };
         let who = self.env.who();
-        match self.env.store().publish(&id, &iyakki_flow::store::PublishReq { by: &who, label, changelog, approved_by: Some(&who) }) {
+        match self.env.publish(&id, &who, label, changelog, Some(who.clone())) {
             Ok(v) => {
-                iyakki_flow::host::Host::audit(self.env.host(), "flow.publish", &format!("{id} v{v} by {who}"));
+                self.env.audit("flow.publish", &format!("{id} v{v} by {who}"));
                 self.env.assist_after_publish(&id, v);
-                if let Some(f) = self.env.store().get_draft(&id) {
+                if let Some(f) = self.env.get_draft(&id) {
                     self.flow = f;
                 }
                 self.stamp = stamp_of(&self.env, &id);
@@ -796,7 +792,7 @@ impl FlowsApp {
 
     pub(super) fn open_history(&mut self) {
         let Some(id) = self.cur.clone() else { return };
-        let entries = self.env.store().versions(&id);
+        let entries = self.env.versions(&id);
         if entries.is_empty() {
             self.say("Nothing has been published yet.", false);
             return;
@@ -810,8 +806,8 @@ impl FlowsApp {
     pub(super) fn fill_diff(&self, h: &mut HistView) {
         let Some(id) = &self.cur else { return };
         let v = h.entries[h.sel].version;
-        let cur = self.env.store().get_version(id, v);
-        let prev = if h.sel > 0 { self.env.store().get_version(id, h.entries[h.sel - 1].version) } else { None };
+        let cur = self.env.get_version(id, v);
+        let prev = if h.sel > 0 { self.env.get_version(id, h.entries[h.sel - 1].version) } else { None };
         h.diff = match (prev, cur) {
             (Some(p), Some(c)) => iyakki_flow::store::diff(&p, &c).text().lines().take(60).map(str::to_string).collect(),
             (None, Some(c)) => vec![format!("The first version: {} steps, {} connections.", c.nodes.len(), c.edges.len())],
@@ -837,11 +833,11 @@ impl FlowsApp {
         }
         let flow = self.flow.clone();
         let inputs: serde_json::Map<String, serde_json::Value> = flow.inputs.iter().filter_map(|p| p.default.clone().map(|d| (p.name.clone(), d))).collect();
-        let (engine, tx, nid) = (self.env.engine().clone(), self.tx.clone(), id.clone());
+        let (env, tx, nid) = (self.env.clone(), self.tx.clone(), id.clone());
         self.testing = Some(id.clone());
         self.say(format!("Testing `{id}`..."), true);
         std::thread::spawn(move || {
-            let r = engine.test_node(&flow, &nid, serde_json::Value::Object(inputs), serde_json::json!({}));
+            let r = env.test_node(&flow, &nid, serde_json::Value::Object(inputs), serde_json::json!({}));
             let _ = tx.send(Msg::NodeTest(nid, r));
         });
     }
@@ -859,8 +855,8 @@ impl FlowsApp {
     }
 
     pub(super) fn import_path(&mut self, path: &str) -> Result<String, String> {
-        let roots = crate::file_scope().roots(&self.env.policy(), &self.env.user(), self.env.svc_dir());
-        let home = crate::agent().scope_home_root(&self.env.user(), self.env.svc_dir());
+        let roots = crate::file_scope().roots(&self.env.policy(), &self.env.user(), &self.env.svc_dir());
+        let home = crate::agent().scope_home_root(&self.env.user(), &self.env.svc_dir());
         let real = roots.resolve(&home, path)?;
         if !roots.read_ok(&self.env.policy(), &self.env.user(), &real) {
             return Err("that file is outside the folders you may read".into());
@@ -891,7 +887,7 @@ impl FlowsApp {
 
     pub(super) fn apply_update(&mut self, scope: ApplyScope) {
         let (Some(id), Some(u)) = (self.cur.clone(), self.updates.first().cloned()) else { return };
-        match self.env.engine().apply_node_update(&id, &u.node, scope, &self.env.who(), false) {
+        match self.env.apply_node_update(&id, &u.node, scope, &self.env.who(), false) {
             Ok(r) => {
                 self.pick_updates();
                 self.say(format!("Step {}: {} scheduled run(s) updated, {} will take it at the step's next boundary, {} already past it, {} left (incompatible).", u.node, r.scheduled_updated.len(), r.running_pending.len(), r.skipped_started.len(), r.skipped_incompatible.len()), true);
@@ -1074,7 +1070,7 @@ impl FlowsApp {
             self.redraw = true;
         }
         if self.tick % 6 == 0 {
-            let rev = self.env.engine().revision();
+            let rev = self.env.revision();
             if rev != self.run_rev {
                 self.refresh_runs();
                 self.redraw = true;
@@ -1097,7 +1093,7 @@ impl FlowsApp {
             if let Some(id) = self.cur.clone() {
                 let st = stamp_of(&self.env, &id);
                 if st != self.stamp && self.drag.is_none() && self.modal.is_none() && self.text.is_none() {
-                    if let Some(f) = self.env.store().get_draft(&id) {
+                    if let Some(f) = self.env.get_draft(&id) {
                         if f != self.flow {
                             self.undo.push(std::mem::replace(&mut self.flow, f));
                             self.redo.clear();
@@ -1122,8 +1118,8 @@ impl FlowsApp {
     pub(super) fn next_runs(&self) -> Vec<(String, String, i64)> {
         let mut v = Vec::new();
         for s in self.flows.iter().filter(|s| s.published > 0).take(40) {
-            if let Some(f) = self.env.store().published(&s.id) {
-                for (t, at) in self.env.engine().next_runs(&f, 3) {
+            if let Some(f) = self.env.published(&s.id) {
+                for (t, at) in self.env.next_runs(&f, 3) {
                     v.push((s.id.clone(), t, at));
                 }
             }
@@ -1527,17 +1523,4 @@ impl FlowsApp {
             }
         }
     }
-}
-
-
-/// Runs a script step: `args` is the input, `return` the result. The engine has no web modules, so a script can reach nothing.
-pub fn js_runner() -> Arc<dyn Fn(&str, &serde_json::Value, u64) -> Result<serde_json::Value, String> + Send + Sync> {
-    Arc::new(|source: &str, args: &serde_json::Value, wall_ms: u64| {
-        let mut limits = iyakki_js::Limits::default();
-        limits.wall = std::time::Duration::from_millis(wall_ms.clamp(100, 60_000));
-        let mut e = iyakki_js::JsEngine::new(limits, vec![]).map_err(|e| e.to_string())?;
-        let code = format!("JSON.stringify((function(args){{ {source}\n}})({}))", serde_json::to_string(args).unwrap_or_else(|_| "null".into()));
-        let out = e.eval("flow-script", &code).map_err(|e| e.to_string())?;
-        Ok(serde_json::from_str(&out).unwrap_or(serde_json::Value::String(out)))
-    })
 }

@@ -99,7 +99,7 @@ pub fn note_to(path: &std::path::Path, msg: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let up = iyakki_storage::uptime_token().unwrap_or_else(|| "?".into());
+    let up = iyakki_core_api::device_types::storage::uptime_token().unwrap_or_else(|| "?".into());
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(f, "[{up}] splash: {msg}");
     }
@@ -193,9 +193,7 @@ const KEEP_LINES: usize = 400;
 
 impl LogTail {
     pub fn open() -> LogTail {
-        use std::os::unix::fs::OpenOptionsExt;
-        let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open("/dev/kmsg").ok();
-        LogTail { file, lines: Vec::new() }
+        LogTail { file: iyakki_core_local::kernelfacts::open_kmsg(), lines: Vec::new() }
     }
 
     /// Read what has been logged since the last call.
@@ -402,8 +400,8 @@ fn paint_background(g: &mut Gfx) {
         *c = Some(grub_background(w, h));
     }
     if let Some(bg) = c.as_ref() {
-        if bg.data().len() == g.pm.data().len() {
-            g.pm.data_mut().copy_from_slice(bg.data());
+        if bg.data().len() == g.pm_ref().data().len() {
+            g.pm_mut().data_mut().copy_from_slice(bg.data());
             return;
         }
     }
@@ -481,7 +479,7 @@ pub fn draw_logo(g: &mut Gfx, t: f32, cx: f32, cy: f32, d: f32) {
     let k = d / img.width() as f32;
     let paint = PixmapPaint { opacity: 1.0, quality: FilterQuality::Bilinear, ..PixmapPaint::default() };
     let tf = Transform::from_translate(cx, cy).pre_scale(k, k);
-    g.pm.draw_pixmap(-(img.width() as i32) / 2, -(img.height() as i32) / 2, img.as_ref(), &paint, tf, None);
+    g.pm_mut().draw_pixmap(-(img.width() as i32) / 2, -(img.height() as i32) / 2, img.as_ref(), &paint, tf, None);
 }
 
 pub fn draw(g: &mut Gfx, v: &View) {
@@ -770,7 +768,7 @@ mod tests {
                 let (mut sum, mut n) = (0u64, 0u64);
                 for y in (cy as i32 - r..cy as i32 + r).step_by(3) {
                     for x in (cx as i32 - r..cx as i32 + r).step_by(3) {
-                        let a = g.pm.pixel(x as u32, y as u32).unwrap();
+                        let a = g.pm_ref().pixel(x as u32, y as u32).unwrap();
                         let b = grub.pixel((x + dx) as u32, (y + dy) as u32).unwrap();
                         sum += (a.red() as i32 - b.red() as i32).unsigned_abs() as u64 + (a.green() as i32 - b.green() as i32).unsigned_abs() as u64 + (a.blue() as i32 - b.blue() as i32).unsigned_abs() as u64;
                         n += 3;
@@ -820,6 +818,36 @@ mod tests {
             let _ = i;
             assert!(g.rgba().iter().any(|&b| b > 200));
         }
+    }
+
+    #[test]
+    fn the_bar_the_stage_text_and_the_log_toggle_change_what_is_drawn() {
+        let (w, h) = (1280usize, 720usize);
+        let frame = |fraction: f32, stage: &str, log: Option<&[String]>| {
+            let mut g = Gfx::new(w as u32, h as u32);
+            draw(&mut g, &View { t: 1.0, fraction, stage, log, steps: &[] });
+            g.rgba().to_vec()
+        };
+        let differs = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x != y).count();
+        let empty = frame(0.0, "Starting", None);
+        let half = frame(0.5, "Starting", None);
+        let full = frame(1.0, "Starting", None);
+        // the bar grows with the fraction: each step paints more pixels than the one before
+        let (d_half, d_full) = (differs(&empty, &half), differs(&empty, &full));
+        assert!(d_half > 100, "half a bar paints something ({d_half})");
+        assert!(d_full > d_half, "a full bar paints more than half a bar ({d_full} vs {d_half})");
+        // the same frame twice is identical (the drawing has no hidden randomness)
+        assert_eq!(differs(&half, &frame(0.5, "Starting", None)), 0);
+        // the current step is written on the screen: another text gives another picture, no text gives none of it
+        let other = frame(0.5, "Mounting the data disk (3/9)", None);
+        let none = frame(0.5, "", None);
+        assert!(differs(&half, &other) > 100 && differs(&half, &none) > 100);
+        // L shows the loading log: the panel covers pixels the plain screen has, and the hint line changes
+        let lines: Vec<String> = (0..60).map(|i| format!("[{i}.000] driver {i} probed")).collect();
+        let with_log = frame(0.5, "Starting", Some(&lines));
+        assert!(differs(&half, &with_log) > 1000, "the log panel is drawn");
+        let other_lines: Vec<String> = (0..60).map(|i| format!("[{i}.500] other {i}")).collect();
+        assert!(differs(&with_log, &frame(0.5, "Starting", Some(&other_lines))) > 100, "the log shows the lines given");
     }
 
     #[test]

@@ -12,7 +12,8 @@
 //! standard error, and the process is killed when the decoder is dropped (the radio stopped or switched).
 
 use std::io::{Read, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
+use iyakki_core_local::starters_launch::{Launch, Stream};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -108,12 +109,11 @@ pub(crate) fn spawn_retry(cmd: &mut Command) -> std::io::Result<Child> {
 
 impl PipeDecoder {
     pub fn spawn(program: &str, kind: Kind) -> Result<PipeDecoder, String> {
-        let mut cmd = Command::new(program);
+        let mut launch = Launch::new(program);
         if kind == Kind::Ffmpeg {
-            cmd.args(FFMPEG_ARGS);
+            launch = launch.args(FFMPEG_ARGS);
         }
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = spawn_retry(&mut cmd).map_err(|e| format!("cannot start the audio decoder: {e}"))?;
+        let mut child = launch.stdin(Stream::Piped).stdout(Stream::Piped).stderr(Stream::Piped).spawn_retrying(51, Duration::from_millis(20)).map_err(|e| format!("cannot start the audio decoder: {e}"))?;
         let mut stdin = child.stdin.take().ok_or("the audio decoder has no input")?;
         let mut stdout = child.stdout.take().ok_or("the audio decoder has no output")?;
         let mut stderr = child.stderr.take().ok_or("the audio decoder has no error output")?;
@@ -191,7 +191,15 @@ impl AacDecoder for PipeDecoder {
     }
 
     fn read(&mut self, out: &mut [i16], wait: Duration) -> Result<Pcm, String> {
-        if self.carry.len() < 2 {
+        // only whole frames (one sample of every channel) are handed out: the pipe delivers whatever bytes the decoder had written when
+        // the reader looked (its standard output is line buffered, so a write can end in the middle of a sample), and a frame cut in
+        // two would swap the channels of everything that follows
+        let ch = loop {
+            // read again after every chunk: the format is known by the time the first sound arrives
+            let ch = self.format().1.clamp(1, 2);
+            if self.carry.len() / 2 >= ch {
+                break ch;
+            }
             match self.rx.recv_timeout(wait) {
                 Ok(b) => self.carry.extend_from_slice(&b),
                 Err(RecvTimeoutError::Timeout) => return Ok(Pcm::Pending),
@@ -206,8 +214,9 @@ impl AacDecoder for PipeDecoder {
                     };
                 }
             }
-        }
+        };
         let n = (self.carry.len() / 2).min(out.len());
+        let n = n - n % ch;
         for (o, c) in out.iter_mut().zip(self.carry.chunks_exact(2)).take(n) {
             *o = i16::from_le_bytes([c[0], c[1]]);
         }
@@ -275,6 +284,27 @@ mod tests {
         assert_eq!(d2.read(&mut out, Duration::from_secs(2)).unwrap(), Pcm::Samples(2));
         assert_eq!(&out[..2], &[0x0101, 0x0101]);
         assert_eq!(d2.format(), (48000, 2));
+    }
+
+    #[test]
+    fn a_frame_cut_in_two_by_the_pipe_is_never_handed_out_in_halves() {
+        // stereo; the program writes 8 bytes (4 samples, 2 frames) in pieces of 3 and 5 bytes, as a line-buffered output can
+        let p = script("cut", "printf 'IYPC\\200\\273\\000\\000\\002\\000'; printf '\\001\\000\\002'; printf '\\000\\003\\000\\004\\000'; cat >/dev/null");
+        let mut d = PipeDecoder::spawn(&p, Kind::Helper).unwrap();
+        d.finish();
+        let mut got: Vec<i16> = Vec::new();
+        let mut out = [0i16; 16];
+        while got.len() < 4 {
+            match d.read(&mut out, Duration::from_millis(50)).unwrap() {
+                Pcm::Samples(n) => {
+                    assert_eq!(n % 2, 0, "whole frames only");
+                    got.extend_from_slice(&out[..n]);
+                }
+                Pcm::Pending => {}
+                Pcm::End => break,
+            }
+        }
+        assert_eq!(got, [1, 2, 3, 4], "left and right stay where they were");
     }
 
     #[test]

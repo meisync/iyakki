@@ -16,9 +16,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -197,23 +195,14 @@ fn fraction_in(line: &str) -> Option<f32> {
 
 #[cfg(target_os = "linux")]
 fn proc_stat(pid: u32) -> Option<(char, u64)> {
-    let s = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let rest = &s[s.rfind(')')? + 1..];
-    let mut t = rest.split_whitespace();
-    let state = t.next()?.chars().next()?;
-    let start = t.nth(18)?.parse().ok()?;
-    Some((state, start))
+    iyakki_core_local::procfacts::stat(pid)
 }
 
 /// Without `/proc` (macOS) `ps` gives the state letter and the start time text; the text is folded into a number that stays
 /// the same for the life of the process, which is all `alive` needs to tell it from a later process with the same pid.
 #[cfg(not(target_os = "linux"))]
 fn proc_stat(pid: u32) -> Option<(char, u64)> {
-    let out = std::process::Command::new("ps").args(["-o", "stat=,lstart=", "-p", &pid.to_string()]).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = iyakki_core_local::starters::ps_state_text(pid)?;
     let text = text.trim();
     let state = text.chars().next()?;
     let started = text.split_once(char::is_whitespace)?.1.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -225,15 +214,14 @@ fn proc_stat(pid: u32) -> Option<(char, u64)> {
 /// The program name of `pid` (`/proc/<pid>/comm`; `ps` on macOS), or `None` when there is no such process.
 #[cfg(target_os = "linux")]
 pub(crate) fn process_name(pid: u32) -> Option<String> {
-    fs::read_to_string(format!("/proc/{pid}/comm")).ok().map(|c| c.trim().to_string())
+    iyakki_core_local::procfacts::name(pid)
 }
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn process_name(pid: u32) -> Option<String> {
-    let out = std::process::Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = iyakki_core_local::starters::ps_name_text(pid)?;
     let name = text.trim().rsplit('/').next()?.to_string();
-    out.status.success().then_some(name).filter(|n| !n.is_empty())
+    Some(name).filter(|n| !n.is_empty())
 }
 
 /// Does a process with this id exist (any user)? Signal 0 only checks; "not permitted" still means it exists.
@@ -253,18 +241,7 @@ fn alive(pid: u32, start_ticks: u64) -> bool {
 /// own). `None` where there is no `/proc`.
 #[cfg(target_os = "linux")]
 fn group_cpu_ticks(pgid: u32) -> Option<u64> {
-    let mut sum = 0u64;
-    for e in fs::read_dir("/proc").ok()?.flatten() {
-        let name = e.file_name();
-        let Some(pid) = name.to_str().filter(|n| n.bytes().all(|b| b.is_ascii_digit())) else { continue };
-        let Ok(text) = fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
-        let Some(rest) = text.rfind(')').map(|i| &text[i + 1..]) else { continue };
-        let f: Vec<&str> = rest.split_whitespace().collect();
-        if f.get(2).and_then(|g| g.parse::<u32>().ok()) == Some(pgid) {
-            sum += f.get(11).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) + f.get(12).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-        }
-    }
-    Some(sum)
+    iyakki_core_local::procfacts::group_cpu_ticks(pgid)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -392,28 +369,13 @@ impl Jobs {
         let exit = dir.join("exit");
         // the wrapper runs the command and records its exit code, so the code is known even when the shell has gone
         const WRAP: &str = "f=\"$1\"; shift; \"$@\"; c=$?; printf '%s' \"$c\" > \"$f.tmp\" && mv \"$f.tmp\" \"$f\"; exit \"$c\"";
-        let mut c = Command::new("sh");
-        c.arg("-c").arg(WRAP).arg("sh").arg(&exit);
-        match &spec.cmd {
-            Cmd::Shell(line) => {
-                c.args(["sh", "-c", line]);
-            }
-            Cmd::Argv(a) => {
-                c.args(a);
-            }
-        }
-        c.current_dir(&cwd).stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(log2)).env_clear();
-        for (k, v) in std::env::vars() {
-            if passes(&k) {
-                c.env(k, v);
-            }
-        }
-        c.env("IYAKKI_JOB_ID", &id);
-        // SAFETY: setsid is async-signal-safe and the only thing done between fork and exec.
-        unsafe {
-            c.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
-        }
-        let child = match c.spawn() {
+        let command: Vec<String> = match &spec.cmd {
+            Cmd::Shell(line) => vec!["sh".into(), "-c".into(), line.clone()],
+            Cmd::Argv(a) => a.iter().map(|x| x.to_string()).collect(),
+        };
+        let mut envs: Vec<(String, String)> = std::env::vars().filter(|(k, _)| passes(k)).collect();
+        envs.push(("IYAKKI_JOB_ID".into(), id.clone()));
+        let child = match iyakki_core_local::starters::job_spawn(WRAP, &exit, &command, &cwd, &envs, log, log2) {
             Ok(ch) => ch,
             Err(e) => {
                 let _ = fs::remove_dir_all(&dir);

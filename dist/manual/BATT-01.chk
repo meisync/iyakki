@@ -1,0 +1,19 @@
+scenario: BATT-01
+title: Laptop battery
+area: Power
+rows: F-BATT-02, F-BATT-03, F-BATT-04
+machines: macbook, thinkpad, pavilion, laptop
+needs: person
+prereq: A laptop with its charger and a battery that is not full.
+step: Look at the top bar.
+expect: A battery icon shows the percentage and whether it charges.
+clause: F-BATT-02.icon
+step: Unplug the charger and wait ten seconds.
+expect: The icon changes to discharging and the time left appears in Settings, System, Battery.
+clause: F-BATT-04.discharging
+step: Plug the charger in again.
+expect: The icon shows charging within ten seconds.
+clause: F-BATT-02.charging
+step: If you can, let the battery fall to twenty percent while unplugged.
+expect: A message appears once at twenty percent and again at ten, with a Plug in now note.
+clause: F-BATT-03.low

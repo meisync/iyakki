@@ -562,9 +562,7 @@ pub fn for_user(data_dir: &Path, user: &str, audit: Arc<dyn Fn(&str, &str) + Sen
 
 /// This machine's IPv4 addresses on the networks around it, private ones first (loopback left out).
 pub fn lan_addresses() -> Vec<String> {
-    let mut v: Vec<std::net::Ipv4Addr> = iyakki_devctl::ipv4_addresses().iter().filter_map(|(_, a)| a.parse().ok()).filter(|a: &std::net::Ipv4Addr| !a.is_loopback()).collect();
-    v.sort_by_key(|a| !a.is_private());
-    v.into_iter().map(|a| a.to_string()).collect()
+    iyakki_core_local::netfacts::lan_addresses()
 }
 
 /// Sign-out: this person's shares stop.

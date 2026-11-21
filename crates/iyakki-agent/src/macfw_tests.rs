@@ -1,5 +1,5 @@
 use super::*;
-use iyakki_drivers::run::Recorder;
+use iyakki_core_local::driver_packs::run::Recorder;
 use std::sync::Mutex;
 
 fn tmp(tag: &str) -> PathBuf {
@@ -945,7 +945,7 @@ fn a_hex_patch_from_macos_11_becomes_the_bluetooth_hcd_and_the_log_says_how() {
     f.hcd_in = vec![];
     f.hex_in = vec!["macos11".into()];
     let o = go(&mut f, &Source::Download).unwrap();
-    let want = iyakki_drivers::ihex::to_hcd(&synthetic_hex()).unwrap();
+    let want = iyakki_core_local::driver_packs::ihex::to_hcd(&synthetic_hex()).unwrap();
     assert_eq!(std::fs::read(f.fs.data.join("firmware/mac-bt-broadcom/files/brcm/BCM.hcd")).unwrap(), want);
     assert!(f.said.iter().any(|l| l.contains("BCM.hcd was made from BCM4350-Updater.hex") && l.contains("Intel HEX") && l.contains("sha256")), "{:?}", f.said);
     assert!(o.headline.contains("Bluetooth firmware installed: the controller has an address"), "{}", o.headline);

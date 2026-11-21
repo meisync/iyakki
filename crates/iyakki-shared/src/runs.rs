@@ -2,7 +2,7 @@
 
 
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RunMeta {
     pub id: String,
     pub started: u64,
@@ -34,14 +34,14 @@ impl RunMeta {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Integrity {
     Verified,
     Tampered(String),
 }
 
 /// A run that is going on now, for the SYSTEM tile.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LiveRun {
     pub id: String,
     pub user: String,
@@ -59,7 +59,7 @@ pub struct LiveRun {
 }
 
 /// A tool call that is waiting for the person's answer, as the INBOX shows it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PendingApproval {
     pub run_id: String,
     pub user: String,
@@ -71,10 +71,45 @@ pub struct PendingApproval {
     pub summary: String,
     /// What exactly will change, when there is more to show.
     pub detail: String,
-    /// `low`, `medium` or `high`.
+    /// `low`, `medium` or `high` (over the core socket it comes back through [`risk_word`]: anything else reads as `high`).
     pub risk: &'static str,
     /// When the call started waiting.
     pub since: i64,
+}
+
+/// The risk word of an approval that crossed a socket: one of the three static words, and an unknown word reads as the careful one.
+pub fn risk_word(w: &str) -> &'static str {
+    match w {
+        "low" => "low",
+        "medium" => "medium",
+        _ => "high",
+    }
+}
+
+/// The wire form of [`PendingApproval`] (`risk` as text).
+#[derive(serde::Deserialize)]
+struct PendingApprovalWire {
+    run_id: String,
+    user: String,
+    prompt: String,
+    call_id: String,
+    tool: String,
+    summary: String,
+    detail: String,
+    risk: String,
+    since: i64,
+}
+
+impl<'de> serde::Deserialize<'de> for PendingApproval {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        <PendingApprovalWire as serde::Deserialize>::deserialize(d).map(PendingApproval::from)
+    }
+}
+
+impl From<PendingApprovalWire> for PendingApproval {
+    fn from(w: PendingApprovalWire) -> PendingApproval {
+        PendingApproval { run_id: w.run_id, user: w.user, prompt: w.prompt, call_id: w.call_id, tool: w.tool, summary: w.summary, detail: w.detail, risk: risk_word(&w.risk), since: w.since }
+    }
 }
 
 // ---- moved from iyakki-agent (F-SPLIT-03) ----

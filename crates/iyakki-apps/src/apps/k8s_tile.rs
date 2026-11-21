@@ -62,6 +62,8 @@ pub(super) const T_SCALE_UP: usize = 63;
 pub(super) const T_PANEL_CLOSE: usize = 64;
 pub(super) const T_CLEAR_FILTER: usize = 65;
 pub(super) const T_REVEAL_YES: usize = 66;
+pub(super) const T_APPLY: usize = 300;
+pub(super) const T_APPLY_GO: usize = 301;
 pub(super) const T_CONT: usize = 100; // 100..199: container chips
 pub(super) const T_CLUSTER_ROW: usize = 1_000;
 /// The cluster switcher of the header owns the codes from here (its list rows follow).
@@ -77,6 +79,7 @@ pub(super) const F_FILTER: usize = 63_001;
 pub(super) const F_NS: usize = 63_002;
 pub(super) const F_LOGS: usize = 63_003;
 pub(super) const F_NAME: usize = 63_004;
+pub(super) const F_PATH: usize = 63_005;
 
 /// Rows a wheel notch moves.
 const WHEEL_ROWS: i32 = 3;
@@ -199,6 +202,9 @@ impl Kube for SwitchKube {
     }
     fn run_with(&self, args: &[String], secs: u64) -> iyakki_shared::wsexec::Out {
         self.get().run_with(args, secs)
+    }
+    fn apply_manifest(&self, args: &[String], yaml: &str, secs: u64) -> iyakki_shared::wsexec::Out {
+        self.get().apply_manifest(args, yaml, secs)
     }
 }
 
@@ -511,6 +517,8 @@ pub struct K8sApp {
     pub(super) last_draw: Option<Instant>,
     pub(super) pending: Option<Pending>,
     pub(super) reveal_ask: bool,
+    /// The file of a manifest being asked for (the Apply YAML button, key A): the path in the person's files.
+    pub(super) apply_path: Option<TextField>,
     pub(super) panel: Option<Panel>,
     pub(super) status: Option<(String, bool)>,
     /// The selected row, kept across refreshes (namespace, name).
@@ -576,6 +584,7 @@ impl K8sApp {
             last_draw: None,
             pending: None,
             reveal_ask: false,
+            apply_path: None,
             panel: None,
             status: None,
             sel_key: None,
@@ -889,6 +898,7 @@ impl K8sApp {
         self.det.view.set(vec![], false);
         self.pending = None;
         self.reveal_ask = false;
+        self.apply_path = None;
     }
 
     fn on_selection_changed(&mut self) {
@@ -1182,6 +1192,40 @@ impl K8sApp {
         }
         self.pending = Some(p);
         self.focus = if matches!(self.pending.as_ref().map(|p| p.action.confirm()), Some(Confirm::TypeName(_))) { Focus::Detail } else { self.focus };
+    }
+
+    /// The Apply YAML button: ask for the file of a manifest (a path in the person's files).
+    pub(super) fn begin_apply(&mut self) {
+        if !self.allow_changes() {
+            self.say(self.change_block().unwrap_or_else(|| "Turn on Allow changes first (the switch in the header).".into()), false);
+            return;
+        }
+        self.apply_path = Some(TextField::new("a YAML file in your files, such as deploy.yaml", false));
+    }
+
+    /// The path was given: read the file through the core's file access (the person's own files only), list what it holds and put the
+    /// card up. Nothing is sent to the cluster before the person confirms the card.
+    pub(super) fn apply_load(&mut self, cx: &AppCx) {
+        let Some(f) = self.apply_path.take() else { return };
+        let path = f.value.trim().to_string();
+        if path.is_empty() {
+            self.apply_path = Some(f);
+            self.say("Type the path of the YAML file first.", false);
+            return;
+        }
+        let yaml = match cx.core.files().read_text(&self.user, &path, iyakki_shared::k8sexptools::MAX_YAML) {
+            Ok(y) => y,
+            Err(e) => {
+                self.say(format!("The file could not be read: {e}"), false);
+                return;
+            }
+        };
+        let action = Action::Apply { yaml, ns: String::new() };
+        if let Err(e) = action.validate() {
+            self.say(format!("That file is not a manifest the tile can apply: {e}"), false);
+            return;
+        }
+        self.pending = Some(Pending { action, owned: true, typed: TextField::new("type the name", false), replicas: 1, scaling: None });
     }
 
     /// The person said yes to the card.
@@ -1665,6 +1709,8 @@ impl K8sApp {
                 }
             }
             T_REVEAL_YES => self.reveal(cx),
+            T_APPLY => self.begin_apply(),
+            T_APPLY_GO => self.apply_load(cx),
             T_WRAP => self.det.view.wrap = !self.det.view.wrap,
             T_FOLLOW => {
                 self.det.logs.follow = !self.det.logs.follow;
@@ -1685,6 +1731,7 @@ impl K8sApp {
             T_NO => {
                 self.pending = None;
                 self.reveal_ask = false;
+                self.apply_path = None;
             }
             T_SCALE_DN => {
                 if let Some(p) = &mut self.pending {
@@ -1759,6 +1806,18 @@ impl K8sApp {
         if self.pending.is_some() {
             return self.card_key(k, cx);
         }
+        if self.apply_path.is_some() {
+            match k {
+                Key::Esc => self.apply_path = None,
+                Key::Enter => self.apply_load(cx),
+                other => {
+                    if let Some(f) = &mut self.apply_path {
+                        f.handle(other);
+                    }
+                }
+            }
+            return Flow::Stay;
+        }
         if self.reveal_ask {
             match k {
                 Key::Char('y') | Key::Enter => self.reveal(cx),
@@ -1808,6 +1867,7 @@ impl K8sApp {
                 }
             }
             Key::Char('n') => self.open_ns(),
+            Key::Char('a') => self.begin_apply(),
             Key::Char('k') => self.open_kinds(),
             Key::Char('l') => {
                 self.set_tab(DTab::Logs);
@@ -2047,7 +2107,7 @@ impl App for K8sApp {
         "K8S"
     }
     fn icon(&self) -> Icon {
-        Icon::Mesh
+        Icon::K8s
     }
     fn accent(&self) -> [u8; 4] {
         ACCENT

@@ -145,6 +145,28 @@ pub enum Outcome {
     TooSoon,
 }
 
+impl Outcome {
+    /// One plain sentence for a page or the chat.
+    pub fn sentence(&self) -> String {
+        match self {
+            Outcome::Loaded(n) => format!("loaded the drivers for {n} devices"),
+            Outcome::AlreadyLoaded => "the drivers are loaded already".into(),
+            Outcome::Denied => "not allowed: this app does not hold the permission for that hardware".into(),
+            Outcome::NothingToLoad => "nothing to load: no held-back device of this class".into(),
+            Outcome::Failed(e) => format!("the drivers did not load: {e}"),
+            Outcome::TooSoon => "the drivers failed a moment ago; try again later".into(),
+        }
+    }
+}
+
+/// The text form of a request, for the device API (`Hardware::request_class`): an unknown class name is refused in words.
+pub fn answer(class: &str, who: &str, ask: impl FnOnce(Class, &str) -> Outcome) -> String {
+    match Class::parse(class) {
+        Some(c) => ask(c, who).sentence(),
+        None => format!("unknown hardware class {class:?} (audio, gpu or bluetooth)"),
+    }
+}
+
 /// Is `who` allowed to wake `class`? (In the real system this asks the core's permission check.)
 pub trait Gate {
     fn allowed(&self, who: &str, class: Class) -> bool;
@@ -229,6 +251,13 @@ impl<G: Gate, L: Loader, A: Audit> Broker<G, L, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_device_api_answers_in_words_and_refuses_an_unknown_class() {
+        assert_eq!(answer("bluetooth", "settings", |c, w| { assert_eq!((c, w), (Class::Bluetooth, "settings")); Outcome::Loaded(3) }), "loaded the drivers for 3 devices");
+        assert!(answer("audio", "x", |_, _| Outcome::Denied).starts_with("not allowed"));
+        assert!(answer("printer", "x", |_, _| unreachable!()).contains("unknown hardware class"));
+    }
     use std::cell::RefCell;
     use std::rc::Rc;
 

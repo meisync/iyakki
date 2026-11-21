@@ -8,7 +8,7 @@
 //! that came from one group of letters) is wrapped in marked content with `/ActualText` holding the letters in logical order, so
 //! copying and searching give the text the person typed, not the glyph order.
 //!
-//! Limits: Regular weight only (headings are not bold in these scripts); no vertical metrics tuning; a word wider than the line is
+//! Weights: regular, and a designed bold face of every script (Noto Sans Bold, DejaVu Sans Bold for Latin; `layout_weight`); no vertical metrics tuning; a word wider than the line is
 //! cut before a letter that is not a mark, which can separate a rare long cluster. Chinese, Japanese and Korean need a very large
 //! font and are not drawn (they are refused with the script named).
 
@@ -21,11 +21,21 @@ use unicode_bidi::{BidiInfo, Level};
 use crate::ttf::Ttf;
 
 /// Font list: 0 Latin (DejaVu Sans), 1 Devanagari, 2 Bengali, 3 Gurmukhi, 4 Gujarati, 5 Tamil, 6 Telugu, 7 Kannada, 8 Malayalam,
-/// 9 Arabic, 10 Hebrew, 11 Thai.
-pub const FONT_COUNT: usize = 12;
-pub const NAMES: [&str; FONT_COUNT] = ["DejaVuSans", "NotoSansDevanagari", "NotoSansBengali", "NotoSansGurmukhi", "NotoSansGujarati", "NotoSansTamil", "NotoSansTelugu", "NotoSansKannada", "NotoSansMalayalam", "NotoSansArabic", "NotoSansHebrew", "NotoSansThai"];
+/// 9 Arabic, 10 Hebrew, 11 Thai, 12 Armenian, 13 Georgian, 14 Ethiopic (the three scripts that need no shaping rules of their own),
+/// 15 Sinhala, 16 Khmer, 17 Lao, 18 Myanmar, 19 Tibetan (Noto Serif Tibetan: the Sans face is not in the Ubuntu font package; all SIL OFL; rustybuzz carries the
+/// Indic, Khmer, Myanmar and Tibetan shaping engines, so reordering, stacked and subjoined letters come from the font tables and no rule is written here).
+pub const FONT_COUNT: usize = 20;
+/// Every font with its weight: the fonts above are the regular weight; font `BOLD_OFFSET + i` is the designed bold face of font `i`
+/// (Noto Sans Bold of the same script, SIL OFL, kept deflated in `data/bold/` and opened on first use; DejaVu Sans Bold for Latin).
+pub const BOLD_OFFSET: usize = FONT_COUNT;
+pub const TOTAL_FONTS: usize = 2 * FONT_COUNT;
+pub const NAMES: [&str; TOTAL_FONTS] = ["DejaVuSans", "NotoSansDevanagari", "NotoSansBengali", "NotoSansGurmukhi", "NotoSansGujarati", "NotoSansTamil", "NotoSansTelugu", "NotoSansKannada", "NotoSansMalayalam", "NotoSansArabic", "NotoSansHebrew", "NotoSansThai", "NotoSansArmenian", "NotoSansGeorgian", "NotoSansEthiopic", "NotoSansSinhala", "NotoSansKhmer", "NotoSansLao", "NotoSansMyanmar", "NotoSerifTibetan", "DejaVuSans-Bold", "NotoSansDevanagari-Bold", "NotoSansBengali-Bold", "NotoSansGurmukhi-Bold", "NotoSansGujarati-Bold", "NotoSansTamil-Bold", "NotoSansTelugu-Bold", "NotoSansKannada-Bold", "NotoSansMalayalam-Bold", "NotoSansArabic-Bold", "NotoSansHebrew-Bold", "NotoSansThai-Bold", "NotoSansArmenian-Bold", "NotoSansGeorgian-Bold", "NotoSansEthiopic-Bold", "NotoSansSinhala-Bold", "NotoSansKhmer-Bold", "NotoSansLao-Bold", "NotoSansMyanmar-Bold", "NotoSerifTibetan-Bold"];
 
+/// The program of font `i` (a regular face, or `BOLD_OFFSET + i`: the bold one, inflated once).
 pub fn bytes(i: usize) -> &'static [u8] {
+    if i >= BOLD_OFFSET {
+        return bold_bytes(i - BOLD_OFFSET);
+    }
     match i {
         0 => include_bytes!("../../iyakki-shell/assets/DejaVuSans.ttf"),
         1 => include_bytes!("../../iyakki-shell/assets/NotoSansDevanagari-Regular.ttf"),
@@ -38,8 +48,48 @@ pub fn bytes(i: usize) -> &'static [u8] {
         8 => include_bytes!("../../iyakki-shell/assets/NotoSansMalayalam-Regular.ttf"),
         9 => include_bytes!("../../iyakki-shell/assets/NotoSansArabic-Regular.ttf"),
         10 => include_bytes!("../../iyakki-shell/assets/NotoSansHebrew-Regular.ttf"),
-        _ => include_bytes!("../../iyakki-shell/assets/NotoSansThai-Regular.ttf"),
+        11 => include_bytes!("../../iyakki-shell/assets/NotoSansThai-Regular.ttf"),
+        12 => include_bytes!("../../iyakki-shell/assets/NotoSansArmenian-Regular.ttf"),
+        13 => include_bytes!("../../iyakki-shell/assets/NotoSansGeorgian-Regular.ttf"),
+        14 => include_bytes!("../../iyakki-shell/assets/NotoSansEthiopic-Regular.ttf"),
+        15 => include_bytes!("../../iyakki-shell/assets/NotoSansSinhala-Regular.ttf"),
+        16 => include_bytes!("../../iyakki-shell/assets/NotoSansKhmer-Regular.ttf"),
+        17 => include_bytes!("../../iyakki-shell/assets/NotoSansLao-Regular.ttf"),
+        18 => include_bytes!("../../iyakki-shell/assets/NotoSansMyanmar-Regular.ttf"),
+        _ => include_bytes!("../../iyakki-shell/assets/NotoSerifTibetan-Regular.ttf"),
     }
+}
+
+const BOLD_Z: [&[u8]; FONT_COUNT] = [
+    &[],
+    include_bytes!("../data/bold/NotoSansDevanagari-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansBengali-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansGurmukhi-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansGujarati-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansTamil-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansTelugu-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansKannada-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansMalayalam-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansArabic-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansHebrew-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansThai-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansArmenian-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansGeorgian-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansEthiopic-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansSinhala-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansKhmer-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansLao-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSansMyanmar-Bold.ttf.z"),
+    include_bytes!("../data/bold/NotoSerifTibetan-Bold.ttf.z"),
+];
+
+/// The bold face of base font `i`: Latin is the DejaVu Sans Bold the shell carries, the rest are inflated from `data/bold/` the first time.
+fn bold_bytes(i: usize) -> &'static [u8] {
+    if i == 0 {
+        return include_bytes!("../../iyakki-shell/assets/DejaVuSans-Bold.ttf");
+    }
+    static CACHE: [OnceLock<Vec<u8>>; FONT_COUNT] = [const { OnceLock::new() }; FONT_COUNT];
+    CACHE[i].get_or_init(|| crate::filter::inflate(BOLD_Z[i], 8 << 20)).as_slice()
 }
 
 const RANGES: &[(u32, u32, usize)] = &[
@@ -60,6 +110,23 @@ const RANGES: &[(u32, u32, usize)] = &[
     (0x0C80, 0x0CFF, 7),
     (0x0D00, 0x0D7F, 8),
     (0x0E00, 0x0E7F, 11),
+    (0x0530, 0x058F, 12),
+    (0xFB13, 0xFB17, 12),
+    (0x10A0, 0x10FF, 13),
+    (0x1C90, 0x1CBF, 13),
+    (0x2D00, 0x2D2F, 13),
+    (0x1200, 0x139F, 14),
+    (0x2D80, 0x2DDF, 14),
+    (0xAB00, 0xAB2F, 14),
+    (0x0D80, 0x0DFF, 15),
+    (0x111E0, 0x111FF, 15),
+    (0x1780, 0x17FF, 16),
+    (0x19E0, 0x19FF, 16),
+    (0x0E80, 0x0EFF, 17),
+    (0x1000, 0x109F, 18),
+    (0xA9E0, 0xA9FF, 18),
+    (0xAA60, 0xAA7F, 18),
+    (0x0F00, 0x0FFF, 19),
 ];
 
 fn script_font(c: char) -> Option<usize> {
@@ -76,23 +143,20 @@ struct Loaded {
     face: rustybuzz::Face<'static>,
 }
 
-fn loaded() -> &'static Vec<Loaded> {
-    static L: OnceLock<Vec<Loaded>> = OnceLock::new();
-    L.get_or_init(|| (0..FONT_COUNT).map(|i| Loaded { face: rustybuzz::Face::from_slice(bytes(i), 0).expect("bundled font is valid") }).collect())
-}
-
-fn ttfs() -> &'static Vec<Option<Ttf<'static>>> {
-    static T: OnceLock<Vec<Option<Ttf<'static>>>> = OnceLock::new();
-    T.get_or_init(|| (0..FONT_COUNT).map(|i| Ttf::parse(bytes(i))).collect())
+/// The shaping face of font `i` (a bold one is opened when it is first asked for).
+fn face(i: usize) -> &'static rustybuzz::Face<'static> {
+    static L: [OnceLock<Loaded>; TOTAL_FONTS] = [const { OnceLock::new() }; TOTAL_FONTS];
+    &L[i].get_or_init(|| Loaded { face: rustybuzz::Face::from_slice(bytes(i), 0).expect("bundled font is valid") }).face
 }
 
 /// The font program (for subsetting) of font `i`.
 pub fn ttf(i: usize) -> Option<&'static Ttf<'static>> {
-    ttfs().get(i)?.as_ref()
+    static T: [OnceLock<Option<Ttf<'static>>>; TOTAL_FONTS] = [const { OnceLock::new() }; TOTAL_FONTS];
+    T.get(i)?.get_or_init(|| Ttf::parse(bytes(i))).as_ref()
 }
 
 fn has_glyph(font: usize, c: char) -> bool {
-    loaded()[font].face.glyph_index(c).is_some()
+    face(font).glyph_index(c).is_some()
 }
 
 /// Can some bundled font draw `c`? (Formatting characters such as the joiners are always kept.)
@@ -142,7 +206,7 @@ fn split_by_font(text: &str) -> Vec<(usize, &str)> {
 }
 
 fn shape_piece(font: usize, text: &str, size: f64, rtl: bool, pen: &mut f64, out: &mut Vec<Cluster>) {
-    let face = &loaded()[font].face;
+    let face = face(font);
     let mut buf = UnicodeBuffer::new();
     buf.push_str(text);
     buf.set_direction(if rtl { Direction::RightToLeft } else { Direction::LeftToRight });
@@ -168,6 +232,12 @@ fn shape_piece(font: usize, text: &str, size: f64, rtl: bool, pen: &mut f64, out
 
 /// Shape one line (no line breaks inside) at `size` points, in the paragraph direction `para`.
 pub fn shape_line(text: &str, size: f64, para: Level) -> Line {
+    shape_line_weight(text, size, para, false)
+}
+
+/// As [`shape_line`]; with `bold` each piece is shaped with the designed bold face of its script (so the widths are the bold ones), unless
+/// that face lacks a letter the regular face has: then that piece stays regular and [`draw_weight`] thickens it.
+pub fn shape_line_weight(text: &str, size: f64, para: Level, bold: bool) -> Line {
     let mut line = Line { rtl: para.is_rtl(), text: text.to_string(), ..Default::default() };
     if text.is_empty() {
         return line;
@@ -183,12 +253,29 @@ pub fn shape_line(text: &str, size: f64, para: Level) -> Line {
                 pieces.reverse();
             }
             for (font, t) in pieces {
+                let font = if bold && t.chars().all(|c| !has_glyph(font, c) || has_glyph(font + BOLD_OFFSET, c)) { font + BOLD_OFFSET } else { font };
                 shape_piece(font, t, size, rtl, &mut pen, &mut line.clusters);
             }
         }
     }
     line.width = pen;
     line
+}
+
+/// Tibetan is written with no spaces: a syllable ends at a tsek (U+0F0B, U+0F0C), and a line may end after it.
+fn tibetan_syllables(word: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in word.chars() {
+        cur.push(c);
+        if c == '\u{0F0B}' || c == '\u{0F0C}' {
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 fn clean(text: &str, replaced: &mut usize) -> String {
@@ -209,6 +296,12 @@ fn clean(text: &str, replaced: &mut usize) -> String {
 /// Break `text` into lines no wider than `max` points. Paragraphs are separated by `\n`; each takes the direction of its first
 /// strong letter (so a Hebrew paragraph is set against the right margin).
 pub fn layout(text: &str, size: f64, max: f64, replaced: &mut usize) -> Vec<Line> {
+    layout_weight(text, size, max, replaced, false)
+}
+
+/// As [`layout`], in the bold faces when `bold` is set (see [`shape_line_weight`]).
+pub fn layout_weight(text: &str, size: f64, max: f64, replaced: &mut usize, bold: bool) -> Vec<Line> {
+    let shape_line = |s: &str, size: f64, level: Level| shape_line_weight(s, size, level, bold);
     let text = clean(text, replaced);
     let mut lines = Vec::new();
     for para in text.split('\n') {
@@ -218,8 +311,12 @@ pub fn layout(text: &str, size: f64, max: f64, replaced: &mut usize) -> Vec<Line
         // units a line may end between: the words between spaces, and inside Thai words the pieces the dictionary finds
         let mut units: Vec<(String, bool)> = Vec::new();
         for word in para.split(' ').filter(|w| !w.is_empty()) {
-            if word.chars().any(crate::thai::is_thai) {
+            if crate::thai::has_dictionary_script(word) {
                 for (k, piece) in crate::thai::pieces(word).into_iter().enumerate() {
+                    units.push((piece, k == 0));
+                }
+            } else if word.chars().any(|c| (0x0F00..=0x0FFF).contains(&(c as u32))) {
+                for (k, piece) in tibetan_syllables(word).into_iter().enumerate() {
                     units.push((piece, k == 0));
                 }
             } else {
@@ -289,13 +386,11 @@ pub fn draw(line: &Line, size: f64, x0: f64, y: f64, used: &mut BTreeMap<usize, 
     draw_weight(line, size, x0, y, used, false)
 }
 
-/// As [`draw`]; with `bold` the letters are filled and stroked with a thin line (the bundled fonts have one weight, so the heavier
-/// weight is made, as word processors do when a font has no bold face).
+/// As [`draw`]; with `bold` the letters of a regular face (a piece whose bold face lacks a letter, or a line not shaped with
+/// [`layout_weight`]) are filled and stroked with a thin line, as word processors do when a font has no bold face; letters already shaped
+/// with a bold face (font number from `BOLD_OFFSET`) are drawn as they are.
 pub fn draw_weight(line: &Line, size: f64, x0: f64, y: f64, used: &mut BTreeMap<usize, BTreeMap<u16, char>>, bold: bool) -> String {
     let mut out = String::new();
-    if bold {
-        out.push_str(&format!("q 2 Tr {:.3} w\n", size * 0.028));
-    }
     for cl in &line.clusters {
         let one = {
             let mut it = cl.text.chars();
@@ -307,12 +402,16 @@ pub fn draw_weight(line: &Line, size: f64, x0: f64, y: f64, used: &mut BTreeMap<
         out.push_str(&format!("/Span << /ActualText {} >> BDC\n", actual_text(&cl.text)));
         for &(font, gid, x, dy) in &cl.glyphs {
             used.entry(font).or_default().entry(gid).or_insert(one);
+            let thicken = bold && font < BOLD_OFFSET;
+            if thicken {
+                out.push_str(&format!("q 2 Tr {:.3} w\n", size * 0.028));
+            }
             out.push_str(&format!("BT /S{font} {size:.1} Tf {:.2} {:.2} Td <{gid:04X}> Tj ET\n", x0 + x, y + dy));
+            if thicken {
+                out.push_str("Q\n");
+            }
         }
         out.push_str("EMC\n");
-    }
-    if bold {
-        out.push_str("Q\n");
     }
     out
 }
@@ -323,6 +422,78 @@ mod tests {
 
     fn glyphs(l: &Line) -> usize {
         l.clusters.iter().map(|c| c.glyphs.len()).sum()
+    }
+
+    /// One word of each script, for the bold tests.
+    const SAMPLES: [(usize, &str); 19] = [
+        (1, "हिन्दी भाषा"),
+        (2, "বাংলা ভাষা"),
+        (3, "ਪੰਜਾਬੀ ਭਾਸ਼ਾ"),
+        (4, "ગુજરાતી ભાષા"),
+        (5, "தமிழ் மொழி"),
+        (6, "తెలుగు భాష"),
+        (7, "ಕನ್ನಡ ಭಾಷೆ"),
+        (8, "മലയാളം ഭാഷ"),
+        (9, "مرحبا بالعالم"),
+        (10, "שלום עולם"),
+        (11, "ภาษาไทย"),
+        (12, "Հայերեն"),
+        (13, "ქართული"),
+        (14, "አማርኛ"),
+        (15, "සිංහල"),
+        (16, "ភាសាខ្មែរ"),
+        (17, "ພາສາລາວ"),
+        (18, "မြန်မာဘာသာ"),
+        (19, "བོད་སྐད་"),
+    ];
+
+    #[test]
+    fn every_script_has_a_designed_bold_face_that_draws_its_sample_and_differs_from_the_regular_one() {
+        for (font, word) in SAMPLES {
+            assert!(word.chars().all(|c| c == ' ' || script_font(c) == Some(font)), "{word} is not font {font}");
+            let regular = shape_line_weight(word, 20.0, Level::ltr(), false);
+            let bold = shape_line_weight(word, 20.0, Level::ltr(), true);
+            let ids = |l: &Line| l.clusters.iter().flat_map(|c| c.glyphs.iter().map(|g| g.0)).collect::<BTreeSet<usize>>();
+            assert!(ids(&regular).iter().all(|&f| f < BOLD_OFFSET), "{word}: regular line");
+            assert!(ids(&bold).contains(&(font + BOLD_OFFSET)), "{}: the bold face of font {font} is used: {:?}", NAMES[font], ids(&bold));
+            assert!(bold.clusters.iter().flat_map(|c| &c.glyphs).all(|g| g.1 != 0), "{}: a .notdef glyph in the bold line", NAMES[font]);
+            // the same letters, in the same logical order
+            assert_eq!(bold.text, regular.text);
+            let back: String = bold.clusters.iter().map(|c| c.text.as_str()).collect();
+            assert!(!back.is_empty());
+            // a designed bold face has its own advance widths
+            assert!((bold.width - regular.width).abs() > 1e-6, "{}: bold and regular have the same width", NAMES[font]);
+        }
+        // Latin: DejaVu Sans Bold
+        let b = shape_line_weight("Heading", 20.0, Level::ltr(), true);
+        assert!(b.clusters.iter().flat_map(|c| &c.glyphs).all(|g| g.0 == BOLD_OFFSET));
+    }
+
+    #[test]
+    fn a_bold_line_is_drawn_without_the_thickening_and_a_regular_line_asked_for_bold_still_gets_it() {
+        let mut used = BTreeMap::new();
+        let bold = shape_line_weight("ภาษาไทย", 12.0, Level::ltr(), true);
+        let c = draw_weight(&bold, 12.0, 10.0, 20.0, &mut used, true);
+        assert!(!c.contains("2 Tr") && c.contains("/S31 "), "{c}");
+        assert!(used.contains_key(&(BOLD_OFFSET + 11)));
+        let regular = shape_line("ภาษาไทย", 12.0, Level::ltr());
+        let c = draw_weight(&regular, 12.0, 10.0, 20.0, &mut BTreeMap::new(), true);
+        assert!(c.contains("2 Tr"), "a face with no bold copy is thickened as before");
+        let c = draw_weight(&regular, 12.0, 10.0, 20.0, &mut BTreeMap::new(), false);
+        assert!(!c.contains("2 Tr"));
+    }
+
+    #[test]
+    fn a_bold_layout_wraps_inside_the_width_with_the_bold_widths_and_loses_no_letter() {
+        let text = "ภาษาไทยเป็นภาษาที่ใช้ในประเทศไทย ".repeat(6);
+        let mut rep = 0;
+        let lines = layout_weight(&text, 14.0, 120.0, &mut rep, true);
+        assert_eq!(rep, 0);
+        assert!(lines.len() > 2);
+        assert!(lines.iter().all(|l| l.width <= 120.0 + 1e-6 || l.clusters.len() <= 1), "{:?}", lines.iter().map(|l| l.width).collect::<Vec<_>>());
+        let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        let back: String = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(squash(&back), squash(&text));
     }
 
     #[test]
@@ -336,7 +507,7 @@ mod tests {
 
     #[test]
     fn every_font_parses_for_the_subsetter() {
-        for i in 0..FONT_COUNT {
+        for i in 0..TOTAL_FONTS {
             assert!(ttf(i).is_some(), "{} cannot be subset", NAMES[i]);
         }
     }
@@ -399,6 +570,66 @@ mod tests {
         let l = layout("नमस्ते 日本", 12.0, 300.0, &mut rep);
         assert_eq!(rep, 2);
         assert!(l[0].clusters.iter().any(|c| c.text == "?"));
+    }
+
+    #[test]
+    fn armenian_georgian_and_ethiopic_have_fonts_and_are_drawn_not_replaced() {
+        for (word, font) in [("\u{540}\u{561}\u{575}\u{565}\u{580}\u{565}\u{576}", 12), ("\u{10e5}\u{10d0}\u{10e0}\u{10d7}\u{10e3}\u{10da}\u{10d8}", 13), ("\u{12a0}\u{121b}\u{122d}\u{129b}", 14)] {
+            assert!(needs(word), "{word}");
+            assert!(word.chars().all(|c| script_font(c) == Some(font)));
+            let mut rep = 0;
+            let l = layout(word, 12.0, 300.0, &mut rep);
+            assert_eq!(rep, 0, "no letter of {word} became a question mark");
+            assert!(l[0].width > 10.0 && l[0].clusters.iter().all(|c| c.text != "?"));
+        }
+        assert_eq!(TOTAL_FONTS, NAMES.len());
+        assert!((0..TOTAL_FONTS).all(|i| crate::ttf::Ttf::parse(bytes(i)).is_some()), "every bundled font reads");
+    }
+
+    #[test]
+    fn sinhala_khmer_lao_myanmar_and_tibetan_have_fonts_and_are_shaped_not_replaced() {
+        // words written out as escapes so no table is typed from memory beyond the code points of each script's block
+        let samples: [(&str, usize); 5] = [
+            ("\u{0DC1}\u{0DCA}\u{200D}\u{0DBB}\u{0DD3}\u{0DBD}\u{0D82}\u{0D9A}\u{0DCF}", 15),
+            ("\u{1781}\u{17D2}\u{1798}\u{17C2}\u{179A}\u{1797}\u{17B6}\u{179F}\u{17B6}", 16),
+            ("\u{0EA5}\u{0EB2}\u{0EA7}\u{0E9E}\u{0EB2}\u{0EAA}\u{0EB2}", 17),
+            ("\u{1019}\u{103C}\u{1014}\u{103A}\u{1019}\u{102C}\u{1018}\u{102C}\u{101E}\u{102C}", 18),
+            ("\u{0F56}\u{0F7C}\u{0F51}\u{0F0B}\u{0F61}\u{0F72}\u{0F42}", 19),
+        ];
+        for (word, font) in samples {
+            assert!(needs(word), "{word}");
+            assert!(word.chars().all(|c| script_font(c) == Some(font) || c == '\u{200D}'), "{word}");
+            let mut rep = 0;
+            let l = layout(word, 12.0, 300.0, &mut rep);
+            assert_eq!(rep, 0, "no letter of {word} became a question mark");
+            assert!(l[0].width > 10.0 && l[0].clusters.iter().all(|c| c.text != "?"));
+            assert!(l[0].clusters.iter().flat_map(|c| c.glyphs.iter()).any(|g| g.0 == font), "{word} drawn with its own font");
+            let back: String = l[0].clusters.iter().map(|c| c.text.as_str()).collect();
+            let mut sorted: Vec<char> = back.chars().collect();
+            sorted.sort();
+            let mut want: Vec<char> = word.chars().collect();
+            want.sort();
+            assert_eq!(sorted, want, "every typed letter is kept in the clusters");
+        }
+    }
+
+    #[test]
+    fn a_stacked_khmer_consonant_and_a_reordered_vowel_become_fewer_clusters_than_letters() {
+        // the coeng (U+17D2) joins the next consonant under the first: shaping makes one cluster of three code points
+        let l = shape_line("\u{1781}\u{17D2}\u{1798}\u{17C2}\u{179A}", 12.0, Level::ltr());
+        assert!(l.clusters.len() < 5, "{} clusters", l.clusters.len());
+        assert!(l.clusters.iter().any(|c| c.text.contains('\u{17D2}')));
+    }
+
+    #[test]
+    fn tibetan_wraps_after_a_tsek_and_nothing_is_lost() {
+        let word: String = "\u{0F56}\u{0F7C}\u{0F51}\u{0F0B}".repeat(30);
+        let mut rep = 0;
+        let lines = layout(&word, 12.0, 120.0, &mut rep);
+        assert!(lines.len() > 1);
+        let text: String = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(text, word);
+        assert!(lines.iter().all(|l| l.text.ends_with('\u{0F0B}')), "every line ends at a tsek");
     }
 
     #[test]

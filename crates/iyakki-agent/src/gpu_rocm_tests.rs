@@ -72,3 +72,31 @@ fn the_smoke_log_must_show_a_gpu_target_not_just_the_cpu_agent() {
     let e = rocm_smoke_ok("Agent 1\n Name: AMD Ryzen 9\n").unwrap_err();
     assert!(e.contains("no GPU target"), "{e}");
 }
+
+#[test]
+fn the_rocm_patches_give_the_card_and_the_unpatches_take_it_away() {
+    let v: serde_json::Value = serde_json::from_str(&lemonade_rocm_patch()).unwrap();
+    let c = &v["spec"]["template"]["spec"]["containers"][0];
+    assert_eq!((c["name"].as_str(), c["resources"]["limits"]["amd.com/gpu"].as_i64(), c["env"][0]["value"].as_str()), (Some("lemonade"), Some(1), Some("rocm")));
+    let o: serde_json::Value = serde_json::from_str(&ollama_rocm_patch(None).unwrap()).unwrap();
+    assert!(o["spec"]["template"]["spec"]["containers"][0]["image"].is_null());
+    let with = ollama_rocm_patch(Some(&format!("ollama/ollama:rocm@sha256:{DIGEST}"))).unwrap();
+    assert!(with.contains("ollama/ollama:rocm@sha256:"));
+    assert!(ollama_rocm_patch(Some("ollama/ollama:rocm")).is_err(), "a tag is not a pin");
+    for u in [crate::gpu_workloads::lemonade_unpatch(), crate::gpu_workloads::ollama_unpatch()] {
+        let u: serde_json::Value = serde_json::from_str(&u).unwrap();
+        assert!(u["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"].as_object().unwrap().contains_key("amd.com/gpu"));
+    }
+}
+
+#[test]
+fn the_pins_this_build_carries_are_checked_and_an_unset_one_is_named() {
+    use iyakki_shared::gpu_rocm::Pins;
+    let none = Pins::shipped();
+    assert!(Pins::is_pinned(&none.plugin) && Pins::is_pinned(&none.smoke) && none.ollama_image().is_some(), "the shipped pins are valid digests");
+    assert!(Pins::shipped().check().is_ok());
+    let e = Pins { plugin: String::new(), smoke: format!("a@sha256:{DIGEST}"), ollama: String::new() }.check().unwrap_err();
+    assert!(e.contains("device plugin") && !e.contains("test image"), "{e}");
+    assert!(Pins::is_pinned(&format!("x/y@sha256:{DIGEST}")) && !Pins::is_pinned("x/y:latest") && !Pins::is_pinned(&format!("@sha256:{DIGEST}")) && !Pins::is_pinned(&format!("x@sha256:{}", DIGEST.to_uppercase())));
+    assert!(Pins { plugin: String::new(), smoke: String::new(), ollama: "x:rocm".into() }.ollama_image().is_none());
+}

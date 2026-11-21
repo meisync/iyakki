@@ -43,7 +43,7 @@ pub enum Track {
 }
 
 /// `vertical-align` of an atomic inline box (and of controls): the approximations the line layout makes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VAlign {
     #[default]
     Middle,
@@ -51,7 +51,7 @@ pub enum VAlign {
     Bottom,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Align {
     #[default]
     Left,
@@ -59,7 +59,7 @@ pub enum Align {
     Right,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Float {
     #[default]
     None,
@@ -67,7 +67,7 @@ pub enum Float {
     Right,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Clear {
     #[default]
     None,
@@ -76,7 +76,7 @@ pub enum Clear {
     Both,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Pos {
     #[default]
     Static,
@@ -86,7 +86,7 @@ pub enum Pos {
     Sticky,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Fit {
     #[default]
     Fill,
@@ -97,7 +97,7 @@ pub enum Fit {
 }
 
 /// Floats, positioning, shadows, gradients and opacity of one box.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Fx {
     pub float: Float,
     pub clear: Clear,
@@ -137,7 +137,7 @@ pub enum Transform {
     Capitalize,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Justify {
     #[default]
     Start,
@@ -210,7 +210,7 @@ pub struct Computed {
     /// The face is a Times-like serif (a browser's default face is one; `font-family` says otherwise): only the width table of the page-size estimate reads it (inherited).
     pub serif: bool,
     /// The first family of `font-family`, lower case and without quotes (inherited; empty until a rule sets it): the page-size estimate looks for a web font of that name.
-    pub family: String,
+    pub family: Rc<str>,
     /// `line-height` (inherited).
     pub line_height: LineHeight,
     pub vars: Rc<HashMap<String, String>>,
@@ -266,6 +266,24 @@ pub struct Computed {
 
 pub const ROOT_PX: f32 = 16.0;
 
+thread_local! {
+    // Operation counts of `compute` on this thread: styles worked out in full and styles taken from a look-alike element. Tests budget on
+    // these (a count does not move with the machine's load, a clock does).
+    static STYLE_COUNTS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+    // One shared empty custom-property map and family name per thread: every element starts from a default `Computed`, and a new
+    // allocation for each of them was a visible part of styling a big page (F-BROX-15).
+    static EMPTY_VARS: Rc<HashMap<String, String>> = Rc::new(HashMap::new());
+    static EMPTY_FAMILY: Rc<str> = Rc::from("");
+}
+
+fn empty_vars() -> Rc<HashMap<String, String>> {
+    EMPTY_VARS.with(Rc::clone)
+}
+
+fn empty_family() -> Rc<str> {
+    EMPTY_FAMILY.with(Rc::clone)
+}
+
 impl Default for Computed {
     fn default() -> Self {
         Computed {
@@ -286,9 +304,9 @@ impl Default for Computed {
             list_none: false,
             mono: false,
             serif: true,
-            family: String::new(),
+            family: empty_family(),
             line_height: LineHeight::Normal,
-            vars: Rc::new(HashMap::new()),
+            vars: empty_vars(),
             bg: None,
             hidden: false,
             zero_opacity: false,
@@ -346,7 +364,7 @@ impl Computed {
             list_none: parent.list_none,
             mono: parent.mono,
             serif: parent.serif,
-            family: parent.family.clone(),
+            family: Rc::clone(&parent.family),
             line_height: parent.line_height,
             nowrap: parent.nowrap,
             hcenter: parent.hcenter,
@@ -421,19 +439,76 @@ impl StyleSheets {
 }
 
 /// The computed style of every element (`None` for text). Indexed like `tree.nodes`.
-pub fn compute(tree: &Tree, sheets: &StyleSheets, vp: &Viewport) -> Vec<Option<Computed>> {
-    let mut out: Vec<Option<Computed>> = vec![None; tree.nodes.len()];
+/// One element's computed style, shared by reference with every look-alike element (F-BROX-15): a copy of an element's style is a pointer.
+pub type Shared = std::rc::Rc<Computed>;
+
+/// `(styled in full, taken from a look-alike)` summed over the `compute` calls of this thread since [`reset_style_counts`].
+pub fn style_counts() -> (u64, u64) {
+    STYLE_COUNTS.with(|c| c.get())
+}
+
+pub fn reset_style_counts() {
+    STYLE_COUNTS.with(|c| c.set((0, 0)));
+}
+
+fn count_style(full: bool) {
+    STYLE_COUNTS.with(|c| {
+        let (f, s) = c.get();
+        c.set(if full { (f + 1, s) } else { (f, s + 1) });
+    });
+}
+
+pub fn compute(tree: &Tree, sheets: &StyleSheets, vp: &Viewport) -> Vec<Option<Shared>> {
+    let mut out: Vec<Option<Shared>> = vec![None; tree.nodes.len()];
     let root = Computed::default();
-    let mut stack: Vec<(usize, Computed)> = vec![(0, root)];
+    // Style sharing (F-BROX-15): an element with no inline style or presentational attribute, the same tag, the same matching rules and a
+    // parent of the same style has the same computed style as the one before it, so it is copied instead of worked out again. `ids` is the
+    // number of the distinct style each element got, `rep` the first element that has it.
+    let mut ids: Vec<u32> = vec![u32::MAX; tree.nodes.len()];
+    let mut rep: Vec<usize> = Vec::new();
+    let mut shared: HashMap<(u32, &str, Matched), u32> = HashMap::new();
+    // each element is styled from its parent's finished style, read from `out` (no copy of the parent per child)
+    let mut stack: Vec<(usize, usize)> = vec![(0, usize::MAX)];
     while let Some((n, parent)) = stack.pop() {
         let c = match &tree.nodes[n].kind {
-            NodeKind::Element { .. } if n != 0 => element_style(tree, n, &parent, sheets, vp, None),
-            NodeKind::Element { .. } => parent.clone(),
+            NodeKind::Element { .. } if n != 0 => {
+                let parent_style: &Computed = out[parent].as_deref().unwrap_or(&root);
+                let matched = matching_rules(tree, n, sheets, None);
+                let plain = ["style", "bgcolor", "align", "width", "color", "size"].iter().all(|k| tree.attr(n, k).is_none());
+                if plain {
+                    let key = (ids[parent], tree.tag(n).unwrap_or(""), matched);
+                    match shared.get(&key) {
+                        Some(&id) => {
+                            count_style(false);
+                            ids[n] = id;
+                            out[rep[id as usize]].clone().unwrap_or_else(|| Shared::new(Computed::default()))
+                        }
+                        None => {
+                            count_style(true);
+                            let c = element_style_with(tree, n, parent_style, sheets, vp, None, &key.2);
+                            ids[n] = rep.len() as u32;
+                            shared.insert(key, rep.len() as u32);
+                            rep.push(n);
+                            Shared::new(c)
+                        }
+                    }
+                } else {
+                    count_style(true);
+                    ids[n] = rep.len() as u32;
+                    rep.push(n);
+                    Shared::new(element_style_with(tree, n, parent_style, sheets, vp, None, &matched))
+                }
+            }
+            NodeKind::Element { .. } => {
+                ids[n] = rep.len() as u32;
+                rep.push(n);
+                Shared::new(root.clone())
+            }
             NodeKind::Text(_) => continue,
         };
         for &ch in tree.nodes[n].children.iter().rev() {
             if matches!(tree.nodes[ch].kind, NodeKind::Element { .. }) {
-                stack.push((ch, c.clone()));
+                stack.push((ch, n));
             }
         }
         out[n] = Some(c);
@@ -452,7 +527,7 @@ struct Applied<'a> {
 /// shows (CSS escapes, `attr()` and quotes resolved) and its computed style (inheriting from the element). Boxes
 /// with `content: none`/`normal`, hidden ones and boxes whose text comes out empty are left out, except that an empty
 /// string is kept (a block with a background is an empty box).
-pub fn compute_pseudo(tree: &Tree, sheets: &StyleSheets, vp: &Viewport, styles: &[Option<Computed>]) -> HashMap<(usize, PseudoEl), (String, Computed)> {
+pub fn compute_pseudo(tree: &Tree, sheets: &StyleSheets, vp: &Viewport, styles: &[Option<Shared>]) -> HashMap<(usize, PseudoEl), (String, Computed)> {
     let mut out = HashMap::new();
     if !sheets.has_pseudo() {
         return out;
@@ -557,12 +632,16 @@ pub fn content_text(raw: &str, tree: &Tree, n: usize) -> Option<String> {
     Some(out)
 }
 
+type Matched = Vec<(usize, (u32, u32, u32))>;
+
 fn element_style(tree: &Tree, n: usize, parent: &Computed, sheets: &StyleSheets, vp: &Viewport, pseudo: Option<PseudoEl>) -> Computed {
-    let mut c = Computed::inheriting(parent);
+    let best = matching_rules(tree, n, sheets, pseudo);
+    element_style_with(tree, n, parent, sheets, vp, pseudo, &best)
+}
+
+/// The rules that match element `n` (or its generated box), each once with its best specificity, sorted by rule.
+fn matching_rules(tree: &Tree, n: usize, sheets: &StyleSheets, pseudo: Option<PseudoEl>) -> Matched {
     let tag = tree.tag(n).unwrap_or("");
-    if pseudo.is_none() {
-        presentational(tree, n, tag, parent, &mut c, vp);
-    }
     // matching rules
     let mut cands: Vec<(usize, usize)> = Vec::new();
     if let Some(which) = pseudo {
@@ -583,19 +662,29 @@ fn element_style(tree: &Tree, n: usize, parent: &Computed, sheets: &StyleSheets,
         cands.extend(v);
     }
     cands.extend(&sheets.universal);
-    let mut best: HashMap<usize, (u32, u32, u32)> = HashMap::new();
+    // the best specificity per matching rule (a rule with several selectors counts once)
+    let mut best: Vec<(usize, (u32, u32, u32))> = Vec::new();
     for (ri, si) in cands {
         let sel = &sheets.rules[ri].selectors[si];
         if if let Some(which) = pseudo { tree.pseudo_matches(n, sel, which) } else { tree.selector_matches(n, sel) } {
-            let e = best.entry(ri).or_insert((0, 0, 0));
-            if sel.specificity > *e {
-                *e = sel.specificity;
-            }
+            best.push((ri, sel.specificity));
         }
+    }
+    // sorted by rule, the highest specificity last of each rule; only that one is kept
+    best.sort_unstable();
+    best.dedup_by(|later, earlier| if later.0 == earlier.0 { earlier.1 = later.1.max(earlier.1); true } else { false });
+    best
+}
+
+fn element_style_with(tree: &Tree, n: usize, parent: &Computed, sheets: &StyleSheets, vp: &Viewport, pseudo: Option<PseudoEl>, best: &Matched) -> Computed {
+    let mut c = Computed::inheriting(parent);
+    let tag = tree.tag(n).unwrap_or("");
+    if pseudo.is_none() {
+        presentational(tree, n, tag, parent, &mut c, vp);
     }
     let inline: Vec<Decl> = if pseudo.is_some() { Vec::new() } else { tree.attr(n, "style").map(parse_decls).unwrap_or_default() };
     let mut list: Vec<Applied> = Vec::new();
-    for (ri, spec) in &best {
+    for (ri, spec) in best {
         let r = &sheets.rules[*ri];
         for d in &r.decls {
             list.push(Applied { layer: if d.important { 2 } else { 0 }, spec: *spec, order: r.order, decl: d });
@@ -615,7 +704,7 @@ fn element_style(tree: &Tree, n: usize, parent: &Computed, sheets: &StyleSheets,
     if let Some(v) = vars {
         c.vars = Rc::new(v);
     }
-    let resolved: Vec<(&str, String)> = list
+    let resolved: Vec<(&str, std::borrow::Cow<str>)> = list
         .iter()
         .filter(|a| !a.decl.prop.starts_with("--"))
         .filter_map(|a| resolve_vars(&a.decl.value, &c.vars, 0).map(|v| (a.decl.prop.as_str(), v)))
@@ -719,9 +808,9 @@ fn presentational(tree: &Tree, n: usize, tag: &str, parent: &Computed, c: &mut C
 }
 
 /// Replace `var(--name, fallback)`; `None` when a variable is not defined and has no fallback.
-fn resolve_vars(value: &str, vars: &HashMap<String, String>, depth: u32) -> Option<String> {
+fn resolve_vars<'a>(value: &'a str, vars: &HashMap<String, String>, depth: u32) -> Option<std::borrow::Cow<'a, str>> {
     if !value.contains("var(") {
-        return Some(value.to_string());
+        return Some(std::borrow::Cow::Borrowed(value));
     }
     if depth > 8 {
         return None;
@@ -760,7 +849,7 @@ fn resolve_vars(value: &str, vars: &HashMap<String, String>, depth: u32) -> Opti
         rest = &rest[end + 1..];
     }
     out.push_str(rest);
-    Some(out)
+    Some(std::borrow::Cow::Owned(out))
 }
 
 fn words(v: &str) -> Vec<&str> {
@@ -1075,13 +1164,13 @@ fn apply(c: &mut Computed, parent: &Computed, prop: &str, raw: &str, vp: &Viewpo
             let ws: Vec<&str> = lv.split_whitespace().collect();
             if let Some(i) = ws.iter().position(|w| w.starts_with(|ch: char| ch.is_ascii_digit() || ch == '.') && (w.contains("px") || w.contains("pt") || w.contains("em") || w.contains('%') || w.contains('/'))) {
                 c.serif = serif_face(&ws[i + 1..].join(" "));
-                c.family = first_family(&ws[i + 1..].join(" "));
+                c.family = first_family(&ws[i + 1..].join(" ")).into();
             }
         }
         "font-family" => {
             c.mono = ["monospace", "courier", "consolas", "menlo", "monaco", "mono"].iter().any(|f| lv.contains(f));
             c.serif = serif_face(&lv);
-            c.family = first_family(&lv);
+            c.family = first_family(&lv).into();
         }
         "text-decoration" | "text-decoration-line" => {
             if lv.contains("none") {
@@ -1525,6 +1614,12 @@ pub fn styled_doc(tree: &Tree, url: &Url, vp: &Viewport, get: &(dyn Fn(&Url) -> 
     crate::doc::build_styled(tree, &StyleSheets::new(&sheets), vp)
 }
 
+/// [`styled_doc`] with the elements of these `id`s marked, so their boxes can be found after layout (F-SDK-14).
+pub fn styled_doc_marked(tree: &Tree, url: &Url, vp: &Viewport, get: &(dyn Fn(&Url) -> Option<String> + Sync), wanted: &[String]) -> crate::doc::Doc {
+    let sheets = collect_sheets(tree, url, vp, get);
+    crate::doc::build_styled_marked(tree, &StyleSheets::new(&sheets), vp, wanted)
+}
+
 /// Relative luminance, 0 (black) to 1 (white).
 pub fn luminance(c: Rgba) -> f32 {
     let f = |v: u8| {
@@ -1557,7 +1652,7 @@ mod tests {
     use crate::css::parse_sheet;
     use crate::html::parse;
 
-    fn styles(html: &str, css: &str) -> (Tree, Vec<Option<Computed>>) {
+    fn styles(html: &str, css: &str) -> (Tree, Vec<Option<Shared>>) {
         let tree = parse(html);
         let vp = Viewport::default();
         let mut n = 0;
@@ -1566,9 +1661,39 @@ mod tests {
         (tree, c)
     }
 
-    fn of<'a>(t: &Tree, c: &'a [Option<Computed>], id: &str) -> &'a Computed {
+    fn of<'a>(t: &Tree, c: &'a [Option<Shared>], id: &str) -> &'a Computed {
         let n = (0..t.nodes.len()).find(|&i| t.attr(i, "id") == Some(id)).unwrap();
         c[n].as_ref().unwrap()
+    }
+
+    #[test]
+    fn shared_styles_equal_the_styles_worked_out_one_by_one() {
+        // many look-alike siblings under parents that differ, with structural selectors, an inline style, a presentational attribute and
+        // custom properties: the copy of a style the first look-alike got must equal what element_style gives for each of them
+        let mut page = String::from("<body>");
+        for i in 0..40 {
+            let parent = if i % 3 == 0 { "<div class=a style='color:#123456'>" } else if i % 3 == 1 { "<div class=a>" } else { "<div class=b>" };
+            page.push_str(parent);
+            page.push_str("<p class=x>one</p><p class=x>two</p><p class=x style='margin:3px'>three</p><p class=x align=center>four</p><span>five</span><b>six</b></div>");
+        }
+        let css = ".a p{color:red;font-size:20px} .b p{--k:7px;margin-left:var(--k)} p:first-child{padding:5px} p:nth-child(2){padding:9px} p.x+p.x{border:1px solid #333} div.a>span{font-weight:700} div{background:#eee}";
+        let (t, c) = styles(&page, css);
+        let vp = Viewport::default();
+        let mut n = 0;
+        let sheet = parse_sheet(css, &vp, &mut n);
+        let sheets = StyleSheets::new(&[sheet]);
+        let root = Computed::default();
+        let mut checked = 0;
+        for i in 1..t.nodes.len() {
+            if !matches!(t.nodes[i].kind, NodeKind::Element { .. }) {
+                continue;
+            }
+            let parent: &Computed = t.parent_of(i).map(|p| c[p].as_deref().unwrap()).unwrap_or(&root);
+            let alone = element_style(&t, i, parent, &sheets, &vp, None);
+            assert_eq!(c[i].as_deref().unwrap(), &alone, "element {i} ({:?})", t.tag(i));
+            checked += 1;
+        }
+        assert!(checked > 200);
     }
 
     #[test]

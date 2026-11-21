@@ -30,6 +30,10 @@ pub enum ErrorCode {
     VersionMismatch,
     Cancelled,
     Internal,
+    /// A code a newer release added that this one does not know (compatibility charter: enums are open). A caller treats it like `internal`
+    /// and shows the message that came with it. Never sent by this release; not in [`ErrorCode::ALL`].
+    #[serde(other)]
+    Unknown,
 }
 
 impl ErrorCode {
@@ -69,6 +73,7 @@ impl ErrorCode {
             ErrorCode::VersionMismatch => "version_mismatch",
             ErrorCode::Cancelled => "cancelled",
             ErrorCode::Internal => "internal",
+            ErrorCode::Unknown => "unknown",
         }
     }
     /// May a client repeat the same request (with the same idempotency key) and expect it to be harmless? Only conditions that

@@ -33,6 +33,10 @@ pub fn request_text(who: &str, method: &str, path: &str, ts: u64, body: &[u8], n
     format!("iyakki-vault-v2\n{who}\n{method}\n{path}\n{ts}\n{}\n{nonce}", hex(&Sha256::digest(body)))
 }
 
+/// The prefixes of the texts a key held by an `ssh-agent` signs (the version tag of [`request_text`] and its newline). An SSH login
+/// signature starts with a session identifier, so none of these can be one.
+const AGENT_MAY_SIGN: &[&[u8]] = &[b"iyakki-vault-v2\n"];
+
 enum Inner {
     /// The secret half is held here.
     Seed([u8; 32]),
@@ -104,7 +108,13 @@ impl DeviceKey {
     pub fn sign_bytes(&self, msg: &[u8]) -> Result<[u8; 64], String> {
         match &self.inner {
             Inner::Seed(s) => Ok(SigningKey::from_bytes(s).sign(msg).to_bytes()),
-            Inner::Agent { public, sock } => crate::sshagent::Agent::at(sock).sign(public, msg),
+            Inner::Agent { public, sock } => {
+                // the agent is never a signing oracle: only the texts this scheme makes (KI-104)
+                if !AGENT_MAY_SIGN.iter().any(|p| msg.starts_with(p)) {
+                    return Err("this text is not one a key in an ssh-agent may sign here (only IYAKKI-SIG request texts)".into());
+                }
+                crate::sshagent::Agent::at(sock).sign(public, msg)
+            }
         }
     }
 
@@ -317,6 +327,21 @@ mod tests {
 
     fn key(n: u8) -> DeviceKey {
         DeviceKey::from_seed([n; 32])
+    }
+
+    #[test]
+    fn ki104_an_agent_key_refuses_any_text_that_is_not_an_iyakki_request() {
+        let d = std::env::temp_dir().join(format!("iyakki-ki104-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        // no agent listens at this path: a refused text must be refused before the agent is asked, an allowed one gets as far as the agent
+        let k = DeviceKey::from_agent(key(1).public(), d.join("none.sock"));
+        for bad in [&b"data"[..], b"", b"ssh-connection", b"iyakki-vault-v1\nann", b" iyakki-vault-v2\n", b"iyakki-vault-v2"] {
+            let e = k.sign_bytes(bad).unwrap_err();
+            assert!(e.contains("may sign"), "{e}");
+        }
+        let e = k.sign_bytes(b"iyakki-vault-v2\nann").unwrap_err();
+        assert!(!e.contains("may sign"), "an IYAKKI text reaches the agent: {e}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

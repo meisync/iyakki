@@ -116,3 +116,53 @@ fn the_docs_say_what_secure_boot_needs_and_the_known_limits() {
     assert!(lic.contains("shim") && lic.contains("BSD-2-Clause") && lic.contains("sbsigntool"));
     assert!(read("KNOWN-ISSUES.md").contains("SECURE-BOOT.md"));
 }
+
+#[test]
+fn the_unified_kernel_image_step_is_opt_in_signed_with_the_image_key_and_built_by_our_own_tool() {
+    let sb = read("dist/buildroot/secureboot.sh");
+    // a command of its own, built with the in-house section writer and signed once with the same key as GRUB and the kernel
+    assert!(sb.contains("cmd_uki()") && sb.contains("uki) cmd_uki") && sb.contains("--uki \"$stub\""), "secureboot.sh has no uki command");
+    let fun = &sb[sb.find("cmd_uki()").unwrap()..];
+    let fun = &fun[..fun.find("\n}\n").unwrap()];
+    assert!(fun.contains("need_key") && fun.contains("cmd_sign_pe"), "the unified image is signed with the image key");
+    assert!(!fun.contains("objcopy") && !fun.contains("ukify"), "no third-party tool adds the sections");
+    // the image step builds one only when a stub is named, and checks the result against the key
+    assert!(sb.contains("IYAKKI_UKI_STUB") && sb.contains("iyakki-uki.efi") && sb.contains("is not signed by the image key"));
+    let image = &sb[sb.find("cmd_image()").unwrap()..];
+    assert!(image.contains("if [ -n \"${IYAKKI_UKI_STUB:-}\" ]"), "without a stub the image is built exactly as before");
+    // the Rust side is there and refuses a signed stub (a signature would be lost)
+    let uki = read("crates/iyakki-usb/src/uki.rs");
+    assert!(uki.contains("already signed") && uki.contains(".initrd") && uki.contains(".cmdline") && uki.contains(".linux") && uki.contains(".osrel"));
+}
+
+#[test]
+fn the_driver_pack_builder_signs_its_module_only_with_the_key_and_checks_the_marker() {
+    let st = Command::new("sh").arg("-n").arg(root().join("dist/drivers/build-wl-pack.sh")).status().unwrap();
+    assert!(st.success(), "build-wl-pack.sh does not parse");
+    let s = read("dist/drivers/build-wl-pack.sh");
+    assert!(s.contains("if [ -n \"${IYAKKI_SB_KEY:-}\" ] && [ -n \"${IYAKKI_SB_CERT:-}\" ]"), "signing is opt-in by the key, like the image build");
+    assert!(s.contains("scripts/sign-file") && s.contains("sha256 \"$IYAKKI_SB_KEY\" \"$IYAKKI_SB_CERT\" \"$ko\""), "the kernel's own tool signs the module");
+    assert!(s.contains("~Module signature appended~") && s.contains("has no module signature after signing"), "the marker is checked after signing");
+    assert!(s.contains("is NOT signed"), "an unsigned pack says so");
+    // the key stays out of the pack: it is read from two files named by the environment and never copied into the payload
+    assert!(!s.contains("cp \"$IYAKKI_SB_KEY\"") && !s.contains("cat \"$IYAKKI_SB_KEY\""));
+    // the signing happens after the module was checked against the kernel and before it is measured and packed
+    let (check, sign, pack) = (s.find("inspect-module").unwrap(), s.find("signfile=").unwrap(), s.find("kobytes=").unwrap());
+    assert!(check < sign && sign < pack);
+}
+
+#[test]
+fn the_signed_unified_image_can_be_made_the_default_by_one_file_and_the_menu_is_unchanged_without_it() {
+    let cfg = read("dist/buildroot/board/iyakki/grub.cfg");
+    assert!(cfg.contains("source $prefix/iyakki-uki-default.cfg"), "the menu reads the switch file");
+    assert!(cfg.contains("[ -f $prefix/iyakki-uki-default.cfg ]"), "and only when it exists");
+    let (src, row) = (cfg.find("iyakki-uki-default.cfg").unwrap(), cfg.find("menuentry \"IYAKKI (signed image)\" --id iyakki-uki").unwrap());
+    assert!(src < row, "the default is set before the entries are defined");
+    let block = &cfg[cfg.find("# BEGIN uki-entry").unwrap()..cfg.find("# END uki-entry").unwrap()];
+    assert!(block.contains("grub_platform\" = efi") && block.contains("[ -f /EFI/IYAKKI/iyakki-uki.efi ]") && block.contains("chainloader /EFI/IYAKKI/iyakki-uki.efi"), "the row exists only on UEFI and only when the image is there");
+    // the plain entry stays the first row
+    assert!(cfg.find("menuentry \"IYAKKI\" {").unwrap() < cfg.find("# BEGIN uki-entry").unwrap());
+    // the Rust side writes exactly that file and sets exactly that id
+    let r = read("crates/iyakki-core/src/ukidefault.rs");
+    assert!(r.contains("pub const DEFAULT_FILE: &str = \"iyakki-uki-default.cfg\"") && r.contains("pub const ENTRY_ID: &str = \"iyakki-uki\""));
+}

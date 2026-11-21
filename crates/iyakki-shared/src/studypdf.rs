@@ -2,7 +2,7 @@
 
 
 /// What to export.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Item {
     Plan(String),
     /// `key`: put the answer key on a page of its own after the questions.

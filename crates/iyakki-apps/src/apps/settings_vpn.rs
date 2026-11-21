@@ -34,6 +34,8 @@ pub(super) enum VpnForm {
     ImportClip,
     /// Mode and filters of the profile with this id.
     Mode(String),
+    /// The user name and password of the OpenVPN profile with this id (the password is a secret field; it goes to the vault only).
+    Login(String),
 }
 
 const MODES: [&str; 2] = ["FULL: everything goes through the VPN", "HYBRID: only what the filters match"];
@@ -59,7 +61,7 @@ impl SettingsApp {
     }
 
     pub(super) fn vpn_buttons(&self) -> Vec<Btn> {
-        vec![("Import file", ACCENT, 'i'), ("Import clipboard", ACCENT, 'p'), ("Enable / Disable", TEXT, 'x'), ("Mode and filters", TEXT, 'm'), ("Delete", ERR, 'd'), ("Retry", TEXT, 'r'), ("VPN helper on / off", TEXT, 'h')]
+        vec![("Import file", ACCENT, 'i'), ("Import clipboard", ACCENT, 'p'), ("Enable / Disable", TEXT, 'x'), ("Mode and filters", TEXT, 'm'), ("Delete", ERR, 'd'), ("Login", TEXT, 'l'), ("Retry", TEXT, 'r'), ("VPN helper on / off", TEXT, 'h')]
     }
 
     /// The heartbeat: while the page is open the profiles are looked at every two seconds.
@@ -133,6 +135,14 @@ impl SettingsApp {
                 },
                 None => self.fail("There is no privileged VPN helper on this system."),
             },
+            Key::Char('l') => match row {
+                Some(r) if matches!(&r.profile.body, iyakki_vpn::profile::Body::Openvpn(o) if o.needs_credentials) => {
+                    let f = Form::new(&format!("Login for {}", r.profile.name)).text("User name", "", "the user name of your VPN account").secret("Password", "kept in your vault, never shown");
+                    self.open_form(FormKind::Vpn(VpnForm::Login(r.profile.id.clone())), f);
+                }
+                Some(_) => self.fail("This profile does not ask for a user name and password."),
+                None => self.fail(none),
+            },
             Key::Char('r') => match row {
                 Some(r) => {
                     mgr.retry(&r.profile.id, self.vpn_now());
@@ -175,6 +185,10 @@ impl SettingsApp {
                 // the keys must not stay in the clipboard history
                 crate::ui::clipboard::forget(&text);
                 Ok(format!("{said} The copied text was removed from the clipboard history; copy something else to replace the clipboard itself."))
+            }
+            VpnForm::Login(id) => {
+                mgr.set_credentials(id, form.value(0).trim(), &form.value(1))?;
+                Ok("The login is kept in your vault. It is used when the profile connects; enable or retry it now.".into())
             }
             VpnForm::Mode(id) => {
                 let hybrid = form.choice_idx(0) == 1;

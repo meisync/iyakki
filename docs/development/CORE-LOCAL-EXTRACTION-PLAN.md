@@ -10,6 +10,14 @@ Status: plan, lane P-B round 8, 2026-11-13. Nothing in this file is built beyond
 
 The agent's `sysinfo` module (634 lines, the owner of the `/proc` and `/sys` reads for processor, memory, load, uptime, heat, network, disks, processes and sockets, plus the signal sender) moved to `iyakki-core-local/src/sysinfo.rs` with its tests; `iyakki-agent` re-exports it (`pub use iyakki_core_local::sysinfo;`), so call sites did not change. The UI must keep naming `iyakki_agent::sysinfo` (the ratchet refuses `iyakki_core_local` in apps); the next step is to give those 36 uses a trait method each (`Sysinfo` already has the shape) and drop the re-export. The counts below are from before this move; the files that remain are the same list minus `sysinfo.rs`.
 
+## Part B slice (alpha.7 lane X6, 2026-11-20)
+
+Agent files m-z and the shell outside the tiles: the kernel readers moved into `iyakki-core-local` are `usbports`, `usbawake`, `bootvolume`, `debugfacts` and `netfacts`, plus new functions in `procfacts`, `machinefacts` and `kernelfacts`. The agent files re-export or call them; the allow list had no pair for these (they read through roots). Left in m-z: calls into the device crates that are configuration or parsing (zram config, fanservice, the Wi-Fi join, crash-log and loss, the Bluetooth management socket, the Secure Boot writer, the dev client's network scan); in the shell, `/sys/class/drm` in `backend_kms.rs`, `panel.rs` and `fb.rs`.
+
+## Part B, group Y4 (alpha.7, 2026-11-20)
+
+The configuration and parsing calls into the device crates got typed core-local wrappers, one module per cluster: `memconf`, `fanctl`, `wifijoin`, `keptlog`, `btshare`, `sbwrite`, `devscan`, `kmodpack`, `bootmenu`, plus `machinefacts::is_apple_t2` and `kernelfacts::{DRM_CLASS, GRAPHICS_CLASS}`. Left: the Bluetooth audio group (btaudiotools, btaac, btroute, bluetoothtools, appevent_more), startupdisk, the installer tools, the driver store's apply and facetime types, and the apps and shell uses of the device crates.
+
 ## Count of direct kernel reads that remain (2026-11-13)
 
 Counted with the patterns of `dependency_ratchet.rs` (a `/proc/`, `/sys/` or `/dev/` literal, `Command::new(`, a use of the devctl, storage, usb, drivers, netscan, hwinfo or zram crate) over non-test code. The tile ratchet is exact; the agent and shell-outside-tiles figures are a cruder lexical count (test modules cut at the first `#[cfg(test)] mod`), so read them as the size of the job, not as a gate.

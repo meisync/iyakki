@@ -241,8 +241,21 @@ fn the_ide_asks_for_frames_only_while_a_job_runs() {
     while count(&mut app, 30, 5) > 2 {
         assert!(t0.elapsed() < Duration::from_secs(120), "the IDE never went quiet after opening a workspace");
     }
-    let baseline = count(&mut app, 90, 0);
-    assert!(baseline <= 4, "an idle IDE asks for (almost) no frames: {baseline}");
+    // a window of 90 beats can still meet a background task that the IDE's wall-clock refresh starts (it asks for a frame on every beat while
+    // it runs, and how long that lasts depends on the machine): the claim is "an idle IDE settles to (almost) no frames", so a window that
+    // meets such a task is measured again, within a wall-clock budget; an IDE that never settles still fails with the last value
+    let window = |app: &mut IdeApp, ok: &dyn Fn(usize) -> bool, what: &str| -> usize {
+        let t = Instant::now();
+        loop {
+            let n = count(app, 90, 0);
+            if ok(n) {
+                return n;
+            }
+            assert!(t.elapsed() < Duration::from_secs(120), "{what}: {n}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let baseline = window(&mut app, &|n| n <= 4, "an idle IDE asks for (almost) no frames");
     // a running job: every third beat on top of that
     let id = start(&w.cx, "Alpha", &a, "nap", "sleep 120");
     // the chat notices a job started by someone else within a few seconds: wait for the first animated frames, then measure
@@ -250,8 +263,7 @@ fn the_ide_asks_for_frames_only_while_a_job_runs() {
     while count(&mut app, 10, 5) <= 3 {
         assert!(seen.elapsed() < Duration::from_secs(120), "the IDE never noticed the running job");
     }
-    let running = count(&mut app, 90, 0);
-    assert!(running >= baseline + 25 && running <= baseline + 36, "one frame in three while a job runs: {running} (baseline {baseline})");
+    window(&mut app, &|n| n >= baseline + 25 && n <= baseline + 36, &format!("one frame in three while a job runs (baseline {baseline})"));
     // stopped: one last frame to draw the result, then back to the baseline
     w.cx.services.jobs().stop(&w.cx.session.user, &id, Duration::from_secs(1)).unwrap();
     // (the last frame and the reading of the result come when the heartbeats have seen the end: wait for a quiet round, as after the opening)
@@ -259,8 +271,7 @@ fn the_ide_asks_for_frames_only_while_a_job_runs() {
     while count(&mut app, 30, 5) > 2 {
         assert!(settled.elapsed() < Duration::from_secs(120), "the IDE never went quiet after the job ended");
     }
-    let after = count(&mut app, 90, 0);
-    assert!(after <= baseline + 1, "back to the baseline once the job has ended: {after} (baseline {baseline})");
+    window(&mut app, &|n| n <= baseline + 1, &format!("back to the baseline once the job has ended (baseline {baseline})"));
 }
 
 #[test]

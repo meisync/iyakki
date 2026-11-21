@@ -1,0 +1,22 @@
+{
+ "schema": 1,
+ "row": "F-SDK-216",
+ "feature_sha": "7cc7f26e1d1986ef",
+ "title": "the app_permissions_status chat tool answers without values",
+ "clauses": [
+  {
+   "id": "chat-status",
+   "text": "the app_permissions_status chat tool answers without values",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant what each app holds now and the last permission change told to it.",
+     "expect": "A list of apps with permission names only, no values.",
+     "runner_did": "Booted the image in QEMU and signed in a scratch account (when run through the runner)"
+    }
+   ]
+  }
+ ]
+}

@@ -636,10 +636,12 @@ pub fn run_blocking_to(svc: &Arc<crate::services::Services>, streamer: &dyn Stre
                 r
             };
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            crate::appevent_more::transfer_finished(&*svc.app_events, user, "download", name, true);
             let _ = svc.notify(user, crate::inbox::Kind::Download, &format!("Downloaded {name}"), &format!("{} KB from {shown}{}", bytes / 1024, if added.is_err() { " (not added to the library index)" } else { "" }), Some(crate::inbox::Link::new("media", "")));
         }
         Ok(Fetched::Links(_)) => {}
         Err(e) if e != "cancelled" => {
+            crate::appevent_more::transfer_finished(&*svc.app_events, user, "download", "media", false);
             let _ = svc.notify(user, crate::inbox::Kind::Error, "Download failed", &format!("{shown}: {e}"), Some(crate::inbox::Link::new("media", "")));
         }
         Err(_) => {}

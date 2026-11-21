@@ -186,3 +186,62 @@ fn the_prefs_tool_changes_only_what_is_given_and_asks_on_a_card() {
     assert!(w.prefs().unwrap().quiet.is_empty());
     assert!(t.call(PREFS, &json!({"min_severity": "loud"})).is_err());
 }
+
+#[test]
+fn the_open_vault_registry_lets_the_hub_push_only_to_people_signed_in_with_an_open_vault_and_only_in_their_own_tenant() {
+    use iyakki_shared::notifyhub_sink::Severity;
+    let reg = OpenVaults::default();
+    // the registry type is also the process's (`global`); a private one keeps this test away from other tests
+    let reg: &'static OpenVaults = Box::leak(Box::new(reg));
+    let (w, _store, net, _) = setup();
+    let b = browser(9);
+    w.subscribe("phone", "https://push.example.net/s/9", &b.public, &b64::url(&b.auth)).unwrap();
+    let tenant = std::path::Path::new("/tenant-a");
+    let sender = reg.sender(tenant);
+    assert!(!sender.can_push("ada"), "nobody is signed in: nothing to push to");
+    assert!(reg.register(tenant, "ada", w.clone()));
+    assert!(sender.can_push("ada"));
+    assert!(!sender.can_push("bob"), "bob is not signed in");
+    assert!(!reg.sender(std::path::Path::new("/tenant-b")).can_push("ada"), "another tenant's hub never reaches this vault");
+    sender.push("ada", Severity::High, "Disk full", "the data volume is full", 1_000).unwrap();
+    assert_eq!(net.posts.lock().unwrap().len(), 1);
+    assert!(sender.push("bob", Severity::High, "x", "y", 1_000).unwrap_err().contains("locked"));
+    reg.forget(tenant, "ada");
+    assert!(!sender.can_push("ada"), "the sign-out locks the vault: no push");
+    assert!(sender.push("ada", Severity::High, "x", "y", 1_000).is_err());
+}
+
+#[test]
+fn the_registry_is_bounded() {
+    let reg = OpenVaults::default();
+    let (w, ..) = setup();
+    let dir = std::path::Path::new("/t");
+    for i in 0..OpenVaults::MAX {
+        assert!(reg.register(dir, &format!("p{i}"), w.clone()));
+    }
+    assert!(!reg.register(dir, "one-too-many", w.clone()));
+    assert!(reg.register(dir, "p0", w.clone()), "a person already in it can be registered again");
+}
+
+#[test]
+fn the_link_tool_asks_every_time_refuses_without_the_owners_name_and_gives_a_one_time_address_with_it() {
+    let (w, ..) = setup();
+    let dir = std::env::temp_dir().join(format!("iyakki-webpush-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg: &'static OpenVaults = Box::leak(Box::new(OpenVaults::default()));
+    reg.register(&dir, "ada", w.clone());
+    let pages = Arc::new(crate::webpush_page::PushPages::new(&dir, "/push", reg));
+    let t = WebPushTools::new(Arc::new(crate::assign::tests_support::NoTools), w.clone());
+    assert!(!t.defs().iter().any(|d| d.spec.name == LINK), "without the pages the tool is not offered");
+    let t = t.with_link(pages, "ada");
+    let d = t.defs().into_iter().find(|d| d.spec.name == LINK).unwrap();
+    assert_eq!(d.risk, Risk::Ask);
+    assert!(t.grant_blocker(LINK, &json!({})).is_some() && !t.pre_approved(LINK));
+    assert!(t.preview(LINK, &json!({})).unwrap().contains("one-time link"));
+    assert!(t.call(LINK, &json!({})).unwrap_err().contains("public HTTPS name"), "unset by default");
+    std::fs::write(dir.join(crate::webpush_page::CONFIG_FILE), r#"{"public_name":"notify.example.org"}"#).unwrap();
+    let said = t.call(LINK, &json!({})).unwrap();
+    assert!(said.contains("https://notify.example.org/push/subscribe?t="), "{said}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

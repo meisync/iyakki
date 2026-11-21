@@ -8,9 +8,9 @@ use serde_json::json;
 
 use super::AppCx;
 
-pub const TOOLS: [&str; 14] = ["display_type", "display_type_set", "display_themes", "display_theme_set", "display_wallpaper", "display_wallpaper_set", "display_fonts", "display_font_set", "display_board", "display_board_set", "display_look", "display_look_set", "display_dock", "display_dock_set"];
+pub const TOOLS: [&str; 16] = ["display_type", "display_type_set", "display_themes", "display_theme_set", "display_wallpaper", "display_wallpaper_set", "display_fonts", "display_font_set", "display_board", "display_board_set", "display_look", "display_look_set", "display_dock", "display_dock_set", "display_sdk_apps", "display_sdk_apps_set"];
 
-pub const PROMPT_RULE: &str = "\nDESKTOP THEMES: display_themes lists the built-in themes (dark, light, high-contrast), the theme files the person or an administrator put in the themes folder (a file that cannot be read is listed with the reason) and which one is chosen; display_theme_set chooses one and asks the person first. The choice applies the next time they sign in. DESKTOP WALLPAPER: display_wallpaper lists the wallpapers (theme, daylight, dusk, meadow, slate) and which one is chosen; display_wallpaper_set chooses one and asks the person first; it applies the next time they sign in (Settings, Display changes it at once with w). TYPE: display_type shows the line height (tight, normal, loose), the letter spacing (normal, wide, wider) and tabular figures (on or off) and display_type_set changes any of them and asks the person first; it applies at once in apps made with the UI SDK. DESKTOP FONTS: display_fonts lists the bundled fonts (DejaVu and Liberation, each with its licence) for the text and for code and which are chosen; display_font_set chooses the text font and/or the code font and asks the person first; it applies the next time they sign in (Settings, Appearance changes it at once with f and p). The text size stays as the person chose it. WIDGET BOARD (the home screen's machine page): display_board lists the widgets on it in order with their width and the ones that can be added (attention, approvals, vitals, runs, tokens, network, apps); display_board_set changes it with op add, remove, move (to position), size (half or full) or reset and asks the person first; it shows within a moment. DESKTOP LOOK: display_look lists the Looks (Default, Compact, Classic and the person's files), the one chosen and its parts (icon shape, style and size, launcher layout, dock and its pinned apps, top bar items); display_look_set chooses a Look by its key and/or changes parts of it by their Look-file keys (icon_style, icon_shape, icon_size, launcher, columns, density, dock, dock_items, topbar_items, ...) and asks the person first. The bell, the needs-you sign, Settings, the account and power always stay on the top bar. Accessibility settings overrule a Look. DOCK: display_dock lists the apps pinned to the dock in order and the apps that can be pinned (JSON); display_dock_set pins, unpins or moves one app and asks the person first.";
+pub const PROMPT_RULE: &str = "\nDESKTOP THEMES: display_themes lists the built-in themes (dark, light, high-contrast), the theme files the person or an administrator put in the themes folder (a file that cannot be read is listed with the reason) and which one is chosen; display_theme_set chooses one and asks the person first. The choice applies the next time they sign in. DESKTOP WALLPAPER: display_wallpaper lists the wallpapers (theme, daylight, dusk, meadow, slate) and which one is chosen; display_wallpaper_set chooses one and asks the person first; it applies the next time they sign in (Settings, Display changes it at once with w). TYPE: display_type shows the line height (tight, normal, loose), the letter spacing (normal, wide, wider) and tabular figures (on or off) and display_type_set changes any of them and asks the person first; it applies at once in apps made with the UI SDK. DESKTOP FONTS: display_fonts lists the bundled fonts (DejaVu and Liberation, each with its licence) for the text and for code and which are chosen; display_font_set chooses the text font and/or the code font and asks the person first; it applies the next time they sign in (Settings, Appearance changes it at once with f and p). The text size stays as the person chose it. WIDGET BOARD (the home screen's machine page): display_board lists the widgets on it in order with their width and the ones that can be added (attention, approvals, vitals, runs, tokens, network, apps); display_board_set changes it with op add, remove, move (to position), size (half or full) or reset and asks the person first; it shows within a moment. DESKTOP LOOK: display_look lists the Looks (Default, Compact, Classic and the person's files), the one chosen and its parts (icon shape, style and size, launcher layout, dock and its pinned apps, top bar items); display_look_set chooses a Look by its key and/or changes parts of it by their Look-file keys (icon_style, icon_shape, icon_size, launcher, columns, density, dock, dock_items, topbar_items, ...) and asks the person first. The bell, the needs-you sign, Settings, the account and power always stay on the top bar. Accessibility settings overrule a Look. DOCK: display_dock lists the apps pinned to the dock in order and the apps that can be pinned (JSON); display_dock_set pins, unpins or moves one app and asks the person first. SDK VERSIONS (experimental): EDIT and CLI each have a version written on the UI SDK next to the usual screen; display_sdk_apps says which the person chose (the usual screen is the default) and display_sdk_apps_set switches one (app edit or cli, enabled true or false) and asks the person first; it applies the next time the app is opened.";
 
 /// The most apps the dock holds (the shell shows at most this many).
 const DOCK_MAX: usize = 10;
@@ -370,6 +370,28 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
             Ok(said)
         }));
     }
+    {
+        let core = cx.core.clone();
+        let user = env.user.clone();
+        v.push(Entry::read("Display", "display_sdk_apps", "Say which of EDIT and CLI opens as its version written on the UI SDK (experimental) and which as the usual screen.", no_args(), move |_| {
+            let kept = core.app_data().get(&user, iyakki_shared::sdkapps::APP, iyakki_shared::sdkapps::KEY);
+            Ok(iyakki_shared::sdkapps::describe(kept.as_deref()))
+        }));
+    }
+    {
+        let (core, user, e1) = (cx.core.clone(), env.user.clone(), env.clone());
+        let schema = json!({"type": "object", "properties": {"app": {"type": "string", "description": "edit or cli."}, "enabled": {"type": "boolean", "description": "true: open the version written on the UI SDK (experimental); false: the usual screen."}}, "required": ["app", "enabled"]});
+        v.push(Entry::change("Display", "display_sdk_apps_set", "Choose, for EDIT or CLI, the version written on the UI SDK (experimental) or the usual screen. It applies the next time the app is opened. The person approves a card first.", schema, |a| format!("{}: {}", a["app"].as_str().unwrap_or("?").to_uppercase(), if a["enabled"].as_bool() == Some(true) { "the SDK version" } else { "the usual screen" }), move |a| {
+            let app = a.get("app").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
+            let on = a.get("enabled").and_then(|x| x.as_bool()).ok_or("say `enabled`: true or false")?;
+            let state = core.app_data();
+            let now = state.get(&user, iyakki_shared::sdkapps::APP, iyakki_shared::sdkapps::KEY);
+            let next = iyakki_shared::sdkapps::with(now.as_deref(), &app, on)?;
+            state.set(&user, iyakki_shared::sdkapps::APP, iyakki_shared::sdkapps::KEY, &next)?;
+            e1.audit("settings.display.sdk_apps", &format!("{app} {}", if on { "on" } else { "off" }));
+            Ok(format!("{} It applies the next time the app is opened.", iyakki_shared::sdkapps::describe(Some(&next))))
+        }));
+    }
     v
 }
 
@@ -402,7 +424,7 @@ mod tests {
         let audits = Arc::new(Mutex::new(Vec::new()));
         let a2 = audits.clone();
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
-        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings, audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         let dir = cx.data_dir().to_path_buf();
         std::fs::create_dir_all(dir.join("themes")).unwrap();
         std::fs::write(dir.join("themes/midnight-blue.theme"), "name = Midnight blue\nbase = dark\nbg_top = #0b1020\n").unwrap();
@@ -425,13 +447,28 @@ mod tests {
     }
 
     #[test]
+    fn a_theme_a_bundle_brought_is_listed_and_chosen_like_a_theme_file_and_the_two_folder_names_are_one() {
+        assert_eq!(iyakki_uikit::usertheme::BUNDLE_DIR, iyakki_shared::bundle_members::THEME_DIR);
+        let cx = crate::apps::tests::cx_with_admin_store("chatbundletheme");
+        cx.services.on_login("root", "rootpass12", true);
+        let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(|_, _| {}) };
+        let dir = cx.data_dir().to_path_buf();
+        iyakki_shared::bundle_members::put_theme(&dir, None, "dusk", &json!({"name": "Dusk", "base": "dark", "bg_top": "#101830"})).unwrap();
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+        assert!(t.call("display_themes", &json!({})).unwrap().contains("Theme file bundle-dusk: Dusk"));
+        assert!(t.call("display_theme_set", &json!({"theme": "bundle-dusk"})).unwrap().contains("Dusk is chosen"));
+        assert_eq!(iyakki_uikit::theme::load_choice(&dir, "root").as_deref(), Some("user:bundle-dusk"));
+    }
+
+    #[test]
     fn the_wallpaper_list_is_free_the_choice_asks_refuses_an_unknown_one_is_saved_and_logged() {
         let cx = crate::apps::tests::cx_with_admin_store("chatwall");
         cx.services.on_login("root", "rootpass12", true);
         let audits = Arc::new(Mutex::new(Vec::new()));
         let a2 = audits.clone();
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
-        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings, audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         let dir = cx.data_dir().to_path_buf();
         let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
         let d = t.defs();
@@ -455,7 +492,7 @@ mod tests {
         let audits = Arc::new(Mutex::new(Vec::new()));
         let a2 = audits.clone();
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
-        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings, audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         let dir = cx.data_dir().to_path_buf();
         let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
         let d = t.defs();
@@ -483,7 +520,7 @@ mod tests {
         let audits = Arc::new(Mutex::new(Vec::new()));
         let a2 = audits.clone();
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
-        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings, audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         let dir = cx.data_dir().to_path_buf();
         typeset::set_current(Prefs::default());
         let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
@@ -511,7 +548,7 @@ mod tests {
         let audits = Arc::new(Mutex::new(Vec::new()));
         let a2 = audits.clone();
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
-        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings, audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         let dir = cx.data_dir().to_path_buf();
         let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
         let d = t.defs();
@@ -545,7 +582,7 @@ mod tests {
         let audits = Arc::new(Mutex::new(Vec::new()));
         let a2 = audits.clone();
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
-        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings, audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         let dir = cx.data_dir().to_path_buf();
         let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
         let d = t.defs();
@@ -588,7 +625,7 @@ mod tests {
         let audits = Arc::new(Mutex::new(Vec::new()));
         let a2 = audits.clone();
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
-        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings, audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         let dir = cx.data_dir().to_path_buf();
         let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
         let d = t.defs();
@@ -615,5 +652,35 @@ mod tests {
         }
         assert!(t.call("display_dock_set", &json!({"op": "pin", "app": "scan"})).unwrap_err().contains("at most 10"));
         assert!(TOOLS.contains(&"display_dock") && TOOLS.contains(&"display_dock_set"));
+    }
+
+    #[test]
+    fn the_sdk_version_tools_say_what_is_chosen_for_free_switch_with_a_card_refuse_other_apps_and_log() {
+        let cx = crate::apps::tests::cx_with_admin_store("chatsdkapps");
+        cx.services.on_login("root", "rootpass12", true);
+        let audits = Arc::new(Mutex::new(Vec::new()));
+        let a2 = audits.clone();
+        let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+        let d = t.defs();
+        assert_eq!(d.iter().find(|x| x.spec.name == "display_sdk_apps").unwrap().risk, Risk::Safe);
+        assert_eq!(d.iter().find(|x| x.spec.name == "display_sdk_apps_set").unwrap().risk, Risk::Ask);
+        assert_eq!(t.call("display_sdk_apps", &json!({})).unwrap(), "EDIT: the usual screen. CLI: the usual screen.");
+        assert!(t.call("display_sdk_apps_set", &json!({"app": "cli"})).unwrap_err().contains("enabled"));
+        assert!(t.call("display_sdk_apps_set", &json!({"app": "chat", "enabled": true})).unwrap_err().contains("edit and cli"));
+        assert_eq!(t.call("display_sdk_apps", &json!({})).unwrap(), "EDIT: the usual screen. CLI: the usual screen.", "refusals kept nothing");
+        let said = t.call("display_sdk_apps_set", &json!({"app": "cli", "enabled": true})).unwrap();
+        assert!(said.contains("CLI: the SDK version") && said.contains("next time the app is opened"), "{said}");
+        assert!(t.describe("display_sdk_apps_set", &json!({"app": "cli", "enabled": true})).contains("CLI: the SDK version"));
+        // the same text the shell reads: the core's app data of the person
+        let kept = cx.core.app_data().get("root", iyakki_shared::sdkapps::APP, iyakki_shared::sdkapps::KEY);
+        assert_eq!(kept.as_deref(), Some("cli"));
+        assert_eq!(cx.core.app_data().get("alice", iyakki_shared::sdkapps::APP, iyakki_shared::sdkapps::KEY), None, "another person's apps are untouched");
+        t.call("display_sdk_apps_set", &json!({"app": "edit", "enabled": true})).unwrap();
+        t.call("display_sdk_apps_set", &json!({"app": "cli", "enabled": false})).unwrap();
+        assert_eq!(t.call("display_sdk_apps", &json!({})).unwrap(), "EDIT: the SDK version. CLI: the usual screen.");
+        assert!(audits.lock().unwrap().iter().any(|a| a == "settings.display.sdk_apps cli on") && audits.lock().unwrap().iter().any(|a| a == "settings.display.sdk_apps cli off"));
+        assert!(TOOLS.contains(&"display_sdk_apps") && TOOLS.contains(&"display_sdk_apps_set"));
     }
 }

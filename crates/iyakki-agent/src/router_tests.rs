@@ -499,9 +499,13 @@ struct Mem {
     refuse: Mutex<bool>,
     verifier: Mutex<Option<Arc<dyn Verifier>>>,
     used_today: Mutex<u64>,
+    gate: Mutex<Option<Arc<dyn iyakki_core_api::router::Router>>>,
 }
 
 impl Backend for Mem {
+    fn core_router(&self) -> Option<Arc<dyn iyakki_core_api::router::Router>> {
+        self.gate.lock().unwrap().clone()
+    }
     fn providers(&self) -> Vec<ProviderCfg> {
         let mut l = ProviderCfg::new("local", Kind::Ollama);
         l.models = vec!["qwen:7b".into()];
@@ -1029,6 +1033,31 @@ fn a_step_whose_check_says_tests_is_judged_by_the_projects_own_test_command() {
 }
 
 #[test]
+fn a_project_with_its_own_test_command_is_judged_by_a_real_process_run_in_its_own_folder() {
+    use crate::router::ProjectTestCheck;
+    let dir = crate::testdir::outside_project("router-check", "real-cmd");
+    let step = |check: &str| Step { id: "s1".into(), title: "t".into(), task: "t".into(), after: vec![], role: Role::Executor, needs: Default::default(), check: check.into() };
+    // the project file as the IDE writes it: the test command is a real script that passes only when a marker file is in ITS folder
+    std::fs::write(dir.join("check.sh"), "test -f marker.txt || { echo 'marker.txt is missing'; exit 3; }\n").unwrap();
+    let mut cfg = crate::workspace::ProjectConfig::default();
+    cfg.commands.test = "sh check.sh".into();
+    cfg.save(&dir).unwrap();
+    let check = ProjectTestCheck::for_project(&dir).expect("a configured test command is picked up from project.json");
+    assert_eq!((check.program.as_str(), check.args.clone()), ("sh", vec!["check.sh".to_string()]));
+    let v = CheckedVerifier(vec![Arc::new(check)]);
+    // the command runs in the project folder and fails with its own words
+    let e = v.verify(&step("tests pass"), "done").unwrap_err();
+    assert!(e.contains("did not pass") && e.contains("marker.txt is missing"), "{e}");
+    // the step is accepted once the project's real state makes the real command pass; nothing else changed
+    std::fs::write(dir.join("marker.txt"), "x").unwrap();
+    v.verify(&step("tests pass"), "done").expect("the project's tests pass now");
+    // other kinds of check keep the executor's claim even while the tests would fail
+    std::fs::remove_file(dir.join("marker.txt")).unwrap();
+    assert!(v.verify(&step("the page loads"), "done").is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn the_strategy_is_told_how_fast_each_allowed_model_has_been_and_the_ledger_lines_are_averaged() {
     struct Spy(Arc<std::sync::Mutex<Vec<serde_json::Value>>>);
     impl Strategy for Spy {
@@ -1126,6 +1155,31 @@ fn a_strategy_can_be_chosen_for_one_workspace_or_fleet_and_the_rest_keep_the_com
     assert_eq!(rt::strategy_for(be.as_ref(), "").name(), "default");
     assert!(be.audit.lock().unwrap().iter().any(|l| l.contains("router.strategy.set") && l.contains("scope=workspace:alpha")));
     assert!(rt::scope_ok("workspace:a b") && !rt::scope_ok("workspace:") && !rt::scope_ok("moon:x"));
+}
+
+#[test]
+fn the_routing_decision_is_a_free_read_that_names_the_best_fit_and_why_the_others_do_not_and_goes_through_the_core_door() {
+    let (t, be) = tools();
+    let d = t.defs();
+    assert!(matches!(d.iter().find(|d| d.spec.name == rt::ROUTE).unwrap().risk, Risk::Safe));
+    assert!(hard_ask(rt::ROUTE, &json!({})).is_none());
+    let all = rt::route_models(be.as_ref());
+    assert_eq!(all.len(), 2);
+    assert!(all.iter().all(|m| !m.id.is_empty()));
+    let text = t.call(rt::ROUTE, &json!({})).unwrap();
+    assert!(text.starts_with("The router would use local/qwen:7b first"), "{text}");
+    let near = t.call(rt::ROUTE, &json!({"max_zone": "computer"})).unwrap();
+    assert!(near.contains("- cloud/gpt-large: it runs farther away than allowed"), "{near}");
+    let none = t.call(rt::ROUTE, &json!({"audio": true, "max_cost": "free"})).unwrap();
+    assert!(none.starts_with("No model fits this request."), "{none}");
+    assert!(t.call(rt::ROUTE, &json!({"max_zone": "moon"})).unwrap_err().contains("max_zone"));
+    assert!(t.call(rt::ROUTE, &json!({"max_cost": "huge"})).unwrap_err().contains("max_cost"));
+    // with the core's door: the decision comes from the door's list, which the fake machine owns
+    let fake = Arc::new(iyakki_core_fake::FakeRouter::default());
+    fake.set_models(vec![iyakki_core_api::router::RouteModel { id: "fleet/box".into(), role: "both".into(), tools: true, vision: true, audio: false, context: 4096, cost: iyakki_core_api::router::RouteCost::Free, zone: iyakki_core_api::router::RouteZone::Network, enabled: true, answer_ms: None }]);
+    *be.gate.lock().unwrap() = Some(fake);
+    let via = t.call(rt::ROUTE, &json!({"vision": true})).unwrap();
+    assert!(via.starts_with("The router would use fleet/box first"), "{via}");
 }
 
 #[path = "router_parallel_tests.rs"]

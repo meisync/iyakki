@@ -56,11 +56,15 @@ fn open_part(path: &Path, mode: Mode) -> Result<AviWriter<BufWriter<File>>, Stri
     AviWriter::new(BufWriter::with_capacity(1 << 20, f), mode.width, mode.height, 30.0).map_err(|e| e.to_string())
 }
 
+/// The frame rate written into a part's header: the frames of the part over its real length; a part shorter than 0.2 s says 15.
+fn part_fps(frames: u64, secs: f32) -> f32 {
+    if secs > 0.2 { frames as f32 / secs } else { 15.0 }
+}
+
 impl Recording {
     fn finish_part(&mut self) {
         if let Some(w) = self.writer.take() {
-            let secs = self.part_started.elapsed().as_secs_f32();
-            let fps = if secs > 0.2 { self.part_frames as f32 / secs } else { 15.0 };
+            let fps = part_fps(self.part_frames, self.part_started.elapsed().as_secs_f32());
             self.done_bytes += w.bytes() + 8 + 16 * w.frames() as u64;
             if let Err(e) = w.finish(fps) {
                 self.error.get_or_insert(format!("could not finish the video: {e}"));
@@ -337,6 +341,16 @@ mod tests {
     }
 
     #[test]
+    fn the_header_rate_is_frames_over_length() {
+        assert_eq!(part_fps(30, 2.0), 15.0);
+        assert_eq!(part_fps(60, 2.0), 30.0);
+        assert_eq!(part_fps(4, 8.0), 0.5);
+        assert_eq!(part_fps(500, 0.2), 15.0, "a part shorter than 0.2 s says 15");
+        assert_eq!(part_fps(500, 0.0), 15.0);
+        assert!((part_fps(25, 1.0) - 25.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn frames_flow_to_the_preview_and_a_recording_is_a_playable_avi() {
         let d = std::env::temp_dir().join(format!("iyakki-cam-live-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -360,7 +374,10 @@ mod tests {
             let info = super::super::avi::parse(&std::fs::read(&path).unwrap()).unwrap();
             assert_eq!(info.frames as u64, frames);
             assert_eq!((info.width, info.height), (live.mode.width, live.mode.height));
-            assert!(info.fps > 1.0 && info.fps < 120.0, "{}", info.fps);
+            // the rate is frames over the real length of the recording, so how big it is depends on how fast the machine ran the camera
+            // thread (a starved one recorded 4 frames in 7 s: 0.57); the arithmetic is tested exactly in `the_header_rate_is_frames_over_length`,
+            // here: the header holds a rate the writer accepts (it keeps 0.5 to 120 as measured and writes 15 outside that)
+            assert!((info.fps > 0.5 && info.fps <= 120.0) || (info.fps - 15.0).abs() < 0.01, "{}", info.fps);
             // every frame is a complete JPEG (tables included) that decodes to the right size
             let b = super::super::jpeg::decode(&info.chunks[0]).unwrap();
             assert!(super::super::jpeg::has_huffman(&info.chunks[0]));

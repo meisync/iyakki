@@ -915,6 +915,8 @@ fn mb(b: u64) -> String {
 struct CliKeys {
     ring: Option<KeyRing>,
     vault: Option<crate::cloudvaultd::Client>,
+    /// The shared vault with the provider its setting names, when that is an external system (`--token-file FILE`): the keys live there.
+    shared: Option<iyakki_shared::sharedvault::SharedVault>,
     /// Envelope mode (`--keys kms:REF`): the keys sit wrapped in a folder, the master key is read from a file.
     kms: Option<KmsHold>,
 }
@@ -935,6 +937,7 @@ impl KeySource for CliKeys {
     fn current(&self) -> Result<SnapKey, String> {
         match (&self.ring, &self.vault) {
             (Some(r), _) if !r.0.is_empty() => r.current(),
+            _ if self.shared.is_some() => self.shared.as_ref().map(|v| crate::sharedvault_cli::SharedKeyring { vault: v }.current()).unwrap_or_else(|| Err(String::new())),
             (_, Some(c)) => VaultKeyring { client: c }.current(),
             _ if self.kms.is_some() => self.kms.as_ref().map(|k| k.ring().current()).unwrap_or_else(|| Err(String::new())),
             _ => Err("no snapshot key given (--key-file FILE, or --vault-key FILE --as USER, or --keys kms:REF --kms-master-key FILE)".into()),
@@ -944,6 +947,9 @@ impl KeySource for CliKeys {
         if let Some(Ok(k)) = self.ring.as_ref().map(|r| r.get(id)) {
             return Ok(k);
         }
+        if let Some(v) = &self.shared {
+            return crate::sharedvault_cli::SharedKeyring { vault: v }.get(id);
+        }
         match (&self.vault, &self.kms) {
             (Some(c), _) => VaultKeyring { client: c }.get(id),
             (None, Some(k)) => k.ring().get(id),
@@ -952,13 +958,19 @@ impl KeySource for CliKeys {
     }
 }
 
+/// True when the shared-vault setting of `data` names an external system (an unusable setting counts: the vault stays closed, the command
+/// then reports it instead of going to the built-in service).
+fn external_shared_vault(data: &Path) -> bool {
+    !matches!(iyakki_shared::sharedvault::Setting::load(data), Ok(s) if s.provider == iyakki_shared::sharedvault::Provider::Builtin)
+}
+
 fn cli_keys(a: &[String], data: &Path) -> Result<Option<CliKeys>, String> {
     use crate::cloudsnapshot_kms::ProviderSetting;
     // where the keys live: `--keys`, else the launch configuration's setting the pod carries, else what the other options say
     let provider = opt(a, "--keys").or_else(|| std::env::var("IYAKKI_SNAPSHOT_KEYS").ok().filter(|s| !s.trim().is_empty())).map(|s| ProviderSetting::parse(&s)).transpose()?;
     match &provider {
         Some(ProviderSetting::File) if !a.iter().any(|x| x == "--key-file") => return Err("the key source is file: give --key-file FILE".into()),
-        Some(ProviderSetting::Vault) if opt(a, "--vault-key").is_none() => return Err("the key source is vault: give --vault-key FILE --as USER".into()),
+        Some(ProviderSetting::Vault) if opt(a, "--vault-key").is_none() && !external_shared_vault(data) => return Err("the key source is vault: give --vault-key FILE --as USER".into()),
         _ => {}
     }
     let kms = match &provider {
@@ -986,7 +998,17 @@ fn cli_keys(a: &[String], data: &Path) -> Result<Option<CliKeys>, String> {
     for f in all("--key-file").iter().chain(all("--old-key-file").iter()) {
         ring.push(read(f)?);
     }
-    let vault = match opt(a, "--vault-key") {
+    // the shared vault names an external system: the keys live there (token from --token-file), never in the built-in service
+    let shared = if matches!(provider, Some(ProviderSetting::Vault)) || opt(a, "--vault-key").is_some() {
+        if external_shared_vault(data) {
+            Some(crate::sharedvault_cli::open_vault(data, crate::sharedvault_cli::deps_from_args(a)?)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let vault = match opt(a, "--vault-key").filter(|_| shared.is_none()) {
         None => None,
         Some(kf) => {
             let user = opt(a, "--as").ok_or("--vault-key needs --as USER")?;
@@ -1004,7 +1026,7 @@ fn cli_keys(a: &[String], data: &Path) -> Result<Option<CliKeys>, String> {
             }
         }
     };
-    Ok((!ring.is_empty() || vault.is_some() || kms.is_some()).then_some(CliKeys { ring: (!ring.is_empty()).then_some(KeyRing(ring)), vault, kms }))
+    Ok((!ring.is_empty() || vault.is_some() || shared.is_some() || kms.is_some()).then_some(CliKeys { ring: (!ring.is_empty()).then_some(KeyRing(ring)), vault, shared, kms }))
 }
 
 /// `iyakki cloud snapshot create | list | verify | restore | rekey | key-new | key-rotate | prune | cronjob` (the arguments after `snapshot`).
@@ -1090,6 +1112,11 @@ pub fn cli(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
             if let Some(h) = keys.as_ref().and_then(|k| k.kms.as_ref()) {
                 let k = h.ring().rotate()?;
                 out(&format!("the current snapshot key is now {} (wrapped by {}; older keys stay in {}; run rekey on old snapshots, then prune)", k.id, h.key_ref, h.dir.0.display()));
+                return Ok(());
+            }
+            if let Some(v) = keys.as_ref().and_then(|k| k.shared.as_ref()) {
+                let k = crate::sharedvault_cli::SharedKeyring { vault: v }.rotate()?;
+                out(&format!("the current snapshot key is now {} (kept in the external shared vault; older keys stay there; run rekey on old snapshots, then prune)", k.id));
                 return Ok(());
             }
             let c = keys.as_ref().and_then(|k| k.vault.as_ref()).ok_or("usage: iyakki cloud snapshot key-rotate --vault-key FILE --as USER (or --keys kms:REF --kms-master-key FILE)")?;

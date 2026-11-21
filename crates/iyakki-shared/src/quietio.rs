@@ -3,23 +3,7 @@
 //! Everything in this crate that prints from non-test code uses [`qprintln!`] and [`qeprintln!`], which ignore a failed write (the line was only for
 //! a person who is no longer listening).
 
-use std::io::Write;
-
-/// Write `args` and a newline to `w`; a failure is ignored.
-pub fn line_to(w: &mut dyn Write, args: std::fmt::Arguments) {
-    let _ = w.write_fmt(args);
-    let _ = w.write_all(b"\n");
-}
-
-pub fn out_line(args: std::fmt::Arguments) {
-    let mut o = std::io::stdout().lock();
-    line_to(&mut o, args);
-    let _ = o.flush();
-}
-
-pub fn err_line(args: std::fmt::Arguments) {
-    line_to(&mut std::io::stderr().lock(), args);
-}
+pub use iyakki_linuxinit::quietio::{err_line, line_to, out_line};
 
 /// `println!` that ignores a failed write.
 #[macro_export]

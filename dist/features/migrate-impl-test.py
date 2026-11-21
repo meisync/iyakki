@@ -8,10 +8,16 @@ Test levels: 0 nothing; 30 fakes/unit tests of parts, or the notes say not tried
 browser harness) is listed; 100 notes report a real-hardware run, or a done row with tests whose notes name no open verification.
 Second pass (class B, see docs/development/IMPL-TEST-COLUMNS.md) runs on every call, so a migrated file is updated once and then stays put.
 Usage: python3 dist/features/migrate-impl-test.py [FEATURES.md]
+       python3 dist/features/migrate-impl-test.py --from-autotest DIR [--apply] [--image-commit SHA]   (Test from machine evidence; docs/development/AUTOTEST.md)
 """
 import json, os, re, sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if "--from-autotest" in sys.argv:  # machine-made evidence raises Test by the rules of dist/autotest/evidence.py (dry run unless --apply)
+    sys.path.insert(0, os.path.join(ROOT, "dist", "autotest"))
+    import evidence
+    i = sys.argv.index("--from-autotest")
+    sys.exit(evidence.main(sys.argv[i + 1:], os.path.join(ROOT, "FEATURES.md"), ROOT))
 path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "FEATURES.md")
 text = open(path, encoding="utf-8").read()
 migrated = "| Impl/Test |" in text

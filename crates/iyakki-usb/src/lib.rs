@@ -11,14 +11,23 @@
 
 pub mod apply;
 pub mod biosgpt;
+pub mod bios4kn;
+#[cfg(test)]
+mod bios4kn_vm_tests;
 pub mod biosshared;
 pub mod bootpack;
+pub mod btrfsshrink;
 pub mod cli;
 pub mod drives;
 pub mod efi;
 pub mod elevate;
 pub mod fetch;
+pub mod filepick;
 pub mod fatclone;
+pub mod exfatreloc;
+pub mod exfatshrink;
+pub mod fatreloc;
+pub mod fatshrink;
 pub mod fatwrite;
 pub mod imagearch;
 pub mod gpt_install;
@@ -28,6 +37,7 @@ pub mod json;
 pub mod leanstrip;
 pub mod plan_cli;
 pub mod planner;
+pub mod posix;
 pub mod resize;
 pub mod sbenroll;
 pub mod sbenroll_cli;
@@ -39,7 +49,11 @@ pub mod macos;
 pub mod term;
 pub mod tui;
 pub mod ui;
+pub mod uki;
 pub mod windows;
+pub mod winacl;
+pub mod windisk;
+pub mod windows_cli;
 #[cfg(windows)]
 pub mod windows_real;
 pub mod wizard;
@@ -57,6 +71,8 @@ mod planner_tests;
 mod real_mkfs_tests;
 #[cfg(test)]
 mod resize_tests;
+#[cfg(test)]
+mod exfatreloc_tests;
 #[cfg(test)]
 mod resize_step_tests;
 #[cfg(test)]

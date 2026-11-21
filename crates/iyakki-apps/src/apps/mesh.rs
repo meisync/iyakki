@@ -11,6 +11,8 @@ use iyakki_shared::consul::{ClusterInfo, Health, Instance, NodeInfo, ServiceInfo
 use iyakki_shared::consul::{self, Consul};
 
 use super::widgets::{Form, FormEvent};
+use super::mesh_port::{CxPort, MeshPort};
+pub use super::mesh_port::load_address;
 use super::{blink, App, AppCx, Flow};
 use crate::gfx::{rgb, Face, Gfx, Icon};
 use crate::ui::{Event, Key, DIM, ERR, MUTED, OK, R, TEXT};
@@ -79,27 +81,18 @@ pub struct MeshApp {
     rx: Receiver<Loaded>,
 }
 
-fn config_path(cx: &AppCx) -> std::path::PathBuf {
-    cx.data_dir().join("mesh.json")
-}
-
-pub fn load_address(cx: &AppCx) -> String {
-    std::fs::read_to_string(config_path(cx)).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).and_then(|v| v["address"].as_str().map(str::to_string)).unwrap_or_default()
-}
-
-fn save_address(cx: &AppCx, address: &str) -> Result<(), String> {
-    let p = config_path(cx);
-    let tmp = p.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::json!({ "address": address }).to_string()).and_then(|_| std::fs::rename(&tmp, &p)).map_err(|e| e.to_string())
-}
-
 impl MeshApp {
-    pub fn new(cx: &AppCx) -> MeshApp {
+    pub fn new(port: &AppCx) -> MeshApp {
+        MeshApp::with_port(&CxPort(port))
+    }
+
+    /// The tile over any port (a fake in tests).
+    pub fn with_port(port: &dyn MeshPort) -> MeshApp {
         let (tx, rx) = channel();
-        let address = load_address(cx);
+        let address = port.load_address();
         let mut app = MeshApp { tab: if address.is_empty() { Tab::Setup } else { Tab::Services }, mode: Mode::Browse, sel: 0, cluster: None, services: vec![], nodes: vec![], instances: vec![], prefix: String::new(), keys: vec![], address, busy: 0, status: None, tx, rx };
         if app.tab != Tab::Setup {
-            app.refresh(cx);
+            app.refresh(port);
         }
         app
     }
@@ -120,25 +113,20 @@ impl MeshApp {
         &self.keys
     }
 
-    fn can_configure(cx: &AppCx) -> bool {
-        cx.session.policy.manage_settings
-    }
-
     /// The client for the configured cluster, after the account's host policy has said yes.
-    fn client(&self, cx: &AppCx) -> Result<Arc<Consul>, String> {
+    fn client(&self, port: &dyn MeshPort) -> Result<Arc<Consul>, String> {
         if self.address.is_empty() {
             return Err("No Consul address yet. An administrator sets it in Setup.".into());
         }
         let host = consul::host_of(&self.address);
-        if !cx.session.policy.allows_host(&host) {
+        if !port.allows_host(&host) {
             return Err(format!("Your account may not reach {host}."));
         }
-        let token = cx.secrets().resolve(&format!("vault:{TOKEN_NAME}"), None).ok().map(|t| t.to_string());
-        Consul::new(&self.address, token, cx.quick_upstream()).map(Arc::new)
+        port.consul(&self.address, TOKEN_NAME).map(Arc::new)
     }
 
-    fn spawn(&mut self, cx: &AppCx, f: impl FnOnce(&Consul) -> Loaded + Send + 'static) {
-        match self.client(cx) {
+    fn spawn(&mut self, port: &dyn MeshPort, f: impl FnOnce(&Consul) -> Loaded + Send + 'static) {
+        match self.client(port) {
             Ok(c) => {
                 let tx = self.tx.clone();
                 self.busy += 1;
@@ -151,34 +139,34 @@ impl MeshApp {
     }
 
     /// Load what the current tab shows.
-    fn refresh(&mut self, cx: &AppCx) {
+    fn refresh(&mut self, port: &dyn MeshPort) {
         self.status = None;
         match (&self.tab, &self.mode) {
             (Tab::Services, Mode::Instances(name)) => {
                 let name = name.clone();
-                self.spawn(cx, move |c| Loaded::Instances(name.clone(), c.instances(&name)));
+                self.spawn(port, move |c| Loaded::Instances(name.clone(), c.instances(&name)));
             }
             (Tab::Services, _) => {
-                self.spawn(cx, |c| Loaded::Cluster(c.cluster()));
-                self.spawn(cx, |c| Loaded::Services(c.services()));
+                self.spawn(port, |c| Loaded::Cluster(c.cluster()));
+                self.spawn(port, |c| Loaded::Services(c.services()));
             }
             (Tab::Nodes, _) => {
-                self.spawn(cx, |c| Loaded::Cluster(c.cluster()));
-                self.spawn(cx, |c| Loaded::Nodes(c.nodes()));
+                self.spawn(port, |c| Loaded::Cluster(c.cluster()));
+                self.spawn(port, |c| Loaded::Nodes(c.nodes()));
             }
             (Tab::Kv, _) => {
                 let p = self.prefix.clone();
-                self.spawn(cx, move |c| Loaded::Keys(p.clone(), c.kv_list(&p)));
+                self.spawn(port, move |c| Loaded::Keys(p.clone(), c.kv_list(&p)));
             }
             (Tab::Setup, _) => {
                 if !self.address.is_empty() {
-                    self.spawn(cx, |c| Loaded::Cluster(c.cluster()));
+                    self.spawn(port, |c| Loaded::Cluster(c.cluster()));
                 }
             }
         }
     }
 
-    fn poll(&mut self, cx: &AppCx) {
+    fn poll(&mut self, port: &dyn MeshPort) {
         while let Ok(l) = self.rx.try_recv() {
             self.busy = self.busy.saturating_sub(1);
             match l {
@@ -226,7 +214,7 @@ impl MeshApp {
                 Loaded::Changed(what, r) => match r {
                     Ok(()) => {
                         self.mode = Mode::Browse;
-                        self.refresh(cx);
+                        self.refresh(port);
                         self.status = Some((what, true));
                     }
                     Err(e) => self.status = Some((e, false)),
@@ -260,22 +248,22 @@ impl MeshApp {
         }
     }
 
-    fn set_tab(&mut self, tab: Tab, cx: &AppCx) {
+    fn set_tab(&mut self, tab: Tab, port: &dyn MeshPort) {
         if self.tab != tab || !matches!(self.mode, Mode::Browse) {
             self.tab = tab;
             self.mode = Mode::Browse;
             self.sel = 0;
-            self.refresh(cx);
+            self.refresh(port);
         }
     }
 
-    fn open_selected(&mut self, cx: &AppCx) {
+    fn open_selected(&mut self, port: &dyn MeshPort) {
         match self.tab {
             Tab::Services if matches!(self.mode, Mode::Browse) => {
                 if let Some(s) = self.services.get(self.sel) {
                     self.mode = Mode::Instances(s.name.clone());
                     self.instances.clear();
-                    self.refresh(cx);
+                    self.refresh(port);
                 }
             }
             Tab::Kv => {
@@ -284,21 +272,21 @@ impl MeshApp {
                     self.prefix = k;
                     self.sel = 0;
                     self.keys.clear();
-                    self.refresh(cx);
+                    self.refresh(port);
                 } else {
-                    cx.audit.record(&cx.session.user, "mesh.kv.get", &k);
-                    self.spawn(cx, move |c| Loaded::Value(k.clone(), c.kv_get(&k)));
+                    port.audit("mesh.kv.get", &k);
+                    self.spawn(port, move |c| Loaded::Value(k.clone(), c.kv_get(&k)));
                 }
             }
             _ => {}
         }
     }
 
-    fn up_a_folder(&mut self, cx: &AppCx) {
+    fn up_a_folder(&mut self, port: &dyn MeshPort) {
         let trimmed = self.prefix.trim_end_matches('/');
         self.prefix = trimmed.rfind('/').map_or(String::new(), |i| trimmed[..=i].to_string());
         self.sel = 0;
-        self.refresh(cx);
+        self.refresh(port);
     }
 
     fn config_form(&self) -> Form {
@@ -309,10 +297,10 @@ impl MeshApp {
         Form::new("New key").text("Key", &self.prefix, "app/color").text("Value", "", "text")
     }
 
-    fn submit(&mut self, form: &Form, kind: FormKind, cx: &AppCx) {
+    fn submit(&mut self, form: &Form, kind: FormKind, port: &dyn MeshPort) {
         match kind {
             FormKind::Config => {
-                if !Self::can_configure(cx) {
+                if !port.can_configure() {
                     self.status = Some(("Only an administrator can change the connection.".into(), false));
                     self.mode = Mode::Browse;
                     return;
@@ -330,19 +318,19 @@ impl MeshApp {
                 };
                 let token = form.raw(1);
                 if !token.is_empty() {
-                    if let Err(e) = cx.vault().system_set(TOKEN_NAME, &token) {
+                    if let Err(e) = port.store_token(TOKEN_NAME, &token) {
                         self.status = Some((format!("The token was not saved: {e}"), false));
                         self.mode = Mode::Browse;
                         return;
                     }
                 }
-                match save_address(cx, &addr) {
+                match port.save_address(&addr) {
                     Ok(()) => {
-                        cx.audit.record(&cx.session.user, "mesh.config", &consul::host_of(&addr));
+                        port.audit("mesh.config", &consul::host_of(&addr));
                         self.address = addr;
                         self.cluster = None;
                         self.mode = Mode::Browse;
-                        self.refresh(cx);
+                        self.refresh(port);
                         self.status = Some(("Saved. Checking the connection…".into(), true));
                     }
                     Err(e) => {
@@ -356,9 +344,9 @@ impl MeshApp {
                     FormKind::EditKey(k) => (k.clone(), form.raw(0)),
                     _ => (form.value(0), form.raw(1)),
                 };
-                cx.audit.record(&cx.session.user, "mesh.kv.put", &key);
+                port.audit("mesh.kv.put", &key);
                 self.mode = Mode::Browse;
-                self.spawn(cx, move |c| Loaded::Changed(format!("Saved {key}"), c.kv_put(&key, &value)));
+                self.spawn(port, move |c| Loaded::Changed(format!("Saved {key}"), c.kv_put(&key, &value)));
             }
         }
     }
@@ -406,8 +394,9 @@ impl App for MeshApp {
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        let port = &CxPort(cx);
         if matches!(ev, Event::Tick) {
-            self.poll(cx);
+            self.poll(port);
             return Flow::Stay;
         }
         // a form takes everything
@@ -417,7 +406,7 @@ impl App for MeshApp {
                 FormEvent::Cancel => self.mode = Mode::Browse,
                 FormEvent::Submit => {
                     let f = std::mem::replace(form, Form::new(""));
-                    self.submit(&f, kind, cx);
+                    self.submit(&f, kind,  port);
                 }
                 _ => {}
             }
@@ -426,7 +415,7 @@ impl App for MeshApp {
         match ev {
             Event::Tab(i) => {
                 if let Some((t, _)) = TABS.get(*i) {
-                    self.set_tab(*t, cx);
+                    self.set_tab(*t,  port);
                 }
                 return Flow::Stay;
             }
@@ -445,9 +434,9 @@ impl App for MeshApp {
         if let Mode::ConfirmDelete(key) = &self.mode {
             let key = key.clone();
             if *k == Key::Char('y') {
-                cx.audit.record(&cx.session.user, "mesh.kv.delete", &key);
+                port.audit("mesh.kv.delete", &key);
                 self.mode = Mode::Browse;
-                self.spawn(cx, move |c| Loaded::Changed(format!("Deleted {key}"), c.kv_delete(&key)));
+                self.spawn(port, move |c| Loaded::Changed(format!("Deleted {key}"), c.kv_delete(&key)));
             } else {
                 self.mode = Mode::Value(key.clone(), String::new());
                 self.mode = Mode::Browse;
@@ -457,7 +446,7 @@ impl App for MeshApp {
         let n = self.rows().len();
         match k {
             Key::Esc | Key::Backspace => match &self.mode {
-                Mode::Browse if self.tab == Tab::Kv && !self.prefix.is_empty() && *k == Key::Backspace => self.up_a_folder(cx),
+                Mode::Browse if self.tab == Tab::Kv && !self.prefix.is_empty() && *k == Key::Backspace => self.up_a_folder(port),
                 Mode::Browse if *k == Key::Esc => return Flow::Back,
                 Mode::Browse => {}
                 _ => {
@@ -469,27 +458,27 @@ impl App for MeshApp {
             },
             Key::Left => {
                 let i = TABS.iter().position(|(t, _)| *t == self.tab).unwrap_or(0);
-                self.set_tab(TABS[(i + TABS.len() - 1) % TABS.len()].0, cx);
+                self.set_tab(TABS[(i + TABS.len() - 1) % TABS.len()].0,  port);
             }
             Key::Right => {
                 let i = TABS.iter().position(|(t, _)| *t == self.tab).unwrap_or(0);
-                self.set_tab(TABS[(i + 1) % TABS.len()].0, cx);
+                self.set_tab(TABS[(i + 1) % TABS.len()].0,  port);
             }
-            Key::Char(c @ '1'..='4') if matches!(self.mode, Mode::Browse) => self.set_tab(TABS[(*c as u8 - b'1') as usize].0, cx),
+            Key::Char(c @ '1'..='4') if matches!(self.mode, Mode::Browse) => self.set_tab(TABS[(*c as u8 - b'1') as usize].0,  port),
             Key::Up => self.sel = self.sel.saturating_sub(1),
             Key::Down => self.sel = (self.sel + 1).min(n.saturating_sub(1)),
-            Key::Enter => self.open_selected(cx),
-            Key::Char('r') => self.refresh(cx),
+            Key::Enter => self.open_selected(port),
+            Key::Char('r') => self.refresh(port),
             Key::Char('t') if self.tab == Tab::Setup => {
-                cx.audit.record(&cx.session.user, "mesh.test", &consul::host_of(&self.address));
+                port.audit("mesh.test", &consul::host_of(&self.address));
                 self.cluster = None;
-                self.refresh(cx);
+                self.refresh(port);
                 if self.address.is_empty() {
                     self.status = Some(("No Consul address yet.".into(), false));
                 }
             }
             Key::Char('c') if self.tab == Tab::Setup => {
-                if Self::can_configure(cx) {
+                if port.can_configure() {
                     self.mode = Mode::Form(self.config_form(), FormKind::Config);
                 } else {
                     self.status = Some(("Only an administrator can change the connection.".into(), false));
@@ -515,6 +504,7 @@ impl App for MeshApp {
     }
 
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+        let port = &CxPort(cx);
         let x = area.x + 24.0 * s;
         let w = area.w - 48.0 * s;
         let mut y = area.y + 10.0 * s;
@@ -555,7 +545,7 @@ impl App for MeshApp {
         }
         match (&self.tab, &self.mode) {
             (Tab::Setup, _) => {
-                let token = if cx.secrets().resolve(&format!("vault:{TOKEN_NAME}"), None).is_ok() { "stored in the system vault" } else { "none (fine when ACLs are off)" };
+                let token = if port.has_token(TOKEN_NAME) { "stored in the system vault" } else { "none (fine when ACLs are off)" };
                 for (title, sub) in [("Address", if self.address.is_empty() { "not set".to_string() } else { self.address.clone() }), ("ACL token", token.to_string())] {
                     crate::fx::glass(g, x, y, w, 62.0 * s, 12.0 * s, ACCENT);
                     g.text(x + 18.0 * s, y + 9.0 * s, 18.0 * s, TEXT, title, Face::Bold);
@@ -564,9 +554,9 @@ impl App for MeshApp {
                     y += 72.0 * s;
                 }
                 let (bx, by) = (x, y + 4.0 * s);
-                let b1 = if Self::can_configure(cx) { g.button(bx, by, 15.0 * s, "Change (c)", ACCENT, Event::Key(Key::Char('c'))) } else { 0.0 };
+                let b1 = if port.can_configure() { g.button(bx, by, 15.0 * s, "Change (c)", ACCENT, Event::Key(Key::Char('c'))) } else { 0.0 };
                 g.button(bx + b1 + 10.0 * s, by, 15.0 * s, "Test (t)", TEXT, Event::Key(Key::Char('t')));
-                if !Self::can_configure(cx) {
+                if !port.can_configure() {
                     g.text(x, by + 48.0 * s, 13.0 * s, DIM, "Only an administrator can change the connection.", Face::Sans);
                 }
             }
@@ -679,7 +669,7 @@ mod tests {
         let d = temp_dir(&format!("{tag}-svc"));
         cx.services = services_in(&d, fake.clone());
         if let Some(a) = address {
-            save_address(&cx, a).unwrap();
+            super::super::mesh_port::save_address(&cx, a).unwrap();
         }
         (cx, fake)
     }
@@ -733,7 +723,7 @@ mod tests {
         assert_eq!(load_address(&cx), "http://consul.local:8500");
         assert_eq!(a.cluster.as_ref().unwrap().datacenter, "dc1", "the connection was checked");
         assert!(fake.asked.lock().unwrap().iter().any(|r| r.ends_with("/v1/agent/self")));
-        assert!(std::fs::read_to_string(cx.audit.path()).unwrap().contains("mesh.config"));
+        assert!(std::fs::read_to_string(cx.audit.path_buf()).unwrap().contains("mesh.config"));
     }
 
     #[test]
@@ -807,7 +797,7 @@ mod tests {
         key(&mut a, &cx, Key::Char('y'));
         settle(&mut a, &cx);
         assert_eq!(fake.kv.lock().unwrap().len(), 1, "one key deleted");
-        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap();
         for what in ["mesh.kv.get", "mesh.kv.put", "mesh.kv.delete"] {
             assert!(log.contains(what), "{what} in {log}");
         }
@@ -856,5 +846,145 @@ mod tests {
             a.mode = Mode::Browse;
         }
         assert!(!a.help().is_empty());
+    }
+
+    // ---- the tile on a fake port: no shell context, no vault, no real network ------------------------------------------------------------------
+
+    struct FakePort {
+        admin: bool,
+        allowed: bool,
+        address: Mutex<String>,
+        tokens: Mutex<Vec<(String, String)>>,
+        token_fails: bool,
+        audit: Mutex<Vec<(String, String)>>,
+        upstream: Arc<Fake>,
+        clients: Mutex<usize>,
+    }
+
+    impl FakePort {
+        fn new(address: &str) -> FakePort {
+            FakePort { admin: true, allowed: true, address: Mutex::new(address.into()), tokens: Mutex::new(vec![]), token_fails: false, audit: Mutex::new(vec![]), upstream: Arc::new(Fake::default()), clients: Mutex::new(0) }
+        }
+        fn audit_text(&self) -> String {
+            self.audit.lock().unwrap().iter().map(|(a, s)| format!("{a} {s}")).collect::<Vec<_>>().join("\n")
+        }
+    }
+
+    impl MeshPort for FakePort {
+        fn load_address(&self) -> String {
+            self.address.lock().unwrap().clone()
+        }
+        fn save_address(&self, address: &str) -> Result<(), String> {
+            *self.address.lock().unwrap() = address.into();
+            Ok(())
+        }
+        fn can_configure(&self) -> bool {
+            self.admin
+        }
+        fn allows_host(&self, _host: &str) -> bool {
+            self.allowed
+        }
+        fn consul(&self, address: &str, _token_name: &str) -> Result<Consul, String> {
+            *self.clients.lock().unwrap() += 1;
+            Consul::new(address, None, self.upstream.clone())
+        }
+        fn store_token(&self, token_name: &str, token: &str) -> Result<(), String> {
+            if self.token_fails {
+                return Err("the vault is locked".into());
+            }
+            self.tokens.lock().unwrap().push((token_name.into(), token.into()));
+            Ok(())
+        }
+        fn has_token(&self, token_name: &str) -> bool {
+            self.tokens.lock().unwrap().iter().any(|(n, _)| n == token_name)
+        }
+        fn audit(&self, action: &str, subject: &str) {
+            self.audit.lock().unwrap().push((action.into(), subject.into()));
+        }
+    }
+
+    /// Wait for every answer the tile asked for, without a clock: block on its own channel, hand each answer back and let it read them.
+    fn await_all(a: &mut MeshApp, port: &dyn MeshPort) {
+        while a.busy > 0 {
+            let m = a.rx.recv().expect("an answer");
+            a.tx.send(m).unwrap();
+            a.poll(port);
+        }
+    }
+
+    #[test]
+    fn fake_port_with_no_address_the_tile_opens_on_setup_and_asks_no_client() {
+        let port = FakePort::new("");
+        let a = MeshApp::with_port(&port);
+        assert_eq!(a.tab(), Tab::Setup);
+        assert_eq!(*port.clients.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn fake_port_an_administrator_saves_the_address_and_token_through_the_port_and_it_is_audited() {
+        let port = FakePort::new("");
+        let mut a = MeshApp::with_port(&port);
+        let mut f = a.config_form();
+        f.set_value(0, "http://consul.local:8500");
+        f.set_value(1, "s3cret-token");
+        a.submit(&f, FormKind::Config, &port);
+        assert_eq!(port.load_address(), "http://consul.local:8500");
+        assert_eq!(port.tokens.lock().unwrap().as_slice(), [(TOKEN_NAME.to_string(), "s3cret-token".to_string())]);
+        assert_eq!(port.audit_text(), "mesh.config consul.local");
+        assert!(!port.audit_text().contains("s3cret"), "the token never reaches the audit log");
+        await_all(&mut a, &port);
+        assert!(port.upstream.asked.lock().unwrap().iter().any(|r| r.ends_with("/v1/agent/self")), "the connection is checked");
+        assert!(a.cluster.is_some());
+    }
+
+    #[test]
+    fn fake_port_an_ordinary_account_cannot_change_the_connection() {
+        let mut port = FakePort::new("");
+        port.admin = false;
+        let mut a = MeshApp::with_port(&port);
+        let mut f = a.config_form();
+        f.set_value(0, "http://consul.local:8500");
+        a.submit(&f, FormKind::Config, &port);
+        assert_eq!(port.load_address(), "");
+        assert_eq!(a.status_text(), Some("Only an administrator can change the connection."));
+        assert!(port.audit.lock().unwrap().is_empty() && port.tokens.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fake_port_a_token_the_vault_refuses_stops_the_save_and_says_why() {
+        let mut port = FakePort::new("");
+        port.token_fails = true;
+        let mut a = MeshApp::with_port(&port);
+        let mut f = a.config_form();
+        f.set_value(0, "http://consul.local:8500");
+        f.set_value(1, "tok");
+        a.submit(&f, FormKind::Config, &port);
+        assert_eq!(port.load_address(), "", "the address is not kept when the token was not");
+        assert!(a.status_text().unwrap().contains("The token was not saved: the vault is locked"));
+    }
+
+    #[test]
+    fn fake_port_a_host_the_account_may_not_reach_is_refused_before_any_client_is_made() {
+        let mut port = FakePort::new("http://consul.local:8500");
+        port.allowed = false;
+        let a = MeshApp::with_port(&port);
+        assert_eq!(a.status_text(), Some("Your account may not reach consul.local."));
+        assert_eq!(*port.clients.lock().unwrap(), 0);
+        assert_eq!(a.busy, 0);
+    }
+
+    #[test]
+    fn fake_port_a_key_put_is_audited_before_it_is_sent_and_lands_in_the_store() {
+        let port = FakePort::new("http://consul.local:8500");
+        let mut a = MeshApp::with_port(&port);
+        await_all(&mut a, &port);
+        let mut f = a.new_key_form();
+        f.set_value(0, "app/size");
+        f.set_value(1, "big");
+        a.submit(&f, FormKind::NewKey, &port);
+        assert_eq!(port.audit_text(), "mesh.kv.put app/size");
+        await_all(&mut a, &port);
+        assert_eq!(port.upstream.kv.lock().unwrap().get("app/size").map(String::as_str), Some("big"));
+        assert!(a.status_text().unwrap().contains("Saved app/size"));
     }
 }

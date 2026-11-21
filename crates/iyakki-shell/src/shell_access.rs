@@ -310,10 +310,21 @@ impl Shell {
         }
         let said = self.acc.reader.take_spoken();
         let Some(s) = self.acc.braille.as_mut() else { return };
-        let mut failed = said.is_some_and(|t| s.announce(&t).is_err());
+        let grade = if self.acc.cfg.braille_contracted { iyakki_uikit::braille::Grade::Two } else { iyakki_uikit::braille::Grade::One };
+        let regraded = s.set_grade(grade).is_err();
+        let mut failed = regraded || said.is_some_and(|t| s.announce(&t).is_err());
         let mut focus = Vec::new();
+        let mut carets = Vec::new();
         match s.poll() {
-            Ok(list) => focus.extend(list.into_iter().filter_map(|o| if let iyakki_uikit::braille::Outcome::Focus { forward } = o { Some(forward) } else { None })),
+            Ok(list) => {
+                for o in list {
+                    match o {
+                        iyakki_uikit::braille::Outcome::Focus { forward } => focus.push(forward),
+                        iyakki_uikit::braille::Outcome::Cursor(i) => carets.push((i, s.line().to_string())),
+                        _ => {}
+                    }
+                }
+            }
             Err(_) => failed = true,
         }
         if failed {
@@ -322,6 +333,27 @@ impl Shell {
         }
         for forward in focus {
             self.access_walk(!forward);
+        }
+        for (i, line) in carets {
+            self.access_route_caret(i, &line);
+        }
+    }
+
+    /// A routing key of the braille display over a text field: the caret goes to the character under the key. The field the walk stands on is
+    /// clicked (so it has the keyboard), then Home and as many Right keys as the character's place say, the way a person would. Only when the
+    /// line on the display is what that field says now (the display may show something else), never for a secret field.
+    fn access_route_caret(&mut self, spoken_index: usize, line: &str) {
+        let list = self.access_controls();
+        let Some(i) = self.acc.cursor.find(&list, &self.hits) else { return };
+        let node = list[i].node.clone();
+        if node.speak() != line {
+            return;
+        }
+        let Some(to) = iyakki_uikit::braille::field_caret(&node, spoken_index) else { return };
+        self.access_press();
+        self.handle(&Event::Key(Key::Home));
+        for _ in 0..to.min(4096) {
+            self.handle(&Event::Key(Key::Right));
         }
     }
 

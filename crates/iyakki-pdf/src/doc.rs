@@ -264,7 +264,19 @@ impl Document {
     /// The text of a page with its tables written as Markdown tables (see [`crate::table`]).
     pub fn page_text_tables(&self, i: usize) -> Result<String, PdfError> {
         let (lines, _) = self.page_lines(i)?;
-        Ok(crate::table::page_text_with_tables(&lines))
+        let rules = self.page_rules(i)?;
+        Ok(crate::ruled::page_text_with_rules(&lines, &rules))
+    }
+
+    /// The rules (horizontal and vertical lines) a page draws, for ruled tables (see [`crate::ruled`]).
+    pub fn page_rules(&self, i: usize) -> Result<Vec<crate::ruled::Rule>, PdfError> {
+        let p = self.page(i)?;
+        self.file.reset_budget();
+        let data = self.contents(p);
+        let mut it = Interp::new(&self.file);
+        let mut sink = crate::ruled::RuleSink::default();
+        it.run(&data, &p.res, GState::new(Matrix::ID), &mut sink, 0);
+        Ok(sink.rules)
     }
 
     /// All text, pages separated by form feeds, capped at `max_chars`.

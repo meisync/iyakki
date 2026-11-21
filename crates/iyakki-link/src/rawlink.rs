@@ -348,6 +348,37 @@ impl FilesApi {
             .unwrap_or_default())
     }
 
+    /// Where to send the microphone's sound and the certificate to trust for that link (`GET /api/v1/voice/offer`, F-VOICE-38): `(address,
+    /// the offer as the JSON text the session carries)`. The server answers only while its cloud audio stream switch is on.
+    pub fn voice_offer(&self) -> Result<(String, String), LinkError> {
+        let (s, b) = self.call("GET", "/api/v1/voice/offer", &[], b"", 1 << 16)?;
+        match s {
+            404 => return Err(LinkError::Other("this server does not take a microphone from a connector".into())),
+            200 => {}
+            _ => return Err(Self::fail(s, &b)),
+        }
+        let v: Value = serde_json::from_slice(&b).map_err(|_| LinkError::Other("the voice offer is not understood".into()))?;
+        match (v["addr"].as_str(), v["offer"].as_str()) {
+            (Some(a), Some(o)) if !a.is_empty() && a.len() < 256 && !a.chars().any(char::is_control) => Ok((a.to_string(), o.to_string())),
+            _ => Err(LinkError::Other("the voice offer is not understood".into())),
+        }
+    }
+
+    /// Tell the server where the answer's sound goes and which certificate to trust for it (`POST /api/v1/voice/return`, F-VOICE-61):
+    /// this computer's own listening address and the certificate offer as JSON text. Sent only after the person said yes to the card here.
+    pub fn voice_return(&self, addr: &str, offer_json: &str) -> Result<(), LinkError> {
+        if addr.is_empty() || addr.len() >= 256 || addr.chars().any(char::is_control) {
+            return Err(LinkError::Other("the return address is not usable".into()));
+        }
+        let body = serde_json::json!({ "addr": addr, "offer": offer_json }).to_string();
+        let (s, b) = self.call("POST", "/api/v1/voice/return", &[("Content-Type", "application/json")], body.as_bytes(), 1 << 16)?;
+        match s {
+            404 => Err(LinkError::Other("this server does not take a microphone from a connector".into())),
+            200 => Ok(()),
+            _ => Err(Self::fail(s, &b)),
+        }
+    }
+
     /// Work in another tenant the person belongs to (`POST /api/v1/tenant/switch`). The server checks membership (a tenant the person is
     /// not in is refused) and says what it stopped and locked; nothing is assumed here.
     pub fn switch_tenant(&self, id: &str) -> Result<Switched, LinkError> {

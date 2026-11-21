@@ -4,8 +4,11 @@
 //! file listing (so the file policy applies, names only), the watch only says WHEN to look. Where there is no inotify (another system, a
 //! kernel that refuses) [`DirWatch::new`] fails and the once-a-second look stays.
 
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(target_os = "linux")]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -16,6 +19,7 @@ pub struct DirWatch {
     #[cfg(target_os = "linux")]
     fd: std::os::fd::OwnedFd,
     /// Watch descriptor to folder.
+    #[cfg(target_os = "linux")]
     watched: Mutex<BTreeMap<i32, PathBuf>>,
 }
 

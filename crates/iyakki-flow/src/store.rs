@@ -71,7 +71,7 @@ pub struct FlowMeta {
     pub draft_rev: u32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FlowSummary {
     pub id: String,
     pub name: String,

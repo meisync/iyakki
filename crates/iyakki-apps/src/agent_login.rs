@@ -238,7 +238,7 @@ pub enum Out {
 
 /// This device's address on the local network (private first), for the phone relay.
 fn lan_ip() -> Option<String> {
-    let all = iyakki_devctl::ipv4_addresses();
+    let all = iyakki_core_api::device_types::devctl::ipv4_addresses();
     let ip = |s: &str| s.parse::<std::net::Ipv4Addr>().ok();
     all.iter().filter_map(|(_, a)| ip(a)).find(|a| a.is_private()).or_else(|| all.iter().filter_map(|(_, a)| ip(a)).find(|a| a.is_link_local())).map(|a| a.to_string())
 }
@@ -436,7 +436,7 @@ impl LoginModal {
                     self.after = Some(move_token_to_vault(cx, &home));
                 }
                 // the chip, the picker and the model list read the new state
-                cx.ext_status().refresh_one(cx.agents_cfg(), self.agent, None);
+                cx.ext_status().refresh_one(cx.agents_cfg(), self.agent);
             }
         }
         self.snap = Some(sn);
@@ -891,7 +891,7 @@ pub fn sign_out_in(cx: &AppCx, agent: &'static str, home: &std::path::Path) -> R
     let a = cfg.agent(agent).ok_or("unknown agent")?;
     let r = crate::agent().ext_login().logout(agent, &a.program(), home);
     cx.audit.record(&cx.session.user, "agent.logout", &format!("{agent} {}", if r.is_ok() { "ok" } else { "failed" }));
-    cx.ext_status().refresh_one(cfg, agent, None);
+    cx.ext_status().refresh_one(cfg, agent);
     r
 }
 
@@ -959,7 +959,7 @@ fn sign_out_copilot(cx: &AppCx, home: &std::path::Path) -> Result<String, String
     let file = login::scrub_copilot_file(home, true);
     let locked = matches!(vault, Err(iyakki_shared::vault::VaultError::Locked));
     cx.audit.record(user, "agent.logout", &format!("{} {}", extagent::COPILOT, if locked || file.is_err() { "failed" } else { "ok" }));
-    cx.ext_status().refresh_one(cx.agents_cfg(), extagent::COPILOT, None);
+    cx.ext_status().refresh_one(cx.agents_cfg(), extagent::COPILOT);
     if locked {
         return Err("Your vault is locked, so the token in it could not be removed: unlock it (Settings → Vault) and sign out again.".into());
     }

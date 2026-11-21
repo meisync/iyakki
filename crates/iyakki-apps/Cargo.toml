@@ -40,29 +40,29 @@ iyakki-tile-api = { path = "../iyakki-tile-api" }
 iyakki-tile-abi = { path = "../iyakki-tile-abi" }
 iyakki-tile-host = { path = "../iyakki-tile-host" }
 iyakki-tile-usage = { path = "../iyakki-tile-usage" }
+iyakki-tile-board = { path = "../iyakki-tile-board" }
 iyakki-tile-radio = { path = "../iyakki-tile-radio" }
 iyakki-tile-calendar = { path = "../iyakki-tile-calendar" }
 iyakki-tile-remotefiles = { path = "../iyakki-tile-remotefiles" }
 iyakki-tile-cameras = { path = "../iyakki-tile-cameras" }
 iyakki-tile-pdf = { path = "../iyakki-tile-pdf" }
+iyakki-tile-firewall = { path = "../iyakki-tile-firewall" }
+iyakki-site-apps = { path = "../iyakki-site-apps" }
+iyakki-tile-hostfiles = { path = "../iyakki-tile-hostfiles" }
+iyakki-devtools-engine = { path = "../iyakki-devtools-engine" }
 iyakki-ui-sdk = { path = "../iyakki-ui-sdk" }
 iyakki-app-sample = { path = "../iyakki-app-sample" }
+iyakki-app-edit = { path = "../iyakki-app-edit" }
+iyakki-app-terminal = { path = "../iyakki-app-terminal" }
 iyakki-app-markdown = { path = "../iyakki-app-markdown" }
 iyakki-vpn = { path = "../iyakki-vpn" }
 iyakki-sec.workspace = true
 iyakki-accounts = { path = "../iyakki-accounts" }
-iyakki-storage.workspace = true
-iyakki-zram.workspace = true
 iyakki-fw.workspace = true
-iyakki-usb = { path = "../iyakki-usb" }
 iyakki-edit.workspace = true
-iyakki-hwinfo.workspace = true
-iyakki-drivers.workspace = true
-iyakki-devctl.workspace = true
 iyakki-web.workspace = true
 iyakki-pdf.workspace = true
 iyakki-js.workspace = true
-iyakki-netscan.workspace = true
 iyakki-webview.workspace = true
 iyakki-rfb.workspace = true
 iyakki-ledger.workspace = true

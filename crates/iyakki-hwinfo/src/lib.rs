@@ -4,6 +4,8 @@
 //! It exists for the boot hardware check: "did the keyboard, mouse and touch screen show up? what
 //! resolution and monitor did we get? is it UEFI, is Secure Boot on?".
 
+pub mod asahi;
+
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -256,7 +258,13 @@ pub fn collect(r: &Roots) -> Report {
     let mut sys = Section { title: "System".into(), lines: vec![] };
     let dmi = |f: &str| read(&r.sys.join("class/dmi/id").join(f));
     let machine = [dmi("sys_vendor"), dmi("product_name"), dmi("product_version")].into_iter().flatten().collect::<Vec<_>>().join(" ");
-    sys.lines.push(format!("machine: {}", if machine.is_empty() { "unknown (no DMI: virtual machine or ARM board)".to_string() } else { machine }));
+    // an Apple Silicon Mac has no DMI; Asahi Linux names it in the device tree (F-APPLE-03)
+    let apple = std::fs::read(r.proc.join("device-tree/compatible")).ok().and_then(|b| asahi::from_compatible(&b));
+    sys.lines.push(format!("machine: {}", match (&apple, machine.is_empty()) {
+        (Some(a), true) => a.line(),
+        (_, false) => machine,
+        (None, true) => "unknown (no DMI: virtual machine or ARM board)".to_string(),
+    }));
     if let Some(b) = dmi("bios_version") {
         sys.lines.push(format!("firmware version: {b}{}", dmi("bios_date").map(|d| format!(" ({d})")).unwrap_or_default()));
     }
@@ -390,6 +398,22 @@ mod tests {
     use super::*;
 
     const DEVICES: &str = "I: Bus=0011 Vendor=0001 Product=0001 Version=ab41\nN: Name=\"AT Translated Set 2 keyboard\"\nP: Phys=isa0060/serio0/input0\nH: Handlers=sysrq kbd event3 leds\nB: PROP=0\nB: EV=120013\nB: KEY=402000000 3803078f800d001 feffffdfffefffff fffffffffffffffe\n\nI: Bus=0003 Vendor=046d Product=c077 Version=0111\nN: Name=\"Logitech USB Optical Mouse\"\nH: Handlers=mouse0 event4\nB: PROP=0\nB: EV=17\nB: KEY=70000 0 0 0 0\nB: REL=903\n\nI: Bus=0003 Vendor=222a Product=0001 Version=0110\nN: Name=\"ILITEK ILITEK-TP\"\nH: Handlers=mouse1 event5\nB: PROP=2\nB: EV=b\nB: KEY=400 0 0 0 0 0\nB: ABS=260800000000003\n\nI: Bus=0011 Vendor=0002 Product=0007 Version=01b1\nN: Name=\"SynPS/2 Synaptics TouchPad\"\nH: Handlers=mouse2 event6\nB: PROP=5\nB: EV=b\nB: KEY=e520 10000 0 0 0 0\nB: ABS=3\n\nI: Bus=0019 Vendor=0000 Product=0001 Version=0000\nN: Name=\"Lid Switch\"\nH: Handlers=event0\nB: EV=21\nB: SW=1\n";
+
+    #[test]
+    fn an_apple_silicon_mac_without_dmi_is_named_from_its_device_tree() {
+        let d = std::env::temp_dir().join(format!("iyakki-hwinfo-asahi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("proc/device-tree")).unwrap();
+        std::fs::create_dir_all(d.join("sys")).unwrap();
+        std::fs::write(d.join("proc/device-tree/compatible"), b"apple,j274\0apple,t8103\0apple,arm-platform\0").unwrap();
+        let rep = collect(&Roots { sys: d.join("sys"), proc: d.join("proc") });
+        let text = rep.to_text();
+        assert!(text.contains("machine: Mac mini (M1, 2020); chip M1 (t8103); Asahi Linux supports this chip family"), "{text}");
+        // a machine with DMI keeps the DMI name, and one with neither keeps the old words
+        std::fs::remove_file(d.join("proc/device-tree/compatible")).unwrap();
+        assert!(collect(&Roots { sys: d.join("sys"), proc: d.join("proc") }).to_text().contains("machine: unknown (no DMI"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn input_devices_are_classified_from_their_capability_bitmaps() {

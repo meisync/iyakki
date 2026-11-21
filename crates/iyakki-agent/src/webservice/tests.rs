@@ -34,9 +34,9 @@ impl ChatBackend for Script {
         Err("plain chat is not scripted".into())
     }
     fn complete_tools(&self, m: &[Message], specs: &[ToolSpec]) -> Result<ModelTurn, String> {
-        // what each run was offered: the words of its first user message and the names of the tools
+        // what each run was offered: its first user message (whole, the tests look inside prompts) and the names of the tools
         if let Some(first) = m.iter().find(|x| matches!(x.role, crate::chat::Role::User)) {
-            SEEN_TOOLS.lock().unwrap().push((first.content.chars().take(80).collect(), specs.iter().map(|s| s.name.clone()).collect()));
+            SEEN_TOOLS.lock().unwrap().push((first.content.chars().take(200_000).collect(), specs.iter().map(|s| s.name.clone()).collect()));
         }
         let t = self.turns.lock().unwrap().pop_front().unwrap_or(ModelTurn { text: "done".into(), calls: vec![] });
         // two turns for the real-browser fixture: a failing model and a slow one
@@ -67,6 +67,9 @@ static FAKE_FILES: Mutex<std::collections::BTreeMap<String, String>> = Mutex::ne
 static FAKE_ACCESS: Mutex<(bool, bool, bool, bool)> = Mutex::new((false, false, true, true));
 static FAKE_SWITCHES: Mutex<(bool, bool, bool, bool)> = Mutex::new((true, false, true, true));
 
+/// The calls the settings forms made: (tool, arguments).
+static FAKE_FORMS: Mutex<Vec<(String, Value)>> = Mutex::new(Vec::new()); // flaky-ok: an append-only log behind a lock; each test looks only for its own unique entry
+
 struct FakeTools {
     executed: Arc<Mutex<Vec<String>>>,
 }
@@ -76,7 +79,7 @@ impl Tools for FakeTools {
         let t = |n: &str, risk| ToolDef { spec: ToolSpec { name: n.into(), description: n.into(), schema: json!({"type": "object"}) }, risk, untrusted: true };
         // `web_fetch` asks here so approvals can be tested with a tool that is in the profile; `run_command` is not in any profile
         // `read_file` and `write_file` are what a person's own tool set has and no service profile lists: only the tiles' `files` domain reaches them
-        vec![t("now", Risk::Safe), t("web_fetch", Risk::Ask), t("run_command", Risk::Ask), t("radio_play", Risk::Safe), t("read_file", Risk::Safe), t("write_file", Risk::Ask), t("notification_filters", Risk::Safe), t("notification_filter_set", Risk::Ask), t("screensaver_status", Risk::Safe), t("screensaver_set", Risk::Ask), t("system_sounds_status", Risk::Safe), t("system_sounds_set", Risk::Ask), t("battery_settings_status", Risk::Safe), t("battery_settings_set", Risk::Ask), t("accessibility_status", Risk::Safe), t("accessibility_set", Risk::Ask), t("display_dock", Risk::Safe), t("display_dock_set", Risk::Ask), t("display_wallpaper", Risk::Safe), t("display_wallpaper_set", Risk::Ask)]
+        vec![t("now", Risk::Safe), t("web_fetch", Risk::Ask), t("run_command", Risk::Ask), t("radio_play", Risk::Safe), t("read_file", Risk::Safe), t("write_file", Risk::Ask), t("notification_filters", Risk::Safe), t("notification_filter_set", Risk::Ask), t("screensaver_status", Risk::Safe), t("screensaver_set", Risk::Ask), t("system_sounds_status", Risk::Safe), t("system_sounds_set", Risk::Ask), t("battery_settings_status", Risk::Safe), t("battery_settings_set", Risk::Ask), t("accessibility_status", Risk::Safe), t("accessibility_set", Risk::Ask), t("display_dock", Risk::Safe), t("display_dock_set", Risk::Ask), t("display_wallpaper", Risk::Safe), t("display_wallpaper_set", Risk::Ask), t("displays_status", Risk::Safe), t("wifi_status", Risk::Safe), t("wifi_scan", Risk::Safe), t("wifi_join", Risk::Ask), t("model_options_set", Risk::Ask)]
     }
     fn call(&self, name: &str, a: &Value) -> Result<String, String> {
         self.executed.lock().unwrap().push(name.into());
@@ -136,10 +139,20 @@ impl Tools for FakeTools {
             }
             "display_dock" => Ok("{\"pinned\":[\"files\"]}".into()),
             "display_wallpaper" => Ok("Chosen: dusk".into()),
+            "displays_status" => Ok("Screen 1: 2560x1440 at 100%\n\nScreen 2: off\x07\n".into()),
+            "wifi_status" => Ok("Connected to home-net (strong)".into()),
+            "wifi_scan" => Ok("home-net  WPA2  strong\ncafe-guest  open  weak\n".into()),
+            "wifi_join" | "model_options_set" => {
+                FAKE_FORMS.lock().unwrap().push((name.to_string(), a.clone()));
+                Ok("done".into())
+            }
             _ => Ok(format!("{name} ok")),
         }
     }
     fn describe(&self, name: &str, a: &Value) -> String {
+        if name == "wifi_join" || name == "model_options_set" {
+            return format!("{name} {a}");
+        }
         if name == "screensaver_set" || name == "notification_filter_set" || name == "system_sounds_set" || name == "battery_settings_set" || name == "accessibility_set" {
             return format!("{name} {a}");
         }
@@ -183,6 +196,7 @@ struct FakeExtras {
     ready: AtomicBool,
     /// (switch, port) of "Serve this desktop to browsers"
     web: Mutex<(bool, u16)>,
+    voice_ret: Mutex<Vec<(String, String, String)>>,
     /// (person, from, to) of every tenant switch the service reported
     switched: Arc<Mutex<Vec<(String, String, String)>>>,
     /// developer key (hex) -> (computer, account); computer -> its api scopes
@@ -194,9 +208,14 @@ struct FakeExtras {
     home: Mutex<HashMap<String, Vec<u8>>>,
     /// (person, tile, badge, line) of every `dock.status` a tile set
     tile_status: Mutex<Vec<(String, String, Option<u32>, String)>>,
+    /// the terminal a tile's `terminal.*` calls reach (F-SDK-34)
+    terminal: Arc<iyakki_core_fake::FakeTerminal>,
 }
 
 impl Extras for FakeExtras {
+    fn terminal(&self) -> Arc<dyn iyakki_core_api::Terminal> {
+        self.terminal.clone()
+    }
     fn set_tile_status(&self, p: &Principal, tile: &str, badge: Option<u32>, line: &str) {
         self.tile_status.lock().unwrap().push((p.user.clone(), tile.into(), badge, line.into()));
     }
@@ -307,6 +326,16 @@ impl Extras for FakeExtras {
         }
         Ok(json!({"id": "r1", "flow": "f1", "status": "succeeded", "nodes": []}))
     }
+    fn voice_offer(&self, p: &Principal) -> ApiResult<(String, String)> {
+        Ok(("cloud.example:7443".into(), format!("{{\"for\":\"{}\"}}", p.user)))
+    }
+    fn voice_return(&self, p: &Principal, addr: &str, offer: &str) -> ApiResult<()> {
+        if addr.parse::<std::net::SocketAddr>().is_err() {
+            return Err(ApiError::InvalidInput("the device's audio address is not host:port".into()));
+        }
+        self.voice_ret.lock().unwrap().push((p.user.clone(), addr.to_string(), offer.to_string()));
+        Ok(())
+    }
     fn web_access(&self, _: &Principal) -> ApiResult<Value> {
         let (on, port) = *self.web.lock().unwrap();
         Ok(json!({"on": on, "port": port, "listening": on, "boot": false, "error": "", "status": if on { format!("on, port {port}") } else { "off: nothing listens".to_string() }, "urls": if on { vec![format!("https://x.local:{port}")] } else { vec![] }, "fingerprint": "AA:BB", "exposes": "Anyone on this network who knows a sign-in can use this desktop.", "has_admin_password": true}))
@@ -360,7 +389,7 @@ fn harness(profile: &str, tweak: impl FnOnce(&mut ServiceConfig)) -> H {
     let executed = Arc::new(Mutex::new(vec![]));
     let script = Arc::new(Script { turns: Mutex::new(VecDeque::new()) });
     let switched = Arc::new(Mutex::new(Vec::new()));
-    let extras = Arc::new(FakeExtras { ready: AtomicBool::new(true), web: Mutex::new((false, 8443)), switched: switched.clone(), progs: Default::default(), pscopes: Default::default(), paused: Default::default(), home: Default::default(), tile_status: Default::default() });
+    let extras = Arc::new(FakeExtras { ready: AtomicBool::new(true), web: Mutex::new((false, 8443)), switched: switched.clone(), progs: Default::default(), pscopes: Default::default(), paused: Default::default(), home: Default::default(), tile_status: Default::default(), voice_ret: Default::default(), terminal: Default::default() });
     let deps = Arc::new(Deps {
         auth: accounts.clone(),
         audit: accounts.clone(),
@@ -457,9 +486,10 @@ fn the_route_table_is_consistent() {
         }
         assert_eq!(r.method == "POST" && !r.request.is_empty(), r.method == "POST" && r.request != "", "{}", r.id);
     }
-    // only these are reachable without signing in
+    // only these are reachable without signing in (the last three are a tile's static page, its script and its style sheet: the same bytes
+    // for everyone, no data in them, served only by the profiles that have tiles; F-WEBSVC-12)
     let public: Vec<&str> = ROUTES.iter().filter(|r| r.access == Access::Public).map(|r| r.id).collect();
-    assert_eq!(public, ["healthz", "readyz", "version", "login"]);
+    assert_eq!(public, ["healthz", "readyz", "version", "login", "tile_page", "tile_page_js", "tile_page_css", "tile_bundle_file", "tile_wrapper", "tile_wrapper_js", "tile_bridge_js", "tile_bridge"]);
     // the cloud profile is the agent-api profile plus more
     for r in ROUTES.iter().filter(|r| r.in_profile(Profile::AgentApi)) {
         assert!(r.in_profile(Profile::Cloud), "{}", r.id);
@@ -1002,8 +1032,9 @@ fn the_default_tool_set_is_exactly_this_list() {
     // the reviewed list, by name (docs/development/MINIMAL-WEBSERVICE.md, section 9); a change here is a decision
     assert_eq!(Profile::AgentApi.tools(), ["now", "web_search", "web_fetch", "web_research", "web_feed", "web_links", "weather", "stock_quote", "search_documents", "data_open", "data_describe", "data_query"]);
     let extra: Vec<&&str> = Profile::Cloud.tools().iter().filter(|t| !Profile::AgentApi.tools().contains(t)).collect();
-    // tiles_list is free; deploy_team_host asks on a card every time (F-WEB-04, F-TCFG-14)
-    assert_eq!(extra, [&"deploy_team_host", &"tiles_list", &"flow_list", &"flow_get", &"flow_runs", &"flow_run_status"]);
+    // tiles_list is free; deploy_team_host and k8s_apply_yaml ask on a card every time (F-WEB-04, F-TCFG-14, F-TCFG-10: D-TCFG-10; a cluster
+    // bound to a team environment also goes through that team's deploy rules)
+    assert_eq!(extra, [&"deploy_team_host", &"k8s_apply_yaml", &"tiles_list", &"flow_list", &"flow_get", &"flow_runs", &"flow_run_status", &"webhook_list", &"webhook_create", &"webhook_regenerate", &"webhook_enable", &"webhook_disable", &"webhook_public"]);
     assert!(tools::allowed_set(Profile::AgentApi, &[], &["now".into(), "web_search".into()]).unwrap().len() == 2, "a request may narrow the list");
 }
 
@@ -1081,7 +1112,7 @@ fn deps_for(dir: &std::path::Path) -> Arc<Deps> {
         store: Arc::new(RunStore::new(&dir.join("runs"))),
         chat: Arc::new(Script { turns: Mutex::new(VecDeque::new()) }),
         tools: Arc::new(FakeSource { executed: Arc::new(Mutex::new(vec![])) }),
-        extras: Arc::new(FakeExtras { ready: AtomicBool::new(true), web: Mutex::new((false, 8443)), switched: Default::default(), progs: Default::default(), pscopes: Default::default(), paused: Default::default(), home: Default::default(), tile_status: Default::default() }),
+        extras: Arc::new(FakeExtras { ready: AtomicBool::new(true), web: Mutex::new((false, 8443)), switched: Default::default(), progs: Default::default(), pscopes: Default::default(), paused: Default::default(), home: Default::default(), tile_status: Default::default(), voice_ret: Default::default(), terminal: Default::default() }),
         system_prompt: "t".into(),
     })
 }
@@ -1228,7 +1259,7 @@ fn readiness_follows_the_services_and_shutdown_is_graceful() {
     let dir = crate::testdir::unique("webservice", "ready");
     std::fs::create_dir_all(&dir).unwrap();
     let a = accounts();
-    let extras = Arc::new(FakeExtras { ready: AtomicBool::new(false), web: Mutex::new((false, 8443)), switched: Default::default(), progs: Default::default(), pscopes: Default::default(), paused: Default::default(), home: Default::default(), tile_status: Default::default() });
+    let extras = Arc::new(FakeExtras { ready: AtomicBool::new(false), web: Mutex::new((false, 8443)), switched: Default::default(), progs: Default::default(), pscopes: Default::default(), paused: Default::default(), home: Default::default(), tile_status: Default::default(), voice_ret: Default::default(), terminal: Default::default() });
     let deps = Arc::new(Deps { auth: a.clone(), audit: a, store: Arc::new(RunStore::new(&dir)), chat: Arc::new(Script { turns: Mutex::new(VecDeque::new()) }), tools: Arc::new(FakeSource { executed: Arc::new(Mutex::new(vec![])) }), extras: extras.clone(), system_prompt: "t".into() });
     let chk = ServiceConfig { listen: "127.0.0.1:0".into(), data_dir: dir.to_string_lossy().into(), ..ServiceConfig::default() }.check().unwrap();
     let svc = server::start(&chk, deps, tls::self_signed(&dir.join("tls"), &[]).unwrap()).unwrap();
@@ -1687,6 +1718,49 @@ fn tenantcfg_api_refuses_a_disabled_shared_agent_at_run_start() {
     assert_eq!(h.call("PUT", "/api/v1/tenant/config/agent.claude", Some(&ann), Some(json!({"enabled": false, "values": {}}))).0, 200);
     assert_eq!(run(&bob, "claude").0, 403);
     assert!(h.accounts.lines().iter().any(|l| l.contains("tenant.agent.refused")));
+}
+
+#[test]
+fn a_tiles_page_is_public_static_framed_by_nobody_and_only_in_the_profiles_that_have_tiles() {
+    let h = harness("tile-host", |_| {});
+    let hdr = |r: &Response, k: &str| r.headers.iter().find(|(h, _)| h.eq_ignore_ascii_case(k)).map(|(_, v)| v.clone()).unwrap_or_default();
+    // no token: the page, its script and its style sheet are served, with the strict policy
+    for (path, ctype, needle) in [("/tiles/counter/app", "text/html", "/tiles/app.js"), ("/tiles/app.js", "text/javascript", "window.iyakki"), ("/tiles/app.css", "text/css", "canvas")] {
+        let (s, _, r) = h.call("GET", path, None, None);
+        assert_eq!(s, 200, "{path}");
+        assert!(hdr(&r, "content-type").starts_with(ctype), "{path}: {:?}", r.headers);
+        assert!(String::from_utf8_lossy(&r.body).contains(needle), "{path}");
+        let csp = hdr(&r, "content-security-policy");
+        assert!(csp.contains("script-src 'self'") && csp.contains("frame-ancestors 'none'") && !csp.contains("unsafe-inline"), "{path}: {csp}");
+        assert_eq!(hdr(&r, "x-content-type-options"), "nosniff");
+    }
+    // a name that is not a plain tile id finds nothing, and another method is refused
+    assert_eq!(h.call("GET", "/tiles/a..b/app", None, None).0, 404);
+    assert_eq!(h.call("GET", "/tiles/.hidden/app", None, None).0, 404);
+    assert_eq!(h.call("POST", "/tiles/counter/app", None, None).0, 405);
+    // the flows runner has no tiles: nothing is served there
+    let f = harness("flows-runner", |_| {});
+    assert_eq!(f.call("GET", "/tiles/counter/app", None, None).0, 404);
+    assert_eq!(f.call("GET", "/tiles/app.js", None, None).0, 404);
+}
+
+#[test]
+fn tenantcfg_api_gates_a_named_other_agent_at_run_start_by_its_own_model_list_and_switch() {
+    let (h, _root, ann, bob) = cfg_cloud();
+    let run = |tok: &str, provider: &str, model: &str| h.call("POST", "/api/v1/chat/runs", Some(tok), Some(json!({"prompt": "hi", "provider": provider, "model": model})));
+    // no such entry: this gate has nothing to say about the name
+    assert_ne!(run(&bob, "aider", "m1").1["error"]["message"], "this model is not allowed for the agent");
+    let put = |on: bool| h.call("PUT", "/api/v1/tenant/config/agent.other/aider", Some(&ann), Some(json!({"enabled": on, "values": {"allowed_models": ["m1"]}, "ack_warnings": crate::tenantconfig::safety::rules_table()}))).0;
+    assert_eq!(put(true), 200);
+    // the entry names the agent: a model that is not on its list is refused, the one that is passes the gate
+    let (s, v, _) = run(&bob, "aider", "m2");
+    assert_eq!(s, 403, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("not allowed"), "{v}");
+    assert_ne!(run(&bob, "aider", "m1").0, 403);
+    // switched off: refused
+    assert_eq!(put(false), 200);
+    assert_eq!(run(&bob, "aider", "m1").0, 403);
+    assert!(h.accounts.lines().iter().any(|l| l.contains("tenant.agent.refused") && l.contains("agent.other")));
 }
 
 #[test]
@@ -2184,7 +2258,8 @@ fn the_data_api_profile_offers_sign_in_and_the_read_only_data_tools_and_nothing_
 fn the_tile_host_profile_offers_sign_in_and_the_tiles_and_nothing_else() {
     let h = harness("tile-host", |_| {});
     let ann = h.ann();
-    assert!(Profile::TileHost.tools().is_empty() && Profile::parse("tile-host") == Ok(Profile::TileHost));
+    assert!(Profile::TileHost.tools() == ["tile_bundle_list", "tile_bundle_install", "tile_bundle_remove"], "the only tools are the three that manage web-bundle tiles, given to administrators");
+    assert!(Profile::parse("tile-host") == Ok(Profile::TileHost));
     for p in ["/healthz", "/readyz", "/api/v1/version"] {
         assert_eq!(h.call("GET", p, None, None).0, 200, "{p}");
     }
@@ -2406,4 +2481,40 @@ fn a_dropped_or_unreachable_stream_is_opened_again_a_few_times_then_said_plainly
     let mut n = 0;
     let _ = api.follow_reconnecting(Duration::from_secs(5), 1, 3, Duration::from_millis(10), &mut |_| true, &mut |_, _| n += 1);
     assert_eq!(n, 0, "an unknown computer is refused, not retried");
+}
+
+#[test]
+fn the_voice_offer_route_needs_a_sign_in_exists_only_in_the_cloud_profile_and_is_audited() {
+    let h = harness("cloud", |_| {});
+    assert_eq!(h.call("GET", "/api/v1/voice/offer", None, None).0, 401);
+    let root = h.root();
+    let (s, v, _) = h.call("GET", "/api/v1/voice/offer", Some(&root), None);
+    assert_eq!((s, v["addr"].as_str()), (200, Some("cloud.example:7443")), "{v}");
+    assert!(v["offer"].as_str().unwrap().contains("root"), "the call carries the signed-in person to the dependency");
+    let plain = harness("agent-api", |_| {});
+    assert_eq!(plain.call("GET", "/api/v1/voice/offer", Some(&plain.root()), None).0, 404, "a machine that is not a pod has no such route");
+}
+
+#[test]
+fn the_voice_return_route_hands_the_devices_offer_to_the_dependency_and_keeps_it_out_of_the_audit_line() {
+    let h = harness("cloud", |_| {});
+    let body = json!({"addr": "203.0.113.9:7444", "offer": "{\"machine\":\"laptop\",\"cert\":\"SECRET-CERT-TEXT\"}"});
+    assert_eq!(h.call("POST", "/api/v1/voice/return", None, Some(body.clone())).0, 401, "a sign-in is needed");
+    let root = h.root();
+    let (s, v, _) = h.call("POST", "/api/v1/voice/return", Some(&root), Some(body));
+    assert_eq!((s, v["ok"].as_bool()), (200, Some(true)), "{v}");
+    let kept = h.extras.voice_ret.lock().unwrap().clone();
+    assert_eq!(kept.len(), 1);
+    assert_eq!((kept[0].0.as_str(), kept[0].1.as_str()), ("root", "203.0.113.9:7444"), "the call carries the signed-in person");
+    assert!(kept[0].2.contains("SECRET-CERT-TEXT"));
+    let log = h.accounts.lines().join("\n");
+    assert!(log.contains("api.voice_return") && !log.contains("SECRET-CERT-TEXT") && !log.contains("203.0.113.9"), "the audit line names the call, never the address or the certificate: {log}");
+    // the dependency's refusal and a malformed or oversized body are answered in words, nothing is kept
+    let (s, _, _) = h.call("POST", "/api/v1/voice/return", Some(&root), Some(json!({"addr": "no-port", "offer": "x"})));
+    assert_eq!(s, 400);
+    assert_eq!(h.call("POST", "/api/v1/voice/return", Some(&root), Some(json!({"addr": "1.2.3.4:5"}))).0, 400);
+    assert_eq!(h.call("POST", "/api/v1/voice/return", Some(&root), Some(json!({"addr": "1.2.3.4:5", "offer": "x".repeat(20 << 10)}))).0, 400);
+    assert_eq!(h.extras.voice_ret.lock().unwrap().len(), 1);
+    let plain = harness("agent-api", |_| {});
+    assert_eq!(plain.call("POST", "/api/v1/voice/return", Some(&plain.root()), Some(json!({"addr": "1.2.3.4:5", "offer": "x"}))).0, 404, "a machine that is not a pod has no such route");
 }

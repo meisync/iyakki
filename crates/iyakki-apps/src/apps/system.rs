@@ -1446,7 +1446,7 @@ mod tests {
 
     #[test]
     fn the_memory_card_shows_zram_ratio_and_pressure() {
-        use iyakki_zram::{MemStats, ZramStats};
+        use iyakki_core_api::device_types::zram::{MemStats, ZramStats};
         let mut m = MemStats::default();
         assert_eq!(memory_extra_line(&m), "no zram");
         m.zram = Some(ZramStats { device: "zram0".into(), algorithm: "zstd".into(), disksize: 4 << 30, orig: 3 << 30, compressed: 1 << 30, mem_used: 1 << 30, ..Default::default() });

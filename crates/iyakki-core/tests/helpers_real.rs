@@ -90,7 +90,8 @@ fn the_fan_service_runs_as_a_supervised_child_audits_what_it_does_and_gives_the_
     // the person turns it on (the same file the chat tool writes)
     iyakki_drivers::fanservice::save(&data, &iyakki_drivers::fanservice::Setting { enabled: true, ..Default::default() }).unwrap();
     assert!(wait(|| read(&manual) == "1"), "taken over");
-    assert!(read(&output).parse::<u32>().unwrap() > 1200);
+    // the child writes the speed a moment after the manual flag: wait for it (a single read raced under load)
+    assert!(wait(|| read(&output).parse::<u32>().is_ok_and(|v| v > 1200)), "the fan speed was raised: {:?}", read(&output));
     assert!(wait(|| log.lock().unwrap().iter().any(|l| l.starts_with("fan.take-over|"))), "the child's AUDIT line reached the core's audit: {:?}", log.lock().unwrap());
     // the child writes its status a moment after taking the fans over: wait for it
     assert!(wait(|| iyakki_drivers::fanservice::status(&data).contains("controlled by IYAKKI")), "status: {}", iyakki_drivers::fanservice::status(&data));

@@ -51,7 +51,7 @@ fn status_and_plan_are_free_and_everything_else_asks_every_time() {
     let risk = |n: &str| defs.iter().find(|d| d.spec.name == n).map(|d| d.risk);
     assert_eq!(risk(STATUS), Some(Risk::Safe));
     assert_eq!(risk(PLAN), Some(Risk::Safe));
-    for n in [CREATE, LOCK, UNLOCK, RECOVERY, ADMIN_SLOT, MOVE] {
+    for n in [CREATE, LOCK, UNLOCK, RECOVERY, ADMIN_SLOT, MOVE, EXPORT] {
         assert_eq!(risk(n), Some(Risk::Ask), "{n}");
         assert!(t.grant_blocker(n, &json!({"enable": true})).is_some(), "{n}: no session grant");
         assert!(!t.approved_always(n), "{n}");
@@ -83,7 +83,9 @@ fn the_form_tools_leave_a_one_word_request_and_say_where_to_type() {
     t.call(MOVE, &json!({})).unwrap();
     t.call(ADMIN_SLOT, &json!({"enable": true})).unwrap();
     t.call(ADMIN_SLOT, &json!({"enable": false})).unwrap();
-    assert_eq!(*f.requests.lock().unwrap(), vec![Request::Create, Request::Unlock, Request::ChangeRecovery, Request::Migrate, Request::AdminSlotOn, Request::AdminSlotOff]);
+    assert!(t.call(EXPORT, &json!({})).unwrap().contains("standard LUKS2"));
+    assert_eq!(*f.requests.lock().unwrap(), vec![Request::Create, Request::Unlock, Request::ChangeRecovery, Request::Migrate, Request::AdminSlotOn, Request::AdminSlotOff, Request::Export]);
+    assert!(t.preview(EXPORT, &json!({})).unwrap().contains("LUKS2"));
     assert!(f.audits.lock().unwrap().iter().all(|a| a.contains("form opened")), "audit lines carry no secret");
     assert!(t.call(ADMIN_SLOT, &json!({})).is_err());
     assert!(t.refusal(ADMIN_SLOT, &json!({})).is_some());
@@ -105,7 +107,7 @@ fn lock_closes_directly_and_status_and_plan_read() {
 #[test]
 fn a_guest_has_no_password_so_nothing_is_requested() {
     let (t, f) = rig(true);
-    for n in [CREATE, UNLOCK, RECOVERY, MOVE, LOCK, PLAN] {
+    for n in [CREATE, UNLOCK, RECOVERY, MOVE, EXPORT, LOCK, PLAN] {
         assert!(t.call(n, &json!({})).is_err(), "{n}");
     }
     assert!(t.call(ADMIN_SLOT, &json!({"enable": true})).is_err());

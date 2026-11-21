@@ -78,6 +78,7 @@ crate::appcaps | pub fn Approval::ends(&self) -> std::collections::BTreeMap<Stri
 crate::appcaps | pub fn Approval::holds(&self, name: &str, param: Option<&str>) -> bool
 crate::appcaps | pub fn Approval::holds_at(&self, name: &str, param: Option<&str>, now: i64) -> bool
 crate::appcaps | pub fn Approval::revoke(&mut self, name: &str) -> bool
+crate::appcaps | pub fn Approval::set_end(&mut self, name: &str, end: Option<i64>, now: i64) -> bool
 crate::appcaps | pub fn ApprovalBook::get(&self, installation: &str) -> Option<Approval>
 crate::appcaps | pub fn ApprovalBook::put(&mut self, installation: &str, a: Approval)
 crate::appcaps | pub fn ApprovalBook::remove(&mut self, installation: &str)
@@ -323,11 +324,22 @@ crate::childstate | pub fn child_status(child: &mut Child) -> ChildState
 crate::childstate | pub fn child_wait(child: &mut Child) -> ChildState
 crate::childstate | pub fn steal_status(pid: u32)
 crate::childstate | pub fn steal_status_of_marked(marker: &str, within: std::time::Duration) -> std::thread::JoinHandle<u32>
+crate::client | AppMsg::AppClosed { app: String, reason: String }
+crate::client | AppMsg::AppErr { code: String, message: String }
+crate::client | AppMsg::AppList { app: String, text: String }
 crate::client | ClientMsg::Ack { seq: u32 }
+crate::client | ClientMsg::AppClose
+crate::client | ClientMsg::AppInput { lines: String }
+crate::client | ClientMsg::AppOpen { app: String, w: u32, h: u32 }
 crate::client | ClientMsg::Auth { authorization: String }
 crate::client | ClientMsg::Bye
 crate::client | ClientMsg::Call { id: u64, capability: String, #[serde(default)] unit: Option<String> }
 crate::client | ClientMsg::Enrol { token: String, public: String, name: String }
+crate::client | ClientMsg::FileCancel { id: u32 }
+crate::client | ClientMsg::FileEnd { id: u32 }
+crate::client | ClientMsg::FileGet { id: u32, path: String }
+crate::client | ClientMsg::FileList { dir: String }
+crate::client | ClientMsg::FilePut { id: u32, path: String, size: u64 }
 crate::client | ClientMsg::Hello { v: u32, #[serde(default = "one")] min_v: u32, #[serde(default)] offered: Vec<String>, #[serde(default)] needed: Vec<String>, #[serde(default)] client: String }
 crate::client | ClientMsg::Input { msg: String }
 crate::client | ClientMsg::PictureOpen { #[serde(default)] deflate: bool }
@@ -355,6 +367,15 @@ crate::client | ErrorCode::TokenUsed
 crate::client | ErrorCode::TooBig
 crate::client | ErrorCode::Unsupported
 crate::client | ErrorCode::VersionMismatch
+crate::client | FileMsg::FileDone { id: u32 }
+crate::client | FileMsg::FileErr { id: u32, code: String, message: String }
+crate::client | FileMsg::FileGetOk { id: u32, size: u64 }
+crate::client | FileMsg::FileList { dir: String, entries: Vec<FileRow>, truncated: bool }
+crate::client | FileMsg::FilePutOk { id: u32 }
+crate::client | FileMsg::FileSaved { id: u32, path: String }
+crate::client | FileRow.is_dir: bool
+crate::client | FileRow.name: String
+crate::client | FileRow.size: u64
 crate::client | Kept.audience: String
 crate::client | Kept.body: String
 crate::client | Kept.seq: u64
@@ -376,15 +397,25 @@ crate::client | ServerMsg::ResumeGap { oldest: u64 }
 crate::client | ServerMsg::ResumeOk { from: u64, count: u64 }
 crate::client | ServerMsg::SignedIn { person: String }
 crate::client | [serde(rename_all = "snake_case")] pub enum ErrorCode
+crate::client | [serde(tag = "t", rename_all = "snake_case")] pub enum AppMsg
 crate::client | [serde(tag = "t", rename_all = "snake_case")] pub enum ClientMsg
+crate::client | [serde(tag = "t", rename_all = "snake_case")] pub enum FileMsg
 crate::client | [serde(tag = "t", rename_all = "snake_case")] pub enum ServerMsg
+crate::client | derive AppMsg: Clone, Debug, Eq, PartialEq, Serialize
+crate::client | derive FileMsg: Clone, Debug, Eq, PartialEq, Serialize
+crate::client | derive FileRow: Clone, Debug, Eq, PartialEq, Serialize
 crate::client | impl From<ProtoError> for ServerMsg
 crate::client | impl fmt::Debug for ClientMsg
 crate::client | impl fmt::Display for ProtoError
 crate::client | impl std::error::Error for ProtoError
+crate::client | pub const FILE_CHUNK: usize = 32 * 1024
+crate::client | pub const MAX_APP_LIST: usize = 512 * 1024
+crate::client | pub const MAX_FILE: usize = crate::files::MAX_UPLOAD
 crate::client | pub const MAX_TEXT: usize = 64 * 1024
 crate::client | pub const MIN_PROTOCOL_VERSION: u32 = 1
 crate::client | pub const PROTOCOL_VERSION: u32 = 1
+crate::client | pub const STREAM_FILE_IN: u8 = 7
+crate::client | pub const STREAM_FILE_OUT: u8 = 6
 crate::client | pub const STREAM_PICTURE: u8 = 1
 crate::client | pub const WS_PATH: &str = "/client/ws"
 crate::client | pub enum Resumed
@@ -394,19 +425,29 @@ crate::client | pub fn EventRing::new(cap: usize) -> EventRing
 crate::client | pub fn EventRing::push(&mut self, audience: &str, topic: &str, body: &str) -> u64
 crate::client | pub fn EventRing::since(&self, last_seq: u64, person: &str) -> Resumed
 crate::client | pub fn ProtoError::new(code: ErrorCode, message: impl Into<String>) -> ProtoError
+crate::client | pub fn app_from_value(v: &serde_json::Value) -> Result<AppMsg, ProtoError>
+crate::client | pub fn app_text(text: &str) -> Result<bool, ProtoError>
 crate::client | pub fn binary(stream: u8, payload: &[u8]) -> Vec<u8>
+crate::client | pub fn decode_app(text: &str) -> Result<Option<AppMsg>, ProtoError>
 crate::client | pub fn decode_client(text: &str) -> Result<ClientMsg, ProtoError>
 crate::client | pub fn decode_server(text: &str) -> Result<ServerMsg, ProtoError>
+crate::client | pub fn encode_app(m: &AppMsg) -> String
 crate::client | pub fn encode_client(m: &ClientMsg) -> String
+crate::client | pub fn encode_file(m: &FileMsg) -> String
 crate::client | pub fn encode_server(m: &ServerMsg) -> String
+crate::client | pub fn file_chunk(stream: u8, id: u32, bytes: &[u8]) -> Vec<u8>
 crate::client | pub fn negotiate(v: u32, min_v: u32, offered: &[String], needed: &[String], server: &[&str]) -> Result<Vec<String>, ProtoError>
 crate::client | pub fn split_binary(msg: &[u8]) -> Option<(u8, &[u8])>
+crate::client | pub fn split_file_chunk(payload: &[u8]) -> Option<(u32, &[u8])>
 crate::client | pub mod cap
 crate::client | pub struct EventRing
+crate::client | pub struct FileRow
 crate::client | pub struct Kept
 crate::client | pub struct ProtoError
 crate::client::cap | pub const CALLS: &str = "calls"
+crate::client::cap | pub const DISPLAY_LIST: &str = "display.list"
 crate::client::cap | pub const EVENTS: &str = "events"
+crate::client::cap | pub const FILE_TRANSFER: &str = "files.transfer"
 crate::client::cap | pub const INPUT: &str = "input"
 crate::client::cap | pub const PICTURE: &str = "picture"
 crate::client::cap | pub const SERVER: &[&str] = &[PICTURE, INPUT, EVENTS, CALLS]
@@ -880,7 +921,9 @@ crate::client::cap | pub const CAMERA_FRAMES: &str = "camera.frames"
 crate::client::cap | pub const CLIENT_CAMERA: &str = "client.camera"
 crate::client::cap | pub const CLIENT_MICROPHONE: &str = "client.microphone"
 crate::client::cap | pub const CLIPBOARD_TEXT: &str = "clipboard.text"
+crate::client::cap | pub const SERVER_FILES: &[&str] = &[FILE_TRANSFER]
 crate::client::cap | pub const SERVER_MEDIA: &[&str] = &[AUDIO_OUT, CLIPBOARD_TEXT, CAMERA_FRAMES, CLIENT_CAMERA, CLIENT_MICROPHONE]
+crate::client::cap | pub const SERVER_UI: &[&str] = &[DISPLAY_LIST]
 crate::client::media | ClipError::Empty
 crate::client::media | ClipError::TooBig
 crate::client::media | Side::Both
@@ -1162,6 +1205,7 @@ crate::hardware | pub fn Hardware:::cs8409_line(&self) -> Option<String>
 crate::hardware | pub fn Hardware:::ipv4(&self) -> Vec<(String, String)>
 crate::hardware | pub fn Hardware:::links(&self) -> Vec<Link>
 crate::hardware | pub fn Hardware:::mac_infos(&self, cfg: &mac::MacConfig) -> Vec<mac::MacInfo>
+crate::hardware | pub fn Hardware:::request_class(&self, class: &str, who: &str) -> String
 crate::hardware | pub fn Hardware:::rfkill(&self) -> Vec<Rfkill>
 crate::hardware | pub fn Hardware:::screen(&self) -> Screen
 crate::hardware | pub fn Hardware:::set_brightness(&self, name: &str, percent: u32) -> Result<(), String>
@@ -1197,7 +1241,6 @@ crate::guarded | pub struct GestureTicket
 crate::hardware | pub fn Hardware:::hardware_report(&self) -> Vec<String>
 crate::hardware | pub fn Hardware:::mac_summary(&self) -> Option<String>
 crate::devices | pub fn Disks:::reword_failure(&self, msg: &str) -> String
-crate::appcaps | pub const BUILTIN_TABLE: &[(&str, &[&str])] = &[("settings", &["bluetooth.use", "system.radio.set", "system.brightness.set", "system.volume.set", "system.memory.set", "sy...
 crate::guarded | pub const HOSTNAME_SET: &str = "system.hostname.set"
 crate::hardware | pub fn Hardware:::set_hostname(&self, name: &str, etc_hostname: &std::path::Path) -> Result<(), String>
 crate::hardware | pub use iyakki_devctl::{hostname_ok, btstate, mac, radio_on, Backlight, Card, Control, Link, LinkKind, Rfkill, Roots, Screen, Volume, BROADCOM_NO_DRIVER_TEXT}
@@ -1327,8 +1370,10 @@ crate::uicore | pub fn Core:::session_resume(&self) -> &dyn SessionResume
 crate::uicore | pub fn SessionResume:::allowed(&self) -> bool
 crate::uicore | pub fn SessionResume:::apps(&self) -> Vec<String>
 crate::uicore | pub fn SessionResume:::forget(&self)
+crate::uicore | pub fn SessionResume:::items(&self) -> Vec<(String, String)>
 crate::uicore | pub fn SessionResume:::remember(&self, user: &str)
 crate::uicore | pub fn SessionResume:::remember_apps(&self, _apps: &[String])
+crate::uicore | pub fn SessionResume:::remember_items(&self, _items: &[(String, String)])
 crate::uicore | pub fn SessionResume:::set_switch(&self, on: bool) -> Result<(), String>
 crate::uicore | pub fn SessionResume:::switch_on(&self) -> bool
 crate::uicore | pub fn SessionResume:::who(&self) -> Option<String>
@@ -1597,7 +1642,6 @@ crate::browsersession | pub fn BrowserSessions:::set_enabled(&self, _user: &str,
 crate::browsersession | pub struct PageDefaults
 crate | [cfg(feature = "native")] pub mod drivers
 crate | pub use uicore::FlowsView
-crate::drivers | pub use iyakki_drivers::{apply, facetime, known, Availability, Delivery, Roots, Status}
 crate::uicore | impl FlowsView for NoUiState
 crate::uicore | pub fn Core:::flows_view(&self) -> &dyn FlowsView
 crate::uicore | pub fn FlowsView:::clear_last_flow(&self, _user: &str)
@@ -1621,7 +1665,6 @@ crate::media | pub fn Media:::frame(&self, _user: &str, _session: &str, _after: 
 crate::media | pub struct MediaFrame
 crate | pub mod soundctl
 crate | pub mod soundtypes
-crate | pub use soundctl::{CuePlayer, NoCues, NoSound, SoundControl, SoundState}
 crate::soundctl | SoundState.active: bool
 crate::soundctl | SoundState.busy: Option<String>
 crate::soundctl | SoundState.by_person: bool
@@ -1953,6 +1996,7 @@ crate::cameras | pub fn Cameras:::enabled(&self, _user: &str) -> bool
 crate::cameras | pub fn Cameras:::open_views(&self, _user: &str) -> usize
 crate::cameras | pub fn Cameras:::set_enabled(&self, _user: &str, _on: bool) -> Result<(), String>
 crate | pub mod files
+crate::files | FileChange::SaveBytes { path: String, bytes: Vec<u8> }
 crate::files | FileEntry.is_dir: bool
 crate::files | FileEntry.modified: Option<u64>
 crate::files | FileEntry.name: String
@@ -1966,8 +2010,10 @@ crate::files | pub const MAX_LIST: usize = 500
 crate::files | pub const MAX_NAME: usize = 255
 crate::files | pub const MAX_PATH: usize = 1024
 crate::files | pub const MAX_READ: usize = 1 <<20
+crate::files | pub const MAX_UPLOAD: usize = 8 * 1024 * 1024
 crate::files | pub const NO_FILES: &str = "this core has no file browser"
 crate::files | pub fn Files:::list(&self, _user: &str, _dir: &str) -> Result<Listing, String>
+crate::files | pub fn Files:::read_bytes(&self, _user: &str, _path: &str, _max: usize) -> Result<Vec<u8>, String>
 crate::files | pub fn Files:::read_text(&self, _user: &str, _path: &str, _max: usize) -> Result<String, String>
 crate::files | pub fn check_rel(path: &str) -> Result<Vec<&str>, String>
 crate::files | pub fn is_hidden(name: &str) -> bool
@@ -2387,6 +2433,686 @@ crate::terminal | pub struct PtyCell
 crate::terminal | pub struct PtyFrame
 crate::terminal | pub struct PtyMods
 crate::terminal | pub struct PtyOpen
+crate::appactions | derive ActionBook: Default
+crate::appactions | derive NoAppActions: Default
+crate::appactions | derive PendingAction: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::appcaps | derive Approval: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::appcaps | derive AskPlan: Clone, Debug, Eq, PartialEq
+crate::appcaps | derive BuiltinDefault: Clone, Copy, Debug, Eq, PartialEq
+crate::appcaps | derive CapError: Clone, Debug, Eq, PartialEq
+crate::appcaps | derive CapabilityDef: Clone, Copy, Debug, Eq, PartialEq
+crate::appcaps | derive CapabilityRequest: Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize
+crate::appcaps | derive CardLine: Clone, Debug, Eq, PartialEq
+crate::appcaps | derive Grant: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::appcaps | derive LegacyMap: Clone, Debug, Default, Eq, PartialEq
+crate::appcaps | derive MemoryBook(pub: Debug, Default
+crate::appcaps | derive ParamKind: Clone, Copy, Debug, Eq, PartialEq
+crate::appevents | derive AppEvent: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::appevents | derive Coalesce: Clone, Copy, Debug, Eq, PartialEq
+crate::appevents | derive EventInfo: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::appevents | derive Field: Clone, Copy, Debug, Eq, PartialEq
+crate::appevents | derive MemStore(pub: Clone, Default
+crate::appevents | derive NoAppEvents: Default
+crate::appevents | derive RegInfo: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::appevents | derive Val: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::assistant | derive AppToolSpec: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::assistant | derive AssistEvent: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::assistant | derive Choice: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::assistant | derive ContextItem: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::assistant | derive ContextKind: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::assistant | derive HistoryEntry: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::assistant | derive HistoryRole: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::assistant | derive SessionInfo: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::assistant | derive SessionSpec: Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize
+crate::assistant | derive ToolApproval: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::audio | derive PlaybackVolume: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::audio | derive SoundCard: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::broker | derive AccessEvent: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::broker | derive Call: Clone, Copy, Debug
+crate::broker | derive Caller: Clone, Debug, Eq, PartialEq
+crate::broker | derive CallerKind: Clone, Debug, Eq, PartialEq
+crate::broker | derive CardAnswer: Clone, Copy, Debug, Eq, PartialEq
+crate::broker | derive Denial: Clone, Debug, Eq, PartialEq
+crate::browsersession | derive BrowserError: Clone, Debug, Eq, PartialEq
+crate::browsersession | derive EnginePref: Clone, Copy, Debug, Default, Eq, PartialEq
+crate::browsersession | derive FindState: Clone, Debug, Default, Eq, PartialEq
+crate::browsersession | derive Frame: Clone, Debug, PartialEq
+crate::browsersession | derive Input: Clone, Debug, PartialEq
+crate::browsersession | derive Navigate: Clone, Debug, PartialEq
+crate::browsersession | derive OpenSpec: Clone, Debug, PartialEq
+crate::browsersession | derive PageDefaults: Clone, Copy, Debug, PartialEq
+crate::browsersession | derive PageFont: Clone, Copy, Debug, Default, Eq, PartialEq
+crate::browsersession | derive PageKey: Clone, Copy, Debug, Eq, PartialEq
+crate::browsersession | derive PageState: Clone, Debug, Eq, PartialEq
+crate::browsersession | derive Palette: Clone, Copy, Debug, Eq, PartialEq
+crate::browsersession | derive Prompt: Clone, Debug, Eq, PartialEq
+crate::browsersession | derive PromptKind: Clone, Copy, Debug, Eq, PartialEq
+crate::browsersession | derive Refusal: Clone, Debug, Eq, PartialEq
+crate::browsersession | derive Scheme: Clone, Copy, Debug, Default, Eq, PartialEq
+crate::browsersession | derive SessionId(pub: Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd
+crate::bundle | derive ManifestExt: Clone, Debug, Default, Eq, PartialEq
+crate::bundle | derive Member: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::bundle | derive MemberKind: Clone, Debug, Eq, PartialEq
+crate::bundle | derive Op: Clone, Copy, Debug, Eq, PartialEq
+crate::bundle | derive Requires: Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize
+crate::bundle | derive RequiresRefusal: Clone, Debug, Eq, PartialEq
+crate::bundle | derive UpdateSide: Clone, Copy, Debug, Eq, PartialEq
+crate::bundle | derive VersionRange: Clone, Debug, Eq, PartialEq
+crate::cameras | derive CamAction: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::cameras | derive CamEvent: Clone, Debug, Deserialize, PartialEq, Serialize
+crate::cameras | derive CamFrame: Clone, Debug, PartialEq
+crate::cameras | derive CamStatus: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::cameras | derive CameraInfo: Clone, Debug, Deserialize, PartialEq, Serialize
+crate::cameras | derive FrameFormat: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::cameras | derive FrameSize: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::cameras | derive MotionMark: Clone, Debug, Deserialize, PartialEq, Serialize
+crate::cameras | derive Overlay: Clone, Debug, Default, Deserialize, PartialEq, Serialize
+crate::cameras | derive OverlayShape: Clone, Debug, Deserialize, PartialEq, Serialize
+crate::cameras | derive PtzCommand: Clone, Copy, Debug, Deserialize, PartialEq, Serialize
+crate::cameras | derive SourceKind: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::cameras | derive ViewInfo: Clone, Debug, Deserialize, PartialEq, Serialize
+crate::cameras | derive ViewPhase: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::cameras | derive ViewSpec: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::cameras | derive ViewState: Clone, Debug, Deserialize, PartialEq, Serialize
+crate::channel | derive Cap: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::channel | derive ChannelError: Clone, Debug, Eq, PartialEq, thiserror::Error
+crate::channel | derive ChannelIdentity: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::channel | derive ChannelInfo: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::channel | derive Delivery: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::channel | derive DeliveryState: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::channel | derive Health: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::channel | derive HealthState: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::channel | derive InMessage: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::channel | derive Limits: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::channel | derive OutAttachment: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::channel | derive OutMessage: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::channel | derive RateInfo: Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize
+crate::channel | derive Trust: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::childstate | derive ChildState: Clone, Copy, Debug, Eq, PartialEq
+crate::client | derive CameraEntry: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::client | derive ClientMsg: Clone, Deserialize, Eq, PartialEq, Serialize
+crate::client | derive ErrorCode: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::client | derive Kept: Clone, Debug, Eq, PartialEq
+crate::client | derive ProtoError: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::client | derive Resumed: Clone, Debug, Eq, PartialEq
+crate::client | derive ServerMsg: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::client::media | derive ClipError: Clone, Copy, Debug, Eq, PartialEq
+crate::client::media | derive Side: Clone, Copy, Debug, Eq, PartialEq
+crate::client::media | derive SourceKind: Clone, Copy, Debug, Eq, Hash, PartialEq
+crate::compat | derive Deprecation: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::compat | derive Peer: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::compat | derive Report: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::compat | derive Surface: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::compat | derive UpdateSide: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::appevents | derive AppEventBody: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::consent | derive ConsentAnswer: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::consent | derive ConsentKind: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::consent | derive ConsentRequest: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::consent | derive LocalSeat: Debug
+crate::contract::context | derive CallContext: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::context | derive Risk: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::context | derive Scope(String): Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::context | derive Transport: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::error | derive CallError: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::error | derive ErrorCode: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::error | derive IdempotencyKey(String): Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize
+crate::contract::error | derive RateLimit: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::error | derive RateLimiter: Debug
+crate::contract::event | derive Event: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::event | derive EventBatch: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::event | derive EventLog: Debug
+crate::contract::event | derive Resume: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::flows | derive Approval: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::flows | derive FlowEvent: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::flows | derive FlowInfo: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::flows | derive RunId(pub: Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize
+crate::contract::flows | derive RunState: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::flows | derive RunStatus: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::hello | derive ClientHello: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::hello | derive ContractVersion: Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize
+crate::contract::hello | derive DomainSupport: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::hello | derive Hello: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::hello | derive Negotiated: Clone, Debug, Eq, PartialEq
+crate::contract::settings | derive SettingChange: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::settings | derive SettingEvent: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::settings | derive SettingKind: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::settings | derive SettingSpec: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::settings | derive SettingValue: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::stream | derive Chunk: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::stream | derive StreamHandle: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::stream | derive StreamId(pub: Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize
+crate::contract::stream | derive StreamKind: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::vault | derive ActionOutcome: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::vault | derive NamedAction(pub: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::contract::vault | derive VaultStatus: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::devices | derive BlockDev: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::devices | derive Mount: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::devices | derive NetCounters: Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize
+crate::error | derive ApiError: Clone, Debug, Deserialize, Eq, PartialEq, Serialize, thiserror::Error
+crate::files | derive ChangeAsk: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::files | derive ChangeBook: Default
+crate::files | derive FileChange: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::files | derive FileEntry: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::files | derive Listing: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::host | derive WasmIo: Clone, Debug, Default
+crate::host | derive WasmTask: Clone, Debug, Eq, PartialEq
+crate::identity | derive Capabilities: Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize
+crate::identity | derive Identity: Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize
+crate::media | derive MediaEntry: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::media | derive MediaEvent: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::media | derive MediaFrame: Clone, Debug, PartialEq
+crate::media | derive MediaInfo: Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize
+crate::media | derive MediaSession: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::media | derive MediaSource: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::media | derive MediaSpec: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::media | derive MediaState: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::media | derive TrackInfo: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::media | derive TrackKind: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::memory | derive DataPlace: Clone, Copy, Debug, Eq, PartialEq
+crate::sdkbridge | derive Approval: Clone, Copy, Debug, Eq, PartialEq
+crate::sdkbridge | derive Capability: Clone, Copy, Debug
+crate::sdkbridge | derive Effect: Clone, Copy, Debug, Eq, PartialEq
+crate::sdkbridge | derive Namespace: Clone, Copy, Debug
+crate::sdkbridge | derive Op: Clone, Copy, Debug
+crate::sdkbridge | derive Param: Clone, Copy, Debug, Eq, PartialEq
+crate::sdkbridge | derive Version: Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd
+crate::sdkbridge::markdown | derive Analysis: Clone, Debug, Eq, PartialEq
+crate::sdkbridge::money | derive Limit: Clone, Debug, Eq, PartialEq
+crate::sdkbridge::money | derive Refusal: Clone, Debug, Eq, PartialEq
+crate::service | derive Principal: Clone, Debug
+crate::soundctl | derive SoundState: Clone, Debug, Default, Eq, PartialEq
+crate::soundtypes | derive Choice: Clone, Debug, Eq, PartialEq
+crate::soundtypes | derive Kind: Clone, Copy, Debug, Eq, PartialEq
+crate::soundtypes | derive Outcome: Clone, Debug, Eq, PartialEq
+crate::soundtypes | derive Output: Clone, Debug, Eq, PartialEq
+crate::soundtypes | derive SoundSettings: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::soundtypes | derive VolumeMode: Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize
+crate::sysinfo | derive CpuTimes: Clone, Copy, Debug, Default, Eq, PartialEq
+crate::sysinfo | derive DiskCounters: Clone, Debug, Eq, PartialEq
+crate::sysinfo | derive DiskUse: Clone, Copy, Debug, Default, Eq, PartialEq
+crate::sysinfo | derive LoadAvg: Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize
+crate::sysinfo | derive MemInfo: Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize
+crate::sysinfo | derive Memory: Clone, Copy, Debug, Default, Eq, PartialEq
+crate::sysinfo | derive NetCounters: Clone, Debug, Eq, PartialEq
+crate::sysinfo | derive NetUse: Clone, Copy, Debug, Default, Eq, PartialEq
+crate::sysinfo | derive Proc: Clone, Debug, Eq, PartialEq
+crate::sysinfo | derive SysRoots: Clone, Debug
+crate::sysinfo | derive Uptime: Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize
+crate::terminal | derive PtyCell: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::terminal | derive PtyColor: Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize
+crate::terminal | derive PtyFrame: Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize
+crate::terminal | derive PtyKey: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::terminal | derive PtyMods: Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize
+crate::terminal | derive PtyOpen: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::terminal | derive TermApproval: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::terminal | derive TermOpen: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::terminal | derive TermReply: Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize
+crate::uicore | derive AppStatus: Clone, Debug, Eq, PartialEq
+crate::uicore | derive BrailleKey: Clone, Copy, Debug, Eq, PartialEq
+crate::uicore | derive MixerStats: Clone, Debug, Default, Eq, PartialEq
+crate::uicore | derive MonitorInfo: Clone, Debug, Eq, PartialEq
+crate::uicore | derive SoundKind: Clone, Copy, Debug, Eq, PartialEq
+crate::uicore | derive StatusKind: Clone, Copy, Debug, Eq, PartialEq
+crate::uicore | derive WaitingCall: Clone, Debug, Eq, PartialEq
+crate::wizard | derive CheckStep: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::wizard | derive Choice: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::wizard | derive Field: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::wizard | derive FieldKind: Clone, Debug, Eq, PartialEq
+crate::wizard | derive FormStep: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::wizard | derive MigrationStep: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::wizard | derive Rule: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::wizard | derive Step: Clone, Debug, Eq, PartialEq
+crate::wizard | derive SummaryStep: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::wizard | derive Trigger: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::wizard | derive TriggerKind: Clone, Debug, Eq, PartialEq
+crate::wizard | derive WizardSpec: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::cameras | PtzCommand::Absolute { pan: f32, tilt: f32, zoom: f32 }
+crate | pub use uicore::{BrailleCells, BrailleKey, BrailleLink}
+crate::uicore | BrailleKey::FocusNext
+crate::uicore | BrailleKey::FocusPrev
+crate::uicore | BrailleKey::PanLeft
+crate::uicore | BrailleKey::PanRight
+crate::uicore | BrailleKey::Route(usize)
+crate::uicore | impl BrailleLink for NoUiState
+crate::uicore | pub enum BrailleKey
+crate::uicore | pub fn BrailleCells:::keys(&mut self) -> Vec<BrailleKey>
+crate::uicore | pub fn BrailleCells:::put(&mut self, cells: &str) -> Result<(), String>
+crate::uicore | pub fn BrailleCells:::width(&self) -> usize
+crate::uicore | pub fn BrailleLink:::open(&self) -> Option<Box<dyn BrailleCells>>
+crate::uicore | pub fn BrailleLink:::status(&self) -> String
+crate::uicore | pub fn Core:::braille(&self) -> &dyn BrailleLink
+crate::uicore | pub trait BrailleCells: Send
+crate::uicore | pub trait BrailleLink: Send + Sync
+crate | [cfg(feature = "native")] pub mod installer
+crate::guarded | impl crate::installer::Installer for GuardedInstaller
+crate::guarded | pub const DISK_INSTALL: &str = "system.disk.install"
+crate::installer | impl Installer for NoInstaller
+crate::installer | pub fn Installer:::available(&self) -> bool
+crate::installer | pub fn Installer:::disks(&self) -> Vec<DiskInfo>
+crate::installer | pub fn Installer:::execute(&self, plan: &Plan, progress: &mut dyn FnMut(Progress)) -> Result<InstallReport, String>
+crate::installer | pub fn Installer:::source(&self, disks: &[DiskInfo]) -> Result<SourceInfo, String>
+crate::installer | pub fn Installer:::uefi(&self) -> bool
+crate::installer | pub fn running_disk(mounts: &str, names: &[&str]) -> Option<String>
+crate::installer | pub struct NoInstaller
+crate::installer | pub trait Installer: Send + Sync
+crate::installer | pub use iyakki_usb::install::{confirmation_ok, make_plan_with, partition_name, valid_hostname, Choices, DiskInfo, InstallReport, Plan, SourceInfo, TableChoice, MIN_DISK}
+crate::installer | pub use iyakki_usb::writer::{Phase, Progress}
+crate::sysinfo | [cfg(feature = "native")] pub fn Os:::installer(&self) -> std::sync::Arc<dyn crate::installer::Installer>
+crate::cameras | CamSound.pcm: Vec<i16>
+crate::cameras | CamSound.rate: u32
+crate::cameras | derive CamSound: Clone, Debug, Eq, PartialEq
+crate::cameras | pub const NO_VIEW_SOUND: &str = "camera views carry no sound in this system"
+crate::cameras | pub fn Cameras:::listen(&self, _user: &str, _view: &str, _camera: &str) -> Result<Option<CamSound>, String>
+crate::cameras | pub struct CamSound
+crate::drivers | impl Drivers for NoDrivers
+crate::drivers | pub fn Drivers:::installed(&self) -> Vec<Record>
+crate::drivers | pub fn Drivers:::is_disabled(&self, id: &str) -> bool
+crate::drivers | pub fn Drivers:::machine(&self) -> Machine
+crate::drivers | pub fn Drivers:::rows(&self) -> Vec<Row>
+crate::drivers | pub struct NoDrivers
+crate::drivers | pub trait Drivers: Send + Sync
+crate::drivers | pub use iyakki_drivers::{Machine, Record, Row}
+crate::guarded | impl crate::drivers::Drivers for GuardedDrivers
+crate::sysinfo | [cfg(feature = "native")] pub fn Os:::drivers(&self) -> std::sync::Arc<dyn crate::drivers::Drivers>
+crate | pub mod audioroute
+crate | pub use audioroute::{AudioRoute, NoAudioRoute, PcmHolder}
+crate::audioroute | PcmHolder.name: String
+crate::audioroute | PcmHolder.pid: u32
+crate::audioroute | derive PcmHolder: Clone, Debug, Eq, PartialEq
+crate::audioroute | impl AudioRoute for NoAudioRoute
+crate::audioroute | pub fn AudioRoute:::asound_dir(&self, _rel: &str) -> Vec<String>
+crate::audioroute | pub fn AudioRoute:::asound_has(&self, _rel: &str) -> bool
+crate::audioroute | pub fn AudioRoute:::asound_text(&self, _rel: &str) -> Option<String>
+crate::audioroute | pub fn AudioRoute:::card_count(&self) -> usize
+crate::audioroute | pub fn AudioRoute:::cards_text(&self) -> String
+crate::audioroute | pub fn AudioRoute:::mixer_contents(&self, _card: u32) -> Option<String>
+crate::audioroute | pub fn AudioRoute:::pcm_holders(&self, _card: u32, _device: u32) -> Vec<PcmHolder>
+crate::audioroute | pub fn AudioRoute:::product_name(&self) -> Option<String>
+crate::audioroute | pub fn rel_is_safe(rel: &str) -> bool
+crate::audioroute | pub struct NoAudioRoute
+crate::audioroute | pub struct PcmHolder
+crate::audioroute | pub trait AudioRoute: Send + Sync
+crate::guarded | impl crate::audioroute::AudioRoute for GuardedAudioRoute
+crate::sysinfo | pub fn Os:::audio_route(&self) -> std::sync::Arc<dyn crate::audioroute::AudioRoute>
+crate | [cfg(feature = "native")] pub mod diskmodel
+crate::diskmodel | Actor.gid: u32
+crate::diskmodel | Actor.home: String
+crate::diskmodel | Actor.role: Role
+crate::diskmodel | Actor.uid: u32
+crate::diskmodel | Actor.user: String
+crate::diskmodel | Disk.holders: Vec<String>
+crate::diskmodel | Disk.model: String
+crate::diskmodel | Disk.name: String
+crate::diskmodel | Disk.parts: Vec<Part>
+crate::diskmodel | Disk.path: String
+crate::diskmodel | Disk.read_only: bool
+crate::diskmodel | Disk.removable: bool
+crate::diskmodel | Disk.sector: u32
+crate::diskmodel | Disk.serial: String
+crate::diskmodel | Disk.size_bytes: u64
+crate::diskmodel | Disk.system: bool
+crate::diskmodel | Disk.system_why: String
+crate::diskmodel | Disk.table: Table
+crate::diskmodel | Disk.table_notes: Vec<String>
+crate::diskmodel | Disk.transport: Transport
+crate::diskmodel | Disk.vendor: String
+crate::diskmodel | Fs::Apfs
+crate::diskmodel | Fs::BitLocker
+crate::diskmodel | Fs::Btrfs
+crate::diskmodel | Fs::Empty
+crate::diskmodel | Fs::Exfat
+crate::diskmodel | Fs::Ext2
+crate::diskmodel | Fs::Ext3
+crate::diskmodel | Fs::Ext4
+crate::diskmodel | Fs::F2fs
+crate::diskmodel | Fs::Fat12
+crate::diskmodel | Fs::Fat16
+crate::diskmodel | Fs::Fat32
+crate::diskmodel | Fs::HfsPlus
+crate::diskmodel | Fs::Iso9660
+crate::diskmodel | Fs::Luks
+crate::diskmodel | Fs::Ntfs
+crate::diskmodel | Fs::Swap
+crate::diskmodel | Fs::Unknown
+crate::diskmodel | Fs::Xfs
+crate::diskmodel | FsSupport.driver: &'static str
+crate::diskmodel | FsSupport.fs: Fs
+crate::diskmodel | FsSupport.kernel: bool
+crate::diskmodel | MountFlags.nodev: bool
+crate::diskmodel | MountFlags.noexec: bool
+crate::diskmodel | MountFlags.nosuid: bool
+crate::diskmodel | MountFlags.rdonly: bool
+crate::diskmodel | MountOpts.allow_exec: bool
+crate::diskmodel | MountOpts.read_only: bool
+crate::diskmodel | MountPlan.data: String
+crate::diskmodel | MountPlan.dev: String
+crate::diskmodel | MountPlan.flags: MountFlags
+crate::diskmodel | MountPlan.forced_ro: Option<String>
+crate::diskmodel | MountPlan.fstype: &'static str
+crate::diskmodel | MountPlan.target: String
+crate::diskmodel | Mounted.notes: Vec<String>
+crate::diskmodel | Mounted.read_only: bool
+crate::diskmodel | Mounted.target: String
+crate::diskmodel | Part.crypt: Option<iyakki_diskcrypt::CryptInfo>
+crate::diskmodel | Part.fs: Fs
+crate::diskmodel | Part.label: String
+crate::diskmodel | Part.mounted_ro: bool
+crate::diskmodel | Part.mountpoints: Vec<String>
+crate::diskmodel | Part.name: String
+crate::diskmodel | Part.number: u32
+crate::diskmodel | Part.path: String
+crate::diskmodel | Part.size_bytes: u64
+crate::diskmodel | Part.space: Option<(u64, u64)>
+crate::diskmodel | Part.start_bytes: u64
+crate::diskmodel | Part.swap_in_use: bool
+crate::diskmodel | Part.system: bool
+crate::diskmodel | Part.type_name: String
+crate::diskmodel | Part.unlocked: bool
+crate::diskmodel | Part.uuid: String
+crate::diskmodel | Snapshot.disks: Vec<Disk>
+crate::diskmodel | Snapshot.support: Vec<FsSupport>
+crate::diskmodel | Table::Gpt
+crate::diskmodel | Table::Mbr
+crate::diskmodel | Table::None
+crate::diskmodel | Transport::Mmc
+crate::diskmodel | Transport::Nvme
+crate::diskmodel | Transport::Other
+crate::diskmodel | Transport::Sata
+crate::diskmodel | Transport::Usb
+crate::diskmodel | Transport::Virtual
+crate::diskmodel | derive Actor: Clone, Debug
+crate::diskmodel | derive Disk: Clone, Debug, Eq, PartialEq
+crate::diskmodel | derive Fs: Clone, Copy, Debug, Eq, Hash, PartialEq
+crate::diskmodel | derive FsSupport: Clone, Debug, Eq, PartialEq
+crate::diskmodel | derive MountFlags: Clone, Copy, Debug, Default, Eq, PartialEq
+crate::diskmodel | derive MountOpts: Clone, Copy, Debug, Default, Eq, PartialEq
+crate::diskmodel | derive MountPlan: Clone, Debug, Eq, PartialEq
+crate::diskmodel | derive Mounted: Clone, Debug, Eq, PartialEq
+crate::diskmodel | derive Part: Clone, Debug, Eq, PartialEq
+crate::diskmodel | derive Snapshot: Clone, Debug, Default
+crate::diskmodel | derive Table: Clone, Copy, Debug, Eq, PartialEq
+crate::diskmodel | derive Transport: Clone, Copy, Debug, Eq, PartialEq
+crate::diskmodel | impl DiskEngine for NoDiskEngine
+crate::diskmodel | pub enum Fs
+crate::diskmodel | pub enum Table
+crate::diskmodel | pub enum Transport
+crate::diskmodel | pub fn Actor::new(user: &str, role: Role) -> Actor
+crate::diskmodel | pub fn Disk::audit_id(&self) -> String
+crate::diskmodel | pub fn Disk::identity(&self) -> String
+crate::diskmodel | pub fn Disk::mounted(&self) -> bool
+crate::diskmodel | pub fn Disk::part(&self, name: &str) -> Option<&Part>
+crate::diskmodel | pub fn Disk::removable_media(&self) -> bool
+crate::diskmodel | pub fn Disk::serial_tail(&self) -> String
+crate::diskmodel | pub fn Disk::title(&self) -> String
+crate::diskmodel | pub fn DiskEngine:::at_sign_out(&self, who: &Actor, audit: AuditFn) -> Option<String>
+crate::diskmodel | pub fn DiskEngine:::eject(&self, who: &Actor, disk: &str, audit: AuditFn) -> Result<String, String>
+crate::diskmodel | pub fn DiskEngine:::fingerprint(&self) -> u64
+crate::diskmodel | pub fn DiskEngine:::forget(&self)
+crate::diskmodel | pub fn DiskEngine:::mount(&self, who: &Actor, part: &str, opts: &MountOpts, audit: AuditFn) -> Result<Mounted, String>
+crate::diskmodel | pub fn DiskEngine:::mounted_in(&self, home: &str) -> Vec<(String, String)>
+crate::diskmodel | pub fn DiskEngine:::plan_mount(&self, snap: &Snapshot, who: &Actor, part: &str, opts: &MountOpts) -> Result<MountPlan, String>
+crate::diskmodel | pub fn DiskEngine:::scan(&self) -> Snapshot
+crate::diskmodel | pub fn DiskEngine:::unmount(&self, who: &Actor, part: &str, audit: AuditFn) -> Result<String, String>
+crate::diskmodel | pub fn DiskEngine:::users_of(&self, mountpoint: &str) -> Vec<(u32, String)>
+crate::diskmodel | pub fn Fs::driver(self) -> Option<&'static str>
+crate::diskmodel | pub fn Fs::name(self) -> &'static str
+crate::diskmodel | pub fn Fs::never_mountable(self) -> Option<&'static str>
+crate::diskmodel | pub fn Fs::owner_options(self) -> bool
+crate::diskmodel | pub fn Fs::read_only_always(self) -> bool
+crate::diskmodel | pub fn Part::mounted(&self) -> bool
+crate::diskmodel | pub fn Part::title(&self) -> String
+crate::diskmodel | pub fn Part::used_bytes(&self) -> Option<u64>
+crate::diskmodel | pub fn Snapshot::disk(&self, name: &str) -> Option<&Disk>
+crate::diskmodel | pub fn Snapshot::kernel_has(&self, driver: &str) -> bool
+crate::diskmodel | pub fn Snapshot::part(&self, name: &str) -> Option<(&Disk, &Part)>
+crate::diskmodel | pub fn Table::name(self) -> &'static str
+crate::diskmodel | pub fn Transport::name(self) -> &'static str
+crate::diskmodel | pub fn may_use(who: &Actor, d: &Disk) -> Result<(), String>
+crate::diskmodel | pub struct Actor
+crate::diskmodel | pub struct Disk
+crate::diskmodel | pub struct FsSupport
+crate::diskmodel | pub struct MountFlags
+crate::diskmodel | pub struct MountOpts
+crate::diskmodel | pub struct MountPlan
+crate::diskmodel | pub struct Mounted
+crate::diskmodel | pub struct NoDiskEngine
+crate::diskmodel | pub struct Part
+crate::diskmodel | pub struct Snapshot
+crate::diskmodel | pub trait DiskEngine: Send + Sync
+crate::diskmodel | pub type AuditFn<'a> = &'a dyn Fn(&str, &str)
+crate::guarded | impl crate::diskmodel::DiskEngine for GuardedDiskEngine
+crate::guarded | pub const DISK_MOUNT: &str = "system.disk.mount"
+crate::sysinfo | [cfg(feature = "native")] pub fn Os:::disk_engine(&self) -> std::sync::Arc<dyn crate::diskmodel::DiskEngine>
+crate::router | RouteCost::Free
+crate::router | RouteCost::High
+crate::router | RouteCost::Low
+crate::router | RouteCost::Medium
+crate::router | RouteDecision.chosen: Option<String>
+crate::router | RouteDecision.ranked: Vec<String>
+crate::router | RouteDecision.refused: Vec<(String, String)>
+crate::router | RouteModel.audio: bool
+crate::router | RouteModel.context: u32
+crate::router | RouteModel.cost: RouteCost
+crate::router | RouteModel.enabled: bool
+crate::router | RouteModel.id: String
+crate::router | RouteModel.role: String
+crate::router | RouteModel.tools: bool
+crate::router | RouteModel.vision: bool
+crate::router | RouteModel.zone: RouteZone
+crate::router | RouteNeed.audio: bool
+crate::router | RouteNeed.max_cost: Option<RouteCost>
+crate::router | RouteNeed.max_zone: Option<RouteZone>
+crate::router | RouteNeed.min_context: u32
+crate::router | RouteNeed.planning: bool
+crate::router | RouteNeed.tools: bool
+crate::router | RouteNeed.vision: bool
+crate::router | RouteZone::Computer
+crate::router | RouteZone::Internet
+crate::router | RouteZone::Network
+crate::router | [serde(default, skip_serializing_if = "Option::is_none")] RouteModel.answer_ms: Option<u64>
+crate::router | [serde(rename_all = "lowercase")] pub enum RouteCost
+crate::router | [serde(rename_all = "lowercase")] pub enum RouteZone
+crate::router | derive RouteCost: Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize
+crate::router | derive RouteDecision: Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize
+crate::router | derive RouteModel: Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize
+crate::router | derive RouteNeed: Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize
+crate::router | derive RouteZone: Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize
+crate::router | pub fn Router:::models(&self) -> Vec<RouteModel>
+crate::router | pub fn Router:::route(&self, need: &RouteNeed) -> RouteDecision
+crate::router | pub fn choose(models: &[RouteModel], need: &RouteNeed) -> RouteDecision
+crate::router | pub struct RouteDecision
+crate::router | pub struct RouteModel
+crate::router | pub struct RouteNeed
+crate::client | [serde(other)] ClientMsg::Unknown
+crate::client | [serde(other)] ErrorCode::Unknown
+crate::client | [serde(other)] ServerMsg::Unknown
+crate::contract::consent | [serde(other)] ConsentKind::Unknown
+crate::contract::context | [serde(other)] Risk::Unknown
+crate::contract::context | [serde(other)] Transport::Unknown
+crate::contract::error | [serde(other)] ErrorCode::Unknown
+crate::contract::flows | [serde(other)] FlowEvent::Unknown
+crate::contract::flows | [serde(other)] RunState::Unknown
+crate::contract::settings | [serde(other)] SettingKind::Unknown
+crate::contract::stream | [serde(other)] StreamKind::Unknown
+crate::diskmodel | Confirm.second: bool
+crate::diskmodel | Confirm.typed: String
+crate::diskmodel | Expect::Fs { part: String, fs: Fs }
+crate::diskmodel | Expect::Gone { part: String }
+crate::diskmodel | Expect::Size { part: String, bytes: u64 }
+crate::diskmodel | FormatFs::Exfat
+crate::diskmodel | FormatFs::Ext4
+crate::diskmodel | FormatFs::Fat32
+crate::diskmodel | FormatFs::Ntfs
+crate::diskmodel | PartOp::Add { size_bytes: Option<u64>, fs: Option<FormatFs>, label: String }
+crate::diskmodel | PartOp::Delete { number: u32 }
+crate::diskmodel | PartOp::Format { number: u32, fs: FormatFs, label: String }
+crate::diskmodel | PartOp::NewTable(Table)
+crate::diskmodel | PartOp::Rename { number: u32, label: String }
+crate::diskmodel | PartOp::Reread
+crate::diskmodel | PartOp::Resize { number: u32, size_bytes: u64 }
+crate::diskmodel | Plan.after: Vec<String>
+crate::diskmodel | Plan.audit: String
+crate::diskmodel | Plan.disk: String
+crate::diskmodel | Plan.expect: Vec<Expect>
+crate::diskmodel | Plan.identity: String
+crate::diskmodel | Plan.lost: Vec<String>
+crate::diskmodel | Plan.op: PartOp
+crate::diskmodel | Plan.steps: Vec<Step>
+crate::diskmodel | Plan.warnings: Vec<String>
+crate::diskmodel | Step::MinSize { tool: Tool, args: Vec<String>, block: u64, need: u64, what: String }
+crate::diskmodel | Step::Mke2fs { dev: String, label: String, uuid: String, what: String }
+crate::diskmodel | Step::Reread { dev: String }
+crate::diskmodel | Step::Sync
+crate::diskmodel | Step::Tool { tool: Tool, args: Vec<String>, what: String }
+crate::diskmodel | Step::WaitNode { dev: String }
+crate::diskmodel | Step::Write { dev: String, offset: u64, data: Vec<u8>, what: String }
+crate::diskmodel | Step::Zero { dev: String, offset: u64, len: u64, what: String }
+crate::diskmodel | Tool::E2fsck
+crate::diskmodel | Tool::MkfsExfat
+crate::diskmodel | Tool::Mkntfs
+crate::diskmodel | Tool::Ntfsresize
+crate::diskmodel | Tool::Resize2fs
+crate::diskmodel | derive Confirm: Clone, Debug, Default
+crate::diskmodel | derive Expect: Clone, Debug, Eq, PartialEq
+crate::diskmodel | derive FormatFs: Clone, Copy, Debug, Eq, PartialEq
+crate::diskmodel | derive PartOp: Clone, Debug, Eq, PartialEq
+crate::diskmodel | derive Plan: Clone, Debug
+crate::diskmodel | derive Step: Clone, Debug, Eq, PartialEq
+crate::diskmodel | derive Tool: Clone, Copy, Debug, Eq, PartialEq
+crate::diskmodel | pub enum Expect
+crate::diskmodel | pub enum FormatFs
+crate::diskmodel | pub enum PartOp
+crate::diskmodel | pub enum Step
+crate::diskmodel | pub enum Tool
+crate::diskmodel | pub fn DiskEngine:::allow_writing(&self, who: &Actor, part: &str, audit: AuditFn) -> Result<Mounted, String>
+crate::diskmodel | pub fn DiskEngine:::apply_partition(&self, who: &Actor, disk: &str, op: &PartOp, confirm: &Confirm, audit: AuditFn) -> Result<String, String>
+crate::diskmodel | pub fn DiskEngine:::lock(&self, who: &Actor, part: &str, audit: AuditFn) -> Result<String, String>
+crate::diskmodel | pub fn DiskEngine:::plan_partition(&self, who: &Actor, disk: &str, op: &PartOp) -> Result<Plan, String>
+crate::diskmodel | pub fn DiskEngine:::plan_unlock(&self, snap: &Snapshot, who: &Actor, part: &str) -> Result<iyakki_diskcrypt::CryptKind, String>
+crate::diskmodel | pub fn DiskEngine:::refusal(&self, who: &Actor, d: &Disk) -> Option<String>
+crate::diskmodel | pub fn DiskEngine:::unlock(&self, who: &Actor, part: &str, secret: &iyakki_diskcrypt::Secret, audit: AuditFn) -> Result<Mounted, String>
+crate::diskmodel | pub fn DiskEngine:::use_programs(&self, bin_dir: &str)
+crate::diskmodel | pub fn FormatFs::name(self) -> &'static str
+crate::diskmodel | pub fn FormatFs::tool(self) -> Option<Tool>
+crate::diskmodel | pub fn FormatFs::unsupported(self) -> Option<&'static str>
+crate::diskmodel | pub fn PartOp::destructive(&self) -> bool
+crate::diskmodel | pub fn PartOp::name(&self) -> &'static str
+crate::diskmodel | pub fn Plan::headline(&self) -> String
+crate::diskmodel | pub fn Plan::render(&self) -> String
+crate::diskmodel | pub fn Plan::writes_anything(&self) -> bool
+crate::diskmodel | pub fn Step::text(&self) -> String
+crate::diskmodel | pub fn Tool::missing_words(self, doing: &str) -> String
+crate::diskmodel | pub fn Tool::package(self) -> (&'static str, &'static str)
+crate::diskmodel | pub fn Tool::prog(self) -> &'static str
+crate::diskmodel | pub fn accepted_names(d: &Disk, op: &PartOp) -> Vec<String>
+crate::diskmodel | pub fn check_confirmation(d: &Disk, c: &Confirm) -> Result<(), String>
+crate::diskmodel | pub fn check_confirmation_for(d: &Disk, op: &PartOp, c: &Confirm) -> Result<(), String>
+crate::diskmodel | pub fn op_partition(op: &PartOp) -> Option<u32>
+crate::diskmodel | pub fn partition_refusal(who: &Actor, d: &Disk) -> Option<String>
+crate::diskmodel | pub struct Confirm
+crate::diskmodel | pub struct Plan
+crate::guarded | pub const DISK_PARTITION: &str = "system.disk.partition"
+crate::guarded | pub const DISK_UNLOCK: &str = "system.disk.unlock"
+crate::soundtypes | derive Master: Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize
+crate | [cfg(feature = "native")] pub mod btaudio
+crate | pub mod screenfacts
+crate | pub mod startupdisk
+crate | pub use soundctl::{CuePlayer, NoCues, NoOutputState, NoSound, OutputState, SoundControl, SoundState}
+crate::appcaps | pub const BUILTIN_TABLE: &[(&str, &[&str])] = &[("settings", &["bluetooth.use", "system.radio.set", "system.link.set", "system.startup.set", "system.brightness.set", "sys...
+crate::btaudio | BtAudioAction::Connect { device: String }
+crate::btaudio | BtAudioAction::ConnectAt { address: String }
+crate::btaudio | BtAudioAction::Disconnect
+crate::btaudio | BtAudioAction::Pairing { on: bool }
+crate::btaudio | BtAudioAction::SendStart { device: String, whole_computer: bool, mute_speakers: bool }
+crate::btaudio | BtAudioAction::SendStop
+crate::btaudio | BtAudioAction::SendTone
+crate::btaudio | derive BtAudioAction: Clone, Debug, Eq, PartialEq
+crate::btaudio | impl BtAudio for NoBtAudio
+crate::btaudio | pub const NOT_HERE: &str = "Bluetooth audio is not available here"
+crate::btaudio | pub enum BtAudioAction
+crate::btaudio | pub fn BtAudio:::apply(&self, _action: &BtAudioAction) -> Result<String, String>
+crate::btaudio | pub fn BtAudio:::clear_remote(&self)
+crate::btaudio | pub fn BtAudio:::plan(&self, _action: &BtAudioAction) -> Result<String, String>
+crate::btaudio | pub fn BtAudio:::receive_view(&self) -> AudioView
+crate::btaudio | pub fn BtAudio:::remembered(&self) -> Option<(String, bool)>
+crate::btaudio | pub fn BtAudio:::send_view(&self) -> SendView
+crate::btaudio | pub fn BtAudio:::sinks(&self) -> Vec<(String, String)>
+crate::btaudio | pub fn BtAudio:::sound_line(&self) -> String
+crate::btaudio | pub fn BtAudioAction::tool(&self) -> &'static str
+crate::btaudio | pub struct NoBtAudio
+crate::btaudio | pub trait BtAudio: Send + Sync
+crate::btaudio | pub use iyakki_devctl::a2dp::{AudioDeviceView, AudioState, AudioView}
+crate::btaudio | pub use iyakki_devctl::a2dp_send::SendView
+crate::diskmodel | FormatRequest::Format { part: String, fs: FormatFs, label: String }
+crate::diskmodel | FormatRequest::Resize { part: String, bytes: u64 }
+crate::diskmodel | derive FormatRequest: Clone, Debug, Eq, PartialEq
+crate::diskmodel | pub enum FormatRequest
+crate::diskmodel | pub fn DiskEngine:::take_format_request(&self, dir: &std::path::Path, user: &str) -> Option<FormatRequest>
+crate::diskmodel | pub fn FormatRequest::part(&self) -> &str
+crate::diskmodel | pub fn request_op(snap: &Snapshot, req: &FormatRequest) -> Result<(String, PartOp), String>
+crate::guarded | impl crate::btaudio::BtAudio for GuardedBtAudio
+crate::guarded | impl crate::screenfacts::ScreenFacts for GuardedScreenFacts
+crate::guarded | impl crate::soundctl::OutputState for GuardedOutputState
+crate::guarded | impl crate::startupdisk::StartupDisk for GuardedStartupDisk
+crate::guarded | pub const BLUETOOTH_USE: &str = "bluetooth.use"
+crate::guarded | pub const LINK_SET: &str = "system.link.set"
+crate::guarded | pub const STARTUP_SET: &str = "system.startup.set"
+crate::hardware | pub const NOT_HERE: &str = "not available here"
+crate::hardware | pub fn Hardware:::change_volume(&self, _card: u32, _delta: Option<i32>) -> Result<Volume, String>
+crate::hardware | pub fn Hardware:::dhcp(&self, _name: &str) -> Result<(), String>
+crate::hardware | pub fn Hardware:::set_link(&self, _name: &str, _up: bool) -> Result<(), String>
+crate::hardware | pub fn Hardware:::set_volume(&self, _card: u32, _percent: u32) -> Result<Volume, String>
+crate::hardware | pub fn Hardware:::volume(&self, _card: u32) -> Option<Volume>
+crate::screenfacts | Connector.connected: bool
+crate::screenfacts | Connector.enabled: Option<bool>
+crate::screenfacts | Connector.modes: Vec<(u32, u32)>
+crate::screenfacts | Connector.name: String
+crate::screenfacts | derive Connector: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::screenfacts | impl ScreenFacts for NoScreenFacts
+crate::screenfacts | pub fn ScreenFacts:::card_with(&self, _at_least: usize) -> Option<String>
+crate::screenfacts | pub fn ScreenFacts:::connectors(&self) -> Vec<Connector>
+crate::screenfacts | pub fn ScreenFacts:::fb_signature(&self, _fb_path: &str) -> Option<String>
+crate::screenfacts | pub fn ScreenFacts:::signature(&self) -> String
+crate::screenfacts | pub fn parse_mode(line: &str) -> Option<(u32, u32)>
+crate::screenfacts | pub fn signature_of(connectors: &[Connector]) -> String
+crate::screenfacts | pub struct Connector
+crate::screenfacts | pub struct NoScreenFacts
+crate::screenfacts | pub trait ScreenFacts: Send + Sync
+crate::soundctl | impl OutputState for NoOutputState
+crate::soundctl | pub fn OutputState:::device(&self) -> Option<String>
+crate::soundctl | pub fn OutputState:::gain(&self) -> u32
+crate::soundctl | pub fn OutputState:::generation(&self) -> u64
+crate::soundctl | pub struct NoOutputState
+crate::soundctl | pub trait OutputState: Send + Sync
+crate::startupdisk | StartupAction::First
+crate::startupdisk | StartupAction::Next
+crate::startupdisk | StartupAction::Register
+crate::startupdisk | StartupAction::Revert
+crate::startupdisk | StartupPlan.action: StartupAction
+crate::startupdisk | StartupPlan.preview: String
+crate::startupdisk | derive StartupAction: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::startupdisk | derive StartupPlan: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::startupdisk | impl StartupDisk for NoStartupDisk
+crate::startupdisk | pub const ADMIN_ONLY: &str = "Only administrators change the startup disk."
+crate::startupdisk | pub const NOT_HERE: &str = "This computer was not started through UEFI _no firmware variables__ so there is no boot entry to set."
+crate::startupdisk | pub const StartupAction::ALL: [StartupAction; 4] = [StartupAction::Register, StartupAction::First, StartupAction::Next, StartupAction::Revert]
+crate::startupdisk | pub enum StartupAction
+crate::startupdisk | pub fn StartupAction::name(self) -> &'static str
+crate::startupdisk | pub fn StartupAction::parse(word: &str) -> Option<StartupAction>
+crate::startupdisk | pub fn StartupAction::preview(self) -> &'static str
+crate::startupdisk | pub fn StartupDisk:::apply(&self, _action: StartupAction, _administrator: bool) -> Result<String, String>
+crate::startupdisk | pub fn StartupDisk:::before_dev_reboot(&self, _setting_on: bool) -> Option<String>
+crate::startupdisk | pub fn StartupDisk:::plan(&self, _action: StartupAction, _administrator: bool) -> Result<StartupPlan, String>
+crate::startupdisk | pub fn StartupDisk:::status_line(&self, _reboot_setting: bool) -> String
+crate::startupdisk | pub fn StartupDisk:::status_lines(&self, _reboot_setting: bool) -> Vec<String>
+crate::startupdisk | pub struct NoStartupDisk
+crate::startupdisk | pub struct StartupPlan
+crate::startupdisk | pub trait StartupDisk: Send + Sync
+crate::sysinfo | [cfg(feature = "native")] pub fn Os:::bt_audio(&self) -> std::sync::Arc<dyn crate::btaudio::BtAudio>
+crate::sysinfo | pub fn Os:::output_state(&self) -> std::sync::Arc<dyn crate::soundctl::OutputState>
+crate::sysinfo | pub fn Os:::screen_facts(&self) -> std::sync::Arc<dyn crate::screenfacts::ScreenFacts>
+crate::sysinfo | pub fn Os:::startup_disk(&self) -> std::sync::Arc<dyn crate::startupdisk::StartupDisk>
+crate::soundtypes | derive Cue: Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize
 removed	crate::appcaps | [serde(deny_unknown_fields)] pub struct CapabilityRequest	F-1: deny_unknown_fields dropped from CapabilityRequest (unknown fields kept in extra); added extra, unknown_request_fields, Default
 removed	crate | [cfg(feature = "native")] pub use host::HostApi	the re-export line was widened to also export WasmTask (pub use host::{HostApi, WasmTask}); HostApi is still exported at the same path, so nothing a client used is gone
 removed	crate::client | ServerMsg::HelloOk { v: u32, caps: Vec<String>, challenge: String, tile: u32, max_message: usize }	F-CORE-19: HelloOk gains an optional deprecations list (serde default, skipped when empty, so recorded transcripts still read and older readers ignore it); Hello and Negotiated gain deprecations and update; a variant field added is a shape change of the struct variant only
@@ -2457,19 +3183,37 @@ removed	crate | pub use files::{FileEntry, Files, Listing, NoFiles}	F-SDK-101: t
 removed	crate::files | pub const FILES_FACET_VERSION: u32 = 1	F-SDK-101: the facet version is 2 (additive: change and decide); nothing a version 1 client used is gone
 removed	crate::contract::hello | pub const CONTRACT_VERSION: ContractVersion = ContractVersion { major: 0, minor: 2 }	F-SDK-103 and F-SDK-202: the Terminal facet gains the whole-session calls (default methods), contract 0.3 adds the appevents domain
 removed	crate | pub use terminal::{NoTerminal, TermApproval, TermOpen, TermReply, Terminal}	F-SDK-103 and F-SDK-202: the Terminal facet gains the whole-session calls (default methods), contract 0.3 adds the appevents domain
-crate | pub use uicore::{BrailleCells, BrailleKey, BrailleLink}
-crate::uicore | BrailleKey::FocusNext
-crate::uicore | BrailleKey::FocusPrev
-crate::uicore | BrailleKey::PanLeft
-crate::uicore | BrailleKey::PanRight
-crate::uicore | BrailleKey::Route(usize)
-crate::uicore | impl BrailleLink for NoUiState
-crate::uicore | pub enum BrailleKey
-crate::uicore | pub fn BrailleCells:::keys(&mut self) -> Vec<BrailleKey>
-crate::uicore | pub fn BrailleCells:::put(&mut self, cells: &str) -> Result<(), String>
-crate::uicore | pub fn BrailleCells:::width(&self) -> usize
-crate::uicore | pub fn BrailleLink:::open(&self) -> Option<Box<dyn BrailleCells>>
-crate::uicore | pub fn BrailleLink:::status(&self) -> String
-crate::uicore | pub fn Core:::braille(&self) -> &dyn BrailleLink
-crate::uicore | pub trait BrailleCells: Send
-crate::uicore | pub trait BrailleLink: Send + Sync
+removed	crate::soundtypes | derive Master: Clone, Copy, Debug, Eq, PartialEq	serde::Serialize and serde::Deserialize derived on Master (additive; F-SPLIT-03: the master mute answer crosses the UI socket); Clone, Copy, Debug, Eq, PartialEq are all still there
+removed	crate::soundtypes | derive Cue: Clone, Copy, Debug, Eq, Hash, PartialEq	Cue gains Serialize and Deserialize (additive: the cue crosses the UI socket in the sound preview call, F-SPLIT-03)
+crate::audioroute | pub fn AudioRoute:::is_machine(&self) -> bool
+crate::soundctl | pub fn SoundControl:::card_starting_via(&self, _route: &dyn crate::audioroute::AudioRoute) -> Option<u32>
+crate::soundctl | pub fn SoundControl:::outputs_via(&self, _route: &dyn crate::audioroute::AudioRoute) -> Vec<Output>
+crate::uicore | pub fn Core:::audio_route(&self) -> std::sync::Arc<dyn crate::audioroute::AudioRoute>
+crate::uicore | pub fn Core:::audio_route_at(&self, _proc_root: &std::path::Path, _sys_root: &std::path::Path) -> std::sync::Arc<dyn crate::audioroute::AudioRoute>
+crate::audioroute | pub fn AudioRoute:::process_name(&self, _pid: u32) -> Option<String>
+crate::audioroute | pub fn AudioRoute:::process_parent(&self, _pid: u32) -> Option<u32>
+crate | [cfg(feature = "native")] pub mod device_types
+crate::device_types | pub use iyakki_devctl as devctl
+crate::device_types | pub use iyakki_drivers as driver_packs
+crate::device_types | pub use iyakki_hwinfo as hwinfo
+crate::device_types | pub use iyakki_netscan as netscan
+crate::device_types | pub use iyakki_storage as storage
+crate::device_types | pub use iyakki_usb as usb
+crate::device_types | pub use iyakki_zram as zram
+removed	crate | pub use soundctl::{CuePlayer, NoCues, NoSound, SoundControl, SoundState}	the re-export gained NoOutputState and OutputState (the sound output state seam moved from the agent); nothing a client used is gone
+removed	crate::appcaps | pub const BUILTIN_TABLE: &[(&str, &[&str])] = &[("settings", &["bluetooth.use", "system.radio.set", "system.brightness.set", "system.volume.set", "system.memory.set", "sy...	settings gains system.link.set and system.startup.set in the built-in table (additions to lists, the old items stay)
+removed	crate::drivers | pub use iyakki_drivers::{apply, facetime, known, Availability, Delivery, Roots, Status}	F-ARCH-07 (D-ARCH-07-TYPES): the re-export line was widened (appfw, ihex, macboard, modpack, pack, run, t2hold, Fs, Pack added); every name it exported before is exported at the same path
+crate::drivers | pub fn Drivers:::pack_files(&self, id: &str) -> Option<(usize, usize)>
+crate::drivers | pub fn Drivers:::remove_pack(&self, id: &str) -> Result<String, String>
+crate::drivers | pub use iyakki_drivers::{appfw, apply, facetime, ihex, known, macboard, modpack, pack, run, t2hold, Availability, Delivery, Fs, Pack, Roots, Status}
+crate::installer | impl DiskTools for NoDiskTools
+crate::installer | pub fn DiskTools:::bios_plan(&self, args: &[String]) -> Result<(String, String), String>
+crate::installer | pub fn DiskTools:::bios_write(&self, args: &[String], confirm: &str) -> Result<String, String>
+crate::installer | pub fn DiskTools:::extract_boot_pack(&self, image: &std::path::Path, dir: &std::path::Path) -> Result<Vec<BootFile>, String>
+crate::installer | pub fn DiskTools:::locate(&self, disk: &str, part: u32) -> Result<Located, String>
+crate::installer | pub struct NoDiskTools
+crate::installer | pub trait DiskTools: Send + Sync
+crate::installer | pub use iyakki_usb::bootpack::Extracted as BootFile
+crate::installer | pub use iyakki_usb::resize::{FsTool, HostTools, Located, ShrinkPlan}
+crate::startupdisk | pub fn StartupDisk:::firmware_present(&self) -> bool
+crate::startupdisk | pub fn StartupDisk:::own_entry_first(&self, _administrator: bool) -> Result<Option<String>, String>

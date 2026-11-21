@@ -237,11 +237,18 @@
     function stopSound() { player.stop(); st.sound = false; io.sendJson({ t: "audio", on: false }); changed(); }
 
     // ---- clipboard
+    function htmlToText(h) {
+      return h.replace(/<(script|style)[\s\S]*?<\/\1>/gi, "").replace(/<br\s*\/?>|<\/(p|div|li|h[1-6]|pre|tr)>/gi, "\n").replace(/<[^>]*>/g, "")
+        .replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&").replace(/\n{3,}/g, "\n\n").trim();
+    }
     async function copyIn(item) {                       // a PNG or HTML message of the server to the browser's clipboard
       if (!env.nav.clipboard || !env.nav.clipboard.write || !env.ClipboardItem) return false;
       const type = item.kind === "image" ? "image/png" : "text/html";
+      const parts = { [type]: new env.Blob([item.bytes], { type }) };
+      // HTML goes with its plain text, so a paste into a plain field still gets the words
+      if (item.kind !== "image" && env.TextDecoder) parts["text/plain"] = new env.Blob([htmlToText(new env.TextDecoder().decode(item.bytes))], { type: "text/plain" });
       try {
-        await env.nav.clipboard.write([new env.ClipboardItem({ [type]: new env.Blob([item.bytes], { type }) })]);
+        await env.nav.clipboard.write([new env.ClipboardItem(parts)]);
         st.pendingCopy = null; changed(); return true;
       } catch (e) { st.pendingCopy = item; changed(); return false; }   // no gesture yet: the "Copy" button finishes it
     }

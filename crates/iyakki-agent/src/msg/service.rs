@@ -59,6 +59,13 @@ pub struct MessageService {
     sleeper: Arc<dyn Fn(Duration) + Send + Sync>,
 }
 
+/// The loaded encryption add-ons, one per person and account, so that a verification or a key request in progress survives from one
+/// sync round to the next (every call builds a new service). Keyed by the person's folder and the account id.
+fn addons() -> &'static Mutex<HashMap<String, Arc<dyn super::e2ee::E2eeAddon>>> {
+    static C: OnceLock<Mutex<HashMap<String, Arc<dyn super::e2ee::E2eeAddon>>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn now_secs() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
@@ -105,9 +112,52 @@ impl MessageService {
         &self.acc
     }
 
+    /// The add-on loader: the Olm and Megolm add-on of this account, when the person switched encryption on for it. It is opened from the
+    /// person's vault (a locked vault gives none) and kept for the run. None when the switch is off.
+    pub fn addon_for(&self, a: &Account) -> Option<Arc<dyn super::e2ee::E2eeAddon>> {
+        if !self.acc.e2ee_on(&a.id) || a.device_id.is_empty() {
+            return None;
+        }
+        let key = format!("{}|{}", self.acc.dir_key(), a.id);
+        let store = self.acc.secret_store();
+        let mut map = addons().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // a cached add-on is used only while the vault is open (after a sign-out it must not go on working)
+        if store.get(&super::e2ee_olm::vault_name(&a.id)).is_err_and(|e| e.contains("locked")) {
+            map.remove(&key);
+        }
+        if let Some(x) = map.get(&key) {
+            return Some(x.clone());
+        }
+        let x: Arc<dyn super::e2ee::E2eeAddon> = Arc::new(super::e2ee_olm::OlmAddon::open(store, &a.id, &a.user_id, &a.device_id).ok()?);
+        map.insert(key, x.clone());
+        Some(x)
+    }
+
+    /// The first account with encryption on that has an add-on (the tools that are not about one account use it).
+    pub fn first_addon(&self) -> Option<Arc<dyn super::e2ee::E2eeAddon>> {
+        self.acc.list().iter().find_map(|a| self.addon_for(a))
+    }
+
+    /// Switch encryption on or off for an account. Off forgets the loaded add-on of this run; its keys stay in the vault.
+    pub fn set_e2ee(&self, account: &str, on: bool) -> Result<String, String> {
+        let a = self.acc.pick(account)?;
+        if on && a.device_id.is_empty() {
+            return Err("this account was added with an access token, so IYAKKI does not know the name of its device: add it again with the password to use encrypted rooms".into());
+        }
+        self.acc.set_e2ee(&a.id, on)?;
+        if !on {
+            addons().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&format!("{}|{}", self.acc.dir_key(), a.id));
+        }
+        self.acc.audit("e2ee", &format!("account=\"{}\" on={on}", a.label));
+        Ok(a.label)
+    }
+
     fn channel(&self, a: &Account) -> Result<MatrixChannel, String> {
         let token = self.acc.token(&a.id)?;
-        Ok(MatrixChannel::new(&a.label, &a.homeserver, token, self.up.clone(), self.cluster.clone())
+        let addon = self.addon_for(a);
+        let ch = MatrixChannel::new(&a.label, &a.homeserver, token, self.up.clone(), self.cluster.clone());
+        let ch = if addon.is_some() { ch.with_e2ee(addon) } else { ch };
+        Ok(ch
             .with_sleeper(self.sleeper.clone())
             .with_max_attachment(a.max_attachment)
             .with_since(self.acc.since(&a.id))

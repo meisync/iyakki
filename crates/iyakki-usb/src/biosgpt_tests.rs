@@ -121,3 +121,29 @@ fn the_chainload_entry_uses_only_safe_text_and_replaced_boot_code_needs_a_way_ba
     assert!(entry_for_replaced_boot_code(&BootCode::Windows, None).unwrap_err().contains("unreachable"));
     assert!(entry_for_replaced_boot_code(&BootCode::Other, None).is_err());
 }
+
+fn ntfs_sector(serial: u64) -> Vec<u8> {
+    let mut b = vec![0u8; 512];
+    b[3..11].copy_from_slice(b"NTFS    ");
+    b[0x48..0x50].copy_from_slice(&serial.to_le_bytes());
+    b[510] = 0x55;
+    b[511] = 0xAA;
+    b
+}
+
+#[test]
+fn the_menu_entry_for_windows_names_the_ntfs_volume_serial_as_grub_prints_it_and_nothing_is_added_without_a_replacement() {
+    assert_eq!(ntfs_uuid(&ntfs_sector(0x1234_5678_9ABC_DEF0)).as_deref(), Some("123456789abcdef0"));
+    assert_eq!(ntfs_uuid(&vec![0u8; 512]), None);
+    let mut no_sig = ntfs_sector(1);
+    no_sig[511] = 0;
+    assert_eq!(ntfs_uuid(&no_sig), None);
+    // a non-NTFS first sector is skipped, the NTFS one is used
+    let m = menu_for_install(true, &BootCode::Windows, &[vec![0u8; 512], ntfs_sector(0xAB)]).unwrap().unwrap();
+    assert!(m.contains("--fs-uuid --set=root 00000000000000ab") && m.contains("chainloader +1"), "{m}");
+    // nothing replaced: nothing added; replaced with no NTFS volume found or foreign code: refused in words
+    assert_eq!(menu_for_install(false, &BootCode::Windows, &[]), Ok(None));
+    assert!(menu_for_install(true, &BootCode::Windows, &[vec![0u8; 512]]).unwrap_err().contains("unreachable"));
+    assert!(menu_for_install(true, &BootCode::Other, &[ntfs_sector(1)]).is_err());
+    assert_eq!(menu_for_install(true, &BootCode::Empty, &[]), Ok(None));
+}

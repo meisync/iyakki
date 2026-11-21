@@ -43,18 +43,11 @@ iyakki-tile-pdf = { path = "../iyakki-tile-pdf" }
 iyakki-vpn = { path = "../iyakki-vpn" }
 iyakki-sec.workspace = true
 iyakki-accounts = { path = "../iyakki-accounts" }
-iyakki-storage.workspace = true
-iyakki-zram.workspace = true
 iyakki-fw.workspace = true
-iyakki-usb = { path = "../iyakki-usb" }
 iyakki-edit.workspace = true
-iyakki-hwinfo.workspace = true
-iyakki-drivers.workspace = true
-iyakki-devctl.workspace = true
 iyakki-web.workspace = true
 iyakki-pdf.workspace = true
 iyakki-js.workspace = true
-iyakki-netscan.workspace = true
 iyakki-webview.workspace = true
 iyakki-rfb.workspace = true
 iyakki-ledger.workspace = true

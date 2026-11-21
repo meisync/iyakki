@@ -188,7 +188,7 @@ fn shell_in(d: &std::path::Path) -> Shell {
     let up: Arc<dyn Upstream> = Arc::new(Offline);
     iyakki_compose::wire();
     Shell::new(ShellEnv {
-        store: Arc::new(Mutex::new(store)),
+        store: iyakki_shell::accounts::UsersRef::of_store(&Arc::new(Mutex::new(store))),
         audit: Arc::new(AuditLog::new(&d.join("audit.log"))),
         host: Arc::new(Host),
         cfg: iyakki_agent::config::AiConfig::parse("").unwrap(),
@@ -261,7 +261,7 @@ impl Person {
     /// How many pixels of the last frame have this colour.
     fn pixels(&mut self, c: [u8; 3]) -> usize {
         self.render();
-        self.g.pm.data().chunks_exact(4).filter(|p| p[..3] == c).count()
+        self.g.pm_mut().data().chunks_exact(4).filter(|p| p[..3] == c).count()
     }
 
     fn until_picture(&mut self, what: &str, c: [u8; 3]) {

@@ -18,6 +18,7 @@ pub mod files;
 #[cfg(feature = "uikit")]
 pub mod editorview;
 pub mod terminal;
+pub mod zoom;
 #[cfg(feature = "uikit")]
 pub mod terminalview;
 #[cfg(feature = "uikit")]

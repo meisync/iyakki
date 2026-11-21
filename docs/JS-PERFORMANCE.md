@@ -89,6 +89,76 @@ Where the YouTube page spends its 1.6 s now (second load): 0.02 s engine start, 
 dom.js's `dispatchEvent`/`_invoke` is the only bridge code with a visible share (13 % inclusive, almost all of it the
 handlers it calls).
 
+## Faster script start: measured plan (F-BROW-99, alpha.7, 2026-11-19)
+
+What a page pays before its own scripts run, and what it pays for them, measured on the AMD build host (release build, a shared machine
+with a load of 10 to 18, so read the figures as "about"; best of several runs). Tools: `IYAKKI_JS_STATS=1` makes `JsEngine::new` print a
+`JS-START` line (the wasm instance, QuickJS's own start, the platform preludes and the six slowest preludes), and
+`cargo test --release -p iyakki-js --test bench -- --ignored --nocapture --test-threads=1 bench_start_phases` runs six blank pages with it.
+
+| Part of a new engine (blank page, compiled forms cached) | Time |
+|---|---|
+| wasm instance (`Linker::instantiate`, `_initialize`) | 0.03 to 0.11 ms (0.11 only the first time) |
+| QuickJS's own start (`jb_init`) | 0.22 ms |
+| the platform preludes, evaluated from their compiled form | 3.9 to 4.3 ms |
+| of which the `dom` prelude (136 KB of source) | 2.7 ms |
+| of which `indexedDB` (26 KB) / `window`, `localStorage`, `fetch`, `url`, `console` | 0.29 ms / 0.12 to 0.14 ms each |
+| a blank page in all | 4.7 to 5.0 ms (12 ms the first time: the compiled engine is read from disk) |
+
+Parsing the preludes is already gone (they come from the compiled form); what is left is running them: the definitions of the page object,
+its classes and its listeners. A page script is the other half: from the earlier lane measurements, a function-heavy script costs about 0.09 ms
+per KB to parse and about 0.02 ms per KB to load from the compiled form (32 KB: 2.9 ms against 0.8 ms; 100 KB: 8.5 ms against 1.7 ms), and
+the scripts' own run time (BBC's bootstrap 0.2 to 0.4 s, YouTube about 1.5 s cached) is the interpreter running page code: 30M loop turns in
+3.6 s, `fib(30)` 0.23 s, 200k host calls 0.2 s (table in the row's notes).
+
+**What this says.** For a page that loads a few hundred KB of script, the start (5 ms) and the parse of what the compiled cache already holds
+(tens of ms) are NOT where a second or more goes: it is the page's scripts running in QuickJS inside wasmtime, and the host calls they make
+(38 700 per YouTube page after the bridge work). A new snapshot would save about 3 ms a page; only the interpreter, or less script work, moves
+the big numbers.
+
+Plan, in the order it should be done, each step measured with the tools above before and after, kept only if it is clearly faster and every
+test of the crate passes:
+
+1. **Lazy page object (saves up to about 2.5 ms a page, low risk).** Run only the part of the `dom` prelude every page needs (`document`,
+   `window`, the element base class) at start; define the rest (the `HTMLxxxElement` classes, `Range`, `Selection`, `MutationObserver`, the form
+   and media classes) as accessors on `globalThis` that run their part of the prelude on first use and replace themselves. Risk: a page
+   that enumerates `window` sees the accessors; fix by making them enumerable data-like getters. Test: the existing `dom_*` tests plus a new
+   one that every global name exists before and after the first use.
+2. **Heap snapshot of the platform (about 3 ms a page, medium risk, only if step 1 is not enough).** Run the preludes once per process in a
+   scratch engine, copy its linear memory and the mutable wasm globals, and start each new engine from that copy instead of running the
+   preludes (the Wizer approach, done by hand because the engine has host imports). Needs: the host-call tables of every module to be
+   re-bound by name (they are closures over per-page state, not part of the snapshot), the preludes' own state (ids, caches) to be position
+   independent, and the copy to be done with wasmtime's copy-on-write memory image so it costs microseconds. Not done: a stale snapshot would
+   be a silent wrong page, so it needs a build-time check that the snapshot's key is the hash of every prelude text and of the engine.
+3. **Parse cost of small scripts (about 0.07 ms per KB saved on the second visit).** The compiled cache starts at 16 KiB per script
+   (`SCRIPT_CACHE_MIN`, alpha.7 lane d1). Pages with hundreds of small inline scripts keep paying; keeping the compiled form of inline scripts
+   by a content hash in a per-user pack file (one read per page instead of one per script) would remove it. Measure first on a real page with
+   `bench_page`: the saving shows only above about 200 KB of small scripts.
+4. **The interpreter itself (the only step that moves YouTube's 1.5 s).** In order of effort: build QuickJS with `-O3 -flto` and wasm
+   `-msimd128 -mbulk-memory` (the build script `dist/js/build.sh` has neither flag yet; try each alone and keep a flag only if the bench table
+   improves and the node comparison test still agrees), then wasmtime settings (`Config::cranelift_opt_level(Speed)` is on; try
+   `memory_reservation` and guard pages so bounds checks go away, `parallel_compilation` off for a one-time engine compile), then host-call
+   batching (the guest asks for several DOM answers in one call; 38 700 calls at 0.5 to 1 us each are 20 to 40 ms, small against the
+   interpreter), and last the choice of another interpreter, which is a different project.
+5. **Skip scripts that are not the page (largest practical gain on real sites).** Analytics, ad and tracking scripts are the biggest share of a
+   heavy page's script time; the blocker (`iyakki-web::blocker`) already drops listed addresses before they are fetched, and a page's run
+   report names every script over 30 ms (`IYAKKI_JS_STATS=1`), so the report decides which list entries to add. This needs a real-page run with
+   network, which this host cannot do from a test.
+
+Done in this round: the `JS-START` timing and `bench_start_phases` (so steps 1 and 2 can be measured the same way on any machine, a Mac
+included); nothing in the interpreter changed. Not done: steps 1 to 5 (each is measured against the table above), and a measurement of a real
+site (needs network).
+
+### Step 3 done (alpha.7, lane W3): pack file of small compiled scripts
+
+Scripts from 512 bytes to 16 KiB keep their compiled form in one per-user file (`smallpack-<engine digest>.pack`, `iyakki-js/src/pack.rs`),
+read once per process, merged with what another process stored when an engine that added entries is dropped, capped at 24 MB (oldest entries
+first), trusted under the same owner, mode and checksum rules as the single files. Measured with `bench_small_scripts_pack` (80 inline scripts of
+about 3 KB each, release build, AMD build host, shared machine, fresh cache folder): the first page 40.5 ms (parses, stores), the pages after 10.1 to
+11.9 ms, so about 30 ms a page for 240 KB of small scripts. The blank-page start is unchanged (4.5 to 5.7 ms, `bench_start_phases`). `page_scripts_chrome`
+(KI-996/997) passes. Steps 1, 2, 4 and 5 are not done: step 1 changes what a page sees when it enumerates `window` and wants the node comparison tests
+widened first; the interpreter and wasmtime memory settings were each measured within noise in the earlier round.
+
 ## What is still slow
 
 * The interpreter. QuickJS runs in WebAssembly, without a JIT; build flags, link-time optimisation, bulk memory, wasmtime

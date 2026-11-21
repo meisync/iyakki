@@ -234,6 +234,15 @@ pub fn compress_tree(root: &std::path::Path, release: &str, pack_out: Option<&st
         let manifest = Plan { keep: pl.keep.clone(), optional: moved.iter().cloned().collect() }
             .pack_manifest(release, &|m| std::fs::read(out.join(m)).ok())?;
         std::fs::write(out.join("manifest.txt"), manifest).map_err(|e| format!("manifest: {e}"))?;
+        // the small files the device keeps to know which optional module a device needs (modpack::needed)
+        let alias_text = std::fs::read_to_string(root.join("modules.alias")).unwrap_or_default();
+        let optional: BTreeSet<String> = moved.iter().cloned().collect();
+        let map = crate::modpack::map_text(&optional, &dep, &alias_text);
+        std::fs::write(out.join("optional.map"), &map).map_err(|e| format!("optional.map: {e}"))?;
+        let keep = root.join("optional-pack");
+        std::fs::create_dir_all(&keep).map_err(|e| format!("optional-pack: {e}"))?;
+        std::fs::write(keep.join("optional.map"), map).map_err(|e| format!("optional-pack: {e}"))?;
+        std::fs::copy(out.join("manifest.txt"), keep.join("manifest.txt")).map_err(|e| format!("optional-pack: {e}"))?;
     }
     let mut files = Vec::new();
     collect_ko(root, root, &mut files).map_err(|e| format!("{}: {e}", root.display()))?;
@@ -377,12 +386,17 @@ mod tests {
             std::fs::write(&f, fake_ko(4000)).unwrap();
         }
         std::fs::write(root.join("modules.dep"), dep_text).unwrap();
+        std::fs::write(root.join("modules.alias"), "alias usb:v1p2* hdlc\nalias pci:v3* ext4\n").unwrap();
         let r = compress_tree(&root, "6.12.0", Some(&pack)).unwrap();
         assert!(r.moved_out >= 3 && r.compressed + r.moved_out == d.len());
         assert!(r.bytes_after < r.bytes_before);
         assert!(root.join("kernel/fs/ext4/ext4.ko.gz").is_file() && !root.join("kernel/fs/ext4/ext4.ko").exists());
         assert!(!root.join("kernel/drivers/net/wan/hdlc.ko").exists() && pack.join("kernel/drivers/net/wan/hdlc.ko").is_file());
         assert!(std::fs::read_to_string(pack.join("manifest.txt")).unwrap().contains("hdlc.ko"));
+        let map = std::fs::read_to_string(root.join("optional-pack/optional.map")).unwrap();
+        assert!(map.contains("alias usb:v1p2* kernel/drivers/net/wan/hdlc.ko") && !map.contains("ext4") && map == std::fs::read_to_string(pack.join("optional.map")).unwrap());
+        let m = crate::modpack::Manifest::parse(&std::fs::read_to_string(root.join("optional-pack/manifest.txt")).unwrap()).unwrap();
+        assert!(m.modules.contains_key("kernel/drivers/net/wan/hdlc.ko"));
         let again = compress_tree(&root, "6.12.0", None).unwrap();
         assert_eq!((again.compressed, again.moved_out), (0, 0));
         assert!(compress_tree(&tmp.join("nothing"), "x", None).is_err());

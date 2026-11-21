@@ -20,7 +20,9 @@ pub mod ports;
 pub mod wait;
 
 pub use clock::ManualClock;
+#[cfg(unix)]
+pub use clock::thread_cpu_time;
 pub use gate::{wait_gate_snippet, ChildGuard, GatedChild};
-pub use lock::{lock, lock_timeout, names, EnvGuard, Lock};
+pub use lock::{lock, lock_timeout, names, process_lock, EnvGuard, Lock, ProcessLock};
 pub use ports::{closed_port, port, Port};
 pub use wait::{wait_for_file, wait_for_line, wait_for_state, wait_until, BUDGET};

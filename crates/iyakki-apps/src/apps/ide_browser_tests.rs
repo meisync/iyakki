@@ -11,15 +11,7 @@ use crate::apps::web_agent;
 const APP: &str = "http://192.168.1.69:30929/attendence";
 
 fn fake_helper() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let dir = exe.ancestors().find(|d| d.file_name().is_some_and(|n| n == "debug" || n == "release")).expect("the profile folder (target/debug) above the test program").to_path_buf();
-    let p = dir.join("iyakki-fake-webview");
-    if !p.is_file() {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-        let ok = std::process::Command::new(cargo).args(["build", "-q", "-p", "iyakki-webview", "--bin", "iyakki-fake-webview"]).status().map(|s| s.success()).unwrap_or(false);
-        assert!(ok && p.is_file(), "could not build the fake helper");
-    }
-    p
+    crate::apps::tests::fake_webview_binary()
 }
 
 /// A world whose person has a name of their own: the assistant's tab is one per person, and tests run side by side.
@@ -35,7 +27,7 @@ fn bworld(tag: &str) -> World {
 }
 
 fn pump(app: &mut IdeApp, cx: &AppCx) {
-    web_agent::tick(cx.browser(), cx.data_dir(), &cx.audit, &cx.session);
+    web_agent::tick(&*cx.browser(), &*cx.browser_jobs(), cx.data_dir(), &cx.audit, &cx.session);
     app.handle(&Event::Tick, cx);
 }
 
@@ -46,7 +38,7 @@ fn pump_until(app: &mut IdeApp, cx: &AppCx, what: &str, mut f: impl FnMut(&mut I
     let mut i = 0u32;
     while t0.elapsed() < Duration::from_secs(60) {
         i += 1;
-        web_agent::tick(cx.browser(), cx.data_dir(), &cx.audit, &cx.session);
+        web_agent::tick(&*cx.browser(), &*cx.browser_jobs(), cx.data_dir(), &cx.audit, &cx.session);
         app.handle(&Event::Tick, cx);
         // drawing is slow in a debug build; the engine only needs a frame now and then
         if i % 40 == 0 {
@@ -284,10 +276,13 @@ fn clicks_on_the_toolbar_reach_the_browser_and_clicks_elsewhere_do_not() {
     assert_eq!(cur(&app).owner(), Owner::BrowserPage);
     app.handle(&Event::FocusAt(route::base(route::BROWSER) + ib::FOCUS_ADDR, 5.0), &w.cx);
     assert_eq!(cur(&app).owner(), Owner::BrowserAddr);
-    // the mode button toggles Reader and Full (no engine here: it says so instead of switching)
+    // the mode button toggles Reader and Full. Whether an engine exists here is a process-wide fact other tests change (the shared
+    // agent and the assumed-engine switch), so the test accepts both honest outcomes: it switches, or it says there is no engine.
     let mode = g.hits.iter().find(|h| h.label.contains("engine") || h.label.starts_with("Reader")).unwrap().ev.clone();
+    let before_mode = cur(&app).browser.as_ref().unwrap().mode();
     app.handle(&mode, &w.cx);
-    assert!(cur(&app).browser.as_ref().unwrap().note().is_some_and(|n| n.contains("not installed") || n.contains("engine")), "{:?}", cur(&app).browser.as_ref().unwrap().note());
+    let b = cur(&app).browser.as_ref().unwrap();
+    assert!(b.mode() != before_mode || b.note().is_some_and(|n| n.contains("not installed") || n.contains("engine")), "{:?} {:?}", b.mode(), b.note());
     // the editor's own ids never reach the browser
     let before = cur(&app).browser.as_ref().unwrap().address_text().to_string();
     app.handle(&Event::Tab(2 * STRIDE + 7), &w.cx);
@@ -409,7 +404,7 @@ fn the_assistant_opens_the_page_in_the_ide_and_the_person_watches_and_can_take_o
     ask(&mut app, &w.cx, "ide_browser_open", serde_json::json!({"url": "192.168.1.50/attendence"}));
     let mut asked = 0;
     pump_until(&mut app, &w.cx, "the Browser tab to show the page", |a| {
-        asked += w.cx.browser().consent.pending(&user).len();
+        asked += w.cx.browser_consent().pending(&user).len();
         a.ws[0].main_tab == MainTab::Browser && web_agent::page_view(&user).is_some_and(|v| v.0 == "http://192.168.1.50/attendence")
     });
     assert_eq!(asked, 0, "the workspace's own address needs no look question");
@@ -454,11 +449,11 @@ fn a_readonly_view_ignores_the_persons_clicks_and_keys_on_the_page() {
     let b = cur_mut(&mut app).browser.as_mut().unwrap();
     b.set_params(&serde_json::json!({"readonly": true, "mode": "full"}), &w.cx).unwrap();
     assert!(b.readonly());
-    let before = w.cx.browser().jobs.pending_for(&user);
+    let before = w.cx.browser_jobs().pending_for(&user);
     b.focus_address_for_test(false);
     assert!(b.handle(&Event::Key(Key::Char('a')), &w.cx), "swallowed, not passed on");
     assert!(b.handle(&Event::AreaAt(web_agent::AREA_AGENT, 3.0, 3.0), &w.cx));
-    assert_eq!(w.cx.browser().jobs.pending_for(&user), before);
+    assert_eq!(w.cx.browser_jobs().pending_for(&user), before);
     assert_eq!(b.params()["readonly"], true);
     assert!(b.set_params(&serde_json::json!({"mode": "pdf"}), &w.cx).is_err());
 }
@@ -471,7 +466,7 @@ fn a_crashed_engine_shows_a_notice_with_reload_and_the_ide_keeps_working() {
     app.open_browser(Some("http://192.168.1.69:30929/attendence"), &w.cx);
     pump_until(&mut app, &w.cx, "the first page", |_a| web_agent::page_view(&user).is_some_and(|v| v.0.starts_with("http://192.168.1.69")));
     // the helper dies while a script runs
-    let jobs = w.cx.browser().jobs.clone();
+    let jobs = w.cx.browser_jobs().clone();
     let u2 = user.clone();
     let h = std::thread::spawn(move || jobs.call(&u2, iyakki_shared::browserjobs::Op::Eval { js: "EXIT".into(), timeout_ms: 5000 }, Duration::from_secs(30)));
     pump_until(&mut app, &w.cx, "the crash to be noticed", |a| a.ws[0].browser.as_ref().unwrap().crashed().is_some());
@@ -522,7 +517,7 @@ fn host_events_report_navigation_loading_and_close() {
     let mut b = IdeBrowser::new(EmbedParams { url: Some(APP.into()), mode: EmbedMode::Full, ..Default::default() }, "Alpha", &w.cx);
     let mut got: Vec<HostEvent> = Vec::new();
     for _ in 0..2000 {
-        web_agent::tick(w.cx.browser(), w.cx.data_dir(), &w.cx.audit, &w.cx.session);
+        web_agent::tick(&*w.cx.browser(), &*w.cx.browser_jobs(), w.cx.data_dir(), &w.cx.audit, &w.cx.session);
         b.tick(&w.cx);
         got.extend(b.drain_events());
         if got.iter().any(|e| matches!(e, HostEvent::Navigated { url, .. } if url == APP)) {
@@ -586,7 +581,7 @@ fn live_ide_browser_shows_a_local_page_and_the_check_tool_passes() {
     app.open_browser(Some(&url), &w.cx);
     let started = std::time::Instant::now();
     loop {
-        web_agent::tick(w.cx.browser(), w.cx.data_dir(), &w.cx.audit, &w.cx.session);
+        web_agent::tick(&*w.cx.browser(), &*w.cx.browser_jobs(), w.cx.data_dir(), &w.cx.audit, &w.cx.session);
         app.handle(&Event::Tick, &w.cx);
         if web_agent::page_view(&user).is_some_and(|v| v.1.contains("Attendance")) {
             break;
@@ -600,7 +595,7 @@ fn live_ide_browser_shows_a_local_page_and_the_check_tool_passes() {
     let url2 = url.clone();
     let h = std::thread::spawn(move || t2.call("ide_browser_check", &serde_json::json!({"url": url2, "expect_text": "Attendance sheet", "expect_status": 200})));
     while !h.is_finished() {
-        web_agent::tick(w.cx.browser(), w.cx.data_dir(), &w.cx.audit, &w.cx.session);
+        web_agent::tick(&*w.cx.browser(), &*w.cx.browser_jobs(), w.cx.data_dir(), &w.cx.audit, &w.cx.session);
         app.handle(&Event::Tick, &w.cx);
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -609,7 +604,7 @@ fn live_ide_browser_shows_a_local_page_and_the_check_tool_passes() {
     assert!(r.starts_with("CHECK PASS") && r.contains("status: 200"), "{r}");
     // let a few frames arrive, then draw the IDE with the real page in it
     for _ in 0..100 {
-        web_agent::tick(w.cx.browser(), w.cx.data_dir(), &w.cx.audit, &w.cx.session);
+        web_agent::tick(&*w.cx.browser(), &*w.cx.browser_jobs(), w.cx.data_dir(), &w.cx.audit, &w.cx.session);
         app.handle(&Event::Tick, &w.cx);
         std::thread::sleep(Duration::from_millis(20));
     }

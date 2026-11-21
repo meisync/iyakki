@@ -1,0 +1,24 @@
+[package]
+name = "iyakki-app-edit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "EDIT as an SDK app (F-SDK-34, batch 4): the folder list, the editor and the assistant beside it, written only against iyakki-ui-sdk. Pinch changes the text size; the wasm32 build is a tile that declares tile ABI 3 so the shell sends it the pinch."
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+iyakki-ui-sdk = { path = "../iyakki-ui-sdk" }
+iyakki-sdk-tile = { path = "../iyakki-sdk-tile", optional = true }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }
+iyakki-sdk-tile = { path = "../iyakki-sdk-tile" }
+iyakki-tile-host = { path = "../iyakki-tile-host" }
+iyakki-tile-abi = { path = "../iyakki-tile-abi" }
+iyakki-tile-kit = { path = "../iyakki-tile-kit" }
+
+[features]
+# The wasm32 export (src/guest.rs): the exports of tile ABI 3 over this app with the core's files, assistant, storage and dock behind the tile's `call`.
+tile = ["dep:iyakki-sdk-tile", "iyakki-sdk-tile/app-events"]

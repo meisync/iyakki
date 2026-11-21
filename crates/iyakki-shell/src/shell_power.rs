@@ -179,9 +179,19 @@ impl Shell {
     /// The round runs on its own thread; this only asks whether it is time.
     pub(super) fn mirror_tick(&mut self) {
         let Some(sess) = self.session.as_ref() else { return };
-        let (audit, user) = (self.env.audit.clone(), sess.user.clone());
-        let log: iyakki_shared::gitkeys::AuditFn = std::sync::Arc::new(move |a, d| audit.record(&user, a, d));
-        if self.env.services.msg_mirror_tick(&sess.user, log) {
+        let (audit, user, policy) = (self.env.audit.clone(), sess.user.clone(), sess.policy.clone());
+        let log: iyakki_shared::gitkeys::AuditFn = std::sync::Arc::new({
+            let (audit, user) = (audit.clone(), user.clone());
+            move |a, d| audit.record(&user, a, d)
+        });
+        let copied = self.env.services.msg_mirror_tick(&user, log);
+        // kept web pages read again by themselves, only for collections the person chose a timer for (F-RAG-17)
+        let log: iyakki_shared::gitkeys::AuditFn = std::sync::Arc::new({
+            let user = user.clone();
+            move |a, d| audit.record(&user, a, d)
+        });
+        self.env.services.rag_refresh_tick(&user, &policy, log);
+        if copied {
             self.refresh_badge();
         }
     }

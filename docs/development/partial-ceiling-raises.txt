@@ -403,7 +403,7 @@ F-BROW-101 2026-11-18 planned row now partial: protected-video message and detec
 F-VOICE-04 2026-11-18 planned row now partial: verification-only, code written elsewhere, Impl 100, Test 0
 F-VOICE-20 2026-11-18 planned row now partial: verification-only, code written elsewhere, Impl 100, Test 0
 F-VOICE-24 2026-11-18 planned row now partial: verification-only, code written elsewhere, Impl 100, Test 0
-F-BROW-64 2026-11-18 planned row now partial: code written under F-BROW-62/80, real playback open, Impl 100, Test 30
+F-BROW-64 2026-11-18 planned row now partial: code written under F-BROW-62/80, real playback open, Impl 100, Test 50
 F-SDK-208 2026-11-18 planned row re-rated (now partial): the core timer thread exists, Impl 60, Test 50
 F-SDK-103 2026-11-18 planned row now partial: the whole-session terminal on a pseudo-terminal is written, vi, top and ssh not run, Impl 100, Test 50
 F-SDK-107 2026-11-18 planned row now partial: home.change with the answer taken in the page is written, no real tile run, Impl 100, Test 50
@@ -433,7 +433,7 @@ F-LINAPP-19 2026-11-18 planned row now partial: signed Release verification writ
 F-LINAPP-18 2026-11-18 planned row now partial: device grants for sandboxes written, tested on stand-ins, Impl 80, Test 30
 F-WEBSVC-15 2026-11-18 planned row now partial: headless image variant and size script written, never built, Impl 80, Test 0
 F-KBD-22 2026-11-18 planned row now partial: Fn-hold cycling written and tested with fakes, Impl 100, Test 50
-F-LOSS-06 2026-11-18 planned row now partial: hardware recipe and judging code written, never run on a device, Impl 100, Test 30
+F-LOSS-06 2026-11-18 planned row now partial: hardware recipe and judging code written, never run on a device, Impl 100, Test 50
 F-REL-12 2026-11-18 new partial row: flaky-test cure (testkit, audit, ratchet, hunter), Impl 100, Test 70
 F-SDK-34 2026-11-18 planned row now partial: pinch event, dock.open, on-screen keyboard from wants_keyboard and pane placement written, Impl 80, Test 30
 F-CAM-20 2026-11-18 planned row now partial: code written, Impl 85, Test 30
@@ -449,3 +449,20 @@ F-MEDIA-11 2026-11-18 planned row now partial: code written, Impl 85, Test 50
 F-BROX-21 2026-11-18 planned row now partial: code written, Impl 70, Test 30
 F-SDK-209 2026-11-18 planned row now partial: code written, Impl 100, Test 0 (checks written, none run yet)
 F-BOOT-12 2026-11-18 planned row now partial: code written (formats and firmware verdict), Impl 30, Test 30
+F-SHELL-64 2026-11-18 planned row now partial: opt-in recording and replay layer written, Impl 100, Test 50 (fakes and screens equal to single-thread, no Mac mini measurement)
+F-NET-29 2026-11-19 planned row now partial: code written (Bluetooth AAC through the add-on), Impl 100, Test 50
+F-BROW-90 2026-11-18 planned row now partial: Rust plug-in registry, hooks and chat tools written, helper C side not, Impl 70, Test 50
+F-PKG-04 2026-11-18 blocked row now partial: the person's-click firmware path (F-DRIVERS-51) is the row's delivered form under D-HW-IMAGE (a), Impl 100, Test 50
+F-INST-29 2026-11-18 blocked row now partial: the 4096-byte-sector byte handling is written and tested on byte images, Impl 60, Test 30
+F-APPLE-02 2026-11-18 planned row now partial: recipe generator and chat tool written, Impl 70, Test 30
+F-APPLE-03 2026-11-18 planned row now partial: the earlier recipe/config files counted, Impl 35, Test 30
+F-INST-12 2026-11-18 blocked row now partial: macOS and Windows planner disk readers written and tested with fakes, Impl 40, Test 30
+F-RADIO-17 2026-11-19 new partial row: radio retry and switch to the next station, Impl 100, Test 50
+F-BROX-23 2026-11-21 new partial row: graphics acceleration abstraction (probe, chain, processor paths, golden harness), Impl 60, Test 30
+F-BROX-24 2026-11-21 new partial row: full engine acceleration plan and start environment, Impl 90, Test 30
+F-BROX-25 2026-11-21 new partial row: acceleration switches (person, site, administrator), Settings and chat tools, Impl 100, Test 50
+F-QA-16 2026-11-21 new partial row: test automation runner and evidence-rule enforcer, Impl 90, Test 50
+
+F-DOCTOR-04 2026-11-21 new partial row: Manual tests tab, Impl 90, Test 50
+F-DOCTOR-05 2026-11-21 new partial row: manual test chat tools, Impl 100, Test 50
+F-DOCTOR-06 2026-11-21 new partial row: first 30 human checklists, Impl 100, Test 50

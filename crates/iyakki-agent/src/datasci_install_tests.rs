@@ -38,11 +38,16 @@ fn world() -> (Fake, Vec<Pin>) {
 }
 
 #[test]
-fn the_shipped_table_stops_the_install_before_anything_is_fetched() {
+fn a_table_without_addresses_stops_the_install_before_anything_is_fetched() {
     let d = tmp("closed");
     let (fake, _) = world();
     let mut said = vec![];
-    let e = install(&fake, &d, &datasci::PINS, &mut |_| Ok("never".into()), &mut |l| said.push(l.to_string())).unwrap_err();
+    let mut empty = datasci::PINS;
+    for p in empty.iter_mut() {
+        p.url = "";
+        p.sha256 = "";
+    }
+    let e = install(&fake, &d, &empty, &mut |_| Ok("never".into()), &mut |l| said.push(l.to_string())).unwrap_err();
     assert!(e.contains("Nothing was downloaded"), "{e}");
     assert!(fake.asked.lock().unwrap().is_empty());
     assert!(!datasci::dir(&d).exists() && !d.join("datasci.new").exists());
@@ -92,10 +97,21 @@ fn a_wrong_file_a_bad_redirect_and_a_failed_self_test_leave_nothing_behind() {
     let (_, pins) = world();
     let e = install(&Evil, &d, &pins, &mut |_| Ok(String::new()), &mut |_| {}).unwrap_err();
     assert!(e.contains("not on the toolkit's download hosts"), "{e}");
-    // a failed self-test removes the folder again; the real runner is not wired and says so
+    // a failed self-test removes the folder again; a machine with no runner says so
     let (fake, pins) = world();
     let e = install(&fake, &d, &pins, &mut |data| no_runner(data), &mut |_| {}).unwrap_err();
-    assert!(e.contains("not wired"), "{e}");
+    assert!(e.contains("sandbox runner") && e.contains("not available here"), "{e}");
     assert!(datasci::installed(&d).is_none() && !datasci::dir(&d).exists());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn the_real_install_refuses_before_any_download_while_the_sandbox_for_the_self_test_is_missing() {
+    // with the pins filled, a missing sandbox would otherwise cost a 190 MB download that is thrown away at the self-test
+    let d = tmp("runner");
+    let e = runner_ready(&d.join("no-such-rootfs")).unwrap_err();
+    assert!(e.contains("Nothing was downloaded") && e.contains("Install Linux apps first"), "{e}");
+    std::fs::create_dir_all(d.join("rootfs")).unwrap();
+    assert!(runner_ready(&d.join("rootfs")).is_ok());
     let _ = std::fs::remove_dir_all(&d);
 }

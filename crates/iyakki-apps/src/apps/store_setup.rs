@@ -54,6 +54,9 @@ pub const BUILD: usize = SB + 760;
 /// The popup's Remove button of the voice pack (Undo: the old speech engines come back, the models it pulled are deleted).
 pub const REMOVE: usize = SB + 850;
 /// The popup's two buttons of an Ollama that runs on the host: move it into the cluster, or start fresh there (host models stay).
+/// The popup's two buttons of the data science toolkit: run its self-test again, or fetch the files this IYAKKI pins.
+pub const VERIFY: usize = SB + 1400;
+pub const UPGRADE: usize = SB + 1500;
 pub const OLLAMA_MOVE: usize = SB + 1300;
 pub const OLLAMA_FRESH: usize = SB + 1301;
 /// The cluster switcher of the popup owns the codes from here (its list rows follow); "Show all AI tools" is the link under the filters.
@@ -80,6 +83,8 @@ pub struct Machine {
     /// Graphics devices with a render node (virtual ones left out), and whether one is NVIDIA's.
     pub gpus: usize,
     pub nvidia: bool,
+    /// An AMD card the compute stack (ROCm) may be tried on was found (amdgpu, a render node, `/dev/kfd`, not Polaris or older).
+    pub amd_rocm: bool,
     /// Memory in megabytes, 0 when unknown.
     pub ram_mb: u64,
     /// The MacBook's FaceTime HD camera (PCI 14e4:1570) is there (`camfw::camera_in`).
@@ -112,6 +117,7 @@ impl Machine {
             model: cx.core.host().product_name(),
             gpus: gpus.iter().filter(|g| !g.is_virtual()).count(),
             nvidia: iyakki_shared::gpu::has_nvidia(&gpus),
+            amd_rocm: iyakki_shared::gpu_rocm::any_usable(&gpus),
             ram_mb: kb / 1024,
             camera: cx.agent.camfw_camera_in(cx.core.host().sys_root().as_path()),
             fw: Item::ALL
@@ -166,6 +172,7 @@ impl Machine {
         match item {
             Item::GpuVulkan => !self.cloud && self.gpus > 0,
             Item::GpuNvidia => !self.cloud && self.nvidia,
+            Item::GpuRocm => !self.cloud && self.amd_rocm,
             Item::MacFirmware => !self.cloud && self.is_mac(),
             Item::MacCamera => !self.cloud && self.camera,
             Item::FwHardware => !self.cloud && self.fw.contains(&item),
@@ -202,6 +209,7 @@ impl Machine {
             Item::VoicePack if self.voice_engines == Some(false) && !self.window => Some("No speech engine is set up yet: this adds listening (Whisper tiny) and a reading voice (Kokoro, English) in one action"),
             Item::GpuVulkan => Some("A GPU was found: local models run much faster on it"),
             Item::GpuNvidia => Some("An NVIDIA GPU was found: its driver gives pods CUDA"),
+            Item::GpuRocm => Some("A supported AMD GPU was found: ROCm gives pods its compute"),
             Item::MacFirmware => Some("This is a Mac: Wi-Fi and Bluetooth need Apple's firmware"),
             Item::MacHost if matches!(self.ai_vis(item), iyakki_shared::aiprofile::Vis::Recommended(_)) => Some("No GPU for models here: the GPU of a Mac on your network can run them"),
             _ => None,
@@ -289,8 +297,8 @@ impl Gk {
             Item::Kokoro | Item::VoicePack => Gk::Voices,
             Item::ClaudeCode | Item::Copilot | Item::Gitea | Item::Matrix => Gk::Agents,
             Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::SeaweedFs | Item::RustFs | Item::Registry => Gk::Data,
-            Item::Ffmpeg | Item::FfmpegLibs => Gk::Media,
-            Item::GpuVulkan | Item::GpuNvidia | Item::MacFirmware | Item::MacCamera => Gk::Hardware,
+            Item::Ffmpeg | Item::FfmpegLibs | Item::BrowserPackage | Item::YtDlp => Gk::Media,
+            Item::GpuVulkan | Item::GpuNvidia | Item::GpuRocm | Item::MacFirmware | Item::MacCamera => Gk::Hardware,
             Item::LinuxApps | Item::LinuxWindows | Item::DataScience => Gk::LinuxApps,
             Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek | Item::FwHardware => Gk::Hardware,
         }
@@ -311,8 +319,8 @@ pub fn icon_of(item: Item) -> Icon {
         Item::Kokoro | Item::VoicePack => Icon::Speaker,
         Item::Lemonade | Item::Ollama => Icon::Chat,
         Item::MacHost | Item::MacFirmware => Icon::Devices,
-        Item::GpuVulkan | Item::GpuNvidia => Icon::System,
-        Item::Ffmpeg | Item::FfmpegLibs => Icon::Media,
+        Item::GpuVulkan | Item::GpuNvidia | Item::GpuRocm => Icon::System,
+        Item::Ffmpeg | Item::FfmpegLibs | Item::BrowserPackage | Item::YtDlp => Icon::Media,
         Item::MacCamera => Icon::Camera,
         Item::LinuxApps | Item::LinuxWindows | Item::DataScience => Icon::Ide,
         Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek | Item::FwHardware => Icon::Devices,
@@ -448,8 +456,10 @@ pub fn open_target(item: Item) -> Option<(&'static str, &'static str)> {
         Item::Lemonade | Item::Ollama => Some(("settings", "modelhost:pc")),
         Item::Ffmpeg => Some(("media", "")),
         Item::FfmpegLibs => Some(("browser", "")),
+        Item::YtDlp => Some(("media", "")),
+        Item::BrowserPackage => Some(("browser", "")),
         Item::MacHost => Some(("settings", "modelhost:mac")),
-        Item::GpuVulkan | Item::GpuNvidia => Some(("brand:gpu", "")),
+        Item::GpuVulkan | Item::GpuNvidia | Item::GpuRocm => Some(("brand:gpu", "")),
         Item::MacFirmware => Some(("brand:mac", "")),
         Item::MacCamera => Some(("camera", "")),
         Item::LinuxApps | Item::LinuxWindows => Some(("brand:linux", "")),
@@ -468,6 +478,7 @@ pub fn where_text(item: Item) -> &'static str {
     match item {
         Item::Ollama => "the cluster, namespace iyakki-ai, reachable on this machine only (127.0.0.1:11436), 30 GB volume for the models, up to 16 GB of memory; an Ollama installed earlier runs on the host (the tools folder) until you move it",
         Item::Node | Item::Python | Item::DuckDb | Item::ClaudeCode | Item::Copilot | Item::Ffmpeg | Item::FfmpegLibs => "the tools folder on the data partition, linked into the command path (no sudo)",
+        Item::YtDlp => "the tools folder on the data partition (one program, run only when you ask for a video); the videos go to your video folder",
         Item::K3s => "the data partition: the managed dev cluster",
         Item::Elasticsearch => "the cluster, namespace iyakki-data",
         Item::OpenSearch => "the cluster, namespace iyakki-data (ClusterIP only, port 9200, 5 GB volume, about 1.5 GB of memory)",
@@ -485,10 +496,12 @@ pub fn where_text(item: Item) -> &'static str {
         Item::MacHost => "nothing is installed by IYAKKI; you set up the other computer",
         Item::GpuVulkan => "a small device plugin in the cluster; nothing on the system image changes",
         Item::GpuNvidia => "NVIDIA's libraries on the data partition and a device plugin in the cluster",
+        Item::GpuRocm => "AMD's device plugin in the cluster and a test pod (the cluster pulls the ROCm image)",
         Item::MacFirmware => "a driver pack on the data partition; Apple's files stay on this machine",
         Item::MacCamera => "a driver pack (mac-facetimehd) on the data partition; Apple's files are fetched from Apple's CDN at your click and stay on this machine",
         Item::LinuxApps => "a sandbox named debian on the data partition",
         Item::LinuxWindows => "a sandbox named gui on the data partition (graphical programs in an IYAKKI window)",
+        Item::BrowserPackage => "the folder browser-package on the data partition (one program, run in a small private environment that may use the network and sound only); the system image is not changed",
         Item::DataScience => "the folder datasci on the data partition (Python and the packages, read-only inside a sandbox with no network); nothing on the system image changes",
         Item::FwHardware => "a driver pack (fw-hardware) on the data partition that survives restarts; only the files this computer asks for, from the upstream linux-firmware release",
         Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek => "a driver pack on the data partition that survives restarts; the files come from the upstream linux-firmware repository",
@@ -592,6 +605,8 @@ pub struct Setup {
     /// The removal review card (`store_setup_remove.rs`), its result slot and the step it is on.
     pub rm: Option<remove::RemoveCard>,
     rm_slot: Arc<Mutex<Option<Result<String, String>>>>,
+    /// The browser package card's version and size, read from the pinned store on a thread of its own (F-BROW-40).
+    pkg_card_slot: Arc<Mutex<Option<Result<Vec<String>, String>>>>,
     rm_progress: Arc<Mutex<String>>,
     confirm_own: Option<Item>,
     pub note: Option<(String, bool)>,
@@ -605,6 +620,9 @@ pub struct Setup {
     /// What the host Ollama's models folder looks like (None: read it; tests give one).
     pub ollama_host: Option<qi::ollama_cluster::HostInfo>,
     ctl_slot: Arc<Mutex<Option<Result<String, String>>>>,
+    /// The data science toolkit as its popup shows it: a code (`none`, `current`, `upgrade`, `broken`) and a sentence; read again on every tick
+    /// while that popup is open.
+    pub(super) ds_state: Option<(String, String)>,
     /// Deletes a model of this machine's Lemonade (the voice pack's Remove); tests give a fake.
     pub lemonade_delete: Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>,
     started: bool,
@@ -669,6 +687,7 @@ impl Setup {
             confirm: None,
             rm: None,
             rm_slot: Default::default(),
+            pkg_card_slot: Default::default(),
             rm_progress: Default::default(),
             confirm_own: None,
             note: None,
@@ -678,6 +697,7 @@ impl Setup {
             av_map: None,
             ollama_host: None,
             ctl_slot: Default::default(),
+            ds_state: None,
             lemonade_delete: Arc::new(|m: &str| crate::agent().helpers_b4().voicepack_delete_local_model(m)),
             started: false,
             last_poll: 0,
@@ -797,7 +817,9 @@ impl Setup {
             self.latest = l;
             changed = true;
         }
+        changed |= self.take_pkg_card();
         changed |= self.take_control_result();
+        changed |= self.refresh_toolkit(cx);
         changed |= self.take_remove_result(cx);
         changed |= self.read_live(cx);
         let running = self.jobs.iter().any(|j| j.running());
@@ -1411,6 +1433,19 @@ impl Setup {
                 c.review = found.review;
                 self.confirm = Some(c);
             }
+            // the optional browser package: the card (what it is, size, what it may do, where it comes from) is read and confirmed first
+            Act::Install | Act::Retry | Act::Reinstall | Act::Update | Act::OwnCopy if item == Item::BrowserPackage => {
+                if self.running_job(item).is_some() {
+                    self.say("The full web engine is being installed: its progress is beside the clock.", false);
+                    return;
+                }
+                self.popup = None;
+                let mut c = self.plan_for(vec![item], "Full web engine: read, then confirm".into());
+                c.review = browser_package_review();
+                c.review.insert(0, PKG_CARD_READING.into());
+                self.confirm = Some(c);
+                self.start_pkg_card(cx);
+            }
             Act::Install | Act::Retry | Act::Reinstall | Act::Update | Act::OwnCopy => {
                 self.confirm_own = None;
                 let present: HashSet<Item> = self.facts.iter().flat_map(|f| f.presence.iter().filter(|(_, p)| p.present()).map(|(i, _)| *i)).collect();
@@ -1740,6 +1775,64 @@ impl Setup {
         }
     }
 
+    /// Read the data science toolkit's record again while its popup is open (a small file; nothing runs). True when what it says changed.
+    pub fn refresh_toolkit(&mut self, cx: &AppCx) -> bool {
+        if self.popup != Some(Item::DataScience) {
+            return false;
+        }
+        let data = self.launch_for(cx).map(|l| l.data).unwrap_or_else(|_| cx.data_dir().to_path_buf());
+        let now = cx.agent.helpers_b4().datasci_state(&data);
+        let changed = self.ds_state.as_ref() != Some(&now);
+        self.ds_state = Some(now);
+        changed
+    }
+
+    /// The popup's Verify button of the toolkit: its self-test runs again in the Linux apps sandbox with no network (on a thread of its own);
+    /// the sentence it saw becomes the note. Administrators only; audited.
+    pub fn verify_toolkit(&mut self, cx: &AppCx) {
+        if !self.admin {
+            self.say(format!("Only an administrator can run the toolkit self-test (your role is {}). Ask an administrator.", cx.session.role.name()), false);
+            return;
+        }
+        if self.running_job(Item::DataScience).is_some() {
+            self.say("The toolkit is being installed: verify it when that is done.", false);
+            return;
+        }
+        let data = self.launch_for(cx).map(|l| l.data).unwrap_or_else(|_| cx.data_dir().to_path_buf());
+        let (agent, user, slot) = (cx.agent.clone(), cx.session.user.clone(), self.ctl_slot.clone());
+        cx.audit.record(&cx.session.user, "quickinstall.datasci.verify", "datasci");
+        let run = move || {
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(agent.helpers_b4().datasci_verify(&data, &user).map(|m| format!("The toolkit self-test passed: {m}")));
+        };
+        if crate::TESTING {
+            run();
+            self.take_control_result();
+        } else {
+            self.say("Running the toolkit self-test in the sandbox (no network)\u{2026}", true);
+            if std::thread::Builder::new().name("iyakki-datasci-verify".into()).spawn(run).is_err() {
+                self.say("Could not start the helper that runs the self-test.", false);
+            }
+        }
+    }
+
+    /// The popup's Upgrade button: the install runs again with the files this IYAKKI pins (the same job as Install: the folder is swapped only
+    /// after the new self-test passes, so a failed upgrade leaves the old toolkit). Only when the record says the pins differ.
+    pub fn upgrade_toolkit(&mut self, cx: &AppCx) {
+        if !self.admin {
+            self.say(format!("Only an administrator can upgrade the toolkit (your role is {}). Ask an administrator.", cx.session.role.name()), false);
+            return;
+        }
+        if self.ds_state.as_ref().map(|s| s.0.as_str()) != Some("upgrade") {
+            self.say("The toolkit is not behind this IYAKKI's pins: nothing to upgrade.", false);
+            return;
+        }
+        let present: HashSet<Item> = self.facts.iter().flat_map(|f| f.presence.iter().filter(|(_, p)| p.present()).map(|(i, _)| *i)).collect();
+        if let Err(e) = self.start_one(cx, Item::DataScience, &present, true) {
+            self.say(e, false);
+        }
+        self.refresh_jobs(cx);
+    }
+
     /// Open the popup of a tile.
     pub fn open_popup(&mut self, item: Item) {
         if !self.machine.shows(item) {
@@ -1924,6 +2017,8 @@ impl Setup {
             Event::Tab(n) if *n == STOP + idx => self.stop(item, cx),
             Event::Tab(n) if *n == BUILD + idx && item == Item::FfmpegLibs => self.build_here(cx),
             Event::Tab(n) if *n == REMOVE + idx && item == Item::VoicePack => self.remove_voice_pack(cx),
+            Event::Tab(n) if *n == VERIFY + idx && item == Item::DataScience => self.verify_toolkit(cx),
+            Event::Tab(n) if *n == UPGRADE + idx && item == Item::DataScience => self.upgrade_toolkit(cx),
             Event::Tab(OLLAMA_MOVE) if item == Item::Ollama => self.ollama_review(qi::ollama_cluster::Mode::Move, cx),
             Event::Tab(OLLAMA_FRESH) if item == Item::Ollama => self.ollama_review(qi::ollama_cluster::Mode::Fresh, cx),
             Event::Tab(n) if *n == remove::RM_OPEN + idx => self.open_remove(item, cx),
@@ -2133,12 +2228,15 @@ fn short_about(item: Item) -> &'static str {
         Item::MacHost => "Use the GPU of a Mac (Apple Silicon) or another computer on your network. A guide: you set up that computer.",
         Item::GpuVulkan => "Let pods in the cluster use this machine's GPU through Vulkan.",
         Item::GpuNvidia => "NVIDIA's own driver, so pods can use CUDA.",
+        Item::GpuRocm => "AMD's ROCm, so pods can use the card for compute.",
         Item::Ffmpeg => "Plays video and audio in IYAKKI (MEDIA tile, camera recordings).",
         Item::FfmpegLibs => "H.264 video and AAC sound in the BROWSER tile (TikTok and similar pages).",
         Item::MacFirmware => "Apple's Wi-Fi and Bluetooth firmware for a Mac, fetched for your own Mac at your request.",
         Item::MacCamera => "The built-in FaceTime HD camera of this MacBook: one click loads the camera driver (part of this image) and fetches Apple's firmware from Apple.",
         Item::LinuxApps => "Run Debian or Ubuntu programs in a sandbox of their own.",
         Item::LinuxWindows => "Show a graphical Linux program in an IYAKKI window (the LINUX WINDOW tile).",
+        Item::BrowserPackage => "The full web engine for pages the built-in reader cannot show: fetched from the store you pinned after you read its card.",
+        Item::YtDlp => "Save one video from a page address into your video folder and the media index; the program is fetched from its vendor at your click.",
         Item::DataScience => "Python with scikit-learn, NumPy, SciPy and OpenCV for the data and picture flows, fetched from the vendors at your click.",
         Item::FwHardware => "The vendor firmware this computer asks for and lacks (Wi-Fi, Bluetooth, graphics, network): listed with each licence, then downloaded at your click.",
         Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek => item.fw_def().map_or("Firmware for hardware in this machine, downloaded at your click.", |d| d.about),
@@ -2168,9 +2266,15 @@ mod ai_tests;
 mod cluster_tests;
 
 #[cfg(test)]
+#[path = "store_setup_datasci_tests.rs"]
+mod datasci_tests;
+#[cfg(test)]
 #[path = "store_setup_voice_tests.rs"]
 mod voice_tests;
 
+#[cfg(test)]
+#[path = "store_setup_browserpkg_tests.rs"]
+mod browserpkg_tests;
 #[cfg(test)]
 #[path = "store_setup_avbuild_tests.rs"]
 mod avbuild_tests;
@@ -2182,3 +2286,47 @@ mod remove_tests;
 #[cfg(test)]
 #[path = "store_setup_ollama_tests.rs"]
 mod ollama_tests;
+
+/// The card the person reads before the full web engine is installed (F-BROW-40): the same facts the chat tool's approval states. The
+/// signed description of the package, its size and checksum are checked by the install before anything is kept.
+/// The first line of the package card while the store is being read, and what replaces it.
+pub const PKG_CARD_READING: &str = "Reading the version and size from your store...";
+
+impl Setup {
+    /// Read the package card from the pinned store without holding the screen: a thread makes the network read and leaves the answer in a slot
+    /// that [`Setup::tick`] takes.
+    fn start_pkg_card(&mut self, cx: &AppCx) {
+        let (agent, data, up, slot) = (cx.agent.clone(), cx.data_dir().to_path_buf(), cx.quick_upstream(), self.pkg_card_slot.clone());
+        if let Ok(mut s) = slot.lock() {
+            *s = None;
+        }
+        std::thread::spawn(move || {
+            let r = agent.b0().quickinstall().browser_package_card(&data, up);
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(r);
+            }
+        });
+    }
+
+    /// The store's answer arrived: it replaces the "reading" line of the card that is open (an answer for a card that was closed is dropped).
+    fn take_pkg_card(&mut self) -> bool {
+        let Some(r) = self.pkg_card_slot.lock().ok().and_then(|mut s| s.take()) else { return false };
+        let Some(c) = self.confirm.as_mut() else { return false };
+        let Some(first) = c.review.first_mut().filter(|l| l.as_str() == PKG_CARD_READING) else { return false };
+        *first = match r {
+            Ok(lines) => lines.join(" "),
+            Err(e) => format!("The store could not be read: {e}. You can still confirm: the install reads and checks everything again."),
+        };
+        true
+    }
+}
+
+pub fn browser_package_review() -> Vec<String> {
+    vec![
+        "The full web engine is a separate program that is not in the base image (about 90 MB).".into(),
+        "It is fetched only from the store you pinned (a store source with its key in Store, Settings); with none the install says so and stops.".into(),
+        "Before anything is kept its signed description, size and checksum are checked; a failed install leaves what you had.".into(),
+        "It runs in a small private environment and may use the network and sound, nothing else; it is listed in the task manager.".into(),
+        "Remove takes it away again; the image's own engine, if any, stays, and your profile is not touched.".into(),
+    ]
+}

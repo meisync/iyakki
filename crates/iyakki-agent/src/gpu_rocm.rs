@@ -9,57 +9,12 @@
 //! * **Older cards stay on Vulkan (stage 1).** ROCm dropped the GCN generations; [`rocm_verdict`] says so for the ones it knows by PCI id
 //!   (Polaris and older). A card it does not know is not excluded: the smoke pod is the proof that matters.
 
-use std::path::Path;
 
-use crate::gpu::{Gpu, Vendor};
-pub use iyakki_shared::gpu_rocm::{RESOURCE};
+pub use iyakki_shared::gpu_rocm::{rocm_dropped_generation, rocm_usable, rocm_verdict, RESOURCE};
 
 
 fn managed() -> &'static str {
     "app.kubernetes.io/managed-by: iyakki"
-}
-
-/// PCI device ids of AMD generations ROCm no longer supports (Polaris, Hawaii, Tonga, Fiji and older GCN), by the kernel's amdgpu id table.
-pub fn rocm_dropped_generation(device: u16) -> Option<&'static str> {
-    Some(match device {
-        0x67C0..=0x67FF | 0x6980..=0x699F | 0x694C..=0x694F => "Polaris",
-        0x67A0..=0x67BF => "Hawaii",
-        0x6920..=0x693F => "Tonga",
-        0x7300 => "Fiji",
-        0x6640..=0x665F | 0x6600..=0x663F => "Bonaire and Oland",
-        0x6780..=0x679F => "Tahiti and Pitcairn",
-        _ => return None,
-    })
-}
-
-/// Stage 2: is ROCm worth trying on this card? `(ok, plain words)`. Needs the amdgpu driver, a render node and the compute interface
-/// `/dev/kfd` under `root` (the kernel makes it when `CONFIG_HSA_AMD` is on and the card supports it).
-pub fn rocm_verdict(g: &Gpu, root: &Path) -> (bool, String) {
-    if g.vendor != Vendor::Amd {
-        return (false, format!("{} is not an AMD card", g.name));
-    }
-    if g.is_virtual() {
-        return (false, format!("{} is a virtual display adapter: no compute", g.name));
-    }
-    let drv = g.driver.as_deref().unwrap_or("");
-    if drv != "amdgpu" {
-        return (false, format!("AMD card driven by `{}`: ROCm needs amdgpu", if drv.is_empty() { "no driver" } else { drv }));
-    }
-    if g.render.is_none() {
-        return (false, format!("{} has no render node: the kernel driver did not set it up", g.name));
-    }
-    if let Some(gen) = rocm_dropped_generation(g.device_id) {
-        return (false, format!("{} is a {gen} card: ROCm no longer supports that generation, so it stays on Vulkan (stage 1)", g.name));
-    }
-    if !root.join("dev/kfd").exists() {
-        return (false, format!("{} has no /dev/kfd: the kernel's compute interface did not start for it (the card or its firmware is not supported); it stays on Vulkan", g.name));
-    }
-    (true, format!("{}: amdgpu with the compute interface (/dev/kfd); ROCm can be tried and the smoke pod will say", g.name))
-}
-
-/// Cards stage 2 can try.
-pub fn rocm_usable<'a>(gpus: &'a [Gpu], root: &Path) -> Vec<&'a Gpu> {
-    gpus.iter().filter(|g| rocm_verdict(g, root).0).collect()
 }
 
 fn pinned(image: &str) -> Result<&str, String> {
@@ -174,6 +129,23 @@ pub fn rocm_smoke_ok(log: &str) -> Result<String, String> {
         None if log.contains("ROCk module") && log.contains("not loaded") => Err("the ROCm kernel module is not loaded in the container's view: /dev/kfd did not reach the pod".into()),
         None => Err(format!("rocminfo listed no GPU target. Its log: {}", log.lines().rev().take(6).collect::<Vec<_>>().join(" | "))),
     }
+}
+
+/// The label the device plugin's DaemonSet selects on (`iyakki.dev/amd-compute=true`): put on the node by the step, taken off by the uninstall.
+pub const NODE_LABEL: &str = "iyakki.dev/amd-compute";
+
+/// The patch that gives the Lemonade Deployment the card: `amd.com/gpu: 1` and the ROCm llama.cpp backend (Lemonade fetches its own engine).
+pub fn lemonade_rocm_patch() -> String {
+    serde_json::json!({ "spec": { "template": { "spec": { "containers": [{ "name": "lemonade", "env": [{ "name": "LEMONADE_LLAMACPP", "value": "rocm" }], "resources": { "limits": { RESOURCE: 1 } } }] } } } }).to_string()
+}
+
+/// The patch that gives the Ollama Deployment the card: `amd.com/gpu: 1` and, when the owner pinned one, the ROCm build of Ollama.
+pub fn ollama_rocm_patch(image: Option<&str>) -> Result<String, String> {
+    let mut c = serde_json::json!({ "name": "ollama", "resources": { "limits": { RESOURCE: 1 } } });
+    if let Some(i) = image {
+        c["image"] = serde_json::Value::String(pinned(i)?.to_string());
+    }
+    Ok(serde_json::json!({ "spec": { "template": { "spec": { "containers": [c] } } } }).to_string())
 }
 
 #[cfg(test)]

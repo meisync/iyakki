@@ -627,3 +627,36 @@ fn a_file_made_in_a_watched_folder_is_announced_by_the_kernel_watch_without_wait
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains("files.changed") && lines[0].contains("name=new.txt") && lines[0].contains("change=created"), "{lines:?}");
 }
+
+#[test]
+fn a_finished_install_is_told_as_a_transfer_with_the_apps_name_only() {
+    let s = svc("xfer");
+    let hub = &*s.app_events;
+    listen(hub, "pat", &["transfer.finished"]);
+    hub.start("pat", "sample");
+    crate::appevent_more::transfer_finished(hub, "pat", "install", "Notes", true);
+    crate::appevent_more::transfer_finished(hub, "pat", "install", "Notes", false);
+    let got: Vec<String> = hub.poll("pat", "sample", 50).iter().map(show).collect();
+    assert_eq!(got, ["transfer.finished kind=install name=Notes outcome=finished", "transfer.finished kind=install name=Notes outcome=failed"]);
+}
+
+#[test]
+fn a_media_download_that_ended_is_told_as_a_transfer_by_the_files_name_and_a_failed_one_by_a_fixed_word() {
+    let s = svc("mediadl");
+    let hub = &*s.app_events;
+    listen(hub, "pat", &["transfer.finished"]);
+    hub.start("pat", "sample");
+    let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("iyakki-evsrc-{}-mediadl-files", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = crate::mediadl::tests::serve(vec![("/a/Song.mp3", "audio/mpeg", crate::mediadl::tests::tiny_mp3())]);
+    let st = crate::mediadl::tests::streamer();
+    let policy = crate::mediadl::tests::policy_for(&dir);
+    let choice = crate::mediadl::Choice::default();
+    let progress = crate::mediadl::Progress::default();
+    crate::mediadl::run_blocking(&s, &st, &policy, "pat", &format!("{base}/a/Song.mp3"), &dir, &choice, 1 << 20, &progress).unwrap();
+    assert!(crate::mediadl::run_blocking(&s, &st, &policy, "pat", &format!("{base}/a/missing.mp3"), &dir, &choice, 1 << 20, &progress).is_err());
+    let got: Vec<String> = hub.poll("pat", "sample", 50).iter().map(show).collect();
+    assert_eq!(got, ["transfer.finished kind=download name=Song.mp3 outcome=finished", "transfer.finished kind=download name=media outcome=failed"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

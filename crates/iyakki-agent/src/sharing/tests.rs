@@ -870,3 +870,170 @@ fn a_bridged_downstream_gets_a_bridge_table_that_drops_frames_between_its_ports(
     // the inet table of the same plan is the one in the golden text: the bridge table is a second, separate table
     assert_eq!(describe(&table_spec(&plan_for(&start_req(1)))), GOLDEN);
 }
+
+// ------------------------------------------------------------------------------------------------ the Bluetooth access point (F-HOTSPOT-15)
+
+fn nap_req(id: u64) -> Request {
+    Request { id, on: true, nap: true, ..Request::default() }
+}
+
+#[test]
+fn a_bluetooth_share_makes_its_access_point_first_serves_phones_as_a_downstream_and_removes_it_with_the_session() {
+    let os0 = FakeOs::new(machine());
+    os0.st().nap = true;
+    let mut os = os0.clone();
+    let mut m = Manager::new();
+    let st = m.tick(&mut os, &nap_req(1));
+    assert_eq!(st.state, State::On, "{}", st.note);
+    assert_eq!(st.downstream, iyakki_core_local::devctl::BT_NAP_IFACE);
+    assert_eq!(st.uplink, "eth0");
+    {
+        let s = os.st();
+        assert_eq!(s.calls.iter().filter(|c| *c == "nap_start").count(), 1);
+        assert!(s.calls.iter().position(|c| c == "nap_start") < s.calls.iter().position(|c| c.starts_with("forward=1")), "the access point exists before forwarding starts");
+        assert_eq!(s.nap_isolate, Some(true), "phones are isolated from each other by default");
+        // the access point has the gateway address and the sharing table knows it as the shared interface
+        assert!(s.addrs.iter().any(|(i, _)| i == iyakki_core_local::devctl::BT_NAP_IFACE), "{:?}", s.addrs);
+        assert_eq!(s.zone, vec![iyakki_core_local::devctl::BT_NAP_IFACE.to_string()]);
+        let text = describe(s.rules.as_ref().unwrap());
+        assert!(text.contains(iyakki_core_local::devctl::BT_NAP_IFACE), "{text}");
+    }
+    let st = m.tick(&mut os, &Request { id: 2, on: false, ..Request::default() });
+    assert_eq!(st.state, State::Off);
+    let s = os.st();
+    assert_eq!(s.calls.iter().filter(|c| *c == "nap_stop").count(), 1, "{:?}", s.calls);
+    assert!(!s.ifs.iter().any(|i| i.name == iyakki_core_local::devctl::BT_NAP_IFACE), "the access point interface is gone");
+    assert!(s.addrs.is_empty() && s.rules.is_none() && s.zone.is_empty());
+}
+
+#[test]
+fn phones_may_see_each_other_only_when_the_person_turned_isolation_off() {
+    let os0 = FakeOs::new(machine());
+    os0.st().nap = true;
+    let mut os = os0.clone();
+    let st = Manager::new().tick(&mut os, &Request { isolate: false, ..nap_req(1) });
+    assert_eq!(st.state, State::On, "{}", st.note);
+    assert_eq!(os.st().nap_isolate, Some(false));
+}
+
+#[test]
+fn a_bluetooth_share_that_cannot_be_made_says_why_and_a_failed_share_takes_the_access_point_down_again() {
+    // no controller: nothing is started
+    let mut os = FakeOs::new(machine());
+    let st = Manager::new().tick(&mut os, &nap_req(1));
+    assert_eq!(st.state, State::Failed);
+    assert_eq!(st.note, "Bluetooth tethering: not available on this build.");
+    assert!(!os.st().calls.iter().any(|c| c == "nap_start"));
+    // the server says why it cannot run
+    let os0 = FakeOs::new(machine());
+    os0.st().nap = true;
+    os0.st().nap_error = Some("The Bluetooth network port could not be opened");
+    let mut os = os0.clone();
+    let st = Manager::new().tick(&mut os, &nap_req(1));
+    assert_eq!(st.state, State::Failed);
+    assert!(st.note.contains("could not be opened"), "{}", st.note);
+    // the access point starts but the share fails afterwards (no internet anywhere): it is taken down again
+    let os0 = FakeOs::new(vec![IfaceInfo::new("eth0", LinkKind::Ethernet)]);
+    os0.st().nap = true;
+    let mut os = os0.clone();
+    let st = Manager::new().tick(&mut os, &nap_req(1));
+    assert_eq!(st.state, State::Failed);
+    assert_eq!(os.st().calls.iter().filter(|c| *c == "nap_stop").count(), 1);
+    assert!(!os.st().ifs.iter().any(|i| i.name == iyakki_core_local::devctl::BT_NAP_IFACE));
+}
+
+#[test]
+fn a_crash_with_the_bluetooth_access_point_up_is_cleaned_up_at_the_next_start() {
+    let os0 = FakeOs::new(machine());
+    os0.st().nap = true;
+    let mut os = os0.clone();
+    let mut m = Manager::new();
+    assert_eq!(m.tick(&mut os, &nap_req(1)).state, State::On);
+    drop(m);
+    Manager::new().recover(&mut os);
+    pristine(&os);
+    assert_eq!(os.st().calls.iter().filter(|c| *c == "nap_stop").count(), 1);
+}
+
+#[test]
+fn the_plan_takes_only_this_computers_own_access_point_limits_phones_to_seven_and_refuses_two_kinds_at_once() {
+    let ifs = machine();
+    let p = make_plan(&ifs, &nap_req(1), false, &[]).unwrap();
+    assert_eq!((p.down.as_str(), p.kind, p.pool), (iyakki_core_local::devctl::BT_NAP_IFACE, LinkKind::BluetoothNap, 7));
+    // no flag: the same interface name is not offered by itself, and another Bluetooth interface is never shared
+    assert_eq!(make_plan(&ifs, &Request { via: Some(iyakki_core_local::devctl::BT_NAP_IFACE.into()), ..start_req(1) }, false, &[]).unwrap_err(), ShareError::UnknownInterface(iyakki_core_local::devctl::BT_NAP_IFACE.into()));
+    let mut other = ifs.clone();
+    other.push(IfaceInfo::new("bnep0", LinkKind::BluetoothNap));
+    assert!(matches!(super::plan::free_for_sharing(other.last().unwrap()), Err(ShareError::NotShareable(_))));
+    assert!(matches!(make_plan(&ifs, &Request { wifi: true, ..nap_req(1) }, true, &[]), Err(ShareError::NotShareable(_))));
+    assert_eq!(super::real::kind_of(iyakki_core_local::devctl::BT_NAP_IFACE, "", false), LinkKind::BluetoothNap);
+}
+
+#[test]
+fn the_page_offers_the_bluetooth_access_point_only_when_it_can_be_made_and_start_asks_the_service_to_make_it() {
+    let ifs = machine();
+    let off = super::view::choices_with(&ifs, false, None);
+    assert!(off.downs.iter().any(|d| d.name == "bluetooth-nap" && !d.usable));
+    let reason = super::view::choices_full(&ifs, false, None, Some("This computer has no Bluetooth controller."));
+    let d = reason.downs.iter().find(|d| d.name == "bluetooth-nap").unwrap();
+    assert!(!d.usable && d.why == "This computer has no Bluetooth controller.");
+    let on = super::view::choices_full(&ifs, false, None, None);
+    let d = on.downs.iter().find(|d| d.name == iyakki_core_local::devctl::BT_NAP_IFACE).unwrap();
+    assert!(d.usable && d.label.contains("phones connect"));
+    assert!(!on.downs.iter().any(|d| d.name == "bluetooth-nap"));
+    // choosing it makes a request for the access point, with no interface named (the service makes it)
+    let r = control::start_request(&Request::default(), Some("eth0".into()), Some(d.name.clone()), 2, true, false, "u", true);
+    assert!(r.nap && !r.wifi && r.via.is_none() && r.on);
+    assert!(control::start_nap_request(&Request::default(), None, 2, true, false, "u", true).nap);
+    // the backend says why or that it can
+    let b = MemBackend::new(ifs, false);
+    assert!(b.nap_why().is_some());
+    b.set_nap_why(None);
+    assert!(b.nap_why().is_none());
+    // an old request file without the new field still loads
+    let old: Request = serde_json::from_str(r#"{"id":3,"on":true}"#).unwrap();
+    assert!(!old.nap);
+}
+
+#[derive(Default)]
+struct FakeNap {
+    on: std::cell::Cell<Option<bool>>,
+    see: std::cell::Cell<Option<bool>>,
+    why: String,
+}
+
+impl super::real::NapSwitch for FakeNap {
+    fn see_each_other(&self, on: bool) {
+        self.see.set(Some(on));
+    }
+    fn set_on(&self, on: bool) {
+        self.on.set(Some(on));
+    }
+    fn why_not(&self) -> String {
+        self.why.clone()
+    }
+}
+
+#[test]
+fn the_real_start_waits_for_the_interface_reports_the_services_reason_and_leaves_the_service_on_only_when_it_worked() {
+    // the interface shows up on the third look
+    let svc = FakeNap::default();
+    let looks = std::cell::Cell::new(0);
+    let r = super::real::nap_start(&svc, true, 10, &mut |_| {}, &|| {
+        looks.set(looks.get() + 1);
+        looks.get() >= 3
+    });
+    assert_eq!(r.as_deref(), Ok(iyakki_core_local::devctl::BT_NAP_IFACE));
+    assert_eq!((svc.on.get(), svc.see.get(), looks.get()), (Some(true), Some(false), 3));
+    // the service gives its reason: that is the error, and the service goes off again
+    let svc = FakeNap { why: "The Bluetooth network port could not be opened (denied).".into(), ..FakeNap::default() };
+    let r = super::real::nap_start(&svc, false, 10, &mut |_| panic!("no need to wait for a service that already failed"), &|| false);
+    assert_eq!(r.unwrap_err(), "The Bluetooth network port could not be opened (denied).");
+    assert_eq!((svc.on.get(), svc.see.get()), (Some(false), Some(true)));
+    // it never appears: bounded, says so, off again
+    let svc = FakeNap::default();
+    let waited = std::cell::Cell::new(0);
+    let r = super::real::nap_start(&svc, true, 5, &mut |_| waited.set(waited.get() + 1), &|| false);
+    assert!(r.unwrap_err().contains("did not come up"));
+    assert_eq!((svc.on.get(), waited.get()), (Some(false), 5));
+}

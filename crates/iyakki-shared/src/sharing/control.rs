@@ -37,8 +37,15 @@ pub fn write_status(data: &Path, s: &Status) -> Result<(), String> {
 pub fn start_request(prev: &Request, uplink: Option<String>, via: Option<String>, idle_hours: u8, isolate: bool, allow_lan: bool, by: &str, by_admin: bool) -> Request {
     // the hotspot is not a device that exists yet: choosing it asks the service to make it
     let wifi = via.as_deref() == Some(crate::wifi_ap::AP_IFACE);
-    let via = if wifi { None } else { via };
-    Request { id: prev.id + 1, on: true, uplink, via, idle_hours, isolate, allow_lan, by: by.into(), by_admin, wifi }
+    // the Bluetooth access point is made by the service in the same way
+    let nap = via.as_deref() == Some(iyakki_devctl::BT_NAP_IFACE);
+    let via = if wifi || nap { None } else { via };
+    Request { id: prev.id + 1, on: true, uplink, via, idle_hours, isolate, allow_lan, by: by.into(), by_admin, wifi, nap }
+}
+
+/// The request for "let phones connect over Bluetooth": the access point is made by the service, so there is no `via`.
+pub fn start_nap_request(prev: &Request, uplink: Option<String>, idle_hours: u8, isolate: bool, allow_lan: bool, by: &str, by_admin: bool) -> Request {
+    start_request(prev, uplink, Some(iyakki_devctl::BT_NAP_IFACE.into()), idle_hours, isolate, allow_lan, by, by_admin)
 }
 
 /// The request for "start a Wi-Fi hotspot": the access point is made by the service, so there is no `via`.
@@ -57,6 +64,10 @@ pub trait Backend: Send + Sync {
     /// Why the Wi-Fi hotspot is not offered, in words (`None`: it is, or this backend cannot say).
     fn wifi_ap_why(&self) -> Option<String> {
         None
+    }
+    /// Why letting phones connect over Bluetooth is not offered, in words (`None`: it is). The default says it is not built into this backend.
+    fn nap_why(&self) -> Option<String> {
+        Some(super::view::NAP_NOT_BUILT.into())
     }
     fn status(&self) -> Status;
     fn request(&self) -> Request;
@@ -101,14 +112,19 @@ pub struct MemBackend {
     hot: Mutex<(String, String)>,
     /// What the radios said when the hotspot is not offered.
     why: Mutex<Option<String>>,
+    /// What Bluetooth said when letting phones connect is not offered (`None`: it is).
+    nap: Mutex<Option<String>>,
 }
 
 impl MemBackend {
     pub fn new(ifs: Vec<IfaceInfo>, wifi_ap: bool) -> MemBackend {
-        MemBackend { inner: Mutex::new((ifs, wifi_ap, Status::default(), Request::default(), super::policy::Policy::default())), hot: Mutex::new(("IYAKKI-TEST".into(), "first password".into())), why: Mutex::new(None) }
+        MemBackend { inner: Mutex::new((ifs, wifi_ap, Status::default(), Request::default(), super::policy::Policy::default())), hot: Mutex::new(("IYAKKI-TEST".into(), "first password".into())), why: Mutex::new(None), nap: Mutex::new(Some(super::view::NAP_NOT_BUILT.into())) }
     }
     pub fn set_wifi_why(&self, why: Option<&str>) {
         *self.why.lock().unwrap_or_else(|e| e.into_inner()) = why.map(str::to_string);
+    }
+    pub fn set_nap_why(&self, why: Option<&str>) {
+        *self.nap.lock().unwrap_or_else(|e| e.into_inner()) = why.map(str::to_string);
     }
     pub fn set_status(&self, s: Status) {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).2 = s;
@@ -122,6 +138,9 @@ impl MemBackend {
 }
 
 impl Backend for MemBackend {
+    fn nap_why(&self) -> Option<String> {
+        self.nap.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
     fn wifi_ap_why(&self) -> Option<String> {
         self.why.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }

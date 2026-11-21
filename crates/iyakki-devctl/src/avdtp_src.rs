@@ -127,6 +127,8 @@ pub fn choose_sbc(c: &SbcInfo) -> Result<SbcInfo, String> {
 pub enum SrcAction {
     /// The settings agreed on; the encoder is made from them.
     Configured(Params),
+    /// The settings agreed on are AAC ones (only when the source was built [`Source::with_aac`]); the encoder comes from the add-on.
+    ConfiguredAac(crate::a2dp_aac::AacConfig),
     /// The sink accepted Open: connect the media channel now, then call [`Source::start`].
     Opened,
     Started,
@@ -203,6 +205,20 @@ pub struct Source {
     remote_seid: u8,
     chosen: Option<SbcInfo>,
     delay_agreed: bool,
+    /// AAC may be used (the add-on that encodes it is installed): the capabilities of all endpoints are collected first and AAC wins.
+    aac_on: bool,
+    aac_pick: Option<AacPick>,
+    sbc_pick: Option<(u8, SbcInfo, bool)>,
+    chosen_aac: Option<crate::a2dp_aac::AacConfig>,
+}
+
+/// An AAC endpoint of the sink that can be used: its identifier, the settings to ask for, MPEG-2 or MPEG-4 object type, delay reporting.
+#[derive(Clone, Copy)]
+struct AacPick {
+    seid: u8,
+    cfg: crate::a2dp_aac::AacConfig,
+    mpeg2: bool,
+    delay: bool,
 }
 
 impl Default for Source {
@@ -213,7 +229,19 @@ impl Default for Source {
 
 impl Source {
     pub fn new() -> Source {
-        Source { state: SrcState::Idle, label: 0, our_seid: 1, candidates: vec![], skipped: vec![], pending: None, remote_seid: 0, chosen: None, delay_agreed: false }
+        Source { state: SrcState::Idle, label: 0, our_seid: 1, candidates: vec![], skipped: vec![], pending: None, remote_seid: 0, chosen: None, delay_agreed: false, aac_on: false, aac_pick: None, sbc_pick: None, chosen_aac: None }
+    }
+
+    /// Lets the source choose AAC when the sink offers it (the caller does this only while AAC can be encoded, see
+    /// [`crate::a2dp_aac::aac_ready`]); otherwise, and when no endpoint offers a usable AAC, SBC is chosen as before.
+    pub fn with_aac(mut self) -> Source {
+        self.aac_on = true;
+        self
+    }
+
+    /// The AAC settings agreed on, once the stream is configured as an AAC one.
+    pub fn chosen_aac(&self) -> Option<&crate::a2dp_aac::AacConfig> {
+        self.chosen_aac.as_ref()
     }
 
     pub fn state(&self) -> SrcState {
@@ -233,7 +261,7 @@ impl Source {
 
     /// The first command: Discover. Starts over from any state.
     pub fn begin(&mut self) -> Msg {
-        *self = Source { label: self.label, ..Source::new() };
+        *self = Source { label: self.label, aac_on: self.aac_on, ..Source::new() };
         self.state = SrcState::Discovering;
         self.send(SIG_DISCOVER, vec![])
     }
@@ -314,6 +342,12 @@ impl Source {
                 self.next_candidate()
             }
             (SrcState::Capabilities, SIG_GET_ALL_CAPABILITIES) => self.on_capabilities(m),
+            (SrcState::Configuring, SIG_SET_CONFIGURATION) if self.chosen_aac.is_some() => {
+                self.state = SrcState::Opening;
+                let c = self.chosen_aac.expect("checked");
+                let open = self.send(SIG_OPEN, vec![self.remote_seid << 2]);
+                Ok((Some(open), vec![SrcAction::ConfiguredAac(c)]))
+            }
             (SrcState::Configuring, SIG_SET_CONFIGURATION) => {
                 self.state = SrcState::Opening;
                 let p = self.chosen.as_ref().and_then(|c| c.to_params().ok());
@@ -343,6 +377,9 @@ impl Source {
 
     /// Asks the next endpoint what it can do, or ends the search.
     fn next_candidate(&mut self) -> Result<(Option<Msg>, Vec<SrcAction>), SrcError> {
+        if self.candidates.is_empty() && (self.aac_pick.is_some() || self.sbc_pick.is_some()) {
+            return self.configure_pick();
+        }
         if self.candidates.is_empty() {
             let e = if self.skipped.is_empty() { SrcError::NoSink } else { SrcError::NoSbc(std::mem::take(&mut self.skipped)) };
             return self.fail(e);
@@ -358,6 +395,27 @@ impl Source {
         let codec = cats.iter().find(|(c, _)| *c == 7).and_then(|(_, b)| codec_of(b));
         let transport = cats.iter().any(|(c, _)| *c == 1);
         let sbc = cats.iter().find(|(c, b)| *c == 7 && codec_of(b) == Some(Codec::Sbc)).and_then(|(_, b)| SbcInfo::from_bytes(&b[2..]));
+        let delay = cats.iter().any(|(c, _)| *c == CAT_DELAY_REPORTING);
+        if self.aac_on {
+            // collect: the best AAC endpoint and the first SBC one; the choice is made when every endpoint has been asked
+            if self.aac_pick.is_none() && transport {
+                let aac = cats.iter().find(|(c, b)| *c == 7 && codec_of(b) == Some(Codec::Aac)).and_then(|(_, b)| b.get(2..)).and_then(parse_aac);
+                if let Some(Ok((cfg, mpeg2))) = aac.as_ref().map(crate::a2dp_aac::choose_aac) {
+                    self.aac_pick = Some(AacPick { seid: self.remote_seid, cfg, mpeg2, delay });
+                }
+            }
+            if self.sbc_pick.is_none() && transport {
+                if let Some(caps) = sbc {
+                    self.sbc_pick = Some((self.remote_seid, caps, delay));
+                }
+            }
+            if self.aac_pick.is_none() && self.sbc_pick.is_none() {
+                if let Some(c) = codec {
+                    self.skipped.push(c.name());
+                }
+            }
+            return self.next_candidate();
+        }
         let (Some(caps), true) = (sbc, transport) else {
             if let Some(c) = codec {
                 self.skipped.push(c.name());
@@ -373,6 +431,37 @@ impl Source {
         let mut p = vec![self.remote_seid << 2, self.our_seid << 2, 1, 0, 7, 6, 0, 0];
         p.extend_from_slice(&cfg.to_bytes());
         if self.delay_agreed {
+            p.extend_from_slice(&[CAT_DELAY_REPORTING, 0]);
+        }
+        self.state = SrcState::Configuring;
+        Ok((Some(self.send(SIG_SET_CONFIGURATION, p)), vec![]))
+    }
+
+    /// Every endpoint has been asked: AAC if one was usable, else the first SBC one.
+    fn configure_pick(&mut self) -> Result<(Option<Msg>, Vec<SrcAction>), SrcError> {
+        if let Some(a) = self.aac_pick.take() {
+            self.remote_seid = a.seid;
+            self.chosen_aac = Some(a.cfg);
+            self.delay_agreed = a.delay;
+            let mut p = vec![a.seid << 2, self.our_seid << 2, 1, 0, 7, 8, 0, crate::a2dp_aac::CODEC_AAC];
+            p.extend_from_slice(&a.cfg.to_config_bytes(a.mpeg2));
+            if a.delay {
+                p.extend_from_slice(&[CAT_DELAY_REPORTING, 0]);
+            }
+            self.state = SrcState::Configuring;
+            return Ok((Some(self.send(SIG_SET_CONFIGURATION, p)), vec![]));
+        }
+        let (seid, caps, delay) = self.sbc_pick.take().expect("one pick exists");
+        self.remote_seid = seid;
+        let cfg = match choose_sbc(&caps) {
+            Ok(c) => c,
+            Err(e) => return self.fail(SrcError::Unusable(e)),
+        };
+        self.chosen = Some(cfg);
+        self.delay_agreed = delay;
+        let mut p = vec![seid << 2, self.our_seid << 2, 1, 0, 7, 6, 0, 0];
+        p.extend_from_slice(&cfg.to_bytes());
+        if delay {
             p.extend_from_slice(&[CAT_DELAY_REPORTING, 0]);
         }
         self.state = SrcState::Configuring;

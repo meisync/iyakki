@@ -1,0 +1,19 @@
+scenario: DISP-4K-01
+title: 4K screen and cable link
+area: Display
+rows: F-DISP-01, F-DISP-14
+machines: any
+needs: person
+prereq: A 4K screen connected with a cable you trust (HDMI 2.0, DisplayPort or USB-C).
+step: Open Settings, Display and read the connected outputs.
+expect: The screen is listed with its name and its modes, including the 3840 by 2160 mode.
+clause: F-DISP-01.listed
+step: Choose 3840 by 2160 and confirm.
+expect: The picture becomes sharp at 4K, the screen does not go dark, and the page offers Keep or Go back.
+clause: F-DISP-14.mode
+step: Look at the whole screen for one minute.
+expect: No flicker, no blank flashes, no lines.
+clause: F-DISP-14.stable
+step: Choose a lower mode such as 1920 by 1080.
+expect: The picture changes at once and stays stable.
+clause: F-DISP-14.lower

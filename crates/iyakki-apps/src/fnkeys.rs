@@ -3,7 +3,7 @@
 //! The input thread turns a recognised evdev key into `Event::Fn(key, down)`; the shell takes it before any app sees it (so a
 //! volume key never reaches the web page as a letter) and acts through the functions here. Everything that touches the
 //! machine hangs off a `sys` root (`/sys`), so the tests use a fake directory. The shell runs as root on the IYAKKI image, so
-//! the backlight files are written directly, the way Settings -> Display already does (`iyakki_devctl::set_brightness`).
+//! the backlight files are written directly, the way Settings -> Display already does (`iyakki_core_api::device_types::devctl::set_brightness`).
 
 use crate::safeclamp::SafeClamp;
 use std::path::{Path, PathBuf};
@@ -142,69 +142,8 @@ pub fn volume_apply(s: &mut SoundSettings, op: VolOp) {
 
 // ------------------------------------------------------------------------------------------------ backlights
 
-/// A backlight or keyboard LED: `<dir>/brightness` and `<dir>/max_brightness`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Light {
-    pub name: String,
-    pub dir: PathBuf,
-    pub value: u32,
-    pub max: u32,
-}
-
-impl Light {
-    pub fn fraction(&self) -> f32 {
-        if self.max == 0 { 0.0 } else { (self.value as f32 / self.max as f32).clamp(0.0, 1.0) }
-    }
-    pub fn percent(&self) -> u32 {
-        (self.fraction() * 100.0).round() as u32
-    }
-}
-
-fn read_u32(p: &Path) -> Option<u32> {
-    std::fs::read_to_string(p).ok()?.trim().parse().ok()
-}
-
-fn lights_in(dir: &Path, keep: impl Fn(&str) -> bool) -> Vec<Light> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut v: Vec<Light> = rd
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if !keep(&name) {
-                return None;
-            }
-            let d = e.path();
-            let max = read_u32(&d.join("max_brightness"))?;
-            let value = read_u32(&d.join("brightness"))?;
-            (max > 0).then_some(Light { name, dir: d, value, max })
-        })
-        .collect();
-    v.sort_by(|a, b| a.name.cmp(&b.name));
-    v
-}
-
-/// Lower is better: the panel's own driver before the generic ACPI one.
-fn panel_rank(name: &str) -> u32 {
-    const ORDER: [&str; 7] = ["intel_backlight", "amdgpu_bl", "radeon_bl", "nvidia", "nv_backlight", "apple-panel-bl", "gmux_backlight"];
-    ORDER.iter().position(|p| name.starts_with(p)).map(|i| i as u32).unwrap_or(if name.starts_with("acpi_video") { 100 } else { 50 })
-}
-
-/// Every backlight of the machine (the Touch Bar's included), best panel first.
-pub fn all_backlights(sys: &Path) -> Vec<Light> {
-    let mut v = lights_in(&sys.join("class/backlight"), |_| true);
-    v.sort_by_key(|l| (panel_rank(&l.name), l.name.clone()));
-    v
-}
-
-/// The backlights that dim the screen: the Touch Bar has one of its own (`appletb_backlight`) that is not the display.
-pub fn panel_backlights(sys: &Path) -> Vec<Light> {
-    all_backlights(sys).into_iter().filter(|l| !l.name.starts_with("appletb")).collect()
-}
-
-/// Keyboard backlights (`smc::kbd_backlight` on Macs, `tpacpi::kbd_backlight`, `asus::kbd_backlight`, ...).
-pub fn kbd_backlights(sys: &Path) -> Vec<Light> {
-    lights_in(&sys.join("class/leds"), |n| n.contains("kbd_backlight") || n.contains("kbd_illum"))
-}
+pub use iyakki_core_local::backlight::{all_backlights, kbd_backlights, panel_backlights, Light};
+use iyakki_core_local::backlight::write_light;
 
 pub const STEPS: usize = 16;
 
@@ -257,16 +196,6 @@ pub struct Change {
 
 pub const NO_PANEL: &str = "No brightness control on this display";
 pub const NO_KBD: &str = "No keyboard backlight on this computer";
-
-fn write_light(l: &Light, v: u32, what: &str) -> Result<(), String> {
-    std::fs::write(l.dir.join("brightness"), v.to_string()).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::PermissionDenied {
-            format!("Not allowed to change the {what} (needs root)")
-        } else {
-            format!("Could not change the {what}: {e}")
-        }
-    })
-}
 
 fn change_of(l: &Light, before: u32, now: u32) -> Change {
     Change { name: l.name.clone(), value: now, max: l.max, fraction: now as f32 / l.max.max(1) as f32, at_end: before == now }
@@ -327,12 +256,12 @@ pub enum Radio {
     All,
 }
 
-fn roots(sys: &Path) -> iyakki_devctl::Roots {
-    iyakki_devctl::Roots { sys: sys.to_path_buf(), proc_: PathBuf::from("/proc") }
+fn roots(sys: &Path) -> iyakki_core_api::device_types::devctl::Roots {
+    iyakki_core_api::device_types::devctl::Roots { sys: sys.to_path_buf(), proc_: PathBuf::from("/proc") }
 }
 
-fn of_kind(sys: &Path, r: Radio) -> Vec<iyakki_devctl::Rfkill> {
-    iyakki_devctl::rfkill_list(&roots(sys)).into_iter().filter(|x| match r {
+fn of_kind(sys: &Path, r: Radio) -> Vec<iyakki_core_api::device_types::devctl::Rfkill> {
+    iyakki_core_api::device_types::devctl::rfkill_list(&roots(sys)).into_iter().filter(|x| match r {
         Radio::Wifi => x.kind == "wlan",
         Radio::Bluetooth => x.kind == "bluetooth",
         Radio::All => true,
@@ -379,7 +308,7 @@ pub fn toggle_radio(sys: &Path, r: Radio) -> Result<String, String> {
         if x.hard && !block {
             continue;
         }
-        iyakki_devctl::rfkill_set(&roots(sys), &x.id, block)?;
+        iyakki_core_api::device_types::devctl::rfkill_set(&roots(sys), &x.id, block)?;
     }
     if !block && list.iter().any(|x| x.hard) {
         return Ok(format!("{} is off by a hardware switch", radio_name(r)));

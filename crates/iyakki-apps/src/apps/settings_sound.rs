@@ -25,6 +25,7 @@ impl SettingsApp {
             Key::Char('A') => self.sound_advanced(),
             Key::Char('M') => self.sound_mixer(cx),
             Key::Char('W') => self.sound_web_mix(cx),
+            Key::Char('B') => self.sound_bluetooth(cx),
             Key::Enter | Key::Char(' ' | 'e') => match target {
                 Some(Target::SoundChoice) => self.sound_choose(cx),
                 Some(Target::SoundOut(key, _)) => self.sound_set_output(cx, &key),
@@ -35,6 +36,7 @@ impl SettingsApp {
                 Some(Target::SoundMicTest) => self.sound_mic_test(cx),
                 Some(Target::SoundT2Mic) => self.sound_t2_mic(cx),
                 Some(Target::SoundWebMix) => self.sound_web_mix(cx),
+                Some(Target::SoundBluetooth) => self.sound_bluetooth(cx),
                 Some(Target::SoundHighlightOffset) => self.sound_set_highlight_offset(cx, 0),
                 Some(Target::SoundVolMode(card_id)) => self.sound_cycle_mode(cx, &card_id),
                 Some(Target::SoundHwCheck(card, device, control, card_id)) => self.sound_hw_check(cx, card, device, control, card_id),
@@ -195,6 +197,51 @@ impl SettingsApp {
 
 /// Settings -> Sound: the switch that sends the web engine's sound into the mixer (`iyakki_agent::webmix`). Administrators only.
 impl SettingsApp {
+    /// The Bluetooth row (F-NET-28): stop when sending, else ask on a card which pair gets all of the computer's sound (the only paired one, or the
+    /// remembered one when several are paired). The core does the connecting through the same tools the assistant uses.
+    pub(super) fn sound_bluetooth(&mut self, cx: &AppCx) {
+        if !self.admin(cx) {
+            return self.fail("Only administrators can send the computer's sound to Bluetooth headphones.");
+        }
+        let view = crate::agent().sound_probe().bluetooth_sound_view();
+        if view.active {
+            return self.sound_bluetooth_stop(cx);
+        }
+        let Some((_, name)) = view.sinks.first().filter(|_| view.sinks.len() == 1) else {
+            return if view.sinks.is_empty() {
+                self.fail("No headphones or speaker are paired: pair them in Settings -> Bluetooth first.")
+            } else {
+                // several are paired: the person picks one
+                let items = view.sinks.iter().map(|(a, n)| format!("{n}  [{a}]")).collect();
+                self.modal = Some(Modal::Pick(PickKind::BluetoothSink, Picker::new("Send the computer's sound to", items)));
+            };
+        };
+        self.modal = Some(Modal::Confirm(ConfirmKind::BluetoothSound(String::new()), format!("Send all of this computer's sound to {name}? Its own speakers go silent until you stop it. Press y to start.")));
+    }
+
+    pub(super) fn sound_bluetooth_stop(&mut self, cx: &AppCx) {
+        match crate::agent().sound_probe().bluetooth_sound_stop(cx.data_dir()) {
+            Ok(m) => {
+                cx.audit.record(&cx.session.user, "settings.sound.bluetooth", "stop");
+                self.ok(m);
+                self.hw.invalidate();
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
+    /// The person approved: connect and send (waits for the set-up, which can take a few seconds).
+    pub(super) fn sound_bluetooth_start(&mut self, cx: &AppCx, address: &str) {
+        match crate::agent().sound_probe().bluetooth_sound_start(cx.data_dir(), address) {
+            Ok(m) => {
+                cx.audit.record(&cx.session.user, "settings.sound.bluetooth", "start");
+                self.ok(m);
+                self.hw.invalidate();
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
     pub(super) fn sound_web_mix(&mut self, cx: &AppCx) {
         if !self.admin(cx) {
             return self.fail("Only administrators can change the browser's sound route.");

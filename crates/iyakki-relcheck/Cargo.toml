@@ -3,7 +3,12 @@ name = "iyakki-relcheck"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Release checks for the repository (no dependencies): markdown link checker, secret scan, version consistency, FEATURES totals, SBOM."
+description = "Release checks for the repository (one dependency, the pure-Rust zstd decoder): markdown link checker, secret scan, version consistency, FEATURES totals, SBOM."
+
+# The one dependency: ruzstd (MIT, pure Rust, already used by the archive and update code) opens a `.zst` image by itself, so the image gate
+# no longer needs the build machine's zstd (F-QA-05).
+[dependencies]
+ruzstd = "0.9"
 
 [[bin]]
 name = "iyakki-relcheck"

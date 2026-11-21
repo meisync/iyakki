@@ -147,13 +147,10 @@ fn the_answer_appears_while_it_is_written_and_the_footer_says_where_the_time_wen
 
 #[test]
 fn starting_a_run_does_not_wait_for_the_context() {
-    // the fastest try counts: building the context on the UI thread costs the same every time, a busy host only slows single tries; tries
-    // go on for up to 20 s of wall clock
-    let t0 = std::time::Instant::now();
+    // what is measured is the CPU time the UI thread itself spends in `ask` (building the context costs the same every time; a busy host only
+    // stretches the wall clock, never the CPU time of this thread); the fastest of a few tries counts
     let mut best = Duration::MAX;
-    let mut n = 0;
-    while t0.elapsed() < Duration::from_secs(20) && best >= Duration::from_millis(60) {
-        n += 1;
+    for n in 0..5 {
         let (cx, _home, _seen) = rec(&format!("fast{n}"), vec![turn("ok", vec![])], vec![]);
         // a long chat, so building the context has real work to do
         let mut app = agent(&cx);
@@ -161,12 +158,12 @@ fn starting_a_run_does_not_wait_for_the_context() {
             app.msgs.push(Message::user(format!("question {i}")));
             app.msgs.push(Message::assistant(format!("answer {i}")));
         }
-        let t = std::time::Instant::now();
+        let t = iyakki_testkit::thread_cpu_time();
         ask(&mut app, &cx, "one more");
-        best = best.min(t.elapsed());
+        best = best.min(iyakki_testkit::thread_cpu_time() - t);
         run_until(&mut app, &cx, |a| !a.is_running());
     }
-    assert!(best < Duration::from_millis(60), "sending took {best:?} on the UI thread (the best of {n})");
+    assert!(best < Duration::from_millis(60), "sending took {best:?} of CPU on the UI thread (the best of 5)");
 }
 
 #[test]
@@ -200,13 +197,13 @@ mod screen {
         let (cx, _home) = agent_cx("scr", |_| vec![turn("", vec![("s1", "screen_capture", json!({}))]), turn("", vec![("s2", "screen_capture", json!({}))]), turn("Here are two pictures of your screen.", vec![])]);
         cx.screen().set_present(true);
         let audit = cx.audit.clone();
-        cx.browser().set_audit(Arc::new(move |u: &str, e: &str, d: &str| audit.record(u, e, d)));
+        cx.browser().set_audit_sink(Arc::new(move |u: &str, e: &str, d: &str| audit.record(u, e, d)));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (svc, s2) = (cx.services.clone(), stop.clone());
         std::thread::spawn(move || {
             while !s2.load(std::sync::atomic::Ordering::SeqCst) {
                 if svc.screen().wanted("tester") {
-                    svc.screen().serve("tester", || Some(Frame { w: 8, h: 4, rgba: vec![120; 8 * 4 * 4] }));
+                    svc.screen().serve_frame("tester", Some(Frame { w: 8, h: 4, rgba: vec![120; 8 * 4 * 4] }));
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }

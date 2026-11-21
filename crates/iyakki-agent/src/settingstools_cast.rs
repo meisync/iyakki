@@ -11,7 +11,7 @@ use crate::settingstools::{arg_str, no_args, Entry, Env};
 use crate::upnp_cast::{self, Wire};
 
 const TAB: &str = "Shares";
-pub const TOOLS: [&str; 3] = ["cast_renderers", "cast_play", "cast_stop"];
+pub const TOOLS: [&str; 5] = ["cast_renderers", "cast_play", "cast_stop", "cast_progress", "cast_control"];
 
 pub use iyakki_shared::settingstools_cast::PROMPT_RULE;
 
@@ -60,6 +60,41 @@ pub fn entries_with(env: &Env, wire: fn() -> Box<dyn Wire>, find: Finder) -> Vec
             Ok(format!("{} was told to stop.", r.name))
         }));
     }
+    v.push(Entry::read(TAB, "cast_progress", "Say how far a TV or speaker on the local network is with what it plays: playing, paused or stopped, the position and the length (a name from cast_renderers).", json!({"type": "object", "properties": {"renderer": {"type": "string", "description": "A name from cast_renderers."}}, "required": ["renderer"]}), move |a| {
+        let name = arg_str(a, "renderer")?;
+        let w = wire();
+        let list = find(w.as_ref())?;
+        let r = list.iter().find(|r| r.name.eq_ignore_ascii_case(&name)).ok_or("no player of that name was found; call cast_renderers")?;
+        Ok(format!("{}: {}.", r.name, upnp_cast::progress(w.as_ref(), r)?.line()))
+    }));
+    {
+        let e = env.clone();
+        let schema = json!({"type": "object", "properties": {"renderer": {"type": "string", "description": "A name from cast_renderers."}, "action": {"type": "string", "description": "pause, resume or seek"}, "seconds": {"type": "integer", "description": "seek only: the place to jump to, in seconds from the start (up to 86399)"}}, "required": ["renderer", "action"]});
+        v.push(Entry::change(TAB, "cast_control", "Pause, resume or jump to a place (seek) in what a TV or speaker on the local network is playing. The person approves a card first.", schema, |a| match a["action"].as_str() {
+            Some("seek") => format!("Jump to {} s on {}", a["seconds"].as_u64().unwrap_or(0), a["renderer"].as_str().unwrap_or("the player")),
+            Some("resume") => format!("Resume playing on {}", a["renderer"].as_str().unwrap_or("the player")),
+            _ => format!("Pause {}", a["renderer"].as_str().unwrap_or("the player")),
+        }, move |a| {
+            let name = arg_str(a, "renderer")?;
+            let action = arg_str(a, "action")?;
+            // checked before the network is touched
+            let secs = match action.as_str() {
+                "pause" | "resume" => 0,
+                "seek" => a.get("seconds").and_then(serde_json::Value::as_u64).filter(|s| *s <= 86_399).ok_or("seconds is a whole number from 0 to 86399")?,
+                _ => return Err("action is pause, resume or seek".into()),
+            };
+            let w = wire();
+            let list = find(w.as_ref())?;
+            let r = list.iter().find(|r| r.name.eq_ignore_ascii_case(&name)).ok_or("no player of that name was found; call cast_renderers")?;
+            match action.as_str() {
+                "pause" => upnp_cast::pause(w.as_ref(), r)?,
+                "resume" => upnp_cast::resume(w.as_ref(), r)?,
+                _ => upnp_cast::seek(w.as_ref(), r, secs)?,
+            }
+            e.audit("media.cast", &format!("{action} {}", r.name));
+            Ok(format!("{}: {action} done.", r.name))
+        }));
+    }
     v
 }
 
@@ -84,10 +119,31 @@ mod tests {
     fn the_tools_list_free_ask_for_playing_and_stopping_and_never_guess_a_player() {
         let r = rig("cast", false);
         let tl = tools(&r, entries_with(&r.env, || Box::new(Quiet), |_| Ok(vec![])));
-        assert_policy(&tl, &["cast_renderers"], &["cast_play", "cast_stop"]);
+        assert_policy(&tl, &["cast_renderers", "cast_progress"], &["cast_play", "cast_stop", "cast_control"]);
         assert!(tl.call("cast_renderers", &json!({})).unwrap().contains("No player"));
         assert!(tl.call("cast_play", &json!({"renderer": "TV", "item": "a1"})).unwrap_err().contains("cast_renderers"));
         assert!(tl.call("cast_stop", &json!({"renderer": "TV"})).is_err());
+        assert!(tl.call("cast_progress", &json!({"renderer": "TV"})).unwrap_err().contains("cast_renderers"));
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    fn one_tv() -> Result<Vec<upnp_cast::Renderer>, String> {
+        let xml = "<root><device><friendlyName>Den TV</friendlyName><UDN>uuid:1</UDN><serviceList><service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType><controlURL>/c</controlURL></service></serviceList></device></root>";
+        Ok(vec![upnp_cast::parse_description(xml, "http://192.168.1.9:80/d.xml").unwrap()])
+    }
+
+    #[test]
+    fn progress_is_free_and_control_checks_its_words_before_the_network_and_is_audited() {
+        let r = rig("cast2", false);
+        let tl = tools(&r, entries_with(&r.env, || Box::new(Quiet), |_| one_tv()));
+        assert_eq!(tl.call("cast_progress", &json!({"renderer": "den tv"})).unwrap(), "Den TV: state unknown.");
+        assert!(tl.call("cast_control", &json!({"renderer": "Den TV", "action": "seek"})).unwrap_err().contains("seconds"));
+        assert!(tl.call("cast_control", &json!({"renderer": "Den TV", "action": "seek", "seconds": 99999})).is_err());
+        assert!(tl.call("cast_control", &json!({"renderer": "Den TV", "action": "rewind"})).unwrap_err().contains("pause, resume or seek"));
+        assert!(tl.call("cast_control", &json!({"renderer": "Nobody", "action": "pause"})).unwrap_err().contains("cast_renderers"));
+        assert_eq!(tl.call("cast_control", &json!({"renderer": "Den TV", "action": "seek", "seconds": 125})).unwrap(), "Den TV: seek done.");
+        assert!(tl.call("cast_control", &json!({"renderer": "Den TV", "action": "pause"})).is_ok());
+        assert!(r.audits.lock().unwrap().iter().any(|l| l.contains("media.cast seek Den TV")));
         let _ = std::fs::remove_dir_all(&r.dir);
     }
 }

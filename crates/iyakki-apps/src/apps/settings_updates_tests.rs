@@ -787,3 +787,61 @@ mod wizard_screen {
         assert_eq!(a.take_request(), Some(("chat".into(), String::new())));
     }
 }
+
+/// A fake update channel: serves the bytes it was given at the addresses it was given, 404 elsewhere.
+struct Channel(Vec<(String, Vec<u8>)>);
+
+impl iyakki_proxy::Streamer for Channel {
+    fn open(&self, url: &str, _h: &[(String, String)]) -> Result<iyakki_proxy::StreamHead, String> {
+        match self.0.iter().find(|(u, _)| u == url) {
+            Some((_, b)) => Ok(iyakki_proxy::StreamHead { status: 200, headers: vec![], body: Box::new(std::io::Cursor::new(b.clone())) }),
+            None => Ok(iyakki_proxy::StreamHead { status: 404, headers: vec![], body: Box::new(std::io::empty()) }),
+        }
+    }
+}
+
+#[test]
+fn a_signed_update_is_downloaded_from_an_address_on_the_page_listed_and_nothing_is_installed() {
+    let r = rig("bundle-fetch");
+    let cx = cx_with_admin_store("upd-bundle-fetch");
+    let file = bundle_file(&r, "0.1.0-alpha.2", "pc", true);
+    let bytes = std::fs::read(&file).unwrap();
+    let sig = std::fs::read(format!("{}.sig", file.display())).unwrap();
+    let ch = Channel(vec![("https://cdn.example/u.tgz".into(), bytes), ("https://cdn.example/u.tgz.sig".into(), sig)]);
+    let c = uc::Centre::new(&r.data, Box::new(up::DirBoot { root: r.boot.clone(), capacity: 14 << 20, cluster: 4096 }), "VERSION=0.1.0-alpha.1\nVARIANT=pc\nBUILD_DATE=2026-10-20\n".into(), false, Some(key!().verifying_key())).with_data_free(400 << 20);
+    let mut a = SettingsApp::new(&cx).with_updates(c.into_facet_with_streamer(std::sync::Arc::new(ch)), vec![r.stick.clone()], "boot-1");
+    a.go_to(Tab::Updates);
+    let before = boot_initrd(&r);
+    press(&mut a, &cx, 'd');
+    assert!(matches!(a.modal, Some(Modal::Form(FormKind::UpdateFetch, _))), "the key opens the address form");
+    a.modal = None;
+    let fetch = |a: &mut SettingsApp, url: &str| {
+        let mut f = Form::new("x").text("Address", "", "");
+        f.set_value(0, url);
+        a.upd_fetch_submit(&f, &cx)
+    };
+    assert!(fetch(&mut a, "http://cdn.example/u.tgz").unwrap_err().contains("https"));
+    assert!(fetch(&mut a, "https://cdn.example/missing.tgz").is_err());
+    let said = fetch(&mut a, "https://cdn.example/u.tgz").unwrap();
+    assert!(said.contains("signature is good") && said.contains("0.1.0-alpha.2") && said.contains("cdn.example") && said.contains("nothing is installed"), "{said}");
+    assert_eq!(a.upd.found.len(), 1);
+    assert_eq!(boot_initrd(&r), before, "downloading writes nothing to the boot partition");
+    assert!(cx.audit.recent(10).iter().any(|l| l.contains("system.update.fetch") && l.contains("cdn.example")));
+    for (w, h) in [(360, 740), (1280, 720), (2560, 1600)] {
+        let g = draw(&mut a, &cx, w, h);
+        assert!(g.hits.iter().any(|x| x.ev == Event::Key(Key::Char('d'))), "{w}x{h}: no Download update button");
+    }
+    // a person who is not an administrator cannot
+    let mut ucx = cx_with_admin_store("upd-bundle-fetch-user");
+    ucx.session.user = "amy".into();
+    ucx.session.role = iyakki_sec::policy::Role::User;
+    ucx.session.policy = iyakki_sec::policy::Role::User.template();
+    let mut b = app(&r, &ucx);
+    assert!(fetch_as(&mut b, &ucx, "https://cdn.example/u.tgz").unwrap_err().contains("administrator"));
+}
+
+fn fetch_as(a: &mut SettingsApp, cx: &AppCx, url: &str) -> Result<String, String> {
+    let mut f = Form::new("x").text("Address", "", "");
+    f.set_value(0, url);
+    a.upd_fetch_submit(&f, cx)
+}

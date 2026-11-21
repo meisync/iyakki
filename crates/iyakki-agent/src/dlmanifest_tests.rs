@@ -71,7 +71,7 @@ fn every_review_row_of_the_download_list_is_covered_with_the_same_kind_licence_a
     let rows = download_rows(&std::fs::read_to_string(repo().join("legal/downloads.txt")).unwrap());
     let b = bundled();
     let review: Vec<_> = rows.iter().filter(|r| is_review(&r.2)).collect();
-    assert_eq!(review.len(), 40, "the licence gate lists 40 REVIEW rows");
+    assert_eq!(review.len(), 40, "the licence gate lists 40 REVIEW rows (gpu-rocm left it when the owner-pinned digests landed, F-GPU-02)");
     for r in review {
         let it = b.items.iter().find(|i| i.id == r.0 || i.covers.contains(&r.0)).unwrap_or_else(|| panic!("REVIEW row {} is not in legal/downloads-manifest.json", r.0));
         assert_eq!(it.licence, r.1, "{}: licence differs from legal/downloads.txt", r.0);
@@ -753,4 +753,127 @@ fn a_signed_manifest_moves_the_download_and_the_checksum_address_and_a_move_off_
     let asked = net.1.lock().unwrap().clone();
     assert!(asked.iter().all(|u| u.starts_with("https://cdn.dl.k8s.io/mirror/")), "{asked:?}");
     assert!(asked.iter().any(|u| u.ends_with("/kubectl")) && asked.iter().any(|u| u.ends_with("kubectl.sha256")), "{asked:?}");
+}
+
+// ------------------------------------------------------------------------------------------------ steps 3 and 4: a pinned version moves only with hashes
+
+struct Anything(Vec<u8>, std::sync::Mutex<Vec<String>>);
+
+impl Streamer for Anything {
+    fn open(&self, url: &str, _h: &[(String, String)]) -> Result<StreamHead, String> {
+        self.1.lock().unwrap().push(url.to_string());
+        Ok(StreamHead { status: 200, headers: vec![("content-length".into(), self.0.len().to_string())], body: Box::new(std::io::Cursor::new(self.0.clone())) })
+    }
+}
+
+fn sha_of(b: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn pin_with(m: &mut Manifest, id: &str, version: &str, files: &[(&str, &str)]) {
+    let it = item(m, id);
+    it.version = version.into();
+    it.checksum = Some(Checksum::Sha256 { files: files.iter().map(|(f, h)| FileSum { file: (*f).into(), sha256: (*h).into() }).collect(), date: "2026-11-19".into(), source: "test".into() });
+}
+
+#[test]
+fn the_effective_pin_moves_only_with_hashes_and_only_for_sources_that_can_be_checked_against_them() {
+    let h = "a".repeat(64);
+    let root = dir("moves-pin");
+    let m = crate::clis::CliManager::new(&root);
+    let s = Store::new(&root.join("dlmanifest"));
+    let gcloud = crate::clis::def("gcloud").unwrap();
+    let esptool = crate::clis::def("esptool").unwrap();
+    let codex = crate::clis::def("codex").unwrap();
+    // nothing fetched: the code's pins
+    assert_eq!(m.pin_of(gcloud), gcloud.pin);
+    // a manifest that names a newer version WITHOUT hashes (a vendor-less item with no checksum entry) does not move anything
+    let (b, g) = signed(&newer(|m| item(m, "cli:gcloud").version = "999.0.0".into()));
+    s.apply(&b, &g).unwrap();
+    assert_eq!(m.pin_of(gcloud), gcloud.pin, "a version without hashes does not move a pinned tool");
+    // with hashes it moves (an archive and a pip package), but an npm package and a floating tool are left alone
+    let (b, g) = signed(&{
+        let mut x = newer(|m| {
+            pin_with(m, "cli:gcloud", "999.0.0", &[("google-cloud-cli-999.0.0-linux-x86_64.tar.gz", &h)]);
+            pin_with(m, "cli:esptool", "9.9.9", &[("esptool-9.9.9-py3-none-any.whl", &h)]);
+            pin_with(m, "cli:codex", "9.9.9", &[("codex-9.9.9.tgz", &h)]);
+        });
+        x.sequence += 1;
+        x
+    });
+    s.apply(&b, &g).unwrap();
+    assert_eq!(m.pin_of(gcloud), "999.0.0");
+    assert_eq!(m.pin_of(esptool), "9.9.9");
+    assert_eq!(m.pin_of(codex), codex.pin, "npm packages cannot be checked against a SHA-256 of one file");
+    let floating = crate::clis::def("kubectl").unwrap();
+    assert_eq!(m.pin_of(floating), "", "a tool with no code pin is not touched");
+    // the same through the pure function: an item not in the manifest at all, and a code pin that is empty
+    assert_eq!(pins::effective_pin_with(&s, "no-such-tool", "1.0"), "1.0");
+    assert_eq!(pins::effective_pin_with(&s, "gcloud", ""), "");
+    // the folder an npm tool installs into follows the (unmoved) pin
+    assert!(m.npm_prefix("codex").ends_with(codex.pin));
+    assert!(m.npm_prefix("esptool").ends_with("9.9.9"));
+}
+
+#[test]
+fn a_moved_pin_for_an_archive_is_installed_only_against_its_own_sha256() {
+    let root = dir("moved-archive");
+    let m = std::sync::Arc::new(crate::clis::CliManager::new(&root));
+    m.set_target(false, "x86_64");
+    let body = b"not a real archive".to_vec();
+    let net = std::sync::Arc::new(Anything(body.clone(), Default::default()));
+    m.set_streamer(net.clone());
+    let s = Store::new(&root.join("dlmanifest"));
+    let def = crate::clis::def("gcloud").unwrap();
+    // a moved version with a hash for a DIFFERENT file name: no value for this build, so nothing is installed
+    let (b, g) = signed(&newer(|m| pin_with(m, "cli:gcloud", "999.0.0", &[("something-else.tar.gz", &sha_of(&body))])));
+    s.apply(&b, &g).unwrap();
+    let e = m.run_install(def, &*net, "root").unwrap_err();
+    assert!(e.contains("names no SHA-256 for this file"), "{e}");
+    let asked = net.1.lock().unwrap().clone();
+    assert!(asked.iter().any(|u| u.contains("999.0.0")), "the download is for the moved version: {asked:?}");
+    let file = asked.iter().find(|u| u.contains("999.0.0")).unwrap().rsplit('/').next().unwrap().to_string();
+    // the right file name with a wrong value: the download does not match
+    let mut x = newer(|m| pin_with(m, "cli:gcloud", "999.0.0", &[(&file, &"0".repeat(64))]));
+    x.sequence += 1;
+    let (b, g) = signed(&x);
+    s.apply(&b, &g).unwrap();
+    let e = m.run_install(def, &*net, "root").unwrap_err();
+    assert!(e.contains("does not match the SHA-256 pinned"), "{e}");
+    // the right value: the check passes (the bytes are not an archive, so unpacking is what fails, not the checksum)
+    let mut x = newer(|m| pin_with(m, "cli:gcloud", "999.0.0", &[(&file, &sha_of(&body))]));
+    x.sequence += 2;
+    let (b, g) = signed(&x);
+    s.apply(&b, &g).unwrap();
+    let e = m.run_install(def, &*net, "root").unwrap_err();
+    assert!(!e.contains("SHA-256") && !e.contains("checksum"), "{e}");
+}
+
+#[test]
+fn a_moved_pin_for_a_pip_package_needs_the_hashes_of_the_package_itself() {
+    let root = dir("moved-pip");
+    let m = std::sync::Arc::new(crate::clis::CliManager::new(&root));
+    m.set_target(false, "x86_64");
+    let py = root.join("python3");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(&py, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+    m.set_python(&py.display().to_string());
+    let net = std::sync::Arc::new(Anything(Vec::new(), Default::default()));
+    m.set_streamer(net.clone());
+    let s = Store::new(&root.join("dlmanifest"));
+    // only a dependency is hashed, not esptool itself: refused before pip runs
+    let (b, g) = signed(&newer(|m| pin_with(m, "cli:esptool", "9.9.9", &[("bitstring-4.2.3-py3-none-any.whl", &"b".repeat(64))])));
+    s.apply(&b, &g).unwrap();
+    let e = m.run_install(crate::clis::def("esptool").unwrap(), &*net, "root").unwrap_err();
+    assert!(e.contains("does not cover esptool itself"), "{e}");
+    // the package's own hash is there: the refusal is gone and the install goes on to pip (a stand-in that makes no pip, so it stops there)
+    let mut x = newer(|m| pin_with(m, "cli:esptool", "9.9.9", &[("esptool-9.9.9-py3-none-any.whl", &"c".repeat(64))]));
+    x.sequence += 1;
+    let (b, g) = signed(&x);
+    s.apply(&b, &g).unwrap();
+    let e = m.run_install(crate::clis::def("esptool").unwrap(), &*net, "root").unwrap_err();
+    assert!(!e.contains("does not cover"), "{e}");
 }

@@ -521,7 +521,7 @@ pub fn from_catalog(rows: &[(String, String, String, String, String)], sequence:
         });
     }
     // the REVIEW rows that are not command-line tools
-    for id in ["mac-firmware", "mac-camera", "linux-windows"] {
+    for id in ["mac-firmware", "mac-camera", "linux-windows", "gpu-rocm"] {
         if let Some(r) = row(id).filter(|r| is_review(&r.2)) {
             items.push(Item { id: id.into(), covers: vec![], licence: r.1.clone(), proprietary: PROPRIETARY.contains(&id), downloaded_not_shipped: true, kind: Kind::NoPin, version: String::new(), url: String::new(), hosts: vec![], checksum: None });
         }

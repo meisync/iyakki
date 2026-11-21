@@ -22,9 +22,9 @@ pub const FILE_VERSION: u32 = 1;
 //   outcome in a few plain words. Never a value, a token or the transport's own error text.
 // * Values must be text for `external` (they are stored as the field `value`, so the person's own system shows them as they are).
 //
-// Not done: the snapshot keyring (`cloudsnapshot::VaultKeyring`) and the `iyakki vault` command still use the built-in client directly;
-// the built-in service does not itself refuse writes when the setting says `external`; the setting is not part of the launch
-// configuration of a tenant. See the options document.
+// The snapshot keyring and the `iyakki vault secret` command follow the setting (`iyakki-agent::sharedvault_cli`), and the setting is part
+// of the launch configuration of a tenant (`IYAKKI_SHARED_VAULT`, [`ENV`]); a file saved on the data volume wins over it. See the options
+// document.
 
 use crate::cloudroles::{self, Change};
 use crate::cloudvaultd::Scope;
@@ -33,6 +33,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// The environment variable the tenant's launch configuration sets (`shared_vault`): the default provider of a pod whose data volume has
+/// no setting file of its own. The text is the setting's JSON (references only).
+pub const ENV: &str = "IYAKKI_SHARED_VAULT";
 
 /// Shown wherever the shared vault is shown.
 pub const LABEL: &str = "not externally reviewed";
@@ -144,13 +148,28 @@ impl Setting {
         data_dir.join("cloud").join("shared-vault.json")
     }
 
-    /// The setting of this data volume: `builtin` when there is no file (the default), an error when there is one that cannot be used.
+    /// The setting of this data volume: the file when there is one (a person's choice on the page wins), else the tenant's launch
+    /// configuration (`IYAKKI_SHARED_VAULT`, see [`ENV`]), else `builtin`. An error when what is there cannot be used.
     pub fn load(data_dir: &Path) -> Result<Setting, String> {
+        Self::load_with(data_dir, std::env::var(ENV).ok().as_deref())
+    }
+
+    /// [`Setting::load`] with the launch configuration's value given (tests do not touch the process environment).
+    pub fn load_with(data_dir: &Path, launch: Option<&str>) -> Result<Setting, String> {
         match std::fs::read_to_string(Self::path(data_dir)) {
             Ok(t) => Setting::parse(&t),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Setting::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => match launch.map(str::trim).filter(|t| !t.is_empty()) {
+                Some(t) => Setting::parse(t),
+                None => Ok(Setting::default()),
+            },
             Err(_) => Err("the shared-vault setting cannot be read; the shared vault stays closed until it is fixed".into()),
         }
+    }
+
+    /// The one-line text the launch configuration hands to the pod in [`ENV`]: references only, never a token.
+    pub fn launch_text(&self) -> Result<String, String> {
+        self.check()?;
+        serde_json::to_string(self).map_err(|e| e.to_string())
     }
 
     /// Check, write whole and atomically (mode 0600) and put one line in the audit trail. The file holds references only.

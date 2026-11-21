@@ -368,6 +368,8 @@ pub fn to_table_specs(cfg: &OutConfig) -> Result<Vec<TableSpec>, String> {
             output.push(m);
         }
     }
+    let (output, mut out_sets) = merge_into_interval_sets(output);
+    let output = merge_into_concat_sets(output, &mut out_sets);
     let mut chains = vec![ChainSpec { name: "output".into(), kind: ChainKind::Filter, hook: Hook::Output, priority: 0, policy_accept: !cfg.block_by_default, rules: output }];
     if !cfg.forwards.is_empty() || !cfg.port_forwards.is_empty() {
         let mut fwd: Vec<Vec<Expr>> = vec![vec![Expr::CtState(CT_ESTABLISHED_RELATED), Expr::Accept], vec![Expr::CtState(CT_INVALID), Expr::Drop]];
@@ -389,7 +391,7 @@ pub fn to_table_specs(cfg: &OutConfig) -> Result<Vec<TableSpec>, String> {
         }
         chains.push(ChainSpec { name: "forward".into(), kind: ChainKind::Filter, hook: Hook::Forward, priority: 0, policy_accept: false, rules: fwd });
     }
-    let mut specs = vec![TableSpec { name: TABLE_OUT.into(), sets: Vec::new(), chains }];
+    let mut specs = vec![TableSpec { name: TABLE_OUT.into(), sets: out_sets, chains }];
     let nat: Vec<Vec<Expr>> = cfg
         .port_forwards
         .iter()
@@ -406,6 +408,197 @@ pub fn to_table_specs(cfg: &OutConfig) -> Result<Vec<TableSpec>, String> {
         t.check()?;
     }
     Ok(specs)
+}
+
+/// How many neighbouring rules that differ only in their destination are needed before they become one interval set.
+pub const SET_MIN_RULES: usize = 4;
+
+fn span_of(e: &crate::nl::tablegen::Expr) -> Option<(IpAddr, IpAddr)> {
+    use crate::nl::tablegen::Expr;
+    match e {
+        Expr::DaddrRange(a, b) => Some((*a, *b)),
+        Expr::Daddr(ip, p) => Some(match ip {
+            IpAddr::V4(a) => {
+                let bits = u32::from(*a);
+                let mask = if *p == 0 { 0 } else { u32::MAX << (32 - u32::from(*p)) };
+                (IpAddr::V4((bits & mask).into()), IpAddr::V4((bits | !mask).into()))
+            }
+            IpAddr::V6(a) => {
+                let bits = u128::from(*a);
+                let mask = if *p == 0 { 0 } else { u128::MAX << (128 - u32::from(*p)) };
+                (IpAddr::V6((bits & mask).into()), IpAddr::V6((bits | !mask).into()))
+            }
+        }),
+        _ => None,
+    }
+}
+
+fn key_of(ip: &IpAddr) -> u128 {
+    match ip {
+        IpAddr::V4(a) => u128::from(u32::from(*a)),
+        IpAddr::V6(a) => u128::from(*a),
+    }
+}
+
+/// Union of address spans: sorted, overlapping and touching spans joined (the kernel wants an interval set without overlaps).
+fn union_spans(mut v: Vec<(IpAddr, IpAddr)>) -> Vec<(IpAddr, IpAddr)> {
+    v.sort_by_key(|(a, _)| key_of(a));
+    let mut out: Vec<(IpAddr, IpAddr)> = Vec::new();
+    for (a, b) in v {
+        if let Some(last) = out.last_mut() {
+            if key_of(&a) <= key_of(&last.1).saturating_add(1) {
+                if key_of(&b) > key_of(&last.1) {
+                    last.1 = b;
+                }
+                continue;
+            }
+        }
+        out.push((a, b));
+    }
+    out
+}
+
+/// Runs of neighbouring rules that are the same except for one destination (address, range or network, one family) and have
+/// [`SET_MIN_RULES`] or more members become one rule that looks the destination up in an interval set (F-FW-10). Only neighbours are
+/// joined and the verdict is the same, so first-match order is kept. Returns the new rules and the sets they use.
+pub fn merge_into_interval_sets(rules: Vec<Vec<crate::nl::tablegen::Expr>>) -> (Vec<Vec<crate::nl::tablegen::Expr>>, Vec<crate::nl::tablegen::SetSpec>) {
+    use crate::nl::tablegen::{Expr, SetSpec, MAX_MEMBERS, MAX_SETS};
+    // the rule without its destination step, the position of that step and the span
+    let split = |r: &Vec<Expr>| -> Option<(Vec<Expr>, usize, (IpAddr, IpAddr))> {
+        let mut found = None;
+        for (i, e) in r.iter().enumerate() {
+            if let Some(sp) = span_of(e) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((i, sp));
+            }
+        }
+        let (i, sp) = found?;
+        // a rule that is itself a catch-all or has no verdict is left alone
+        if !matches!(r.last(), Some(Expr::Accept | Expr::Reject | Expr::Drop)) {
+            return None;
+        }
+        let mut rest = r.clone();
+        rest.remove(i);
+        Some((rest, i, sp))
+    };
+    let mut out: Vec<Vec<Expr>> = Vec::new();
+    let mut sets: Vec<SetSpec> = Vec::new();
+    let mut i = 0;
+    while i < rules.len() {
+        let Some((rest, pos, _)) = split(&rules[i]) else {
+            out.push(rules[i].clone());
+            i += 1;
+            continue;
+        };
+        let mut j = i;
+        let mut group: Vec<(IpAddr, IpAddr)> = Vec::new();
+        while j < rules.len() {
+            match split(&rules[j]) {
+                Some((r2, p2, sp)) if r2 == rest && p2 == pos => {
+                    group.push(sp);
+                    j += 1;
+                }
+                _ => break,
+            }
+        }
+        for v4 in [true, false] {
+            let part: Vec<(IpAddr, IpAddr)> = group.iter().copied().filter(|(a, _)| a.is_ipv4() == v4).collect();
+            let merged = union_spans(part.clone());
+            if part.len() >= SET_MIN_RULES && sets.len() < MAX_SETS && merged.len() <= MAX_MEMBERS / 2 {
+                let name = format!("out_dest{}_{}", if v4 { 4 } else { 6 }, sets.len());
+                let mut r = rest.clone();
+                r.insert(pos, Expr::DaddrSet(name.clone()));
+                sets.push(SetSpec { name, v4, timeout: false, members: Vec::new(), ranges: merged, concat: Vec::new() });
+                out.push(r);
+            } else {
+                for k in i..j {
+                    if split(&rules[k]).map(|(_, _, (a, _))| a.is_ipv4() == v4).unwrap_or(false) {
+                        out.push(rules[k].clone());
+                    }
+                }
+            }
+        }
+        i = j;
+    }
+    (out, sets)
+}
+
+/// The destination port steps of a rule as a span, when the rule has exactly one.
+fn port_span_of(e: &crate::nl::tablegen::Expr) -> Option<(u16, u16)> {
+    use crate::nl::tablegen::Expr;
+    match e {
+        Expr::Dport(p) => Some((*p, *p)),
+        Expr::DportRange(a, b) => Some((*a, *b)),
+        _ => None,
+    }
+}
+
+type ConcatElem = ((IpAddr, IpAddr), (u16, u16));
+
+/// Runs of neighbouring rules that are the same except for the destination (address, range or network, one family) AND the
+/// destination port (or port range) and have [`SET_MIN_RULES`] or more members become one rule that looks the address and the port
+/// up together in an `address . port` interval set (F-FW-10, concatenation sets). Only neighbours with the same verdict are
+/// joined, so first-match order is kept; a run whose elements overlap in both address and port is left as typed (the kernel's
+/// set takes no overlapping elements). Runs the pass after [`merge_into_interval_sets`]; adds its sets to `sets`.
+pub fn merge_into_concat_sets(rules: Vec<Vec<crate::nl::tablegen::Expr>>, sets: &mut Vec<crate::nl::tablegen::SetSpec>) -> Vec<Vec<crate::nl::tablegen::Expr>> {
+    use crate::nl::tablegen::{Expr, SetSpec, MAX_MEMBERS, MAX_SETS};
+    // the rule with the port step turned into a marker and the destination step removed, the marker's place, the element
+    let split = |r: &Vec<Expr>| -> Option<(Vec<Expr>, usize, ConcatElem)> {
+        let spans: Vec<(usize, (IpAddr, IpAddr))> = r.iter().enumerate().filter_map(|(i, e)| span_of(e).map(|s| (i, s))).collect();
+        let ports: Vec<(usize, (u16, u16))> = r.iter().enumerate().filter_map(|(i, e)| port_span_of(e).map(|s| (i, s))).collect();
+        let ([(si, sp)], [(pi, pp)]) = (spans.as_slice(), ports.as_slice()) else { return None };
+        if !matches!(r.last(), Some(Expr::Accept | Expr::Reject | Expr::Drop)) || !matches!(r.get(pi.wrapping_sub(1)), Some(Expr::L4(6 | 17))) {
+            return None;
+        }
+        let mut rest = r.clone();
+        rest[*pi] = Expr::DaddrDportSet(String::new());
+        rest.remove(*si);
+        let at = if si < pi { pi - 1 } else { *pi };
+        Some((rest, at, (*sp, *pp)))
+    };
+    let mut out: Vec<Vec<Expr>> = Vec::new();
+    let mut i = 0;
+    while i < rules.len() {
+        let Some((rest, at, _)) = split(&rules[i]) else {
+            out.push(rules[i].clone());
+            i += 1;
+            continue;
+        };
+        let mut j = i;
+        let mut group: Vec<(usize, ConcatElem)> = Vec::new();
+        while j < rules.len() {
+            match split(&rules[j]) {
+                Some((r2, a2, e)) if r2 == rest && a2 == at => {
+                    group.push((j, e));
+                    j += 1;
+                }
+                _ => break,
+            }
+        }
+        for v4 in [true, false] {
+            let part: Vec<&(usize, ConcatElem)> = group.iter().filter(|(_, ((a, _), _))| a.is_ipv4() == v4).collect();
+            let mut el: Vec<ConcatElem> = part.iter().map(|(_, e)| *e).collect();
+            el.sort_by_key(|((a, z), (p, q))| (key_of(a), key_of(z), *p, *q));
+            el.dedup();
+            let overlap = el.iter().enumerate().any(|(n, a)| el[n + 1..].iter().any(|b| key_of(&a.0 .0) <= key_of(&b.0 .1) && key_of(&b.0 .0) <= key_of(&a.0 .1) && a.1 .0 <= b.1 .1 && b.1 .0 <= a.1 .1));
+            if part.len() >= SET_MIN_RULES && !overlap && sets.len() < MAX_SETS && el.len() <= MAX_MEMBERS / 2 {
+                let name = format!("out_pair{}_{}", if v4 { 4 } else { 6 }, sets.len());
+                let mut r = rest.clone();
+                r[at] = Expr::DaddrDportSet(name.clone());
+                // the destination step goes back out of the rule: the lookup names both
+                sets.push(SetSpec { name, v4, timeout: false, members: Vec::new(), ranges: Vec::new(), concat: el });
+                out.push(r);
+            } else {
+                for (k, _) in part {
+                    out.push(rules[*k].clone());
+                }
+            }
+        }
+        i = j;
+    }
+    out
 }
 
 #[cfg(test)]

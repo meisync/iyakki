@@ -268,5 +268,16 @@ fn an_abi_2_tile_reaches_the_toolkits_access_tree_with_its_own_names_roles_and_s
     sh.render(&mut g);
     assert_eq!(sh.screen_name(), "tile:counter");
     assert!(!sh.wasm_tile_text_for_test().contains("not a tile"));
+    // the drawn review: Ctrl+B shows what a screen reader can and cannot name in the picture the tile shows now, and again goes back
+    sh.handle(&Event::Key(Key::Ctrl('b')));
+    g.text_log.clear();
+    sh.render(&mut g);
+    let said: Vec<String> = g.text_log.iter().map(|(_, _, t)| t.clone()).collect();
+    assert!(said.iter().any(|t| t == "Screen reader review"), "{said:?}");
+    assert!(said.iter().any(|t| t.contains("Every clickable part has a name") || t.contains("clickable parts have no name")), "{said:?}");
+    assert!(said.iter().any(|t| t.contains("warning only")), "{said:?}");
+    sh.handle(&Event::Key(Key::Ctrl('b')));
+    sh.render(&mut g);
+    assert!(sh.hits().iter().any(|h| h.label == "Save changes"), "the tile is back");
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }

@@ -17,16 +17,17 @@ use std::any::Any;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 
-use iyakki_shared::checkup::{CamHeard, MicHeard, MicStart, Outcome, Said, ScreenOut};
+use iyakki_shared::checkup::{CamHeard, MicHeard, MicStart, Outcome, Said};
 use iyakki_shared::checkup::{Inventory, StepId, StepResult};
 use iyakki_shared::checkup::{self};
 use iyakki_shared::doctor::Action;
-use iyakki_shared::voicedesk::{Capture, Recorders};
+use iyakki_shared::voicedesk::Capture;
 use tiny_skia::Pixmap;
 
-use super::browser_media;
+use super::checkup_port::{CheckupPort, CxPort};
+pub use super::checkup_port::Parts;
 use super::{App, AppCx, Flow};
-use crate::camera::probe::{self, Shot};
+use crate::camera::probe::Shot;
 use crate::gfx::{rgb, Icon};
 use crate::scrolllist::ScrollList;
 use crate::ui::{Event, Key};
@@ -49,67 +50,8 @@ pub(super) const T_TARGET: usize = 17;
 pub(super) const T_AGAIN_TONE: usize = 18;
 pub(super) const A_LIST: usize = 61_320;
 
-/// How long a camera picture may take.
-const CAMERA_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// Longest the microphone step records, a little over [`checkup::MIC_SECS`] so the stop is ours.
 const MIC_MAX_SECS: usize = 4;
-
-/// What the tile reads and plays; tests replace every part.
-#[derive(Clone)]
-pub struct Parts {
-    pub inventory: Arc<dyn Fn(&AppCx) -> Inventory + Send + Sync>,
-    pub recorders: Arc<dyn Recorders>,
-    /// Play the test tone through the audio entry point; the returned value keeps the sound alive (dropping it stops it).
-    pub play: Arc<dyn Fn(&AppCx) -> Result<Box<dyn Any + Send>, String> + Send + Sync>,
-    /// Take one camera picture (runs on a thread of its own).
-    pub camera: Arc<dyn Fn(&AppCx) -> Box<dyn FnOnce() -> Shot + Send> + Send + Sync>,
-    /// Tell the shell's sign what is capturing (`media_kind` bits).
-    pub sign: Arc<dyn Fn(u8) + Send + Sync>,
-    /// The person clicked the sign: stop everything that captures.
-    pub stop_asked: Arc<dyn Fn() -> bool + Send + Sync>,
-}
-
-impl Parts {
-    pub fn real() -> Parts {
-        Parts {
-            inventory: Arc::new(real_inventory),
-            recorders: crate::recorders(),
-            play: Arc::new(|cx| {
-                use iyakki_core_api::SoundKind;
-                cx.core.mixer().play_wav(SoundKind::Notification, "Check-up tone", &crate::agent().b0().checkup().tone_wav())
-            }),
-            camera: Arc::new(|cx| {
-                let home = std::path::PathBuf::from(format!("/home/{}", cx.session.user));
-                Box::new(move || probe::system_grab(&home, CAMERA_WAIT))
-            }),
-            sign: Arc::new(browser_media::publish_capture),
-            stop_asked: Arc::new(browser_media::take_stop),
-        }
-    }
-}
-
-fn real_inventory(cx: &AppCx) -> Inventory {
-    let screens = crate::display::outputs::hub().status().outputs.iter().map(|o| ScreenOut { name: o.name.clone(), connected: o.connected, current: o.current }).collect();
-    let mut inv = cx.agent.b0().checkup().inventory(screens);
-    inv.sound_chosen = cx.sound_settings().output;
-    inv.k3s_gpu = k3s_sees(&*cx.k3sdev());
-    inv.sound_chosen_present = inv.sound_chosen.is_empty() || iyakki_shared::audioout::choose(&crate::agent().helpers_b4().sound_outputs(), &inv.sound_chosen).chosen;
-    inv
-}
-
-/// What the managed dev cluster says about GPUs on its nodes (read-only `kubectl get nodes -o json`). A cluster that is not running is not asked.
-fn k3s_sees(k: &dyn iyakki_agent_api::DevCluster) -> checkup::K3sSees {
-    let state = k.health().state;
-    if state != "running" {
-        return checkup::K3sSees::NoCluster(state);
-    }
-    let o = k.kubectl_cap(&["get", "nodes", "-o", "json"], 512 * 1024);
-    if !o.ok() {
-        return checkup::K3sSees::Unreadable(o.combined().lines().last().unwrap_or("no answer").trim().chars().take(120).collect());
-    }
-    let n: u32 = [iyakki_shared::gpu_workloads::GPU_RESOURCE, iyakki_shared::gpu_workloads::NVIDIA_RESOURCE, iyakki_shared::gpu_rocm::RESOURCE].iter().map(|r| crate::agent().gpu_workloads_node_resource_count(&o.stdout, r)).sum();
-    checkup::K3sSees::Count(n)
-}
 
 /// What the open step is doing right now.
 pub(super) enum Active {
@@ -156,7 +98,12 @@ impl CheckupApp {
     }
 
     pub fn with_parts(cx: &AppCx, parts: Parts) -> CheckupApp {
-        let inv = (parts.inventory)(cx);
+        CheckupApp::with_port(&CxPort(cx), parts)
+    }
+
+    /// The tile over any port (a fake in tests).
+    pub fn with_port(port: &dyn CheckupPort, parts: Parts) -> CheckupApp {
+        let inv = (parts.inventory)(port);
         let a = CheckupApp {
             parts,
             inv,
@@ -172,8 +119,8 @@ impl CheckupApp {
             request: None,
             dirty: true,
             ticks: 0,
-            k3s: cx.k3sdev(),
-            dir: cx.data_dir().to_path_buf(),
+            k3s: port.k3s(),
+            dir: port.data_dir(),
         };
         a.keep_report();
         a
@@ -241,10 +188,10 @@ impl CheckupApp {
     }
 
     /// Check everything again from the start (the machine is read again; pictures and recordings are already gone).
-    pub(super) fn again(&mut self, cx: &AppCx) {
+    pub(super) fn again(&mut self, port: &dyn CheckupPort) {
         self.end_active();
         self.preview = None;
-        self.inv = (self.parts.inventory)(cx);
+        self.inv = (self.parts.inventory)(port);
         self.results = StepId::ALL.iter().map(|i| StepResult::pending(*i)).collect();
         self.sel = 0;
         self.msg = None;
@@ -255,7 +202,7 @@ impl CheckupApp {
     // ------------------------------------------------------------------------------------------------ starting a step
 
     /// The person started step `i` (a click or Enter on its button).
-    pub(super) fn begin(&mut self, i: usize, cx: &AppCx) {
+    pub(super) fn begin(&mut self, i: usize, port: &dyn CheckupPort) {
         self.select(i);
         self.end_active();
         self.msg = None;
@@ -263,7 +210,7 @@ impl CheckupApp {
         let id = self.step(i);
         // the machine is read again, so a plugged-in microphone or a joined network counts
         if !id.asks_the_person() || id == StepId::Touch {
-            self.inv = (self.parts.inventory)(cx);
+            self.inv = (self.parts.inventory)(port);
         }
         match id {
             StepId::Display => self.active = Some(Active::Bars),
@@ -277,9 +224,9 @@ impl CheckupApp {
             }
             StepId::Pointer => self.active = Some(Active::Target),
             StepId::Keyboard => self.active = Some(Active::Keys(Vec::new())),
-            StepId::Speaker => self.play_tone(cx),
-            StepId::Microphone => self.start_microphone(cx),
-            StepId::Camera => self.start_camera(cx),
+            StepId::Speaker => self.play_tone(port),
+            StepId::Microphone => self.start_microphone(port),
+            StepId::Camera => self.start_camera(port),
             StepId::Monitor => self.finish(i, checkup::monitor(&self.inv)),
             StepId::Network => self.finish(i, checkup::network(&self.inv)),
             StepId::Wifi => self.finish(i, checkup::wifi(&self.inv)),
@@ -291,22 +238,22 @@ impl CheckupApp {
         self.dirty = true;
     }
 
-    fn play_tone(&mut self, cx: &AppCx) {
-        let (played, hold) = match (self.parts.play)(cx) {
+    fn play_tone(&mut self, port: &dyn CheckupPort) {
+        let (played, hold) = match (self.parts.play)(port) {
             Ok(h) => (Ok(()), Some(h)),
             Err(e) => (Err(e), None),
         };
         self.active = Some(Active::Tone { played, _hold: hold });
     }
 
-    fn start_microphone(&mut self, cx: &AppCx) {
-        let vs = cx.voice_settings();
+    fn start_microphone(&mut self, port: &dyn CheckupPort) {
+        let vs = port.voice_settings();
         let i = self.active_step;
         match iyakki_shared::checkup::start_mic(self.parts.recorders.as_ref(), &vs.mic, &vs.record_cmd, MIC_MAX_SECS, self.inv.t2_mic_hidden) {
             Ok(cap) => {
                 let mics = self.parts.recorders.mics();
                 let name = iyakki_shared::voicedesk::pick_mic(&mics, &vs.mic).map(|m| m.label.clone()).unwrap_or_default();
-                cx.audit.record(&cx.session.user, "checkup.microphone", "");
+                port.audit("checkup.microphone", "");
                 (self.parts.sign)(browser_media_bits::MICROPHONE);
                 self.level = 0.0;
                 self.progress = 0.0;
@@ -323,14 +270,14 @@ impl CheckupApp {
         }
     }
 
-    fn start_camera(&mut self, cx: &AppCx) {
-        let job = (self.parts.camera)(cx);
+    fn start_camera(&mut self, port: &dyn CheckupPort) {
+        let job = (self.parts.camera)(port);
         let (tx, rx) = channel();
         match std::thread::Builder::new().name("iyakki-checkup-camera".into()).spawn(move || {
             let _ = tx.send(job());
         }) {
             Ok(_) => {
-                cx.audit.record(&cx.session.user, "checkup.camera", "");
+                port.audit("checkup.camera", "");
                 (self.parts.sign)(browser_media_bits::CAMERA);
                 self.active = Some(Active::Grab(rx));
             }
@@ -397,7 +344,7 @@ impl CheckupApp {
 
     // ------------------------------------------------------------------------------------------------ answers
 
-    fn answer(&mut self, said: Said) {
+    pub(super) fn answer(&mut self, said: Said) {
         let i = self.active_step;
         let r = match (&self.active, self.step(i)) {
             (Some(Active::Bars), _) => checkup::display(said),
@@ -416,9 +363,9 @@ impl CheckupApp {
         self.finish(i, checkup::skipped(self.step(i)));
     }
 
-    fn do_fix(&mut self, cx: &AppCx) {
+    pub(super) fn do_fix(&mut self, port: &dyn CheckupPort) {
         let Some(fix) = self.results.get(self.sel).and_then(|r| r.fix.clone()) else { return };
-        cx.audit.record(&cx.session.user, "checkup.fix", self.step(self.sel).id());
+        port.audit("checkup.fix", self.step(self.sel).id());
         match fix.action {
             Action::Settings(item) => self.request = Some(("settings".into(), item.into())),
             Action::ExtendDeveloperMode => self.request = Some(("settings".into(), "tab:developer".into())),
@@ -440,7 +387,7 @@ impl CheckupApp {
     }
 
     /// The step's main action: start it, or what the open panel asks.
-    fn primary(&mut self, cx: &AppCx) {
+    fn primary(&mut self, port: &dyn CheckupPort) {
         // 0: nothing runs, 1: the open step waits for a yes, 2: something else runs (a recording, a target)
         let state = match &self.active {
             Some(Active::Bars | Active::Tone { .. } | Active::Keys(_)) if self.active_step == self.sel => 1,
@@ -449,7 +396,7 @@ impl CheckupApp {
         };
         match state {
             1 => self.answer(Said::Yes),
-            0 => self.begin(self.sel, cx),
+            0 => self.begin(self.sel, port),
             _ => {}
         }
     }
@@ -532,6 +479,7 @@ impl App for CheckupApp {
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        let port = CxPort(cx);
         if self.handle_keys_mode(ev) {
             return Flow::Stay;
         }
@@ -544,11 +492,11 @@ impl App for CheckupApp {
                 }
             }
             Event::Tab(T_DISMISS) => self.msg = None,
-            Event::Tab(T_AGAIN) | Event::Key(Key::Char('r')) => self.again(cx),
+            Event::Tab(T_AGAIN) | Event::Key(Key::Char('r')) => self.again(&port),
             Event::Tab(T_SHARE) | Event::Key(Key::Char('s')) => self.share(),
             Event::Tab(T_DOCTOR) | Event::Tab(T_ROW_DOCTOR) | Event::Key(Key::Char('d')) => self.open_doctor(),
-            Event::Tab(T_RUN) | Event::Key(Key::Enter) => self.primary(cx),
-            Event::Tab(T_AGAIN_TONE) => self.begin(self.sel, cx),
+            Event::Tab(T_RUN) | Event::Key(Key::Enter) => self.primary(&port),
+            Event::Tab(T_AGAIN_TONE) => self.begin(self.sel, &port),
             Event::Tab(T_YES) | Event::Key(Key::Char('y')) => self.answer(Said::Yes),
             Event::Tab(T_NO) | Event::Key(Key::Char('n')) => self.answer(Said::No),
             Event::Tab(T_TARGET) => self.answer(Said::Yes),
@@ -557,7 +505,7 @@ impl App for CheckupApp {
                 self.end_active();
                 self.ok("Stopped. Nothing was kept.");
             }
-            Event::Tab(T_FIX) | Event::Key(Key::Char('f')) => self.do_fix(cx),
+            Event::Tab(T_FIX) | Event::Key(Key::Char('f')) => self.do_fix(&port),
             Event::Row(i) => self.select(*i),
             Event::Key(Key::Up) => self.select(self.sel.saturating_sub(1)),
             Event::Key(Key::Down) => self.select(self.sel + 1),

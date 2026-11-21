@@ -1807,7 +1807,7 @@ impl ChatView {
                     Prim::Image { pm, x, y, w, h } => {
                         let paint = tiny_skia::PixmapPaint { opacity: 1.0, quality: tiny_skia::FilterQuality::Bilinear, ..tiny_skia::PixmapPaint::default() };
                         let pixmap: &tiny_skia::Pixmap = pm;
-                        g.pm.draw_pixmap(0, 0, pixmap.as_ref(), &paint, tiny_skia::Transform::from_translate(ox + x, oy + y).pre_scale(w / pm.width() as f32, h / pm.height() as f32), None);
+                        g.pm_mut().draw_pixmap(0, 0, pixmap.as_ref(), &paint, tiny_skia::Transform::from_translate(ox + x, oy + y).pre_scale(w / pm.width() as f32, h / pm.height() as f32), None);
                     }
                     Prim::PicBtn { x, y, size, label, act } => {
                         let ev = match act {

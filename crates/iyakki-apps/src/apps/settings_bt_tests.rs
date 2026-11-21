@@ -5,11 +5,11 @@
 use super::*;
 use crate::apps::tests::{cx_with_admin_store, services_in, temp_dir, Offline};
 use crate::btmodel::{pairing_notice, Switch};
-use iyakki_devctl::a2dp::{AudioDeviceView, AudioState, AudioView};
-use iyakki_devctl::bt_pan::{TetherState, TetherView};
-use iyakki_devctl::bthid::{DeviceView, LinkState, PairState};
-use iyakki_devctl::btmgmt::{Found, Kind};
-use iyakki_devctl::btview::Controller;
+use iyakki_core_api::device_types::devctl::a2dp::{AudioDeviceView, AudioState, AudioView};
+use iyakki_core_api::device_types::devctl::bt_pan::{TetherState, TetherView};
+use iyakki_core_api::device_types::devctl::bthid::{DeviceView, LinkState, PairState};
+use iyakki_core_api::device_types::devctl::btmgmt::{Found, Kind};
+use iyakki_core_api::device_types::devctl::btview::Controller;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
@@ -145,7 +145,7 @@ impl Fake {
     }
 }
 
-impl iyakki_devctl::Control for Fake {
+impl iyakki_core_api::device_types::devctl::Control for Fake {
     fn set_link(&self, _: &str, _: bool) -> Result<(), String> {
         Ok(())
     }
@@ -156,13 +156,13 @@ impl iyakki_devctl::Control for Fake {
             vec![]
         }
     }
-    fn volume(&self, _: u32) -> Option<iyakki_devctl::Volume> {
+    fn volume(&self, _: u32) -> Option<iyakki_core_api::device_types::devctl::Volume> {
         None
     }
-    fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_devctl::Volume, String> {
+    fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
         Err("no mixer".into())
     }
-    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_devctl::Volume, String> {
+    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
         Err("no mixer".into())
     }
     fn dhcp(&self, _: &str) -> Result<(), String> {
@@ -302,7 +302,7 @@ fn env(tag: &str, ctl: Arc<Fake>, product: &str, radio: Option<(bool, bool)>, us
         put(&sys, "bus/usb/devices/1-1/bDeviceClass", "e0\n");
     }
     std::fs::create_dir_all(d.join("proc")).unwrap();
-    DeviceEnv { roots: iyakki_devctl::Roots { sys, proc_: d.join("proc") }, ctl }
+    DeviceEnv { roots: iyakki_core_api::device_types::devctl::Roots { sys, proc_: d.join("proc") }, ctl }
 }
 
 /// The page on a working controller (a PC), after a few ticks.
@@ -381,7 +381,7 @@ fn the_single_switch_turns_the_radio_and_the_controller_on_and_says_so_in_words(
     assert!(g.hits.iter().any(|h| h.label == "Bluetooth"), "{:?}", labels(&g));
     click(&mut a, &cx, &g, "Bluetooth");
     // the radio is free and the controller is powered: one press did both
-    assert!(!iyakki_devctl::rfkill_list(&roots).iter().find(|k| k.kind == "bluetooth").unwrap().soft, "the radio was unblocked");
+    assert!(!iyakki_core_api::device_types::devctl::rfkill_list(&roots).iter().find(|k| k.kind == "bluetooth").unwrap().soft, "the radio was unblocked");
     assert_eq!(ctl.calls(), vec!["power 0 true"]);
     assert_eq!(status(&a), "Bluetooth is on.");
     tick(&mut a, &cx, 100);
@@ -390,7 +390,7 @@ fn the_single_switch_turns_the_radio_and_the_controller_on_and_says_so_in_words(
     // and off again: controller down, radio blocked
     key(&mut a, &cx, Key::Char('e'));
     assert_eq!(ctl.calls().last().unwrap(), "power 0 false");
-    assert!(iyakki_devctl::rfkill_list(&roots).iter().find(|k| k.kind == "bluetooth").unwrap().soft);
+    assert!(iyakki_core_api::device_types::devctl::rfkill_list(&roots).iter().find(|k| k.kind == "bluetooth").unwrap().soft);
     assert_eq!(status(&a), "Bluetooth is off.");
     assert!(audit(&cx).iter().any(|l| l.contains("bluetooth switch on")) && audit(&cx).iter().any(|l| l.contains("bluetooth switch off")));
 }
@@ -548,7 +548,7 @@ fn a_mac_with_the_firmware_file_does_not_say_rom_state_and_a_machine_without_a_c
     assert_eq!(a.bt.model.view.switch, Switch::On);
     let d = temp_dir("fwf-none");
     std::fs::create_dir_all(d.join("sys")).unwrap();
-    let e = DeviceEnv { roots: iyakki_devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") }, ctl: Arc::new(Fake::new()) };
+    let e = DeviceEnv { roots: iyakki_core_api::device_types::devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") }, ctl: Arc::new(Fake::new()) };
     let mut b = SettingsApp::new(&cx).with_hardware(e);
     b.go_to(Tab::Bluetooth);
     tick(&mut b, &cx, 3);

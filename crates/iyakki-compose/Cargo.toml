@@ -11,10 +11,19 @@ iyakki-agent-api.workspace = true
 iyakki-apps = { path = "../iyakki-apps" }
 iyakki-shell = { path = "../iyakki-shell" }
 iyakki-core-api.workspace = true
-iyakki-proxy = { path = "../iyakki-proxy" }
-iyakki-ui-client = { path = "../iyakki-ui-client" }
-iyakki-ui-rpc = { path = "../iyakki-ui-rpc" }
-
-[dev-dependencies]
 iyakki-sec.workspace = true
 iyakki-shared.workspace = true
+iyakki-proxy = { path = "../iyakki-proxy" }
+iyakki-web = { workspace = true }
+iyakki-ui-client = { path = "../iyakki-ui-client" }
+iyakki-ui-rpc = { path = "../iyakki-ui-rpc" }
+iyakki-ui-sdk = { path = "../iyakki-ui-sdk" }
+
+[dev-dependencies]
+iyakki-app-sample = { path = "../iyakki-app-sample" }
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-sec.workspace = true
+iyakki-core-fake = { path = "../iyakki-core-fake" }
+iyakki-accounts = { path = "../iyakki-accounts" }
+serde_json = "1"
+iyakki-flow.workspace = true

@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::skills::Scope;
 
 /// What the app declared it needs. Everything is off unless declared.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Caps {
     pub storage: bool,
     /// Hosts the app may reach (exact names, no wildcards); empty: no network.
@@ -88,7 +88,7 @@ pub const DEV_TRUST: &str = "unsigned dev app";
 /// How an app installed from a paired developer computer (developer mode, `devmode`) is labelled on its tile and in its panels.
 pub const DEVELOPER_TRUST: &str = "Developer (local)";
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TileEntry {
     /// `tile/<scope>/<name>` for an installed app, `dev/<name>` for a dev app.
     pub key: String,

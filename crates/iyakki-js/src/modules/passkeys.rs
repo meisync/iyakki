@@ -152,6 +152,25 @@ mod tests {
     }
 
     #[test]
+    fn the_page_may_ask_for_a_security_key_a_resident_key_and_user_verification_and_the_answer_says_where_it_came_from() {
+        let fake = Arc::new(Mutex::new(Fake { answer: Some(Ok(json!({ "credentialId": "AQID", "clientDataJSON": "e30", "attestationObject": "BAUG", "attachment": "cross-platform", "transports": ["usb"] }))), ..Default::default() }));
+        let mut e = engine("https://login.example.org/start", fake.clone());
+        let page = "navigator.credentials.create({ publicKey: { challenge: new Uint8Array(16), rp: { name: 'Ex' }, user: { id: new Uint8Array([9]), name: 'ada' }, pubKeyCredParams: [{ type: 'public-key', alg: -7 }], authenticatorSelection: { authenticatorAttachment: 'cross-platform', residentKey: 'required', userVerification: 'required' } } })";
+        let r = run(&mut e, &format!("const c = await {page}; return [c.authenticatorAttachment, c.response.getTransports().join(',')].join('|');"));
+        assert_eq!(r, "cross-platform|usb");
+        {
+            let f = fake.lock().unwrap();
+            let req = &f.seen[0].2;
+            assert_eq!((req["attachment"].as_str(), req["uv"].as_str(), req["resident"].as_bool()), (Some("cross-platform"), Some("required"), Some(true)));
+        }
+        // a sign-in passes userVerification; an answer with no attachment is a platform passkey
+        fake.lock().unwrap().answer = None;
+        let r = run(&mut e, "const c = await navigator.credentials.get({ publicKey: { challenge: new Uint8Array(16), userVerification: 'preferred' } }); return c.authenticatorAttachment;");
+        assert_eq!(r, "platform");
+        assert_eq!(fake.lock().unwrap().seen[1].2["uv"], "preferred");
+    }
+
+    #[test]
     fn a_refusal_is_a_dom_exception_the_page_can_read_and_other_errors_keep_their_names() {
         let fake = Arc::new(Mutex::new(Fake { answer: Some(Err("the person said no".into())), ..Default::default() }));
         let mut e = engine("https://a.example.org/", fake.clone());

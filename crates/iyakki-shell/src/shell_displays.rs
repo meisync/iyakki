@@ -65,6 +65,11 @@ impl Shell {
         self.session.as_ref().map(|s| s.user.clone())
     }
 
+    /// What the kernel says about the screens, through the core's guarded handle (connectors, modes, the firmware screen, which card to drive).
+    pub fn screen_facts(&self) -> std::sync::Arc<dyn iyakki_core_api::screenfacts::ScreenFacts> {
+        self.osguard.os_for("shell", self.session.as_ref().map_or("", |s| s.user.as_str())).screen_facts()
+    }
+
     /// The folder of the per-person display files.
     pub fn display_dir(&self) -> std::path::PathBuf {
         self.env.data_dir().to_path_buf()
@@ -90,6 +95,11 @@ impl Shell {
         if k < self.panes.d.list.len().max(1) {
             self.panes.d.pointer = k;
         }
+    }
+
+    /// The size of display `k` (its mode), when there is such a display.
+    pub(in crate::shell) fn display_size(&self, k: usize) -> Option<(u32, u32)> {
+        self.panes.d.list.get(k).map(|d| (d.w, d.h))
     }
 
     pub(super) fn pane_under(&self, disp: usize, x: i32, y: i32) -> Option<usize> {
@@ -552,6 +562,35 @@ impl Shell {
         (0..self.panes.d.list.len())
             .map(|k| if k == self.panes.d.active { self.panes.ws.as_ref().map(|w| w.layout.id.clone()) } else { self.panes.d.others.get(k).and_then(|w| w.as_ref()).map(|w| w.layout.id.clone()) }.unwrap_or_else(|| "-".into()))
             .collect()
+    }
+
+    /// The workspaces of the displays other than the working one and the number of the working display, taken out for a view that is
+    /// being left.
+    pub(in crate::shell) fn others_take(&mut self) -> (Vec<Option<Workspace>>, usize) {
+        (std::mem::take(&mut self.panes.d.others), self.panes.d.active)
+    }
+
+    /// Puts back the workspaces of the other displays of a view that comes back, or (`None`) starts a view with an empty working
+    /// space on each. The count follows the displays there are now: a display that went away takes nothing with it that is not
+    /// already shown elsewhere by the hot-plug rules, one that came gets a fresh space.
+    pub(in crate::shell) fn others_put(&mut self, kept: Option<(Vec<Option<Workspace>>, usize)>, displays: usize) {
+        let (mut others, active) = kept.unwrap_or_else(|| (Vec::new(), self.panes.d.active));
+        if displays == 0 {
+            self.panes.d.others = Vec::new();
+            return;
+        }
+        others.resize_with(displays, || None);
+        let active = active.min(displays - 1);
+        self.panes.d.active = active;
+        for (k, w) in others.iter_mut().enumerate() {
+            match (w.as_mut(), self.panes.d.list.get(k)) {
+                (Some(ws), _) => ws.mark_all_dirty(),
+                (None, Some(sp)) if k != active => *w = Some(fresh_ws(sp.w, sp.h)),
+                _ => {}
+            }
+        }
+        others[active] = None;
+        self.panes.d.others = others;
     }
 
     /// What each display shows: the titles of its panes ("Home" for a launcher).

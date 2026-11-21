@@ -1,6 +1,6 @@
 //! The trust level of a package (data only): the badge words and what each level means. The signing and the checks stay in `iyakki_agent::store::trust`.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Level {
     Official,
     Verified,
@@ -127,7 +127,7 @@ pub fn verify_doc(purpose: &str, doc: &Value, key_hex: &str, sig_hex: &str) -> b
 
 // ------------------------------------------------------------------------------------------------ roots
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RootKey {
     pub id: String,
     pub key: String,
@@ -136,7 +136,7 @@ pub struct RootKey {
 }
 
 /// The IYAKKI root keys a device trusts.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Roots(Vec<RootKey>);
 
 impl Roots {
@@ -289,7 +289,7 @@ impl Cert {
 
 // ------------------------------------------------------------------------------------------------ levels and verdicts
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Verdict {
     pub level: Level,
     pub signer: Option<String>,

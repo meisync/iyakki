@@ -1,0 +1,21 @@
+# Sound heard by a person: the one check no machine can make.
+scenario: SND-EAR-01
+title: Speaker sound by ear
+area: Sound
+rows: F-SND-01, F-SND-04
+machines: any
+needs: person
+prereq: Speakers or headphones are connected and switched on. Keep the volume low at the start.
+step: Open Settings, then Sound. Under Output choose the built-in speakers (or the plugged-in headphones).
+expect: The chosen output is marked as in use and the volume slider is shown.
+clause: F-SND-01.output
+step: Press Play test tone.
+expect: You hear two soft notes, the first from the left, the second from the right, with no crackle, no hiss and no gap.
+  The two notes must not be cut short.
+clause: F-SND-01.tone
+step: Move the volume slider from the lowest to the highest position in four steps, pressing Play test tone each time.
+expect: Each step is clearly louder than the one before. At the lowest position the tone is quiet but still audible. There is no sudden jump.
+clause: F-SND-04.volume
+step: Press the mute key (or the Mute button) while the tone plays, then press it again.
+expect: The sound stops at once, the icon shows muted, and the tone is heard again after the second press at the old volume.
+clause: F-SND-04.mute

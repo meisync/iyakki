@@ -119,7 +119,7 @@ impl CloudRunner for TenantRunner {
         let now = crate::tenantconfig::now_secs();
         let approved = crate::tenantconfig::approvals::take_approval(&env, "sandbox.policy", &team, &item, user, now);
         let gate: Arc<dyn ApplyGate> = Arc::new(K3sGate { dir: self.dir.clone(), vault: self.vault.clone(), audit: self.audit.clone(), roles: roles.clone(), rank, guest: false, environment: policy.k3s_environment.clone() });
-        let job = Arc::new(JobExecutor::new(self.kube.for_binding(&env, &team, &policy.k3s_environment).unwrap_or_else(|| self.kube.clone()), policy.clone(), gate, self.secrets.clone()));
+        let job = Arc::new(JobExecutor::new(self.kube.for_binding(&env, &team, &policy.k3s_environment).unwrap_or_else(|| self.kube.clone()), policy.clone(), gate, self.secrets.clone()).for_policy());
         let audit: Arc<dyn ConfigAudit> = Arc::new(super::engine::FileAudit { dir: self.dir.clone(), inner: self.audit.clone() });
         let engine = Engine::new(policy, vec![job], audit);
         match engine.run(&spec, &Who { person: user, role }, approved.as_deref()) {

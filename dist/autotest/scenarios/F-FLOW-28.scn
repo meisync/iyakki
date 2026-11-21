@@ -1,0 +1,8 @@
+# autotest pilot, batch A (2026-11-21). Written against the Feature text with sha 878570f48ec8824e; honest subset only: everything not checked is under not-covered.
+row: F-FLOW-28
+targets: qemu
+profile: ram
+feature-sha: 878570f48ec8824e
+doc: the flow stays with the CHAT tile after leaving FLOWS
+human: flow-chip | Open FLOWS, open a flow, leave FLOWS, open the CHAT tile. Expect: The chat header shows the chip Flow: NAME with x Detach; Detach removes it.
+not-covered: the flow stays with the CHAT tile after leaving FLOWS

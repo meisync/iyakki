@@ -265,13 +265,13 @@ fn search_and_filters_find_by_words_price_trust_type_category_and_publisher() {
 fn the_tools_exist_only_with_the_store_and_install_always_asks() {
     let user_p = a_user_policy();
     let names: Vec<String> = tools::defs(&user_p).iter().map(|d| d.spec.name.clone()).collect();
-    assert_eq!(names, vec!["store_search", "store_info", "store_buy", "store_add_licence", "store_install", "store_outdated", "store_update", "store_remove", "store_data_snapshots", "store_data_restore", "store_data_migrate", "store_rollback"]);
+    assert_eq!(names, vec!["store_search", "store_info", "store_buy", "store_add_licence", "store_install", "store_outdated", "store_update", "store_remove", "store_data_snapshots", "store_data_restore", "store_data_migrate", "store_rollback", "store_bundle_members"]);
     let defs = tools::defs(&user_p);
     assert!(defs.iter().take(3).all(|d| d.risk == crate::agent::Risk::Safe && d.untrusted));
     assert_eq!(defs[3].risk, crate::agent::Risk::Ask, "store_add_licence");
     assert_eq!(defs[4].risk, crate::agent::Risk::Ask);
     assert_eq!(defs[5].risk, crate::agent::Risk::Safe, "store_outdated only reads");
-    assert!(defs[6..].iter().filter(|d| d.spec.name != "store_data_snapshots").all(|d| d.risk == crate::agent::Risk::Ask), "the writers ask");
+    assert!(defs[6..].iter().filter(|d| d.spec.name != "store_data_snapshots" && d.spec.name != "store_bundle_members").all(|d| d.risk == crate::agent::Risk::Ask), "the writers ask");
     assert_eq!(defs.iter().find(|d| d.spec.name == "store_data_snapshots").unwrap().risk, crate::agent::Risk::Safe, "listing snapshots only reads");
     let mut none = user_p.clone();
     none.apps.remove(&iyakki_sec::policy::App::Store);

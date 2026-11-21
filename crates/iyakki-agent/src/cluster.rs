@@ -10,7 +10,7 @@
 pub use iyakki_shared::cluster::{SandboxResult};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -180,7 +180,7 @@ pub fn without_storage_limits(job: &mut Value) {
 
 /// Is `/` a RAM file system right now (`rootfs`/`ramfs` in `/proc/mounts`)? The managed dev cluster (`k3sdev.rs`) asks the same.
 pub(crate) fn ramfs_root_now() -> bool {
-    iyakki_storage::read_mounts().is_ok_and(|m| m.lines().any(|l| { let mut p = l.split_whitespace(); matches!((p.next(), p.next(), p.next()), (Some("rootfs"), Some("/"), Some("rootfs")) | (Some("none"), Some("/"), Some("ramfs"))) }))
+    iyakki_core_local::kernelfacts::mounts_text().lines().any(|l| { let mut p = l.split_whitespace(); matches!((p.next(), p.next(), p.next()), (Some("rootfs"), Some("/"), Some("rootfs")) | (Some("none"), Some("/"), Some("ramfs"))) })
 }
 
 pub struct Cluster {
@@ -243,7 +243,7 @@ impl Cluster {
         if !root {
             v.push("it must run as root (this is a desktop test window, not the machine itself)".to_string());
         }
-        if !o.cgroups.unwrap_or_else(|| Path::new("/sys/fs/cgroup/cgroup.controllers").exists()) {
+        if !o.cgroups.unwrap_or_else(|| iyakki_core_local::kernelfacts::cgroup_v2()) {
             v.push("the kernel needs cgroup v2 (/sys/fs/cgroup/cgroup.controllers is missing)".to_string());
         }
         if self.clis.is_installed("k3s").is_none() {
@@ -299,20 +299,10 @@ impl Cluster {
         }
         let log = std::fs::OpenOptions::new().create(true).append(true).open(self.log_path()).map_err(io_err)?;
         let log2 = log.try_clone().map_err(io_err)?;
-        use std::os::unix::process::CommandExt;
-        let mut cmd = Command::new(self.k3s());
-        cmd.args(["server", "--data-dir"])
-            .arg(self.dir.join("data"))
-            .arg("--write-kubeconfig")
-            .arg(self.kubeconfig())
-            .args(["--write-kubeconfig-mode", "600", "--disable", "traefik", "--disable", "servicelb", "--node-name", "iyakki"])
-            .env_clear()
-            .env("PATH", format!("{}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", self.clis.bin_dir().display()))
-            .env("HOME", &self.dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(log2))
-            .process_group(0);
+        let mut args: Vec<std::ffi::OsString> = vec!["server".into(), "--data-dir".into(), self.dir.join("data").into(), "--write-kubeconfig".into(), self.kubeconfig().into()];
+        args.extend(["--write-kubeconfig-mode", "600", "--disable", "traefik", "--disable", "servicelb", "--node-name", "iyakki"].map(Into::into));
+        let env = [("PATH", iyakki_core_local::starters_launch::tool_path(&self.clis.bin_dir()).into()), ("HOME", self.dir.clone().into_os_string())];
+        let mut cmd = iyakki_core_local::starters_launch::server_launch(&self.k3s(), &args, &env, log, log2).into_command();
         if self.root_is_ramfs() && self.over.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ramfs.is_none() {
             start_in_ram_root_jail(&mut cmd)?;
         }

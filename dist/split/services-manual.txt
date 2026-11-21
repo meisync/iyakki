@@ -1,0 +1,19 @@
+# Accessors of ServicesHandle written by hand (crates/iyakki-ui-rpc/src/served*.rs, D-SPLIT-03-SERVED): gen_services.py calls `m_<name>` on the
+# client and the core answers them in `served::serve_manual`. Everything else of a quiet accessor is still the generated quiet value.
+store_facets
+remote_kit
+cue_out
+quick_upstream
+slow_upstream
+streamer
+reading_synth
+lesson_host
+dash_host
+code_vault
+terminal
+git_keys
+platform_real
+platform_with
+chat_backend
+chat_backend_for
+flows_jobs

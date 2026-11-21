@@ -1,0 +1,8 @@
+{
+  "folders": ["/home/amy/Music", "/home/amy/Podcasts"],
+  "playlists": [
+    { "name": "Morning", "items": ["/home/amy/Music/a.flac", "/home/amy/Music/b.flac"] }
+  ],
+  "shuffle": true,
+  "repeat": "all"
+}

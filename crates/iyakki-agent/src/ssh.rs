@@ -578,24 +578,21 @@ pub fn probe(client: &Client, host: &str, port: u16) -> Result<Vec<HostKey>, Str
     let (h, p) = (split_target(host)?.1, port.to_string());
     let want = pattern(&h, port);
     let found: Vec<HostKey> = if let Some(scan) = client.tool("ssh-keyscan") {
-        let out = std::process::Command::new(&scan).args(["-T", "10", "-p", &p, "-t", "ed25519,ecdsa,rsa", "--", &h]).stdin(std::process::Stdio::null()).output().map_err(|e| format!("could not run ssh-keyscan: {e}"))?;
+        let out = iyakki_core_local::starters::ssh_keyscan(&scan, &h, &p).map_err(|e| format!("could not run ssh-keyscan: {e}"))?;
         String::from_utf8_lossy(&out.stdout).lines().filter_map(iyakki_shared::ssh::parse_known_line).collect()
     } else {
         let tmp = TempDir::new("probe")?;
         let kh = match client.flavor {
             Flavor::OpenSsh => {
                 let kh = tmp.path().join("kh");
-                let args = ["-F", "/dev/null", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "HashKnownHosts=no", "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10", "-o", "IdentityFile=/dev/null", "-o", "IdentitiesOnly=yes", "-o", "PreferredAuthentications=publickey", "-o", "ClearAllForwardings=yes", "-o"];
-                let mut cmd = Command::new(&client.path);
-                cmd.args(args).arg(format!("UserKnownHostsFile={}", kh.display())).args(["-p", &p, "--", &h, "true"]);
+                let cmd = iyakki_core_local::starters::ssh_probe_openssh_command(&client.path, &kh, &p, &h);
                 let _ = cmd_run(cmd, &tmp.path().join("home"), 20);
                 kh
             }
             Flavor::Dropbear => {
                 let home = tmp.path().join("home");
                 private_dir(&home.join(".ssh"))?;
-                let mut cmd = Command::new(&client.path);
-                cmd.args(["-y", "-o", "BatchMode=yes", "-p", &p, &h, "true"]);
+                let cmd = iyakki_core_local::starters::ssh_probe_dropbear_command(&client.path, &p, &h);
                 let _ = cmd_run(cmd, &home, 20);
                 home.join(".ssh").join("known_hosts")
             }
@@ -686,8 +683,7 @@ fn write_keys(env: &Env, client: &Client, names: &[String], dir: &Path) -> Resul
             let askpass = dir.join("askpass");
             std::fs::write(&askpass, "#!/bin/sh\nprintf '%s\\n' \"$IYAKKI_SSH_PASSPHRASE\"\n").map_err(|e| e.to_string())?;
             std::fs::set_permissions(&askpass, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
-            let mut cmd = Command::new(keygen);
-            cmd.args(["-p", "-N", "", "-f"]).arg(&path).env_clear().env("SSH_ASKPASS", &askpass).env("SSH_ASKPASS_REQUIRE", "force").env("IYAKKI_SSH_PASSPHRASE", pass.as_str()).env("PATH", env_path());
+            let cmd = iyakki_core_local::starters::ssh_keygen_unlock_command(&keygen, &path, &askpass, pass.as_str(), &env_path());
             crate::exec::run_prepared(cmd, "ssh-keygen", 20, None).map_err(|_| format!("the passphrase in your vault for `{name}` did not open the key"))?;
         }
         out.push((name.clone(), path));
@@ -850,19 +846,19 @@ pub fn prepare(env: &Env, mode: Mode, program: &str, args: &[String], cwd: &Path
             h
         }
     };
-    let mut cmd = Command::new(&prog_path);
-    cmd.args(&argv).current_dir(cwd).env_clear().env("HOME", &home);
-    for k in ["PATH", "LANG", "LC_ALL", "TERM", "TZ"] {
+    let mut envs: Vec<(String, String)> = vec![("HOME".into(), home.display().to_string())];
+    for k in ["LANG", "LC_ALL", "TERM", "TZ"] {
         if let Ok(v) = std::env::var(k) {
-            cmd.env(k, v);
+            envs.push((k.into(), v));
         }
     }
-    cmd.env("PATH", format!("{}:{}", client.path.parent().map_or(String::new(), |p| p.display().to_string()), client.search));
+    envs.push(("PATH".into(), format!("{}:{}", client.path.parent().map_or(String::new(), |p| p.display().to_string()), client.search)));
     if plan.agent {
         if let Ok(v) = std::env::var("SSH_AUTH_SOCK") {
-            cmd.env("SSH_AUTH_SOCK", v);
+            envs.push(("SSH_AUTH_SOCK".into(), v));
         }
     }
+    let cmd = iyakki_core_local::starters::ssh_session_command(&prog_path, &argv, cwd, &envs);
     Ok(Prepared { cmd, tmp, plan })
 }
 
@@ -925,13 +921,11 @@ pub fn generate_key(env: &Env, name: &str, comment: &str, store: &dyn Fn(&str, &
     let tmp = TempDir::new("gen")?;
     let file = tmp.path().join("key");
     let (private, public) = if let Some(kg) = client.tool("ssh-keygen") {
-        let mut cmd = Command::new(kg);
-        cmd.args(["-q", "-t", "ed25519", "-N", "", "-C", &comment, "-f"]).arg(&file).env_clear().env("PATH", env_path()).env("HOME", tmp.path());
+        let cmd = iyakki_core_local::starters::ssh_keygen_new_command(&kg, &comment, &file, &env_path(), tmp.path());
         crate::exec::run_prepared(cmd, "ssh-keygen", 30, None).map_err(|e| format!("ssh-keygen failed: {e}"))?;
         (std::fs::read_to_string(&file).map_err(|e| e.to_string())?, std::fs::read_to_string(tmp.path().join("key.pub")).map_err(|e| e.to_string())?)
     } else if let Some(dk) = client.tool("dropbearkey") {
-        let mut cmd = Command::new(dk);
-        cmd.args(["-t", "ed25519", "-C", &comment, "-f"]).arg(&file).env_clear().env("PATH", env_path());
+        let cmd = iyakki_core_local::starters::dropbearkey_new_command(&dk, &comment, &file, &env_path());
         let out = crate::exec::run_prepared(cmd, "dropbearkey", 30, None).map_err(|e| format!("dropbearkey failed: {e}"))?;
         let public = out.lines().find(|l| l.starts_with("ssh-")).ok_or("dropbearkey printed no public key")?.to_string();
         let raw = std::fs::read(&file).map_err(|e| e.to_string())?;

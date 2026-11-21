@@ -23,6 +23,8 @@ pub enum Sniff {
     Cpio,
     Iso,
     Fat,
+    /// An ext2/3/4 volume (the superblock's magic at byte 1080).
+    Ext,
     /// A whole disk image: a partition table (MBR or GPT) with volumes in it.
     Disk,
     Zstd,
@@ -39,6 +41,8 @@ pub fn sniff(head: &[u8]) -> Sniff {
         Sniff::Iso
     } else if is_fat_boot(head) {
         Sniff::Fat
+    } else if crate::ext4::is_ext(head) {
+        Sniff::Ext
     } else if partitions(head).is_some_and(|p| !p.is_empty()) || (head.len() >= 520 && head.get(512..520) == Some(b"EFI PART")) {
         Sniff::Disk
     } else {
@@ -57,43 +61,102 @@ const MAX_PARTITIONS: usize = 128;
 /// (a protective MBR in front of it is not a volume), else from the four MBR entries. None when there is no table at all. Needs at least the
 /// first 34 sectors for a GPT; the entries are read from where the header says, which may be later, so pass the whole image when it is known.
 pub fn partitions(img: &[u8]) -> Option<Vec<(usize, usize)>> {
-    if img.len() < 512 || img[510] != 0x55 || img[511] != 0xAA {
-        return None;
+    partitions_checked(img).ok().flatten()
+}
+
+fn mbr_entries(sector: &[u8]) -> Vec<(u8, u32, u32)> {
+    (0..4)
+        .filter_map(|i| {
+            let e = sector.get(446 + i * 16..446 + i * 16 + 16)?;
+            let (ty, start, len) = (e[4], le32(e, 8)?, le32(e, 12)?);
+            (ty != 0 && len != 0).then_some((ty, start, len))
+        })
+        .collect()
+}
+
+fn is_extended(ty: u8) -> bool {
+    matches!(ty, 0x05 | 0x0F | 0x85)
+}
+
+/// A GPT disk whose first sector also lists real partitions (a hybrid MBR): the GPT is read, the MBR's own entries describe the same
+/// volumes and are not read twice.
+pub fn is_hybrid(img: &[u8]) -> bool {
+    img.len() >= 512 && img[510] == 0x55 && img[511] == 0xAA && {
+        let m = mbr_entries(img);
+        m.iter().any(|e| e.0 == 0xEE) && m.iter().any(|e| e.0 != 0xEE)
     }
-    let mbr: Vec<(u8, u32, u32)> = (0..4).filter_map(|i| {
-        let e = img.get(446 + i * 16..446 + i * 16 + 16)?;
-        let (ty, start, len) = (e[4], le32(e, 8)?, le32(e, 12)?);
-        (ty != 0 && len != 0).then_some((ty, start, len))
-    }).collect();
+}
+
+/// [`partitions`], with an error for a table that points outside the image or loops (a scan must not pass what it could not read).
+/// Logical partitions of an extended partition are found by walking its chain of extended boot records (each holds one logical
+/// partition, relative to itself, and a link to the next, relative to the start of the first extended partition).
+pub fn partitions_checked(img: &[u8]) -> Result<Option<Vec<(usize, usize)>>, String> {
+    if img.len() < 512 || img[510] != 0x55 || img[511] != 0xAA {
+        return Ok(None);
+    }
+    let mbr = mbr_entries(img);
     if mbr.iter().any(|m| m.0 == 0xEE) {
         // GPT: the header at sector 1, then a table of entries
-        let h = img.get(512..512 + 92)?;
-        if h.get(0..8)? != b"EFI PART" {
-            return None;
+        let Some(h) = img.get(512..512 + 92) else { return Ok(None) };
+        if &h[0..8] != b"EFI PART" {
+            return Ok(None);
         }
-        let (table_lba, n, size) = (le64(h, 72)? as usize, le32(h, 80)? as usize, le32(h, 84)? as usize);
+        let (Some(table_lba), Some(n), Some(size)) = (le64(h, 72), le32(h, 80), le32(h, 84)) else { return Ok(None) };
+        let (table_lba, n, size) = (table_lba as usize, n as usize, size as usize);
         if !(128..=1024).contains(&size) || n > MAX_PARTITIONS * 8 {
-            return None;
+            return Ok(None);
         }
         let mut out = Vec::new();
         for i in 0..n {
-            let o = table_lba.checked_mul(512)?.checked_add(i.checked_mul(size)?)?;
+            let Some(o) = table_lba.checked_mul(512).and_then(|t| t.checked_add(i.checked_mul(size)?)) else { return Ok(None) };
             let Some(e) = img.get(o..o + 48) else { break };
             if e[..16].iter().all(|b| *b == 0) {
                 continue;
             }
-            let (first, last) = (le64(e, 32)? as usize, le64(e, 40)? as usize);
+            let (Some(first), Some(last)) = (le64(e, 32), le64(e, 40)) else { return Ok(None) };
+            let (first, last) = (first as usize, last as usize);
             if last < first {
                 continue;
             }
-            out.push((first.checked_mul(512)?, (last - first + 1).checked_mul(512)?));
+            let (Some(start), Some(len)) = (first.checked_mul(512), (last - first + 1).checked_mul(512)) else { return Ok(None) };
+            out.push((start, len));
             if out.len() >= MAX_PARTITIONS {
                 break;
             }
         }
-        return Some(out);
+        return Ok(Some(out));
     }
-    Some(mbr.into_iter().filter(|m| !matches!(m.0, 0x05 | 0x0F | 0x85)).map(|(_, s, l)| (s as usize * 512, l as usize * 512)).collect())
+    let mut out = Vec::new();
+    for &(ty, start, len) in &mbr {
+        if !is_extended(ty) {
+            out.push((start as usize * 512, len as usize * 512));
+            continue;
+        }
+        let first_ext = start as usize;
+        let (mut ebr, mut seen) = (first_ext, HashSet::new());
+        loop {
+            if !seen.insert(ebr) {
+                return Err("the chain of extended partitions points back to itself".into());
+            }
+            let sector = img.get(ebr * 512..ebr * 512 + 512).ok_or("an extended partition's table lies outside the image (cut short?)")?;
+            if sector[510] != 0x55 || sector[511] != 0xAA {
+                return Err("an extended partition's table has no 55AA signature".into());
+            }
+            let e = mbr_entries(sector);
+            if let Some(&(lt, rel, l)) = e.iter().find(|x| !is_extended(x.0)) {
+                let _ = lt;
+                out.push(((ebr + rel as usize) * 512, l as usize * 512));
+            }
+            match e.iter().find(|x| is_extended(x.0)) {
+                Some(&(_, rel, _)) => ebr = first_ext + rel as usize,
+                None => break,
+            }
+            if out.len() >= MAX_PARTITIONS {
+                break;
+            }
+        }
+    }
+    Ok(Some(out))
 }
 
 fn le64(b: &[u8], o: usize) -> Option<u64> {
@@ -104,8 +167,11 @@ fn le64(b: &[u8], o: usize) -> Option<u64> {
 /// partition's number. A partition of another kind (ext4, swap, a blank one) is skipped and said in the second answer; a volume that is cut
 /// short or damaged is an error for the whole image: a scan must not pass what it could not read.
 pub fn disk_list(img: &[u8]) -> Result<(Vec<Entry>, Vec<String>), String> {
-    let parts = partitions(img).ok_or("no partition table in this image")?;
+    let parts = partitions_checked(img)?.ok_or("no partition table in this image")?;
     let (mut out, mut skipped) = (Vec::new(), Vec::new());
+    if is_hybrid(img) {
+        skipped.push("hybrid MBR: the GPT was read; the MBR's own entries describe the same volumes and were not read twice".to_string());
+    }
     for (n, (start, len)) in parts.into_iter().enumerate() {
         let n = n + 1;
         let end = start.checked_add(len).ok_or("a partition lies outside the image")?;
@@ -113,6 +179,7 @@ pub fn disk_list(img: &[u8]) -> Result<(Vec<Entry>, Vec<String>), String> {
         let list = match sniff(vol) {
             Sniff::Fat => fat_list(vol).map_err(|e| format!("partition {n}: {e}"))?,
             Sniff::Iso => iso_list(vol).map_err(|e| format!("partition {n}: {e}"))?,
+            Sniff::Ext => crate::ext4::ext_list(vol).map_err(|e| format!("partition {n}: {e}"))?,
             other => {
                 skipped.push(format!("partition {n} ({:?}, {} MiB) is not a volume this scan can open", other, len >> 20));
                 continue;
@@ -378,7 +445,8 @@ pub fn fat_list(img: &[u8]) -> Result<Vec<Entry>, String> {
 }
 
 /// Read the file list of an image file of any kind this module and `cpio` know, by looking at its first bytes. The bool says whether
-/// it is a root file system image (the notice-file check applies) or not. A `.zst` is refused with the way to unpack it.
+/// it is a root file system image (the notice-file check applies) or not. A `.zst` is decoded as a stream by our own dependency-free-of-tools
+/// path (`ruzstd`), nothing is written to disk, and its content must be a newc cpio archive (the root file system image).
 pub fn list_file(path: &std::path::Path) -> Result<(Vec<Entry>, bool), String> {
     use std::io::Read;
     let mut head = vec![0u8; 65536];
@@ -389,6 +457,7 @@ pub fn list_file(path: &std::path::Path) -> Result<(Vec<Entry>, bool), String> {
         Sniff::Cpio => crate::cpio::list(std::io::BufReader::new(std::fs::File::open(path).map_err(|e| e.to_string())?)).map(|e| (e, true)).map_err(|e| e.to_string()),
         Sniff::Iso => iso_list(&read()?).map(|e| (e, false)),
         Sniff::Fat => fat_list(&read()?).map(|e| (e, false)),
+        Sniff::Ext => crate::ext4::ext_list(&read()?).map(|e| (e, false)),
         Sniff::Disk => {
             let (list, skipped) = disk_list(&read()?)?;
             for s in skipped {
@@ -396,7 +465,11 @@ pub fn list_file(path: &std::path::Path) -> Result<(Vec<Entry>, bool), String> {
             }
             Ok((list, false))
         }
-        Sniff::Zstd => Err("this is zstd-compressed; use dist/release/image-gate.sh, or `zstd -dc FILE | iyakki-relcheck image-scan --cpio -`".into()),
+        Sniff::Zstd => {
+            let f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let dec = ruzstd::decoding::StreamingDecoder::new(f).map_err(|e| format!("{}: not a readable zstd file ({e})", path.display()))?;
+            crate::cpio::list(std::io::BufReader::new(dec)).map(|e| (e, true)).map_err(|e| format!("{}: {e}", path.display()))
+        }
         Sniff::Unknown => Err("not a cpio archive, ISO 9660 image or FAT volume image".into()),
     }
 }

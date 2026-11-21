@@ -168,8 +168,8 @@ impl ServicesHandle for Services {
     fn flows_facet(&self) -> Arc<dyn FlowsFacet> {
         self.arc().flows_facet()
     }
-    fn flows_panel(&self, user: &str, policy: &iyakki_sec::policy::Policy) -> Option<Arc<dyn iyakki_agent_api::FlowsPanel>> {
-        iyakki_agent_api::ServicesB7::flows_panel(&self.arc(), user, policy)
+    fn flows_jobs(&self, user: &str, policy: &iyakki_sec::policy::Policy) -> Option<Arc<dyn iyakki_agent_api::FlowsJobs>> {
+        iyakki_agent_api::ServicesB7::flows_panel(&self.arc(), user, policy).map(|p| p as Arc<dyn iyakki_agent_api::FlowsJobs>)
     }
     fn gemini_live(&self) -> Arc<dyn GeminiLive> {
         iyakki_agent_api::ServicesB6::gemini_live(&self.arc())
@@ -276,6 +276,36 @@ impl ServicesHandle for Services {
     fn sftp_status_lines(&self, data: &std::path::Path) -> Vec<String> {
         iyakki_agent_api::ServicesB6::sftp_status_lines(&self.arc(), data)
     }
+    fn scope_check_read(&self, policy: &iyakki_sec::policy::Policy, user: &str, p: &std::path::Path) -> Result<(), String> {
+        crate::scope::check_read(policy, user, p)
+    }
+    fn scope_check_write(&self, policy: &iyakki_sec::policy::Policy, user: &str, p: &std::path::Path) -> Result<(), String> {
+        crate::scope::check_write(policy, user, p)
+    }
+    fn scope_home_root(&self, user: &str, data_dir: &std::path::Path) -> std::path::PathBuf {
+        crate::scope::home_root(user, data_dir)
+    }
+    fn scope_home_root_for_writes(&self, user: &str, data_dir: &std::path::Path) -> std::path::PathBuf {
+        crate::scope::home_root_for_writes(user, data_dir)
+    }
+    fn scope_system_home(&self, user: &str) -> Option<std::path::PathBuf> {
+        crate::scope::system_home(user)
+    }
+    fn scope_roots(&self, policy: &iyakki_sec::policy::Policy, user: &str, data_dir: &std::path::Path) -> iyakki_core_api::FileRoots {
+        crate::scope::file_roots(policy, user, data_dir)
+    }
+    fn scope_roots_with_home(&self, policy: &iyakki_sec::policy::Policy, user: &str, data_dir: &std::path::Path, home: std::path::PathBuf) -> iyakki_core_api::FileRoots {
+        crate::scope::file_roots_with_home(policy, user, data_dir, home)
+    }
+    fn scope_resolve(&self, cwd: &std::path::Path, input: &str) -> Result<std::path::PathBuf, String> {
+        crate::scope::resolve(cwd, input)
+    }
+    fn scope_resolve_for_write(&self, cwd: &std::path::Path, input: &str) -> Result<std::path::PathBuf, String> {
+        crate::scope::resolve_for_write(cwd, input)
+    }
+    fn scope_ensure_parent(&self, path: &std::path::Path) -> Result<(), String> {
+        crate::scope::ensure_parent(path)
+    }
     fn show_all_ai(&self) -> bool {
         Services::show_all_ai(self)
     }
@@ -333,47 +363,65 @@ impl ServicesHandle for Services {
     fn wrap_fleet_tools(&self, inner: Arc<dyn Tools>, os: Arc<dyn iyakki_core_api::Os>, gate: Arc<dyn Fleet>, audit: Arc<dyn Fn(&str, &str) + Send + Sync>) -> Arc<dyn Tools> {
         self.arc().wrap_fleet_tools(inner, os, gate, audit)
     }
-    fn settings(&self) -> &Arc<Mutex<iyakki_shared::settings::SettingsStore>> {
-        &self.settings
+    fn settings_api(&self) -> Arc<dyn iyakki_agent_api::SettingsApi> {
+        Arc::new(self.settings.clone())
     }
-    fn inbox(&self) -> &iyakki_shared::inbox::Inbox {
-        &self.inbox
+    fn settings(&self) -> iyakki_agent_api::SettingsRef {
+        iyakki_agent_api::SettingsRef::new(Arc::new(iyakki_agent_api::SettingsSrc(self.settings_api())))
     }
-    fn calendar(&self) -> &iyakki_shared::calendar::CalendarStore {
-        &self.calendar
+    fn inbox(&self) -> Arc<dyn iyakki_agent_api::InboxApi> {
+        self.inbox.clone()
     }
-    fn study(&self) -> &iyakki_shared::study::StudyStore {
-        &self.study
+    fn calendar(&self) -> Arc<dyn iyakki_agent_api::CalendarApi> {
+        self.calendar.clone()
+    }
+    fn study(&self) -> Arc<dyn iyakki_agent_api::StudyApi> {
+        self.study.clone()
+    }
+    fn study_calendar(&self) -> Arc<dyn iyakki_agent_api::StudyCalendarApi> {
+        Arc::new(iyakki_agent_api::StudyOverCalendar { study: self.study.clone(), calendar: self.calendar.clone() })
     }
     fn secrets(&self) -> &iyakki_shared::vault::Secrets {
         &self.secrets
     }
-    fn kb(&self) -> &Arc<Mutex<iyakki_memx::kb::KnowledgeBase>> {
-        &self.kb
+    fn secrets_api(&self) -> Arc<dyn iyakki_agent_api::member_stores::SecretsApi> {
+        Arc::new(self.secrets.clone())
     }
-    fn devwatch(&self) -> &Arc<iyakki_shared::devwatch::DeviceWatch> {
-        &self.devwatch
+    fn kb(&self) -> Arc<dyn iyakki_agent_api::KnowledgeBaseApi> {
+        Arc::new(self.kb.clone())
     }
-    fn browser(&self) -> &iyakki_shared::browserconsent::BrowserState {
-        &self.browser
+    fn kb_source(&self) -> Arc<dyn iyakki_memx::kb::KbSource> {
+        Arc::new(iyakki_agent_api::KbHandle(self.kb()))
     }
-    fn screen(&self) -> &iyakki_shared::screencap::ScreenCapture {
-        &self.screen
+    fn devwatch(&self) -> Arc<dyn iyakki_agent_api::DevWatchApi> {
+        self.devwatch.clone()
     }
-    fn camera(&self) -> &iyakki_shared::camtools::CameraHub {
-        &self.camera
+    fn browser(&self) -> Arc<dyn iyakki_agent_api::BrowserStateApi> {
+        self.browser.clone()
     }
-    fn devtools(&self) -> &iyakki_shared::devtools::DevTools {
-        &self.devtools
+    fn browser_consent(&self) -> Arc<dyn iyakki_agent_api::ConsentApi> {
+        self.browser.consent.clone()
     }
-    fn ext_status(&self) -> &Arc<iyakki_shared::extagent::StatusCache> {
-        &self.ext_status
+    fn browser_jobs(&self) -> Arc<dyn iyakki_agent_api::BrowserJobsApi> {
+        self.browser.jobs.clone()
     }
-    fn secret_requests(&self) -> &iyakki_shared::secretreq::SecretRequests {
-        &self.secret_requests
+    fn screen(&self) -> Arc<dyn iyakki_agent_api::ScreenCaptureApi> {
+        self.screen.clone()
     }
-    fn usage(&self) -> &iyakki_shared::usagelog::UsageLog {
-        &self.usage
+    fn camera(&self) -> Arc<dyn iyakki_agent_api::CameraHubApi> {
+        self.camera.clone()
+    }
+    fn devtools(&self) -> Arc<dyn iyakki_agent_api::DevToolsApi> {
+        self.devtools.clone()
+    }
+    fn ext_status(&self) -> Arc<dyn iyakki_agent_api::ExtStatusApi> {
+        Arc::new(self.ext_status.clone())
+    }
+    fn secret_requests(&self) -> Arc<dyn iyakki_agent_api::SecretRequestsApi> {
+        self.secret_requests.clone()
+    }
+    fn usage(&self) -> Arc<dyn iyakki_agent_api::UsageLogApi> {
+        self.usage.clone()
     }
     fn sessions(&self) -> Arc<dyn SessionApi> {
         self.sessions.clone()
@@ -423,8 +471,17 @@ impl ServicesHandle for Services {
     fn msg_mirror_tick(&self, user: &str, audit: iyakki_shared::gitkeys::AuditFn) -> bool {
         iyakki_agent_api::ServicesB1::msg_mirror_tick(&self.arc(), user, audit)
     }
+    fn rag_refresh_tick(&self, user: &str, policy: &iyakki_sec::policy::Policy, audit: iyakki_shared::gitkeys::AuditFn) -> bool {
+        iyakki_agent_api::ServicesB1::rag_refresh_tick(&self.arc(), user, policy, audit)
+    }
     fn msg_offer_tools(&self, tools: Arc<dyn iyakki_shared::agent::Tools>, user: &str, audit: iyakki_shared::gitkeys::AuditFn) -> Arc<dyn iyakki_shared::agent::Tools> {
         iyakki_agent_api::ServicesB1::msg_offer_tools(&self.arc(), tools, user, audit)
+    }
+    fn page_passkeys(&self, user: &str, audit: iyakki_shared::gitkeys::AuditFn) -> Option<Arc<std::sync::Mutex<dyn iyakki_agent_api::PagePasskeyHost>>> {
+        iyakki_agent_api::ServicesB1::page_passkeys(&self.arc(), user, audit)
+    }
+    fn page_push(&self, user: &str, audit: iyakki_shared::gitkeys::AuditFn) -> Option<Arc<std::sync::Mutex<dyn iyakki_agent_api::PagePushHost>>> {
+        iyakki_agent_api::ServicesB1::page_push(&self.arc(), user, audit)
     }
     fn msg_prompt_rules(&self, user: &str) -> String {
         iyakki_agent_api::ServicesB1::msg_prompt_rules(&self.arc(), user)

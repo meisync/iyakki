@@ -23,7 +23,15 @@ fn the_binary_is_built_as_the_workspace_version() {
 
 #[test]
 fn the_files_a_release_needs_exist() {
+    // the public tree (marked by dist/release/PUBLIC-EXPORT) leaves the internal gate document out by design (dist/release/public-exclude.txt)
+    let public = root().join("dist/release/PUBLIC-EXPORT").is_file();
     for f in ["LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt", "CHANGELOG.md", "KNOWN-ISSUES.md", "SECURITY.md", "ALPHA-GATE.md", "docs/RELEASING.md", "docs/LICENSES.md", "dist/release/alpha-check.sh", "dist/release/release.sh"] {
+        if public && f == "ALPHA-GATE.md" {
+            let list = std::fs::read_to_string(root().join("dist/release/public-exclude.txt")).unwrap();
+            assert!(list.lines().any(|l| l.trim() == f), "{f} may only be missing from the public tree when the exclusion list names it");
+            eprintln!("SKIPPED: {f} is left out of the public tree by design (dist/release/public-exclude.txt)");
+            continue;
+        }
         assert!(root().join(f).exists(), "{f} is missing");
     }
     let sec = std::fs::read_to_string(root().join("SECURITY.md")).unwrap();

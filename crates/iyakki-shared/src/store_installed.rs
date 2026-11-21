@@ -4,7 +4,7 @@
 use crate::skills::Scope;
 use crate::store_trust::Level;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Type {
     Mcp,
     Cli,
@@ -43,7 +43,7 @@ impl Type {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Status {
     On,
     Off,
@@ -63,13 +63,13 @@ impl Status {
 }
 
 /// Where "Open" goes: a tile, and what in it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Open {
     pub tile: String,
     pub item: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Entry {
     pub key: String,
     pub ty: Type,

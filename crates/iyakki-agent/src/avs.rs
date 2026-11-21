@@ -264,6 +264,15 @@ pub fn interpret(parts: &[Part]) -> Result<Turn, String> {
     Ok(turn)
 }
 
+impl Turn {
+    /// Alexa's spoken answers as 16-bit WAV files, decoded with the in-house MP3 decoder already used for the apps' sounds
+    /// ([`crate::store::sdkv2_playback::mp3_to_wav`]); an answer that is already a WAV is passed through. A piece that cannot be decoded is
+    /// an error in words, never skipped silently.
+    pub fn speech_wav(&self) -> Result<Vec<Vec<u8>>, String> {
+        self.speech.iter().map(|a| if a.starts_with(b"RIFF") { Ok(a.clone()) } else { crate::store::sdkv2_playback::mp3_to_wav(a).map_err(|e| format!("Alexa's spoken answer could not be played: {e}")) }).collect()
+    }
+}
+
 /// The transport: one event with an attachment out, the multipart answer back. (The real one is HTTP/2 with a persistent downchannel.)
 pub trait Transport {
     /// POST to the events endpoint with the bearer token. Returns (status, content type of the answer, body).

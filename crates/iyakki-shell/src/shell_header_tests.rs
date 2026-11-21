@@ -29,11 +29,11 @@ pub(super) fn small_probe(tag: &str) -> crate::devpop::Probe {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, c).unwrap();
     }
-    let roots = iyakki_devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") };
+    let roots = iyakki_core_local::devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") };
     crate::devpop::Probe {
         core: Arc::new(iyakki_core_fake::FakeCore::new()),
         dev: crate::apps::devices::DeviceEnv::real(),
-        hw: iyakki_hwinfo::Roots { sys: roots.sys.clone(), proc: roots.proc_.clone() },
+        hw: iyakki_core_local::hwinfo::Roots { sys: roots.sys.clone(), proc: roots.proc_.clone() },
         data_dir: d.clone(),
         bt_dir: d.join("bt"),
         drivers: None,
@@ -42,6 +42,7 @@ pub(super) fn small_probe(tag: &str) -> crate::devpop::Probe {
         screen: (1280, 720),
         wifi: Arc::new(|_| None),
         can_scan: false,
+        hardware: None,
     }
     .with_roots(roots)
 }
@@ -461,4 +462,17 @@ fn which_header_icons_fit_follows_the_width_and_never_drops_back_or_the_bell() {
     }
     let r = bar_rects(1280, 1.0);
     assert_eq!((r.back.x, r.help.x, r.shot.x, r.dev.x, r.clip.x, r.bell.x), (1280.0 - 114.0, 1280.0 - 226.0, 1280.0 - 266.0, 1280.0 - 306.0, 1280.0 - 346.0, 1280.0 - 386.0));
+}
+
+#[test]
+fn a_sealed_private_folder_is_said_on_the_home_screen_at_sign_in_and_the_settings_page_still_has_the_words() {
+    let (mut sh, _) = shell_with_users("sealed-banner");
+    iyakki_enchome::set_banner("gus", "Your private folder is sealed: use your recovery key in Settings, Encrypted home.");
+    login(&mut sh, "gus", "guestpass1");
+    assert!(sh.toast_text().is_some_and(|t| t.contains("sealed")), "{:?}", sh.toast_text());
+    assert!(iyakki_enchome::take_banner("gus").is_some(), "peeking left it for the page");
+    // nothing sealed: nothing said
+    let (mut sh, _) = shell_with_users("sealed-none");
+    login(&mut sh, "root", "rootpass12");
+    assert!(sh.toast_text().is_none_or(|t| !t.contains("sealed")));
 }

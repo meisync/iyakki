@@ -469,7 +469,7 @@ impl Painter {
                 let (x, y, dw, dh) = ss::cover_rect(pm.width(), pm.height(), w, h, local);
                 let paint = PixmapPaint { opacity, quality: FilterQuality::Bilinear, ..PixmapPaint::default() };
                 let tr = Transform::from_translate(x, y).pre_scale(dw / pm.width() as f32, dh / pm.height() as f32);
-                g.pm.draw_pixmap(0, 0, pm.as_ref(), &paint, tr, None);
+                g.pm_mut().draw_pixmap(0, 0, pm.as_ref(), &paint, tr, None);
                 shown = true;
             }
         }
@@ -533,7 +533,7 @@ fn paint(g: &mut Gfx, geo: &Geom, clock: Option<&str>, s: f32) {
         let k = geo.d as f32 / lw;
         let paint = PixmapPaint { opacity: geo.opacity, quality: FilterQuality::Bilinear, ..PixmapPaint::default() };
         let t = Transform::from_translate(geo.cx as f32, geo.cy as f32).pre_scale(k, k);
-        g.pm.draw_pixmap(-(lw as i32) / 2, -(lh as i32) / 2, logo.as_ref(), &paint, t, None);
+        g.pm_mut().draw_pixmap(-(lw as i32) / 2, -(lh as i32) / 2, logo.as_ref(), &paint, t, None);
     }
     if let (Some((x, y, w, size)), Some(text)) = (geo.clock, clock) {
         let size = (size as f32).max(8.0 * s.min(1.0));

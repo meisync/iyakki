@@ -689,7 +689,7 @@ fn the_chat_opens_a_lesson_through_the_inbox_note() {
     f.app.open_item("lesson:garbage", &f.cx);
     f.draw();
     // the plan's lessons go with the plan
-    f.cx.study().delete_plan(USER, &p, &f.cx.calendar()).unwrap();
+    f.cx.study_calendar().delete_plan(USER, &p).unwrap();
     assert!(f.cx.study().lesson(USER, &p, 2).is_none());
 }
 
@@ -864,7 +864,7 @@ fn a_lesson_that_was_deleted_with_its_plan_leaves_the_page_without_a_crash() {
     let (mut f, _t) = teach_fx("lesson-gone", 800, 480, 1.0);
     let id = open_day(&mut f, 1);
     settle(&mut f);
-    f.cx.study().delete_plan(USER, &id, &f.cx.calendar()).unwrap();
+    f.cx.study_calendar().delete_plan(USER, &id).unwrap();
     f.reload();
     f.reload();
     assert_eq!(f.app.page(), "plans");

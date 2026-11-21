@@ -384,7 +384,12 @@ pub struct Sftp {
     running: Mutex<Option<Running>>,
     limiter: Arc<Mutex<Limiter>>,
     home: Option<PathBuf>,
+    /// The time of day in Unix seconds (the real clock; a test gives its own).
+    now: Clock,
 }
+
+/// A time source in Unix seconds.
+pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 fn config_path(dir: &Path) -> PathBuf {
     dir.join("sftp").join("config.json")
@@ -415,12 +420,18 @@ pub fn status_lines(dir: &Path) -> Vec<String> {
 
 impl Sftp {
     pub fn new(dir: &Path, auth: Arc<dyn Authenticator>, audit: Audit, fw: Arc<dyn Firewall>) -> Sftp {
-        Sftp { dir: dir.to_path_buf(), auth, audit, fw, running: Mutex::new(None), limiter: Arc::new(Mutex::new(Limiter::default())), home: None }
+        Sftp { dir: dir.to_path_buf(), auth, audit, fw, running: Mutex::new(None), limiter: Arc::new(Mutex::new(Limiter::default())), home: None, now: Arc::new(crate::clock::now_unix) }
     }
 
     /// Use this folder as every account's home (tests and portable set-ups).
     pub fn with_home(mut self, home: PathBuf) -> Sftp {
         self.home = Some(home);
+        self
+    }
+
+    /// Use this time source for the expiry (tests move it instead of waiting).
+    pub fn with_clock(mut self, now: Clock) -> Sftp {
+        self.now = now;
         self
     }
 
@@ -496,15 +507,15 @@ impl Sftp {
         let listener = TcpListener::bind(("0.0.0.0", cfg.port)).map_err(|e| format!("cannot listen on port {}: {e}", cfg.port))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-        let now = crate::clock::now_unix();
+        let now = (self.now)();
         let until = if cfg.expiry_secs == 0 { 0 } else { now + cfg.expiry_secs as i64 };
         if let Err(e) = self.fw.open(port, until) {
             return Err(format!("the firewall would not open the port: {e}"));
         }
         let stop = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(RealGate { dir: self.dir.clone(), cfg: cfg.clone(), auth: self.auth.clone(), audit: self.audit.clone(), limiter: self.limiter.clone(), home: self.home.clone() });
-        let (stop2, limiter) = (stop.clone(), self.limiter.clone());
-        let thread = std::thread::spawn(move || accept_loop(listener, key, ec, rsa, gate, stop2, limiter, until));
+        let (stop2, limiter, clock) = (stop.clone(), self.limiter.clone(), self.now.clone());
+        let thread = std::thread::spawn(move || accept_loop(listener, key, ec, rsa, gate, stop2, limiter, until, clock));
         LISTENING.store(port as u32, Ordering::Relaxed);
         *self.running.lock().unwrap_or_else(|e| e.into_inner()) = Some(Running { stop, thread: Some(thread), port, until, by: by.to_string() });
         self.log("sftp.enable", &format!("by {by}, port {port}, {}", if until == 0 { "until stopped".to_string() } else { format!("until {until}") }));
@@ -530,24 +541,24 @@ impl Sftp {
 
     /// Stop by itself when the time is up.
     pub fn tick(&self) {
-        let expired = self.running.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|r| r.until != 0 && crate::clock::now_unix() >= r.until);
+        let expired = self.running.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|r| r.until != 0 && (self.now)() >= r.until);
         if expired {
             self.disable("expiry");
         }
     }
 }
 
-fn accept_loop(listener: TcpListener, key: KeyPair, ec: Arc<crate::sshalg::EcHostKey>, rsa: RsaSlot, gate: Arc<RealGate>, stop: Arc<AtomicBool>, limiter: Arc<Mutex<Limiter>>, until: i64) {
+fn accept_loop(listener: TcpListener, key: KeyPair, ec: Arc<crate::sshalg::EcHostKey>, rsa: RsaSlot, gate: Arc<RealGate>, stop: Arc<AtomicBool>, limiter: Arc<Mutex<Limiter>>, until: i64, clock: Clock) {
     let live = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::Relaxed) {
-        if until != 0 && crate::clock::now_unix() >= until {
+        if until != 0 && clock() >= until {
             stop.store(true, Ordering::Relaxed);
             LISTENING.store(0, Ordering::Relaxed);
             break;
         }
         match listener.accept() {
             Ok((s, peer)) => {
-                let now = crate::clock::now_unix();
+                let now = clock();
                 if !ssh_server::peer_allowed(&peer) {
                     gate.audit("sftp.refused_address", &peer.ip().to_string());
                     continue;

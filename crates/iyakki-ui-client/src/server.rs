@@ -195,7 +195,11 @@ fn serve_connection_x<W: Write + Send>(s: &Served, input: impl Read, out: W, bul
         let mut limiter = RateLimiter::new(s.hello.rate_limit);
         let write = |r: &Response| -> bool {
             let mut o = out.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            writeln!(o, "{}", serde_json::to_string(r).unwrap_or_default()).and_then(|_| o.flush()).is_ok()
+            // one write for the line and its newline: an unbuffered socket would otherwise send them apart, and a client that reads with a single
+            // `recvmsg` (`bulk.get`) could get the line without its newline and meet the newline as the start of the next answer
+            let mut text = serde_json::to_string(r).unwrap_or_default();
+            text.push('\n');
+            o.write_all(text.as_bytes()).and_then(|_| o.flush()).is_ok()
         };
         for _ in 0..MAX_CALLS_PER_CONNECTION {
             let mut line = String::new();

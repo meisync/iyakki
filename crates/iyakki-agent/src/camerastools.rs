@@ -25,7 +25,7 @@ pub use iyakki_shared::camerastools::{MOTION_RULE, PROMPT_RULE};
 
 
 
-pub const TOOLS: [&str; 15] = ["camera_move", "camera_motion_status", "camera_motion_set", "camera_events_list", "camera_zone_set", "cameras_list", "camera_snapshot", "cameras_add", "cameras_remove", "cameras_access", "camera_recording_status", "camera_recording_set", "camera_recordings_list", "camera_export", "camera_recording_limits"];
+pub const TOOLS: [&str; 16] = ["camera_listen", "camera_move", "camera_motion_status", "camera_motion_set", "camera_events_list", "camera_zone_set", "cameras_list", "camera_snapshot", "cameras_add", "cameras_remove", "cameras_access", "camera_recording_status", "camera_recording_set", "camera_recordings_list", "camera_export", "camera_recording_limits"];
 
 pub fn is_camera_view_tool(n: &str) -> bool {
     TOOLS.contains(&n)
@@ -42,6 +42,10 @@ pub struct CameraViewTools {
     rec: Option<Arc<Recorder>>,
     /// Motion watching (F-CAM-04); without it the motion tools are not offered.
     motion: Option<Arc<MotionService>>,
+    /// Where the sound of a chat-started `camera_listen` goes (the mixer; tests give a recording sink).
+    sound_route: Arc<dyn crate::camsource::SoundRoute>,
+    /// The running chat-started sound, if any (one at a time: its own thread, `camsound::Pump`).
+    sound: std::sync::Mutex<Option<crate::camsound::Pump>>,
     /// How a network camera is asked whether it can move, and how the tool waits between a move and its stop (tests give their own).
     ptz_probe: crate::embedcameras::PtzProbe,
     pause: Arc<dyn Fn(Duration) + Send + Sync>,
@@ -86,6 +90,8 @@ pub enum Call {
     EventsList(String, Option<String>, u32, usize),
     ZoneSet(String, ZoneAction),
     Move(String, MoveAct),
+    /// Start the camera's sound on the speaker for this many seconds, or stop it.
+    Listen(String, bool, u32),
 }
 
 /// What `camera_move` was asked to do.
@@ -98,6 +104,8 @@ pub enum MoveAct {
     Positions,
     /// Go to a saved position by name.
     GoTo(String),
+    /// Go to a place across the camera's range (pan and tilt -1 to 1, zoom 0 to 1) and stay there.
+    Place { pan: f32, tilt: f32, zoom: f32 },
 }
 
 #[derive(Debug, PartialEq)]
@@ -151,9 +159,28 @@ pub fn parse(name: &str, args: &Value) -> Result<Call, String> {
                     p if p.is_empty() => return Err("position is the name of a saved position (action positions lists them)".into()),
                     p => MoveAct::GoTo(p),
                 },
-                _ => return Err("action is left, right, up, down, zoom_in, zoom_out, stop, positions or go_to".into()),
+                "to" => {
+                    let n = |k: &str, lo: f64, hi: f64| match args.get(k) {
+                        None | Some(Value::Null) => Ok(0.0),
+                        Some(v) => v.as_f64().filter(|x| x.is_finite() && (lo..=hi).contains(x)).map(|x| x as f32).ok_or(format!("{k} is a number from {lo} to {hi}")),
+                    };
+                    MoveAct::Place { pan: n("pan", -1.0, 1.0)?, tilt: n("tilt", -1.0, 1.0)?, zoom: n("zoom", 0.0, 1.0)? }
+                }
+                _ => return Err("action is left, right, up, down, zoom_in, zoom_out, stop, positions, go_to or to".into()),
             };
             Ok(Call::Move(c, act))
+        }
+        "camera_listen" => {
+            let on = match text(args, "action").as_str() {
+                "" | "start" => true,
+                "stop" => false,
+                _ => return Err("action is start or stop".into()),
+            };
+            let secs = match args.get("seconds") {
+                None | Some(Value::Null) => 60,
+                Some(v) => v.as_u64().filter(|n| (u64::from(crate::camsound::MIN_SECS)..=u64::from(crate::camsound::MAX_SECS)).contains(n)).ok_or_else(|| format!("seconds is a whole number from {} to {}", crate::camsound::MIN_SECS, crate::camsound::MAX_SECS))? as u32,
+            };
+            Ok(Call::Listen(if on { camera()? } else { text(args, "camera") }, on, secs))
         }
         "cameras_remove" => Ok(Call::Remove(camera()?)),
         "cameras_access" => Ok(Call::Access(camera()?, strings(args, "people"))),
@@ -297,7 +324,8 @@ fn status_text(s: &Status) -> String {
 
 impl CameraViewTools {
     pub fn new(inner: Arc<dyn Tools>, hub: Arc<Hub>, who: Who, svc: Arc<Services>) -> CameraViewTools {
-        CameraViewTools { inner, hub, who, svc, secret_wait: Duration::from_secs(180), rec: None, motion: None, ptz_probe: crate::embedcameras::real_probe(), pause: Arc::new(std::thread::sleep) }
+        let ptz_probe = crate::embedcameras::real_probe(hub.env().data.clone());
+        CameraViewTools { inner, hub, who, svc, secret_wait: Duration::from_secs(180), rec: None, motion: None, ptz_probe, pause: Arc::new(std::thread::sleep), sound_route: Arc::new(crate::camsource::MixerRoute), sound: std::sync::Mutex::new(None) }
     }
 
     /// Offer the recording tools (the installation's recorder).
@@ -347,8 +375,14 @@ impl CameraViewTools {
                     MoveAct::Stop => format!("Stop the movement of the camera “{name}”?"),
                     MoveAct::Positions => format!("Ask the camera “{name}” for its saved positions? Nothing moves."),
                     MoveAct::GoTo(p) => format!("Move the camera “{name}” to its saved position “{}”? The camera physically moves.", show(&p)),
+                    MoveAct::Place { pan, tilt, zoom } => format!("Move the camera “{name}” to pan {pan:.2}, tilt {tilt:.2}, zoom {zoom:.2} (each across the camera's range)? The camera physically moves."),
                 }
             }
+            Call::Listen(c, true, secs) => {
+                let v = self.hub.resolve(&self.who, &c)?;
+                format!("Play the SOUND of the camera “{}” on this computer's speaker for {secs} seconds? Whatever its microphone hears is played aloud here; nothing is recorded. You can stop it with camera_listen (stop) or in the CAMERAS tile.", show(&v.name))
+            }
+            Call::Listen(_, false, _) => "Stop the camera sound that was started from the chat?".to_string(),
             Call::Remove(c) => {
                 let v = self.hub.resolve(&self.who, &c)?;
                 format!("REMOVE the camera “{}” ({}) and its stored password from your vault?", show(&v.name), if v.address.is_empty() { "this computer".to_string() } else { v.address })
@@ -612,6 +646,7 @@ impl CameraViewTools {
                 }
             }
             Call::Move(c, act) => self.move_camera(&c, act),
+            Call::Listen(c, on, secs) => self.listen_camera(&c, on, secs),
             Call::List => {
                 let v = self.hub.cameras(&self.who);
                 if v.is_empty() {
@@ -692,6 +727,35 @@ impl CameraViewTools {
 }
 
 impl CameraViewTools {
+    /// Another place for the sound of `camera_listen` (tests use a recording sink; the real one is the global mixer).
+    pub fn with_sound_route(mut self, r: Arc<dyn crate::camsource::SoundRoute>) -> CameraViewTools {
+        self.sound_route = r;
+        self
+    }
+
+    /// Start or stop the camera sound from the chat. The tile feeds the sound from its draw loop; here a pump thread of its own makes the
+    /// same call. One chat sound at a time: a new start ends the old one. The card was answered before this runs.
+    fn listen_camera(&self, camera: &str, on: bool, secs: u32) -> Result<String, String> {
+        let mut slot = self.sound.lock().unwrap_or_else(|e| e.into_inner());
+        let was = slot.take().map(|mut p| (p.camera.clone(), p.stop()));
+        if !on {
+            return Ok(match was {
+                Some((name, crate::camsound::Ended::Unavailable(why))) => format!("The sound of “{name}” had already ended: {}", show(&why)),
+                Some((name, crate::camsound::Ended::NoSound)) => format!("The sound of “{name}” had already ended: the camera sent no sound (it may have no microphone)."),
+                Some((name, _)) => format!("Stopped the sound of “{name}”."),
+                None => "No camera sound had been started from the chat.".to_string(),
+            });
+        }
+        let v = self.hub.resolve(&self.who, camera)?;
+        self.sound_route.ready()?;
+        let src: Arc<crate::camsource::HubSource> = Arc::new(crate::camsource::HubSource::with_route(self.hub.clone(), self.who.clone(), self.sound_route.clone()));
+        let name = show(&v.name);
+        let pump = crate::camsound::Pump::start(src, &v.id, &name, secs)?;
+        (self.hub.env().audit)(&self.who.user, "camera.listen", &format!("{name}: started from the chat for {secs} seconds"));
+        *slot = Some(pump);
+        Ok(format!("Playing the sound of “{name}” on this computer's speaker for up to {secs} seconds. Nothing is recorded. camera_listen with action stop ends it; a camera without a microphone stops it by itself after about 30 seconds of silence."))
+    }
+
     /// Move, stop, list the saved positions of, or send to a saved position, a network camera that has pan, tilt and zoom (ONVIF). The card
     /// was answered before this runs; the log says what happened to which camera, never the address or the login.
     fn move_camera(&self, camera: &str, act: MoveAct) -> Result<String, String> {
@@ -701,7 +765,7 @@ impl CameraViewTools {
             return Err(NONE.into());
         }
         let (addr, user, pass) = self.hub.control_login(&self.who, &v.id)?;
-        let cam = (self.ptz_probe)(&addr, &user, &pass).map_err(|e| iyakki_rtsp::url::scrub(&e))?.ok_or(NONE)?;
+        let cam = (self.ptz_probe)(&v.id, &addr, &user, &pass).map_err(|e| iyakki_rtsp::url::scrub(&e))?.ok_or(NONE)?;
         let name = show(&v.name);
         let audit = |what: &str| (self.hub.env().audit)(&self.who.user, "camera.move", &format!("{name}: {what}"));
         match act {
@@ -722,6 +786,11 @@ impl CameraViewTools {
             MoveAct::Positions => {
                 let list = cam.presets()?;
                 Ok(if list.is_empty() { format!("“{name}” has no saved positions.") } else { format!("Saved positions of “{name}”: {}", list.iter().map(|(_, n)| show(n)).collect::<Vec<_>>().join(", ")) })
+            }
+            MoveAct::Place { pan, tilt, zoom } => {
+                cam.command(iyakki_core_api::cameras::PtzCommand::Absolute { pan, tilt, zoom })?;
+                audit(&format!("to place {pan:.2} {tilt:.2} {zoom:.2}"));
+                Ok(format!("Moved “{name}” to pan {pan:.2}, tilt {tilt:.2}, zoom {zoom:.2}."))
             }
             MoveAct::GoTo(p) => {
                 let at = cam.go_to(&p)?;
@@ -749,7 +818,8 @@ impl Tools for CameraViewTools {
         let cam = json!({"type": "string", "description": "A camera's name or id from cameras_list."});
         v.push(ToolDef { spec: spec("cameras_list", "List the cameras the person may watch (USB cameras of this computer and saved network cameras) with their state. No passwords. No approval needed.", json!({"type": "object", "properties": {}})), risk: Risk::Safe, untrusted: true });
         v.push(ToolDef { spec: spec("camera_snapshot", "Save ONE picture from a camera into the person's Pictures folder (JPEG; the chat shows it). Asks first, every time. Does not record video.", json!({"type": "object", "properties": {"camera": cam}, "required": ["camera"]})), risk: Risk::Ask, untrusted: false });
-        v.push(ToolDef { spec: spec("camera_move", "Turn, zoom, stop or send to a saved position a network camera that can move (ONVIF). Asks first, every time: the camera physically moves. A turn lasts `seconds` (0.2 to 3, default 1) and then stops by itself.", json!({"type": "object", "properties": {"camera": cam, "action": {"type": "string", "enum": ["left", "right", "up", "down", "zoom_in", "zoom_out", "stop", "positions", "go_to"]}, "seconds": {"type": "number"}, "position": {"type": "string", "description": "For go_to: a saved position's name from action positions."}}, "required": ["camera", "action"]})), risk: Risk::Ask, untrusted: false });
+        v.push(ToolDef { spec: spec("camera_listen", "Play the sound of a network camera that has a microphone on this computer's speaker for `seconds` (5 to 600, default 60), or stop it (action stop). Asks first, every time: the camera's microphone is played aloud here. Nothing is recorded. Needs IYAKKI's sound mixer switched on.", json!({"type": "object", "properties": {"camera": cam, "action": {"type": "string", "enum": ["start", "stop"]}, "seconds": {"type": "number"}}, "required": ["camera"]})), risk: Risk::Ask, untrusted: false });
+        v.push(ToolDef { spec: spec("camera_move", "Turn, zoom, stop, send to a saved position or to a place across its range (`to`) a network camera that can move (ONVIF). Asks first, every time: the camera physically moves. A turn lasts `seconds` (0.2 to 3, default 1) and then stops by itself.", json!({"type": "object", "properties": {"camera": cam, "action": {"type": "string", "enum": ["left", "right", "up", "down", "zoom_in", "zoom_out", "stop", "positions", "go_to", "to"]}, "seconds": {"type": "number"}, "position": {"type": "string", "description": "For go_to: a saved position's name from action positions."}, "pan": {"type": "number", "description": "For to: -1 (left) to 1 (right) across the camera's range."}, "tilt": {"type": "number", "description": "For to: -1 (down) to 1 (up)."}, "zoom": {"type": "number", "description": "For to: 0 (wide) to 1 (closest)."}}, "required": ["camera", "action"]})), risk: Risk::Ask, untrusted: false });
         v.push(ToolDef { spec: spec("cameras_add", "Save a network camera (rtsp:// or http:// Motion-JPEG address). Asks first. Never put a user name or password in the address: pass `user`; set `password` true to have the person type the password in a masked form (it goes to their vault).", json!({"type": "object", "properties": {"name": {"type": "string"}, "address": {"type": "string"}, "user": {"type": "string"}, "password": {"type": "boolean", "description": "Open the masked password form for the person."}, "allowed": {"type": "array", "items": {"type": "string"}, "description": "Other accounts that may watch."}}, "required": ["name", "address"]})), risk: Risk::Ask, untrusted: false });
         v.push(ToolDef { spec: spec("cameras_remove", "Remove a saved network camera and its stored password. Asks first.", json!({"type": "object", "properties": {"camera": cam}, "required": ["camera"]})), risk: Risk::Ask, untrusted: false });
         v.push(ToolDef { spec: spec("cameras_access", "Set which other accounts may watch a saved network camera (an empty list: only the owner). Asks first.", json!({"type": "object", "properties": {"camera": cam, "people": {"type": "array", "items": {"type": "string"}}}, "required": ["camera", "people"]})), risk: Risk::Ask, untrusted: false });
@@ -805,6 +875,7 @@ impl Tools for CameraViewTools {
         match name {
             "camera_snapshot" => Some("a picture from a camera asks every time".into()),
             "camera_move" => Some("moving a camera asks every time".into()),
+            "camera_listen" => Some("playing a camera's sound asks every time".into()),
             "cameras_remove" => Some("removing a camera asks every time".into()),
             "camera_recording_set" => Some("changing what a camera records asks every time".into()),
             "camera_recording_limits" => Some("changing the recording limits for all cameras asks every time".into()),

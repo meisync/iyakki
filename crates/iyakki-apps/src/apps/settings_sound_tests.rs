@@ -54,20 +54,20 @@ fn put(root: &Path, rel: &str, content: &str) {
 }
 
 struct NoMixer;
-impl iyakki_devctl::Control for NoMixer {
+impl iyakki_core_api::device_types::devctl::Control for NoMixer {
     fn set_link(&self, _: &str, _: bool) -> Result<(), String> {
         Ok(())
     }
     fn ipv4(&self) -> Vec<(String, String)> {
         vec![]
     }
-    fn volume(&self, _: u32) -> Option<iyakki_devctl::Volume> {
+    fn volume(&self, _: u32) -> Option<iyakki_core_api::device_types::devctl::Volume> {
         None
     }
-    fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_devctl::Volume, String> {
+    fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
         Err("no mixer".into())
     }
-    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_devctl::Volume, String> {
+    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_core_api::device_types::devctl::Volume, String> {
         Err("no mixer".into())
     }
     fn dhcp(&self, _: &str) -> Result<(), String> {
@@ -88,7 +88,7 @@ fn mac_mini(tag: &str, monitor: bool) -> (DeviceEnv, PathBuf) {
         put(&proc_, &format!("asound/card0/eld#2.{p}"), t);
     }
     std::fs::create_dir_all(d.join("sys")).unwrap();
-    (DeviceEnv { roots: iyakki_devctl::Roots { sys: d.join("sys"), proc_ }, ctl: Arc::new(NoMixer) }, d)
+    (DeviceEnv { roots: iyakki_core_api::device_types::devctl::Roots { sys: d.join("sys"), proc_ }, ctl: Arc::new(NoMixer) }, d)
 }
 
 /// A stand-in `aplay` that writes its arguments and what it was given into `dir`; the play command names it by path.
@@ -567,4 +567,33 @@ fn the_highlight_timing_offset_is_kept_in_the_machines_settings_file_and_read_ag
     // a machine setting: another person signing in on the same machine sees the same value
     again.on_login("bob", "bobpass1234", false);
     assert_eq!(again.sound_settings().highlight_offset_ms, -125);
+}
+
+#[test]
+fn the_bluetooth_row_is_on_the_sound_page_says_what_is_missing_and_only_administrators_press_it() {
+    let _route = iyakki_agent::mixer::exclusive_route();
+    let cx = admin("snd-bt");
+    let (env, _d) = mac_mini("snd-bt", true);
+    let mut a = SettingsApp::new(&cx).with_hardware(env.clone());
+    goto(&mut a, &cx, Tab::Sound);
+    let r = rows(&mut a, &cx);
+    let i = r.iter().position(|r| matches!(r.target, Target::SoundBluetooth)).expect("the row is on the Sound page");
+    assert_eq!(r[i].title, "Bluetooth headphones and speakers");
+    assert_eq!(r[i].chips[0].0, "off");
+    // nothing is paired on this machine: the row says where to pair, and pressing B says the same instead of starting anything
+    assert!(r[i].sub.contains("pair them in Settings -> Bluetooth"), "{}", r[i].sub);
+    key(&mut a, &cx, Key::Char('B'));
+    assert!(status(&a).contains("pair them in Settings -> Bluetooth"), "{}", status(&a));
+    assert!(a.modal.is_none(), "no card without a pair to name");
+    // a person who is not an administrator changes nothing
+    let mut ucx = admin("snd-btu");
+    ucx.services = cx.services.clone();
+    ucx.session.user = "bob".into();
+    ucx.session.role = iyakki_sec::policy::Role::User;
+    ucx.session.policy = iyakki_sec::policy::Role::User.template();
+    let mut b = SettingsApp::new(&ucx).with_hardware(env);
+    b.tabs.push(Tab::Sound);
+    b.tab = b.tabs.len() - 1;
+    key(&mut b, &ucx, Key::Char('B'));
+    assert!(status(&b).contains("Only administrators"), "{}", status(&b));
 }

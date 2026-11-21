@@ -12,6 +12,9 @@ path = "src/main.rs"
 [features]
 default = []
 # the shell with the real agent linked in (the whole program, as `iyakki shell`): off in the small ui-layer build
+# the shell and the apps linked in, with every service coming from the core over its UI socket: no agent, no core (`iyakki-core-local`, the machine
+# facts the UI reads itself, comes with the shell). This is the program of the ui layer when the core supervises it.
+socket-shell = ["dep:iyakki-shell", "dep:iyakki-proxy", "dep:iyakki-apps", "dep:iyakki-core-api", "dep:iyakki-agent-api", "dep:iyakki-accounts", "dep:iyakki-sec", "dep:libc"]
 in-process = ["dep:iyakki-shell", "dep:iyakki-compose", "dep:iyakki-core", "dep:libc"]
 
 [dependencies]
@@ -19,6 +22,36 @@ iyakki-ui-client = { path = "../iyakki-ui-client" }
 iyakki-ui-rpc = { path = "../iyakki-ui-rpc" }
 serde_json = "1"
 iyakki-shell = { path = "../iyakki-shell", optional = true }
+iyakki-apps = { path = "../iyakki-apps", optional = true }
+iyakki-core-api = { workspace = true, optional = true }
+iyakki-agent-api = { workspace = true, optional = true }
+iyakki-accounts = { path = "../iyakki-accounts", optional = true }
+iyakki-sec = { workspace = true, optional = true }
+iyakki-proxy = { path = "../iyakki-proxy", optional = true }
 iyakki-compose = { path = "../iyakki-compose", optional = true }
 iyakki-core = { path = "../iyakki-core", default-features = false, features = ["shell"], optional = true }
 libc = { version = "0.2", optional = true }
+
+[[test]]
+name = "socket_shell_fake"
+required-features = ["socket-shell"]
+
+[[test]]
+name = "socket_shell_real"
+required-features = ["socket-shell"]
+
+[[test]]
+name = "socket_shell_flows"
+required-features = ["socket-shell"]
+
+[dev-dependencies]
+iyakki-shared = { workspace = true }
+iyakki-flow = { workspace = true }
+iyakki-core-api = { workspace = true }
+# the core side of the harness tests (tests/socket_shell_*.rs): the real services, the composition root that serves them as roots, the audit log
+iyakki-agent = { workspace = true }
+iyakki-compose = { path = "../iyakki-compose" }
+iyakki-proxy = { path = "../iyakki-proxy" }
+iyakki-shell = { path = "../iyakki-shell" }
+iyakki-tile-example = { path = "../iyakki-tile-example" }
+iyakki-sec = { workspace = true }

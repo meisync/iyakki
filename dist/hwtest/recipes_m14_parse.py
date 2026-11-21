@@ -23,7 +23,13 @@ def info_fields(info):
 def model_of(info):
     """The DMI product name (`Macmini8,1`) from the `device` line, or None."""
     v = info_fields(info).get("device")
-    return v[0].split()[-1] if v else None
+    if not v:
+        return None
+    words = v[0].split()
+    for w in words:   # Apple: "Apple Inc. Macmini8,1 1.0" (the DMI version follows the product name)
+        if re.fullmatch(r"[A-Za-z]+\d+,\d+", w):
+            return w
+    return words[-1]
 
 
 def image_version(info):

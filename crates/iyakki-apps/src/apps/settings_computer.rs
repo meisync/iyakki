@@ -135,16 +135,17 @@ impl SettingsApp {
             return;
         }
         let svc = Self::svc(cx);
-        let sd = cx.agent.startup_disk();
-        let backup = cx.data_dir();
+        // the firmware is the core's: the handle checks the administrator again and the capability behind `cx.os`
+        let sd = cx.os.startup_disk();
+        let apply = |a: iyakki_core_api::startupdisk::StartupAction| sd.apply(a, true);
         let r = match &act {
             CompAct::Copy(id) => cx.b3().computer_copy_from(id),
             CompAct::Reset => cx.b3().computer_reset(),
             CompAct::Forget(id) => cx.b3().computer_forget(id),
-            CompAct::StartRegister => sd.register(backup),
-            CompAct::StartFirst => sd.first(backup),
-            CompAct::StartNext => sd.next(backup),
-            CompAct::StartRevert => sd.revert(backup),
+            CompAct::StartRegister => apply(iyakki_core_api::startupdisk::StartupAction::Register),
+            CompAct::StartFirst => apply(iyakki_core_api::startupdisk::StartupAction::First),
+            CompAct::StartNext => apply(iyakki_core_api::startupdisk::StartupAction::Next),
+            CompAct::StartRevert => apply(iyakki_core_api::startupdisk::StartupAction::Revert),
             CompAct::RebootInto(on) => svc.set_startup_reboot_into_iyakki(*on).map(|()| if *on { "Restarts through `iyakki dev reboot` now start IYAKKI once.".to_string() } else { "Restarts through `iyakki dev reboot` are left to the firmware's own order.".to_string() }),
         };
         let what = match &act {
@@ -224,7 +225,7 @@ impl SettingsApp {
         line(g, &mut y, DIM, 12.5, Face::Sans, "On: this kind of setting is remembered separately for each computer. Off: one value for all of them. Models, voice engines, the store, the firewall, the time zone and accounts always go with you.");
         y += 6.0 * s;
         // the startup disk: what the firmware starts, and the keys that change it (each asks first)
-        let sd_line = cx.agent.startup_disk().status_line(cx.data_dir(), Self::svc(cx).startup_reboot_into_iyakki());
+        let sd_line = cx.os.startup_disk().status_line(Self::svc(cx).startup_reboot_into_iyakki());
         line(g, &mut y, TEXT, 14.0, Face::Bold, "Startup disk");
         line(g, &mut y, MUTED, 13.0, Face::Sans, &sd_line);
         if admin {

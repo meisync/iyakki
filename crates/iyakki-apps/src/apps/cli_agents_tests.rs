@@ -99,7 +99,7 @@ fn claude_code_is_installed_after_a_confirmation_that_shows_the_command_and_sett
     let st = cx.ext_status().get("claude-code").expect("detected after the install");
     assert!(st.installed && st.version.contains("2.1.7"), "{st:?}");
     assert_eq!(st.chip, "sign in", "installed but not signed in: {st:?}");
-    let entries = iyakki_agent::extagent::entries(&cx.agents_cfg(), &cx.ext_status());
+    let entries = iyakki_shared::extagent::entries_with(&cx.agents_cfg(), &|id| cx.ext_status().get(id));
     let e = entries.iter().find(|e| e.id == "claude-code").unwrap();
     assert!(!e.ready && e.chip == "sign in" && e.fix.contains("auth login"), "{e:?}");
     // the same state is what the tile shows, with the sign-in buttons

@@ -309,7 +309,18 @@ def text_size(t):
 #   restore: none
 #   key s | click Display | click-sidebar Firewall | text abc | wait app=Settings [page=Display] [text=REGEX] | shot LABEL
 #   expect-text REGEX | expect-not-blank | expect-page NAME | skip-unless-button LABEL | restore-click LABEL
+#   scroll down|up [X Y [DISTANCE]]       the mouse wheel (a guarded vertical swipe; the middle of the screen when no place is given)
+#   expect-scrollbar | expect-no-scrollbar | skip-unless-scrollbar     the scrollbar detector on the last shot (`skip-unless` skips a page that does not scroll)
+#   expect-changed                         the last shot differs from the one before it (the wheel moved the page)
 # `restore-click` registers a click that runs at the end even when a check failed.
+
+# Extra verbs (dist/autotest/verbs.py registers them): verb -> fn(t, arg). A scenario file may also carry the autotest headers
+#   row: F-X-1, F-X-2 | targets: qemu browser real hw:KEY | clause: TEXT (repeatable) | not-covered: TEXT (repeatable)
+#   needs-hw: TEXT | feature-sha: HEX | profile: ram | session-check: NAME | suite: SCRIPT ARGS | human: CLAUSE | ACTION
+EXTRA_VERBS = {}
+HEADER_KEYS = ("name", "devices", "restore", "doc", "row", "targets", "needs-hw", "clause", "not-covered", "feature-sha", "profile", "session-check", "suite", "human")
+LIST_KEYS = ("clause", "not-covered", "needs-hw", "human")
+
 
 def load_text_scenarios(folder=os.path.join(HERE, "scenarios")):
     if not os.path.isdir(folder):
@@ -325,9 +336,12 @@ def parse_scn(text):
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
-        m = re.match(r"^(name|devices|restore|doc):\s*(.*)$", line)
+        m = re.match(r"^(%s):\s*(.*)$" % "|".join(HEADER_KEYS), line)
         if m and not steps:
-            head[m.group(1)] = m.group(2).strip()
+            if m.group(1) in LIST_KEYS:
+                head.setdefault(m.group(1), []).append(m.group(2).strip())
+            else:
+                head[m.group(1)] = m.group(2).strip()
         else:
             steps.append(line)
     return head, steps
@@ -339,7 +353,10 @@ def _register_text(path):
 
     def fn(t, steps=steps):
         last = [None]
+        prev = [None]
         for line in steps:
+            if line.split(" ", 1)[0] == "shot" and last[0] is not None:
+                prev[0] = last[0]
             verb, _, arg = line.partition(" ")
             arg = arg.strip()
             if verb == "key":
@@ -365,12 +382,42 @@ def _register_text(path):
             elif verb == "skip-unless-button":
                 if not t.dev.state().button(arg):
                     raise Skip("no button %r in this build" % arg)
+            elif verb == "scroll":
+                words = arg.split()
+                if not words or words[0] not in ("down", "up") or len(words) not in (1, 3, 4):
+                    raise devui.CheckFailed("scroll takes `down|up [X Y [DISTANCE]]`, not %r" % line)
+                if len(words) == 1:
+                    iw, ih = (last[0] or t.shot("scroll-size", t.dev.state())).size()
+                    x, y = iw // 2, ih // 2
+                else:
+                    x, y = int(words[1]), int(words[2])
+                t.dev.scroll(x, y, down=words[0] == "down", distance=int(words[3]) if len(words) == 4 else 300)
+                prev[0] = last[0]
+                last[0] = None
+            elif verb in ("expect-scrollbar", "expect-no-scrollbar", "skip-unless-scrollbar"):
+                shot = last[0] or t.shot("scrollbar-check", t.dev.state())
+                last[0] = shot
+                if verb == "skip-unless-scrollbar":
+                    if not devui.HAVE_PIL or t.assert_scrollbar_found(shot) is None:
+                        raise Skip("this page does not scroll (no scrollbar is shown)")
+                else:
+                    t.assert_scrollbar(shot, present=verb == "expect-scrollbar")
+            elif verb == "expect-changed":
+                now = last[0] or t.shot("changed-check", t.dev.state())
+                last[0] = now
+                if prev[0] is None:
+                    raise devui.CheckFailed("expect-changed needs an earlier shot and a scroll in between")
+                d = t.differs(prev[0], now)
+                t.check("the screen changed", d is not None and d > 0.05, "difference %s" % (None if d is None else round(d, 3)))
             elif verb == "restore-click":
                 t.on_restore(lambda a=arg: t.dev.click(a), "click " + arg)
+            elif verb in EXTRA_VERBS:
+                EXTRA_VERBS[verb](t, arg)
             else:
                 raise devui.CheckFailed("unknown step %r in %s" % (line, os.path.basename(path)))
     devui.SCENARIOS[name] = {"name": name, "fn": fn, "devices": tuple((head.get("devices") or "real qemu").split()), "needs_signin": True,
-                             "start_app": "Home", "restore": head.get("restore", "none (read-only)"), "doc": head.get("doc", "text scenario " + os.path.basename(path))}
+                             "start_app": "Home", "restore": head.get("restore", "none (read-only)"), "doc": head.get("doc", "text scenario " + os.path.basename(path)),
+                             "meta": head, "file": path, "steps": steps}
 
 
 load_text_scenarios()

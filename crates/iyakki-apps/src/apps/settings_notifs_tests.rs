@@ -45,7 +45,7 @@ fn notification_levels_are_chosen_per_source_by_key_and_click_and_kept_per_perso
     t.send(Event::Key(Key::Down));
     t.send(Event::Key(Key::Char('o')));
     assert!(ib.add("root", iyakki_shared::inbox::Kind::Warning, "w2", "", "flows", None, 5).is_err());
-    let log = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
     assert!(log.contains("settings.notifications"), "{log}");
 }
 

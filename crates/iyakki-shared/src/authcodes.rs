@@ -35,7 +35,7 @@ impl NewEntry {
 }
 
 /// Why the vault could not be used.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VaultProblem {
     /// The person's vault is locked (it could not be opened at sign-in).
     Locked,
@@ -291,6 +291,11 @@ impl Book {
 pub trait CodeVault {
     fn load(&self) -> Result<Book, VaultProblem>;
     fn save(&self, book: &Book) -> Result<(), VaultProblem>;
+    /// The codes at a Unix time, computed where the secrets are kept: `(entry id, code)`. `None` (the default): this vault hands the secrets to
+    /// its caller, which computes them itself with [`Entry::code_at`]. A vault over the core socket hides every secret and answers here instead.
+    fn codes_now(&self, _unix: i64) -> Option<Vec<(u64, String)>> {
+        None
+    }
 }
 
 /// True when the clock is plausibly set: not before the floor every image is newer than (an unset clock reads 1970 or the date of the

@@ -42,7 +42,13 @@ pub(super) struct DevPanel {
     /// The key (`r`, `e`, `Q`, `B`) whose switching OFF waits for a second press: a double tap on a switch must not undo a standing
     /// grant by accident (it used to: the second tap of a quick pair switched it off again, or ended every grant with developer mode).
     off_armed: Option<char>,
+    /// The box for the relay's certificate fingerprint (key `F`): typing, Enter keeps it, Esc leaves it.
+    pin: iyakki_uikit::ui::TextField,
+    pin_focus: bool,
 }
+
+/// The id of the relay fingerprint box (see the other field ids of Settings: 931 USB code, 932 roles).
+pub(super) const PIN_ID: usize = 933;
 
 fn hours_text(h: u32) -> String {
     if h == 0 { "never (until switched off)".into() } else { format!("after {h} h") }
@@ -55,6 +61,51 @@ impl SettingsApp {
 
     pub(super) fn devmode_keys(cx: &AppCx) -> Vec<dm::DevKey> {
         Self::devmode(cx).keys()
+    }
+
+    /// Events of the relay fingerprint box that must not reach the rest of Settings. True when consumed.
+    pub(super) fn relay_pin_event(&mut self, ev: &Event, cx: &AppCx) -> bool {
+        if self.devel.usb_open || !self.admin(cx) {
+            return false;
+        }
+        match ev {
+            Event::FocusAt(id, x) if *id == PIN_ID => {
+                self.devel.pin_focus = true;
+                self.devel.pin.click(*x);
+                true
+            }
+            Event::Paste(t) if self.devel.pin_focus => {
+                self.devel.pin.paste(t);
+                true
+            }
+            // a click on a button below is not typing: it leaves the box and presses that button
+            Event::Key(_) if self.devel.pin_focus && crate::ui::from_click() => {
+                self.devel.pin_focus = false;
+                false
+            }
+            Event::Key(k) if self.devel.pin_focus => {
+                match k {
+                    Key::Esc => self.devel.pin_focus = false,
+                    Key::Enter => {
+                        self.devel.pin_focus = false;
+                        let (p, user) = (&cx.session.policy, cx.session.user.clone());
+                        let text = self.devel.pin.value.clone();
+                        match Self::devmode(cx).set_relay_pin(p, &user, &text) {
+                            Ok(()) => {
+                                cx.audit.record(&user, "settings.developer", if text.trim().is_empty() { "relay certificate fingerprint removed" } else { "relay certificate fingerprint set" });
+                                self.ok(if text.trim().is_empty() { "The relay's certificate fingerprint is removed: an https relay is not used." } else { "The relay's certificate fingerprint is kept. An https relay is only used for that certificate." });
+                            }
+                            Err(e) => self.fail(e),
+                        }
+                    }
+                    other => {
+                        self.devel.pin.handle(other);
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     pub(super) fn handle_developer(&mut self, k: &Key, cx: &AppCx) {
@@ -442,6 +493,14 @@ impl SettingsApp {
                     Err(e) => self.fail(e),
                 }
             }
+            // the fingerprint of the relay's certificate (the chat tool relay_switch with certificate_fingerprint does the same): F opens the box
+            Key::Char('F') => {
+                self.devel.pin = iyakki_uikit::ui::TextField::new("SHA-256 fingerprint of the relay's certificate (64 hex digits)", false);
+                self.devel.pin.max = 200;
+                self.devel.pin.set(&d.relay_pin());
+                self.devel.pin_focus = true;
+                self.ok("Type or paste the fingerprint of the relay's certificate, then Enter. An empty box takes it away. Esc cancels.");
+            }
             // the socket of a UI program outside the process (off by default; the chat tools ui_socket_status and ui_socket_set do the
             // same; the scopes and the account stay as they are): U switches it, through the core handle
             Key::Char('U') => {
@@ -554,6 +613,7 @@ impl SettingsApp {
         }
         v.push(("Core contract on/off", TEXT, 'K'));
         v.push(("Relay on/off", TEXT, 'Y'));
+        v.push(("Relay certificate", TEXT, 'F'));
         v.push(("UI socket on/off", TEXT, 'U'));
         v.push(("Resume after restart on/off", TEXT, 'R'));
         v.push(("Contract scope on/off", TEXT, 'z'));
@@ -730,6 +790,13 @@ impl SettingsApp {
         tap_line(g, a, &mut y, s, 13.0, if core_on { rgb(255, 196, 94) } else { MUTED }, Face::Sans, &format!("Core contract channel: {} · tap here or press K to turn {}. A computer holds no contract scope until you grant one below.", if core_on { "on" } else { "off (default)" }, if core_on { "off" } else { "on" }), Some(Event::Key(Key::Char('K'))));
         let relay_on = d.relay_enabled();
         tap_line(g, a, &mut y, s, 13.0, if relay_on { rgb(255, 196, 94) } else { MUTED }, Face::Sans, &format!("Relay: {} · tap here or press Y to turn {}. {}", if relay_on { "on" } else { "off (default)" }, if relay_on { "off" } else { "on" }, d.relay_summary()), Some(Event::Key(Key::Char('Y'))));
+        let pin = d.relay_pin();
+        tap_line(g, a, &mut y, s, 13.0, MUTED, Face::Sans, &format!("Relay certificate fingerprint: {} · tap here or press F to type it. An https relay is only used for the certificate you name here.", if pin.is_empty() { "none (an https relay is not used)".to_string() } else { iyakki_proxy::certinfo::fingerprint_groups(&pin) }), Some(Event::Key(Key::Char('F'))));
+        if self.devel.pin_focus {
+            let r = R::new(a.x, y, a.w.min(640.0 * s), 30.0 * s);
+            self.devel.pin.render(g, r, true, s, (self.ticks / 4) % 2 == 0, Face::Mono, PIN_ID);
+            y += 38.0 * s;
+        }
         let ui_on = cx.core.ui_socket().enabled();
         tap_line(g, a, &mut y, s, 13.0, if ui_on { rgb(255, 196, 94) } else { MUTED }, Face::Sans, &format!("UI socket (a UI program on this machine): {} · tap here or press U to turn {}. A unix socket, no network port.", if ui_on { "on" } else { "off (default)" }, if ui_on { "off" } else { "on" }), Some(Event::Key(Key::Char('U'))));
         let rs_on = cx.core.session_resume().switch_on();

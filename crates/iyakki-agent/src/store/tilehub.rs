@@ -186,6 +186,7 @@ pub fn open_wasm(svc: &Arc<Services>, policy: &Policy, user: &str, e: &TileEntry
     let sounds = super::sdkv2_playback::files_of_bundle(&e.name, &bundle);
     let sdk = Arc::new(TileSdk::for_services_with_files(svc, user, &e.name, out.clone(), policy, Some(sounds)));
     let host = TileHost::new(info, bundle.manifest.caps.clone(), TileStorage::open(&storage_path), out).with_sdk(sdk);
-    let backend: Arc<dyn iyakki_tile_host::ServiceBackend> = super::wasm_services::WasmServices::new(host);
-    iyakki_tile_host::TileRunner::load(module, iyakki_tile_host::TileManifest::new(&e.name, &[]), iyakki_tile_host::Budgets::default(), Some(backend), seed).map_err(|x| x.to_string())
+    let backend: Arc<dyn iyakki_tile_host::ServiceBackend> = super::wasm_services::WasmServices::with_dock(host, policy.clone());
+    // `dock.open` is the one other call a tile of this loader may make (D-SDK-34-03): the person's policy decides which app, the audit says it
+    iyakki_tile_host::TileRunner::load(module, iyakki_tile_host::TileManifest::new(&e.name, &["dock.open"]), iyakki_tile_host::Budgets::default(), Some(backend), seed).map_err(|x| x.to_string())
 }

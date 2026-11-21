@@ -99,7 +99,7 @@ fn add_disk(root: &Path, name: &str, sectors: u64) {
 
 struct Machine {
     root: PathBuf,
-    env: InstallEnv,
+    env: iyakki_core_local::LocalInstaller,
     tpl: Vec<u8>,
 }
 
@@ -118,7 +118,7 @@ fn machine(tag: &str, with_boot_disk: bool) -> Machine {
     std::fs::File::create(root.join("dev/vdc")).unwrap().set_len(1 << 20).unwrap();
     std::fs::write(root.join("proc/mounts"), "/dev/vdc1 /mnt/data ext4 rw 0 0\n").unwrap();
     std::fs::write(root.join("proc/swaps"), "Filename Type Size Used Priority\n").unwrap();
-    let env = InstallEnv { sys: root.join("sys"), dev: root.join("dev"), mounts: root.join("proc/mounts"), swaps: root.join("proc/swaps"), template: None, uefi: false };
+    let env = iyakki_core_local::LocalInstaller::under(&root);
     Machine { root, env, tpl }
 }
 
@@ -131,7 +131,7 @@ fn select(a: &mut SettingsApp, cx: &AppCx, name: &str) {
 fn the_page_lists_disks_but_not_the_stick_and_says_why_one_is_refused() {
     let m = machine("inst-list", true);
     let cx = admin("inst-list");
-    let mut a = SettingsApp::new(&cx).with_install(m.env.clone());
+    let mut a = SettingsApp::new(&cx).with_install(Arc::new(m.env.clone()));
     assert!(a.tabs().contains(&Tab::Install));
     goto_install(&mut a, &cx);
     let names: Vec<String> = a.inst_candidates().iter().map(|d| d.drive.name.clone()).collect();
@@ -150,7 +150,7 @@ fn the_page_lists_disks_but_not_the_stick_and_says_why_one_is_refused() {
 fn the_page_is_absent_without_a_boot_stick_and_for_ordinary_users() {
     let m = machine("inst-none", false);
     let cx = admin("inst-none");
-    let a = SettingsApp::new(&cx).with_install(m.env.clone());
+    let a = SettingsApp::new(&cx).with_install(Arc::new(m.env.clone()));
     assert!(!a.tabs().contains(&Tab::Install), "nothing to copy from");
     let m2 = machine("inst-user", true);
     let mut user = admin("inst-user");
@@ -165,7 +165,7 @@ fn the_page_is_absent_without_a_boot_stick_and_for_ordinary_users() {
 fn the_plan_can_be_shown_without_writing_anything() {
     let m = machine("inst-plan", true);
     let cx = admin("inst-plan");
-    let mut a = SettingsApp::new(&cx).with_install(m.env.clone());
+    let mut a = SettingsApp::new(&cx).with_install(Arc::new(m.env.clone()));
     goto_install(&mut a, &cx);
     select(&mut a, &cx, "vdb");
     press(&mut a, &cx, 'p');
@@ -179,7 +179,7 @@ fn the_plan_can_be_shown_without_writing_anything() {
 fn installing_needs_the_typed_name_and_size_then_writes_the_disk_with_the_choices() {
     let m = machine("inst-do", true);
     let cx = admin("inst-do");
-    let mut a = SettingsApp::new(&cx).with_install(m.env.clone());
+    let mut a = SettingsApp::new(&cx).with_install(Arc::new(m.env.clone()));
     goto_install(&mut a, &cx);
     select(&mut a, &cx, "vdb");
     press(&mut a, &cx, 'i');
@@ -218,12 +218,12 @@ fn installing_needs_the_typed_name_and_size_then_writes_the_disk_with_the_choice
     assert_eq!(&disk[512..copy], &m.tpl[512..copy], "the boot area is the stick's");
     assert_eq!(&disk[..440], &m.tpl[..440]);
     let part = &disk[10240 * 512..10240 * 512 + 65536];
-    assert_eq!(iyakki_storage::classify(part), iyakki_storage::Content::Pending);
+    assert_eq!(iyakki_core_api::device_types::storage::classify(part), iyakki_core_api::device_types::storage::Content::Pending);
     let f = m.root.join("part.bin");
     std::fs::write(&f, part).unwrap();
-    let conf = iyakki_storage::read_pending_conf(&f).unwrap();
+    let conf = iyakki_core_api::device_types::storage::read_pending_conf(&f).unwrap();
     assert!(conf.contains("zram=2G,lz4") && conf.contains("hostname=testbox") && conf.contains("swapfile=off"), "{conf}");
-    assert!(std::fs::read_to_string(cx.audit.path()).unwrap_or_default().contains("install.disk"));
+    assert!(std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default().contains("install.disk"));
     // the stick itself and the mounted disk were never opened for writing
     assert_eq!(std::fs::read(m.root.join("dev/vda")).unwrap(), m.tpl);
     assert_eq!(std::fs::metadata(m.root.join("dev/vdc")).unwrap().len(), 1 << 20);
@@ -233,7 +233,7 @@ fn installing_needs_the_typed_name_and_size_then_writes_the_disk_with_the_choice
 fn the_partition_table_can_be_chosen_and_the_plan_and_the_disk_follow() {
     let m = machine("inst-gpt", true);
     let cx = admin("inst-gpt");
-    let mut a = SettingsApp::new(&cx).with_install(m.env.clone());
+    let mut a = SettingsApp::new(&cx).with_install(Arc::new(m.env.clone()));
     goto_install(&mut a, &cx);
     select(&mut a, &cx, "vdb");
     // Auto on a BIOS machine with a small 512-byte disk is MBR; one press of t makes it GPT, two MBR, three Auto again
@@ -253,10 +253,10 @@ fn the_partition_table_can_be_chosen_and_the_plan_and_the_disk_follow() {
     // the UEFI case: Auto turns into GPT by itself
     press(&mut a, &cx, 't');
     press(&mut a, &cx, 't');
-    assert_eq!(a.inst.table, iyakki_usb::install::TableChoice::Auto);
+    assert_eq!(a.inst.table, iyakki_core_api::device_types::usb::install::TableChoice::Auto);
     let mut env = m.env.clone();
     env.uefi = true;
-    let mut b = SettingsApp::new(&cx).with_install(env);
+    let mut b = SettingsApp::new(&cx).with_install(Arc::new(env));
     goto_install(&mut b, &cx);
     select(&mut b, &cx, "vdb");
     press(&mut b, &cx, 'p');
@@ -282,10 +282,10 @@ fn the_partition_table_can_be_chosen_and_the_plan_and_the_disk_follow() {
     let f = m.root.join("dev/vdb");
     let size = 16_000_000u64 * 512;
     let mut h = std::fs::File::open(&f).unwrap();
-    let p = iyakki_storage::gpt::read_gpt(&mut h, 512, size / 512).unwrap();
+    let p = iyakki_core_api::device_types::storage::gpt::read_gpt(&mut h, 512, size / 512).unwrap();
     assert!(p.primary_ok && p.backup_ok && p.problems.is_empty(), "{:?}", p.problems);
     assert_eq!(p.table.entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["IYAKKI-BIOS", "IYAKKI-BOOT", "IYAKKI-DATA"]);
-    assert!(std::fs::read_to_string(cx.audit.path()).unwrap_or_default().contains("table=GPT"));
+    assert!(std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default().contains("table=GPT"));
     assert_eq!(std::fs::read(m.root.join("dev/vda")).unwrap(), m.tpl, "the stick was never written");
 }
 
@@ -293,7 +293,7 @@ fn the_partition_table_can_be_chosen_and_the_plan_and_the_disk_follow() {
 fn geometry_and_click_paths_hold_at_four_sizes() {
     let m = machine("inst-geo", true);
     let cx = admin("inst-geo");
-    let mut a = SettingsApp::new(&cx).with_install(m.env.clone());
+    let mut a = SettingsApp::new(&cx).with_install(Arc::new(m.env.clone()));
     goto_install(&mut a, &cx);
     press(&mut a, &cx, 'p');
     for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
@@ -327,8 +327,8 @@ fn geometry_and_click_paths_hold_at_four_sizes() {
 #[test]
 fn the_disk_the_system_runs_from_is_the_source_even_when_a_removable_iyakki_disk_is_plugged_in() {
     let m = "/dev/nvme0n1p2 /.stage1/boot vfat rw 0 0\n/dev/nvme0n1p3 /var/lib/iyakki ext4 rw 0 0\n";
-    assert_eq!(super::install_page::running_disk(m, &["sda", "nvme0n1"]).as_deref(), Some("nvme0n1"));
+    assert_eq!(iyakki_core_api::installer::running_disk(m, &["sda", "nvme0n1"]).as_deref(), Some("nvme0n1"));
     let m = "/dev/sda2 /.stage1/boot vfat rw 0 0\n";
-    assert_eq!(super::install_page::running_disk(m, &["sda", "sdaa", "nvme0n1"]).as_deref(), Some("sda"));
-    assert_eq!(super::install_page::running_disk("tmpfs /tmp tmpfs rw 0 0\n", &["sda"]), None);
+    assert_eq!(iyakki_core_api::installer::running_disk(m, &["sda", "sdaa", "nvme0n1"]).as_deref(), Some("sda"));
+    assert_eq!(iyakki_core_api::installer::running_disk("tmpfs /tmp tmpfs rw 0 0\n", &["sda"]), None);
 }

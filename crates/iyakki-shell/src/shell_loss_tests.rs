@@ -1,12 +1,12 @@
 //! The lost-drive banner in the shell: drawn on every screen and in panes at six sizes without crossing the screen's edge or itself,
 //! its buttons, "cannot be dismissed but can be minimised", the reconnected card, the wording of toasts, and the audit flush.
-//! The state is made up per test thread (`iyakki_storage::loss::set_thread_override`): no drive, mount or file of the machine is touched.
+//! The state is made up per test thread (`iyakki_core_local::storage::loss::set_thread_override`): no drive, mount or file of the machine is touched.
 
 use super::tests::*;
 use super::*;
 use crate::apps::tests::MockHost;
 use crate::lossbar as lb;
-use iyakki_storage::loss::{self, Snapshot, State};
+use iyakki_core_local::storage::loss::{self, Snapshot, State};
 
 const SIZES: [(u32, u32); 6] = [(360, 740), (800, 480), (1280, 720), (1920, 1080), (2560, 1600), (2880, 1800)];
 

@@ -96,8 +96,9 @@ The helper may receive any shell message at any time after Hello, including befo
 | 0x11 | Script | `u32 id`, `u32 timeout_ms`, `str js` (protocol 1.1) |
 | 0x12 | LeaveFullscreen | (empty; optional, protocol 1.1) |
 | 0x13 | PermissionAnswer | `u32 id`, `bool allow` (optional, protocol 1.1) |
+| 0x1a | CacheLimit | `u32 disk_mb` (0 = no limit, above 65536 is read as none; optional, F-BROX-17). The most the engine's own disk cache may hold. WebKit has no call for the size of its disk cache, so the helper adds up the cache folder when the message arrives and after a page has loaded (at most once in 30 seconds) and empties the disk cache when the folder is above the limit. Sent before a page and when the person's Speed and memory choice changes; a restarted helper gets it again. A helper without it keeps the cache as it always did. |
 | 0x19 | SiteScope | `u8 count` (at most 16), then that many `str origin` (`scheme://host[:port]`, lower case, default port left out; optional, F-BROW-100). A site app's window loads only these origins: the helper judges the main frame's own load events and `window.open`, stops anything else and says `NavigationBlocked`. An empty list (or never sent) is no limit. |
-| 0x18 | MediaPolicy | `u32 max_height` (0 = no limit), `u8 codecs` (optional; the tallest video the page is offered and whether the add-on's decoders may be used, F-BROX-18 and F-BROX-20) |
+| 0x18 | MediaPolicy | `u32 max_height` (0 = no limit), `u8 codecs` (optional; the tallest video the page is offered and whether the add-on's decoders may be used, F-BROX-18 and F-BROX-20). The helper puts the choice in front of `media-cap.js` (a user script for every page, removed when there is no ceiling and the decoders are on), tells the open page at once, and ranks the add-on's decoders (`avdec_*`) at 0 for web processes that start later when `codecs` is 0: the page is told a taller picture or an H.264, H.265, AAC or AC-3 type is not supported, and picks another itself. |
 | 0x17 | ClearCache | (empty) empty the engine's own page cache, memory and disk (optional; sent when the reader's cache was cleared, F-BROX-17) |
 | 0x16 | Extensions | the extension snapshot bytes (optional; layout in `crates/iyakki-webview/src/ext.rs`, plan in `docs/development/BROWSER-EXTENSIONS-PLAN.md`) |
 
@@ -242,6 +243,7 @@ composites it into the same buffers (GStreamer), so nothing special is needed. U
 | 0x94 | NavigationBlocked | `str url` (optional; the address a site app's window was stopped from loading, to open in the Browser tile) |
 | 0x95 | KeySystem | `str name` (optional; the page asked for a media key system, e.g. `com.widevine.alpha`, once per name and page, at most 8; the shell says plainly that this computer has no decryption module when the name needs one, F-BROW-101) |
 | 0x96 | PageMeta | `str manifest_url`, `str manifest`, `str icon` (optional; once the document is ready: the web app manifest address and its text when it could be read from the page's own origin, at most 100 000 bytes, and the icon address, F-BROW-100) |
+| 0x97 | PageAccess | `str json` (optional; a JSON list of the headings, links, buttons, form fields, pictures and landmarks that are on screen, `{"r": kind, "n": name, "l": level, "x","y","w","h": box in CSS pixels}`, at most 160, sent when the document is ready and after a scroll, a resize or a change, at most twice a second; a password box carries no text; F-A11Y-06) |
 | 0x93 | ResponseHeaders | `str url`, `u32 status`, `str headers` (one `Name: value` line per header, at most 48 000 bytes; optional, protocol 1.1) |
 
 * **Ready**: engine name and version for "about" displays (`WPE WebKit` `2.46.3`). Sent once, after Hello.

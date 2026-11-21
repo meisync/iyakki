@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iyakki_core_api::assistant::{AssistEvent, Assistant, Choice, ContextItem, HistoryEntry, SessionInfo, SessionSpec};
+use iyakki_core_api::contract::{AppEventFeed, CallContext, Flows, Resume, Scope, Settings};
 use iyakki_core_api::cameras::{CamEvent, CamFrame, CameraInfo, Cameras, FrameFormat, Overlay, PtzCommand, ViewInfo, ViewSpec, ViewState};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -33,6 +34,13 @@ pub const ASSISTANT_USE: &str = "assistant:use";
 pub const ASSISTANT_APPROVE: &str = "assistant:approve";
 pub const CAMERAS_VIEW: &str = "cameras:view";
 pub const CAMERAS_CONSENT: &str = "cameras:consent";
+/// Change flows, the assistant's book and the outside-message policy through the object calls (F-SPLIT-03, D-S5-02). `flows:read` and `flows:run`
+/// are the contract's own scopes.
+pub const FLOWS_EDIT: &str = "flows:edit";
+/// Make, renew and open webhooks, and allow a program to run in a flow: the asks (D-S5-02). Not in the scopes the core hands the UI program.
+pub const FLOWS_HOOKS: &str = "flows:hooks";
+/// Read the display lists the core draws for apps it runs (`bulk.get` block `display.<name>`, F-SPLIT-07).
+pub const DISPLAY_VIEW: &str = "display:view";
 
 /// The most subscriptions one connection may hold.
 pub const MAX_SUBSCRIPTIONS: usize = 4;
@@ -83,10 +91,14 @@ fn enc<T: serde::Serialize>(v: &T) -> CallResult<Value> {
 
 /// A subscription the connection asked for: the serve loop starts a thread for it (inside the connection's own thread scope, so the thread
 /// ends with the connection and borrows its writer).
-pub struct PushJob {
-    core: Arc<dyn Assistant>,
-    user: String,
-    session: String,
+pub enum PushJob {
+    Assistant { core: Arc<dyn Assistant>, user: String, session: String },
+    /// The changes of the settings the listener may read (`settings.subscribe`), instead of the client asking `settings.watch` again and again.
+    Settings { core: Arc<dyn Settings>, ctx: CallContext, from: u64 },
+    /// The events of the person's flow runs (`flows.subscribe`): `{"push":"flows","events":[..],"gap":bool}`.
+    Flows { core: Arc<dyn Flows>, ctx: CallContext, from: u64 },
+    /// The app events the person registered for (`appevents.subscribe`): `{"push":"appevents","events":[..],"gap":bool}`. Reading hands the events out.
+    AppEvents { core: Arc<dyn AppEventFeed>, ctx: CallContext, from: u64 },
 }
 
 /// What one connection owns: the sessions and views it opened and the pushes it asked for.
@@ -132,6 +144,27 @@ impl Conn {
 /// The thread of one subscription: hand the session's events to the client as soon as the core has them, until the connection ends or a write
 /// fails. A batch too big for one line is split in halves; a single event that is still too big is dropped.
 pub fn push_loop<W: Write>(job: PushJob, out: &Mutex<W>, stop: &AtomicBool) {
+    let (core, user, session) = match job {
+        PushJob::Assistant { core, user, session } => (core, user, session),
+        PushJob::Settings { core, ctx, from } => {
+            return events_push_loop("settings", from, out, stop, |r| {
+                let b = core.watch(&ctx, None, r, 100).ok()?;
+                Some((b.events.iter().filter_map(|e| serde_json::to_value(e).ok()).collect(), b.next, b.gap))
+            })
+        }
+        PushJob::Flows { core, ctx, from } => {
+            return events_push_loop("flows", from, out, stop, |r| {
+                let b = core.events(&ctx, None, r, 100).ok()?;
+                Some((b.events.iter().filter_map(|e| serde_json::to_value(e).ok()).collect(), b.next, b.gap))
+            })
+        }
+        PushJob::AppEvents { core, ctx, from } => {
+            return events_push_loop("appevents", from, out, stop, |r| {
+                let b = core.events(&ctx, r, 100).ok()?;
+                Some((b.events.iter().filter_map(|e| serde_json::to_value(e).ok()).collect(), b.next, b.gap))
+            })
+        }
+    };
     fn send<W: Write>(out: &Mutex<W>, session: &str, events: &[AssistEvent]) -> bool {
         let mut line = json!({"push": "assistant", "session": session, "events": events}).to_string();
         if line.len() >= crate::MAX_LINE {
@@ -145,12 +178,87 @@ pub fn push_loop<W: Write>(job: PushJob, out: &Mutex<W>, stop: &AtomicBool) {
         o.write_all(line.as_bytes()).and_then(|_| o.flush()).is_ok()
     }
     while !stop.load(Ordering::Relaxed) {
-        let events = job.core.poll(&job.user, &job.session);
-        if !events.is_empty() && !send(out, &job.session, &events) {
+        let events = core.poll(&user, &session);
+        if !events.is_empty() && !send(out, &session, &events) {
             return;
         }
         std::thread::sleep(PUSH_EVERY);
     }
+}
+
+/// The thread of an event subscription (settings, flows, app events): `{"push":NAME,"events":[..],"gap":bool}` lines as the core's log grows,
+/// through the same guarded read (`fetch`, which gets the point to continue from) the client could call itself. `None` from `fetch` (the scope
+/// was taken away or the core has no such domain) ends the push, the connection goes on. A batch too big for one line is split in halves; one
+/// event too big is dropped.
+fn events_push_loop<W: Write>(name: &str, from: u64, out: &Mutex<W>, stop: &AtomicBool, mut fetch: impl FnMut(Resume) -> Option<(Vec<Value>, u64, bool)>) {
+    fn send<W: Write>(out: &Mutex<W>, name: &str, events: &[Value], gap: bool) -> bool {
+        let mut line = json!({"push": name, "events": events, "gap": gap}).to_string();
+        if line.len() >= crate::MAX_LINE {
+            return match events.len() {
+                0 | 1 => true,
+                n => send(out, name, &events[..n / 2], gap) && send(out, name, &events[n / 2..], false),
+            };
+        }
+        line.push('\n');
+        let mut o = out.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        o.write_all(line.as_bytes()).and_then(|_| o.flush()).is_ok()
+    }
+    let mut resume = Resume::After(from);
+    while !stop.load(Ordering::Relaxed) {
+        match fetch(resume) {
+            Some((events, next, gap)) => {
+                resume = Resume::After(next);
+                if (!events.is_empty() || gap) && !send(out, name, &events, gap) {
+                    return;
+                }
+            }
+            None => return,
+        }
+        std::thread::sleep(PUSH_EVERY);
+    }
+}
+
+/// `settings.subscribe`: start pushing the settings changes this listener may read. Once per connection.
+fn settings_subscribe(s: &Served, conn: &mut Conn) -> CallResult<Value> {
+    let core = s.settings.as_ref().ok_or_else(|| missing("settings"))?.clone();
+    if !s.ctx.allows(Scope::SETTINGS_READ) {
+        return Err(no_scope(Scope::SETTINGS_READ));
+    }
+    if conn.subscribed.contains("\u{0}settings") {
+        return Ok(json!({"ok": true}));
+    }
+    if conn.subscribed.len() >= MAX_SUBSCRIPTIONS {
+        return Err(CallError::new(ErrorCode::Busy, "facet.too_many_subscriptions", &format!("A connection may hold {MAX_SUBSCRIPTIONS} subscriptions at most.")));
+    }
+    // the point to continue from is taken HERE, before the answer: a change made right after `subscribe` returns is never missed
+    let from = core.watch(&s.ctx, None, Resume::Latest, 1)?.next;
+    conn.subscribed.insert("\u{0}settings".into());
+    conn.jobs.push(PushJob::Settings { core, ctx: s.ctx.clone(), from });
+    Ok(json!({"ok": true}))
+}
+
+/// `flows.subscribe` and `appevents.subscribe`: start pushing the events this listener may read. Once per connection each.
+fn feed_subscribe(s: &Served, conn: &mut Conn, which: &str) -> CallResult<Value> {
+    let mark = format!("\u{0}{which}");
+    // the starting point is taken HERE, through the same guarded read the pushes use, before the answer: nothing after it is missed
+    let job = if which == "flows" {
+        let core = s.flows.as_ref().ok_or_else(|| missing("flows"))?.clone();
+        let from = core.events(&s.ctx, None, Resume::Latest, 1)?.next;
+        PushJob::Flows { core, ctx: s.ctx.clone(), from }
+    } else {
+        let core = s.appevents.as_ref().ok_or_else(|| missing("appevents"))?.clone();
+        let from = core.events(&s.ctx, Resume::Latest, 1)?.next;
+        PushJob::AppEvents { core, ctx: s.ctx.clone(), from }
+    };
+    if conn.subscribed.contains(&mark) {
+        return Ok(json!({"ok": true}));
+    }
+    if conn.subscribed.len() >= MAX_SUBSCRIPTIONS {
+        return Err(CallError::new(ErrorCode::Busy, "facet.too_many_subscriptions", &format!("A connection may hold {MAX_SUBSCRIPTIONS} subscriptions at most.")));
+    }
+    conn.subscribed.insert(mark);
+    conn.jobs.push(job);
+    Ok(json!({"ok": true}))
 }
 
 /// Serve one call of the two domains. `None`: the call is not of these domains.
@@ -159,6 +267,9 @@ pub fn dispatch(s: &Served, conn: &mut Conn, req: &Request) -> Option<CallResult
     match domain {
         "assistant" => Some(assistant(s, conn, method, &req.args)),
         "cameras" => Some(cameras(s, conn, method, &req.args)),
+        "settings" if method == "subscribe" => Some(settings_subscribe(s, conn)),
+        "flows" if method == "subscribe" => Some(feed_subscribe(s, conn, "flows")),
+        "appevents" if method == "subscribe" => Some(feed_subscribe(s, conn, "appevents")),
         _ => None,
     }
 }
@@ -213,7 +324,7 @@ fn assistant(s: &Served, conn: &mut Conn, method: &str, a: &Value) -> CallResult
                 return Err(CallError::new(ErrorCode::Busy, "facet.too_many_subscriptions", &format!("A connection may hold {MAX_SUBSCRIPTIONS} subscriptions at most.")));
             }
             conn.subscribed.insert(id.clone());
-            conn.jobs.push(PushJob { core, user, session: id });
+            conn.jobs.push(PushJob::Assistant { core, user, session: id });
             ok()
         }
         "decide" => {

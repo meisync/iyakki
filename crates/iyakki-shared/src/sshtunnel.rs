@@ -498,7 +498,7 @@ pub fn check_args(args: &[String], known_hosts: &Path) -> Result<(), String> {
 // ------------------------------------------------------------------ what went wrong, in words
 
 /// Why a client run ended, sorted by what the person can do about it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Fault {
     /// The host is not in the known hosts: trust it first.
     NotTrusted,

@@ -50,7 +50,7 @@ fn env(tag: &str, admin: bool) -> (Env, Arc<Mutex<Vec<String>>>) {
     let audits = Arc::new(Mutex::new(Vec::new()));
     let a2 = audits.clone();
     let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&dir.join("settings.json")).unwrap()));
-    (Env { dir, user: "ada".into(), admin, settings, audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) }, audits)
+    (Env { dir, user: "ada".into(), admin, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) }, audits)
 }
 
 fn tools(e: &Env, entries: Vec<Entry>) -> SettingsTools {
@@ -105,7 +105,7 @@ fn keyboard_choices_are_checked_saved_in_the_machine_settings_and_applied() {
 
 #[test]
 fn pointer_speed_is_read_free_changed_by_asking_checked_saved_applied_and_audited() {
-    let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+    let _shared = crate::apps::settings::live_input(); // reads the process-wide input state after the tool applied it: holds the input lock
     let (e, audits) = env("pointer", true);
     let t = tools(&e, pointer_entries(&e));
     policy(&t, &["pointer_speed_status"], &["pointer_speed_set"]);
@@ -166,6 +166,28 @@ fn header_rules_show_no_value_and_cannot_be_added_by_chat() {
     t.call("browser_headers_delete", &json!({"rule": saved.id})).unwrap();
     assert!(store.list().is_empty());
     assert!(values.0.lock().unwrap().is_empty(), "the vault value goes with the rule");
+    let _ = std::fs::remove_dir_all(&e.dir);
+}
+
+#[test]
+fn browser_plugins_are_added_off_switched_on_and_removed_by_chat_with_asks_and_none_by_default() {
+    let (e, audits) = env("plug", false);
+    let t = tools(&e, plugin_entries(&e));
+    policy(&t, &["browser_plugins_list"], &["browser_plugin_add", "browser_plugin_enable", "browser_plugin_remove"]);
+    assert!(t.call("browser_plugins_list", &json!({})).unwrap().contains("No browser plug-ins"));
+    // a script with no sites, or one for a whole domain ending, is refused
+    assert!(t.call("browser_plugin_add", &json!({"name": "A", "kind": "script", "text": "1"})).is_err());
+    assert!(t.call("browser_plugin_add", &json!({"name": "A", "kind": "script", "sites": ["*.com"], "text": "1"})).is_err());
+    assert!(t.call("browser_plugin_add", &json!({"name": "A", "kind": "nope", "text": "1"})).is_err());
+    t.call("browser_plugin_add", &json!({"name": "Dark", "kind": "style", "sites": ["example.com"], "text": "body{background:#000}"})).unwrap();
+    let list = t.call("browser_plugins_list", &json!({})).unwrap();
+    assert!(list.contains("Dark") && list.contains("off") && list.contains("example.com"), "{list}");
+    t.call("browser_plugin_enable", &json!({"plugin": "dark", "on": true})).unwrap();
+    assert!(t.call("browser_plugins_list", &json!({})).unwrap().contains("(on"));
+    assert!(t.call("browser_plugin_enable", &json!({"plugin": "nope", "on": true})).is_err());
+    t.call("browser_plugin_remove", &json!({"plugin": "pl1"})).unwrap();
+    assert!(t.call("browser_plugins_list", &json!({})).unwrap().contains("No browser plug-ins"));
+    assert!(audits.lock().unwrap().iter().filter(|a| a.starts_with("settings.browser.plugins")).count() >= 3);
     let _ = std::fs::remove_dir_all(&e.dir);
 }
 
@@ -314,6 +336,7 @@ fn the_screen_size_tool_asks_checks_the_size_against_what_the_display_offers_sav
 
 #[test]
 fn known_bad_site_and_certificate_tools_show_change_and_refuse_bad_input() {
+    let _turn = CERT_FAKE_TURN.lock().unwrap_or_else(|e| e.into_inner());
     use super::super::browser_badsites as bs;
     let _turn = bs::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let cx = crate::apps::tests::cx_with_admin_store("chatbad1");

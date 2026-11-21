@@ -6,7 +6,7 @@
 pub const SNAPSHOT_CHARS: usize = 40_000;
 
 /// What the BROWSER app shows right now, as text (kept per person, dropped at sign-out).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PageSnapshot {
     pub url: String,
     pub title: String,

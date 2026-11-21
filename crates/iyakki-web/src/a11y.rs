@@ -18,7 +18,7 @@ use std::collections::HashMap;
 const MAX_NODES: usize = 30_000;
 const MAX_DEPTH: usize = 160;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Landmark {
     Navigation,
     Main,
@@ -46,7 +46,7 @@ impl Landmark {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Role {
     Link,
     Button,
@@ -71,7 +71,7 @@ pub enum Role {
     Landmark(Landmark),
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AState {
     /// `Some(true)` checked, `Some(false)` not checked; a half-checked box has `mixed`.
     pub checked: Option<bool>,
@@ -87,7 +87,7 @@ pub struct AState {
     pub multiline: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct A11yNode {
     /// The element in the page's tree.
     pub dom: usize,
@@ -132,14 +132,14 @@ pub struct A11yNode {
 }
 
 /// One thing the "read the page" command says, in document order.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReadItem {
     pub text: String,
     /// The tree node it belongs to, when it is one.
     pub node: Option<usize>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct A11yTree {
     pub nodes: Vec<A11yNode>,
     pub script: Vec<ReadItem>,
@@ -150,7 +150,7 @@ pub struct A11yTree {
 }
 
 /// Counts for the status line: "12 links, 3 headings, ...".
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Stats {
     pub links: usize,
     pub buttons: usize,
@@ -171,12 +171,20 @@ const BLOCKISH: [&str; 38] = [
 ];
 
 fn collapse(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut out = String::with_capacity(s.len());
+    for w in s.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(w);
+    }
+    out
 }
 
 fn short(s: &str) -> String {
     let c = collapse(s);
-    if c.chars().count() <= 60 {
+    // a string of 60 bytes or fewer has at most 60 characters
+    if c.len() <= 60 || c.chars().count() <= 60 {
         return c;
     }
     let cut: String = c.chars().take(60).collect();
@@ -406,8 +414,8 @@ impl<'a> Builder<'a> {
     }
 
     fn walk_children(&mut self, n: usize, ctx: &Ctx, depth: usize) {
-        let kids = self.tree.nodes[n].children.clone();
-        for c in kids {
+        let tree = self.tree;
+        for &c in &tree.nodes[n].children {
             self.visit(c, ctx, depth + 1);
         }
     }
@@ -456,14 +464,15 @@ impl<'a> Builder<'a> {
         if depth > MAX_DEPTH {
             return;
         }
-        let tag = match &self.tree.nodes[n].kind {
+        let tree = self.tree;
+        let tag: &str = match &tree.nodes[n].kind {
             NodeKind::Text(t) => {
                 if self.mute == 0 {
                     self.buf.push_str(t);
                 }
                 return;
             }
-            NodeKind::Element { tag, .. } => tag.clone(),
+            NodeKind::Element { tag, .. } => tag.as_str(),
         };
         if self.hidden(n) {
             return;
@@ -479,7 +488,7 @@ impl<'a> Builder<'a> {
         }
         let role_attr = self.role_attr(n);
         let role = role_attr.as_deref();
-        let block = BLOCKISH.contains(&tag.as_str());
+        let block = BLOCKISH.contains(&tag);
         if matches!(role, Some("presentation" | "none")) && tag == "img" {
             return;
         }
@@ -490,7 +499,7 @@ impl<'a> Builder<'a> {
                 self.alerts.push(t);
             }
         }
-        match tag.as_str() {
+        match tag {
             "a" | "area" if self.has(n, "href") && !matches!(role, Some("button" | "presentation" | "none")) => self.link(n, ctx, depth),
             "button" => self.button(n, ctx, depth),
             "summary" => self.summary(n, ctx, depth),
@@ -525,7 +534,7 @@ impl<'a> Builder<'a> {
                         return;
                     }
                 }
-                if let Some(l) = landmark_of(&tag, role, ctx, self.name_from_attrs(n).is_some()) {
+                if let Some(l) = landmark_of(tag, role, ctx, self.name_from_attrs(n).is_some()) {
                     self.landmark(n, ctx, depth, l);
                     return;
                 }
@@ -573,11 +582,9 @@ impl<'a> Builder<'a> {
 
     fn link(&mut self, n: usize, ctx: &Ctx, depth: usize) {
         let mut nd = self.blank(n, Role::Link, ctx);
-        nd.name = self.name_from_attrs(n).unwrap_or_else(|| {
-            let t = self.text(n);
-            if t.is_empty() { collapse(self.attr(n, "title").unwrap_or("")) } else { t }
-        });
-        nd.anchor = self.text(n);
+        let words = self.text(n);
+        nd.name = self.name_from_attrs(n).unwrap_or_else(|| if words.is_empty() { collapse(self.attr(n, "title").unwrap_or("")) } else { words.clone() });
+        nd.anchor = words;
         nd.href = self.attr(n, "href").unwrap_or("").to_string();
         nd.focusable = true;
         nd.description = self.description_of(n);
@@ -592,11 +599,9 @@ impl<'a> Builder<'a> {
 
     fn button(&mut self, n: usize, ctx: &Ctx, depth: usize) {
         let mut nd = self.blank(n, Role::Button, ctx);
-        nd.name = self.name_from_attrs(n).unwrap_or_else(|| {
-            let t = self.text(n);
-            if t.is_empty() { collapse(self.attr(n, "title").unwrap_or("")) } else { t }
-        });
-        nd.anchor = self.text(n);
+        let words = self.text(n);
+        nd.name = self.name_from_attrs(n).unwrap_or_else(|| if words.is_empty() { collapse(self.attr(n, "title").unwrap_or("")) } else { words.clone() });
+        nd.anchor = words;
         nd.focusable = true;
         nd.description = self.description_of(n);
         let mut st = AState::default();
@@ -797,8 +802,9 @@ impl<'a> Builder<'a> {
     fn heading(&mut self, n: usize, ctx: &Ctx, depth: usize, level: u8) {
         let mut nd = self.blank(n, Role::Heading, ctx);
         nd.level = level;
-        nd.name = self.name_from_attrs(n).unwrap_or_else(|| self.text(n));
-        nd.anchor = self.text(n);
+        let words = self.text(n);
+        nd.name = self.name_from_attrs(n).unwrap_or_else(|| words.clone());
+        nd.anchor = words;
         let idx = self.add(nd);
         self.flush(None);
         if let Some(i) = idx {
@@ -988,8 +994,11 @@ impl<'a> Builder<'a> {
         }
         // an element id points at the first node at or after that element
         let mut ids = HashMap::new();
+        // nodes are made in document order, so the first one at or after an element is found by halving (the scan stays for a tree that is not)
+        let sorted = nodes.windows(2).all(|w| w[0].dom <= w[1].dom);
         for (id, &dom) in &self.id_dom {
-            if let Some(at) = nodes.iter().position(|nd| nd.dom >= dom) {
+            let at = if sorted { Some(nodes.partition_point(|nd| nd.dom < dom)).filter(|&i| i < nodes.len()) } else { nodes.iter().position(|nd| nd.dom >= dom) };
+            if let Some(at) = at {
                 ids.insert(id.clone(), at);
             }
         }
@@ -1170,7 +1179,7 @@ impl A11yTree {
 
     /// Match the nodes with the page model: which node is control `i` of the page and which is link `j`.
     pub fn attach(&mut self, links: &[String], controls: &[Control]) {
-        let by_dom: HashMap<usize, usize> = self.nodes.iter().enumerate().map(|(i, n)| (n.dom, i)).collect();
+        let by_dom: HashMap<usize, usize> = if controls.is_empty() { HashMap::new() } else { self.nodes.iter().enumerate().map(|(i, n)| (n.dom, i)).collect() };
         for (ci, c) in controls.iter().enumerate() {
             if c.kind == ControlKind::Hidden {
                 continue;

@@ -531,7 +531,7 @@ fn remove_deletes_the_extra_firmware_and_keeps_the_acceptance() {
     let (fs, _) = apply::Fs::for_data(&data);
     let got: BTreeMap<String, Vec<u8>> = sel.unique().keys().map(|p| (p.clone(), bytes_of(p))).collect();
     let p = build_pack(&m, &sel, &got, "w", &[]);
-    apply::install_pack(&fs, &iyakki_drivers::run::Dry, PACK_ID, "v", "x", "s", "local", &p).unwrap();
+    apply::install_pack(&fs, &iyakki_core_local::driver_packs::run::Dry, PACK_ID, "v", "x", "s", "local", &p).unwrap();
     assert!(installed(&data).is_some());
     std::fs::create_dir_all(data.join("fwextra/download")).unwrap();
     std::fs::write(data.join("fwextra/download/x"), b"123").unwrap();

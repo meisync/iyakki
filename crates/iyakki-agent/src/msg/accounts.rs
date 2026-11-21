@@ -56,6 +56,9 @@ struct State {
     /// Accounts whose saved rooms are copied into the INBOX (off unless the person switched it on).
     #[serde(default)]
     mirror: std::collections::BTreeSet<String>,
+    /// Accounts the person let read and write end-to-end encrypted rooms (the Olm and Megolm add-on is loaded for them).
+    #[serde(default)]
+    e2ee: std::collections::BTreeSet<String>,
 }
 
 pub fn vault_name(id: &str) -> String {
@@ -303,5 +306,28 @@ impl Accounts {
             s.mirror.remove(account);
         }
         self.write(&self.state_path(), serde_json::to_vec(&s).map_err(|e| e.to_string())?)
+    }
+
+    /// Is encryption switched on for this account? Off until the person says so (it uploads this device's keys to the homeserver).
+    pub fn e2ee_on(&self, account: &str) -> bool {
+        self.read_state().e2ee.contains(account)
+    }
+
+    pub fn set_e2ee(&self, account: &str, on: bool) -> Result<(), String> {
+        if self.get(account).is_none() {
+            return Err("no such account".into());
+        }
+        let mut s = self.read_state();
+        if on {
+            s.e2ee.insert(account.into());
+        } else {
+            s.e2ee.remove(account);
+        }
+        self.write(&self.state_path(), serde_json::to_vec(&s).map_err(|e| e.to_string())?)
+    }
+
+    /// The person's vault (the add-on keeps its keys there).
+    pub fn secret_store(&self) -> Arc<dyn SecretStore> {
+        self.store.clone()
     }
 }

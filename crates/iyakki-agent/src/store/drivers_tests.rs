@@ -1,7 +1,7 @@
 //! Driver packs through the store: the built-in entries, review and install of a pack (signed, local, with modules),
 //! removal, the "Drivers for this machine" status text, the extraction guard and the assistant tools.
 
-use iyakki_drivers::{b64, modinfo, pack};
+use iyakki_core_local::driver_packs::{b64, modinfo, pack};
 use serde_json::json;
 
 use super::super::install::tests::{admin, fx, user, Fx, NOW};
@@ -44,7 +44,7 @@ fn fw_pack() -> Pack {
 fn the_built_in_catalog_lists_every_known_driver_as_a_driver_extension_for_the_system() {
     let f = fx("drv-catalog");
     let v = items(&f, &admin());
-    for k in iyakki_drivers::KNOWN {
+    for k in iyakki_core_local::driver_packs::KNOWN {
         let i = v.iter().find(|i| i.entry.id == k.id).unwrap_or_else(|| panic!("{} is listed", k.id));
         assert_eq!((i.entry.kind.as_str(), i.entry.meta.ext_kind.as_str(), i.entry.meta.target.as_str()), ("extension", "driver", "system"), "{}", k.id);
         assert!(i.entry.meta.description.contains(k.availability.label()) && i.entry.meta.description.contains("What you supply"), "{}", k.id);
@@ -100,7 +100,7 @@ fn a_firmware_pack_from_a_usb_folder_is_reviewed_as_unsigned_and_only_an_adminis
     assert!(f.store.install(&f.svc, &a, &r, Confirm::default()).is_err(), "warnings must be accepted first");
     f.store.install(&f.svc, &a, &r, Confirm::all()).unwrap();
     assert_eq!(std::fs::read(d.fs.data.join("firmware/mac-bt-broadcom/files/brcm/BCM20702A1-05ac-8289.hcd")).unwrap(), b"HCD-DATA");
-    assert!(iyakki_drivers::firmware_present(&d.fs, "brcm/BCM20702A1"));
+    assert!(iyakki_core_local::driver_packs::firmware_present(&d.fs, "brcm/BCM20702A1"));
     // not an administrator, or not for everyone: refused
     let u = user("alice");
     let r = f.store.review_sideload(&f.svc, &u, text.clone().into_bytes(), Scope::User("alice".into()), &[]);
@@ -108,7 +108,7 @@ fn a_firmware_pack_from_a_usb_folder_is_reviewed_as_unsigned_and_only_an_adminis
     let r = f.store.review_sideload(&f.svc, &a, text.into_bytes(), Scope::User("root".into()), &[]);
     assert!(r.refusal.as_ref().unwrap().contains("whole machine"), "{}", r.summary());
     f.store.remove(&f.svc, &a, "extension", "mac-bt-broadcom", &Scope::Shared).unwrap();
-    assert!(!iyakki_drivers::firmware_present(&d.fs, "brcm/BCM20702A1"));
+    assert!(!iyakki_core_local::driver_packs::firmware_present(&d.fs, "brcm/BCM20702A1"));
     let _ = std::fs::remove_dir_all(&f.dir);
 }
 
@@ -155,7 +155,7 @@ fn the_wifi_driver_pack_from_a_usb_stick_installs_only_for_a_trusted_key_and_thi
         let ko = modinfo::synthetic_module_with("wl", vermagic, "MIXED/Proprietary", "cfg80211");
         let p = Pack {
             v: 1,
-            matches: vec![iyakki_drivers::pack::Match { dmi_vendor: "Apple*".into(), pci: "14e4:43a0".into(), ..Default::default() }],
+            matches: vec![iyakki_core_local::driver_packs::pack::Match { dmi_vendor: "Apple*".into(), pci: "14e4:43a0".into(), ..Default::default() }],
             modules: vec![pack::KoFile { name: "wl".into(), kernel: kernel.into(), data: b64::encode(&ko), sha256: pack::sha256_hex(&ko) }],
             modprobe: vec!["blacklist b43".into(), "blacklist bcma".into(), "blacklist ssb".into(), "blacklist brcmsmac".into()],
             unload: vec!["b43".into(), "bcma".into()],
@@ -334,7 +334,7 @@ fn driver_install_goes_through_the_same_review_installs_from_a_folder_and_refuse
     assert!(e.contains("/nonexistent"), "{e}");
     let ok = call(json!({"pack": "mac-bt-broadcom", "source": dir.to_string_lossy()})).unwrap();
     assert!(ok.contains("Installed"), "{ok}");
-    assert!(iyakki_drivers::firmware_present(&sandbox(&f).fs, "brcm/BCM20702A1"));
+    assert!(iyakki_core_local::driver_packs::firmware_present(&sandbox(&f).fs, "brcm/BCM20702A1"));
     // a user without the right is refused by the review, not by luck
     let up = iyakki_sec::policy::Role::User.template();
     let e = super::call("driver_install", &json!({"pack": "mac-bt-broadcom", "source": dir.to_string_lossy()}), &f.svc, &up, "alice").unwrap_err();

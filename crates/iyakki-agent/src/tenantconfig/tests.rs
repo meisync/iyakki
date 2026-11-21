@@ -439,6 +439,20 @@ fn tcfg_media_codecs_is_the_tenants_choice_and_a_person_can_only_narrow_it() {
 }
 
 #[test]
+fn tcfg_the_tenants_page_lists_media_codecs_as_an_allow_or_deny_choice_an_administrator_writes_and_members_read() {
+    let d = schema::describe();
+    let k = d["kinds"].as_array().unwrap().iter().find(|k| k["kind"] == "media.codecs").expect("the registry the tenants page draws from lists it");
+    assert!(k["summary"].as_str().unwrap().contains("audio and video add-on"));
+    assert_eq!((k["write"].as_str(), k["read_values"].as_str(), k["team_level"].as_bool(), k["person_override"].as_bool()), (Some("admin"), Some("member"), Some(true), Some(true)));
+    let f = k["fields"].as_array().unwrap();
+    assert_eq!(f.len(), 1);
+    // the page's field editor turns "one of a|b" into a choice list (tenantcfg.js fieldType)
+    assert_eq!((f[0]["name"].as_str(), f[0]["type"].as_str()), (Some("codecs"), Some("one of allow|deny")));
+    assert!(f[0]["help"].as_str().unwrap().contains("allow unless denied"));
+    assert!(include_str!("../webservice/ui/tenantcfg.js").contains("^one of (.+)$"));
+}
+
+#[test]
 fn tcfg_the_egress_policy_becomes_outgoing_firewall_rules_that_pass_the_firewalls_own_checks() {
     use std::net::IpAddr;
     let x = t("fwout");
@@ -1763,4 +1777,66 @@ fn tcfg_hook_a_cluster_bound_to_a_team_environment_goes_through_the_deploy_rules
     assert!(gate("eve", -1).through("c-dev", &mut apply).unwrap().is_err());
     assert_eq!(*ran.borrow(), 1);
     assert!(x.rec.all().contains("tenant.deploy"));
+}
+
+#[test]
+fn tcfg_a_cloud_caller_hands_the_gate_that_reads_bindings_and_roles_fresh_for_each_change() {
+    use super::clustergate::{Binding, PerTeamGate, TeamGate};
+    let x = t("hook-per-team-gate");
+    for e in ["dev", "prod"] {
+        binding(&x, "web", e, json!({"deploy_role": if e == "dev" { "editor" } else { "admin" }})).unwrap();
+    }
+    let gate = |who: &str| PerTeamGate { dir: x.dir.clone(), vault: x.vault.clone(), audit: x.rec.clone(), roles: x.roles.clone(), requester: who.into(), now: Arc::new(super::now_secs) };
+    let ran = std::cell::RefCell::new(0u32);
+    let mut apply = |_: Option<&str>| -> Result<String, String> {
+        *ran.borrow_mut() += 1;
+        Ok("done".into())
+    };
+    // nothing bound yet: left to the person's own card
+    assert!(gate("max").through("c-dev", &mut apply).is_none());
+    // an administrator binds clusters while the service runs: the next change sees it
+    let bindings = json!([{"cluster_id": "c-dev", "team": "web", "environment": "dev"}, {"cluster_id": "c-prod", "team": "web", "environment": "prod", "promoted_from": "preprod"}]);
+    std::fs::write(x.dir.join(super::clustergate::FILE), bindings.to_string()).unwrap();
+    assert!(gate("max").through("c-own", &mut apply).is_none());
+    assert_eq!(gate("max").through("c-dev", &mut apply), Some(Ok("done".to_string())));
+    // a person judged by their own role in the team: an editor does not deploy prod alone, a stranger to the tenant does not deploy at all
+    let e = gate("mia").through("c-prod", &mut apply).unwrap().unwrap_err();
+    assert!(e.contains("waiting for approval"), "{e}");
+    assert!(gate("stranger-to-the-tenant").through("c-dev", &mut apply).unwrap().is_err());
+    assert_eq!(*ran.borrow(), 1, "only the dev change ran");
+    let _ = Binding { cluster_id: String::new(), team: String::new(), environment: String::new(), promoted_from: None };
+}
+
+#[test]
+fn tcfg_a_team_key_is_used_by_a_caller_other_than_the_run_start_through_the_same_gate_and_the_vault() {
+    use super::runtime::with_integration_key;
+    let x = t("team-key-caller");
+    let body = json!({"enabled": true, "values": {"provider": "openai", "terms_ack": true, "allowed_models": ["gpt-4o"], "daily_requests_per_person": 2, "monthly_requests_team": 100}, "secrets": {"api_key": "sk-OPENAI-CALLER-1234567890"}});
+    x.put("mia", "integration.apikey", &["web", "oa"], body).unwrap();
+    let now = 5_000_000;
+    let mut seen = Vec::new();
+    let mut call = |user: &str, model: Option<&str>| {
+        with_integration_key(&x.env(), "web", "oa", user, 2, model, "git-host-call", now, &mut |t| {
+            seen.push((t.provider.to_string(), t.key.to_string()));
+            Ok(t.provider.len())
+        })
+    };
+    // a use that names no model is decided by the entry and the counters; the key is handed over for the call only
+    assert_eq!(call("max", None).unwrap(), "openai".len());
+    // a use that names a model must have it on the list
+    assert!(call("max", Some("o3")).unwrap_err().contains("not allowed"));
+    assert!(call("max", Some("gpt-4o")).is_ok());
+    // the person's daily limit (2) counts every use, and another person still has theirs
+    assert!(call("max", None).unwrap_err().contains("limit"));
+    assert!(call("mia", None).is_ok());
+    assert_eq!(seen.len(), 3);
+    assert!(seen.iter().all(|(p, k)| p == "openai" && k == "sk-OPENAI-CALLER-1234567890"));
+    // the audit names the person and the counters, never the key; the vault's use list names the action
+    let log = x.rec.all();
+    assert!(log.contains("tenant.provider.use") && log.contains("tenant.provider.refused") && !log.contains("CALLER-1234"), "{log}");
+    assert!(x.vault.uses.lock().unwrap().iter().any(|(a, _)| a == "git-host-call"));
+    // an entry that does not exist, and a locked vault, give nothing
+    assert!(with_integration_key(&x.env(), "web", "nope", "mia", 2, None, "a", now, &mut |_| Ok(())).unwrap_err().contains("not configured"));
+    x.vault.set_locked(true);
+    assert!(with_integration_key(&x.env(), "web", "oa", "mia", 2, None, "a", now, &mut |_| Ok(())).is_err());
 }

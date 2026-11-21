@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -109,13 +109,8 @@ impl Proc for Real {
 /// The real `kubectl`. `base` are the leading flags (`--kubeconfig=...`, `--context=...`).
 pub fn real_spawn(base: Vec<String>) -> Spawn {
     Box::new(move |args: &[String]| {
-        let mut child = Command::new("kubectl")
-            .args(&base)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
+        let all: Vec<String> = base.iter().chain(args.iter()).cloned().collect();
+        let mut child = iyakki_core_local::starters::kubectl_spawn_lines(&all)
             .map_err(|e| format!("kubectl could not be started ({e}): install kubectl"))?;
         let out = child.stdout.take().ok_or("kubectl has no output")?;
         let (tx, rx) = mpsc::channel();

@@ -51,6 +51,10 @@ impl Shell {
             return;
         }
         if !down {
+            if key == FnKey::VoiceAssist {
+                self.gv_release();
+                return;
+            }
             if self.fnk.held.is_some_and(|h| h.0 == key) {
                 self.fnk.held = None;
             }
@@ -121,7 +125,7 @@ impl Shell {
             FnKey::Lock => self.lock_key(),
             FnKey::Saver => self.start_screen_saver(None),
             FnKey::SignOut => self.signout_ask(),
-            FnKey::VoiceAssist => self.gv_toggle(),
+            FnKey::VoiceAssist => self.gv_press(),
             // the accessibility chords are taken earlier (`shell_access.rs`) and never get here
             FnKey::ScreenReader | FnKey::AccessNext | FnKey::AccessPrev | FnKey::AccessActivate | FnKey::AccessRepeat => {}
             // counted by handle_fn (held, it cycles the Touch Bar strips)
@@ -200,7 +204,7 @@ impl Shell {
         self.session.as_ref().is_some_and(|s| s.policy.power || !self.lbar.remote)
     }
 
-    fn fn_power_card(&mut self) {
+    pub(super) fn fn_power_card(&mut self) {
         let allowed = self.may_power();
         if self.session.is_none() {
             // the login and setup screens of the local console have a power card of their own; a remote session never does

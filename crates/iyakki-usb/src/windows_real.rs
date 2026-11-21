@@ -27,6 +27,8 @@ const IOCTL_DISK_SET_DISK_ATTRIBUTES: u32 = 0x0007_C0F4;
 const IOCTL_DISK_UPDATE_PROPERTIES: u32 = 0x0007_0140;
 const DISK_ATTRIBUTE_OFFLINE: u64 = 1;
 const TOKEN_QUERY: u32 = 8;
+const TOKEN_ADJUST_PRIVILEGES: u32 = 0x20;
+const SE_PRIVILEGE_ENABLED: u32 = 2;
 const TOKEN_ELEVATION_CLASS: u32 = 20;
 
 #[repr(C)]
@@ -62,8 +64,30 @@ extern "system" {
 
 #[link(name = "advapi32")]
 extern "system" {
+    fn LookupPrivilegeValueW(system: *const u16, name: *const u16, luid: *mut Luid) -> i32;
+    fn AdjustTokenPrivileges(token: Handle, disable_all: i32, new: *const TokenPrivileges, len: u32, old: *mut c_void, returned: *mut u32) -> i32;
     fn OpenProcessToken(process: Handle, access: u32, token: *mut Handle) -> i32;
     fn GetTokenInformation(token: Handle, class: u32, info: *mut c_void, len: u32, returned: *mut u32) -> i32;
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Luid {
+    low: u32,
+    high: i32,
+}
+
+#[repr(C)]
+struct TokenPrivileges {
+    count: u32,
+    luid: Luid,
+    attributes: u32,
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetFirmwareEnvironmentVariableExW(name: *const u16, guid: *const u16, buf: *mut c_void, size: u32, attributes: *mut u32) -> u32;
+    fn SetFirmwareEnvironmentVariableExW(name: *const u16, guid: *const u16, value: *const c_void, size: u32, attributes: u32) -> i32;
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -83,6 +107,10 @@ impl Drop for Owned {
         unsafe { CloseHandle(self.0) };
     }
 }
+
+// SAFETY: a Windows file handle is a process-wide token, not tied to the thread that made it; `Owned` is used by one owner at a time (the
+// writer thread takes the whole `RealWin32` with it) and closed once.
+unsafe impl Send for Owned {}
 
 fn open(path: &str, flags: u32) -> Result<Owned, String> {
     let w = wide(path);
@@ -243,4 +271,139 @@ pub fn write_image_file(image: &std::path::Path, drive: &crate::drives::Drive, s
     let mut f = std::fs::File::open(image).map_err(|e| format!("{}: {e}", image.display()))?;
     let len = f.metadata().map_err(|e| e.to_string())?.len();
     crate::windows::write_stream(&mut RealWin32::new(), drive, sector, &mut f, len, 4 << 20, patch, progress)
+}
+
+/// The firmware variables of the machine through the Windows calls (`Get/SetFirmwareEnvironmentVariableExW`), as a store for the boot entry
+/// (F-INST-12). Windows cannot list variables, so the entry numbers come from `BootOrder` and from probing `Boot0000`..`Boot00FF`.
+/// NEVER RUN on a machine: type-checked for the Windows target only.
+pub struct WinFirmware {
+    guid: Vec<u16>,
+}
+
+impl WinFirmware {
+    /// Ask for the privilege that firmware variables need (an elevated process has it, switched off until asked for).
+    pub fn new() -> Result<WinFirmware, String> {
+        let mut token: Handle = std::ptr::null_mut();
+        // SAFETY: the out pointer is a local; the token is closed below.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token) } == 0 {
+            return Err(last("opening the process token"));
+        }
+        let name = wide("SeSystemEnvironmentPrivilege");
+        let mut luid = Luid::default();
+        // SAFETY: `name` is NUL-terminated and outlives the call; `luid` is a local.
+        let found = unsafe { LookupPrivilegeValueW(std::ptr::null(), name.as_ptr(), &mut luid) } != 0;
+        let tp = TokenPrivileges { count: 1, luid, attributes: SE_PRIVILEGE_ENABLED };
+        // SAFETY: `tp` is a TOKEN_PRIVILEGES with exactly one entry, `token` is open; no previous state is asked for.
+        let ok = found && unsafe { AdjustTokenPrivileges(token, 0, &tp, std::mem::size_of::<TokenPrivileges>() as u32, std::ptr::null_mut(), std::ptr::null_mut()) } != 0;
+        let err = last("asking for the firmware-variable privilege");
+        // SAFETY: `token` was opened above.
+        unsafe { CloseHandle(token) };
+        if !ok {
+            return Err(err);
+        }
+        Ok(WinFirmware { guid: wide("{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}") })
+    }
+}
+
+impl crate::efi::VarStore for WinFirmware {
+    fn read(&self, base: &str) -> Option<Vec<u8>> {
+        let name = wide(base);
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut attrs = 0u32;
+        // SAFETY: `name` and `self.guid` are NUL-terminated; `buf` has the size given; `attrs` is a local.
+        let n = unsafe { GetFirmwareEnvironmentVariableExW(name.as_ptr(), self.guid.as_ptr(), buf.as_mut_ptr() as *mut c_void, buf.len() as u32, &mut attrs) };
+        if n == 0 {
+            // "no such variable", or any other error: treated as absent (a write that follows would then fail loudly)
+            return None;
+        }
+        buf.truncate(n as usize);
+        Some(buf)
+    }
+
+    fn write(&mut self, base: &str, data: &[u8]) -> Result<(), String> {
+        let name = wide(base);
+        // SAFETY: `name` and `self.guid` are NUL-terminated; `data` is readable for its length.
+        let ok = unsafe { SetFirmwareEnvironmentVariableExW(name.as_ptr(), self.guid.as_ptr(), data.as_ptr() as *const c_void, data.len() as u32, 7) };
+        if ok == 0 {
+            return Err(last(&format!("writing the firmware variable {base}")));
+        }
+        Ok(())
+    }
+
+    fn boot_numbers(&self) -> Vec<u16> {
+        let mut n: Vec<u16> = self.read("BootOrder").unwrap_or_default().chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        n.extend(0..=0xFFu16);
+        n
+    }
+}
+
+const SE_FILE_OBJECT: u32 = 1;
+const OWNER_AND_DACL: u32 = 1 | 4;
+const TOKEN_USER_CLASS: u32 = 1;
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn GetNamedSecurityInfoW(name: *const u16, kind: u32, info: u32, owner: *mut *mut c_void, group: *mut *mut c_void, dacl: *mut *mut c_void, sacl: *mut *mut c_void, sd: *mut *mut c_void) -> u32;
+    fn ConvertSecurityDescriptorToStringSecurityDescriptorW(sd: *mut c_void, revision: u32, info: u32, out: *mut *mut u16, len: *mut u32) -> i32;
+    fn ConvertSidToStringSidW(sid: *mut c_void, out: *mut *mut u16) -> i32;
+}
+#[link(name = "kernel32")]
+extern "system" {
+    fn LocalFree(p: *mut c_void) -> *mut c_void;
+}
+
+fn take_wide(p: *mut u16) -> String {
+    // SAFETY: `p` is a NUL-terminated UTF-16 string allocated by Windows; it is read once up to the NUL and freed with LocalFree.
+    unsafe {
+        let mut n = 0;
+        while *p.add(n) != 0 {
+            n += 1;
+        }
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
+        LocalFree(p as *mut c_void);
+        s
+    }
+}
+
+/// The file's owner and access list as an SDDL string, and the caller's SID string (F-INST-12, read by `winacl`).
+pub fn file_security(file: &std::path::Path) -> Result<(String, String), String> {
+    let w = wide(&file.display().to_string());
+    let mut sd: *mut c_void = std::ptr::null_mut();
+    // SAFETY: `w` is NUL-terminated and outlives the call; the unused out pointers are null; `sd` receives a block freed below.
+    let err = unsafe { GetNamedSecurityInfoW(w.as_ptr(), SE_FILE_OBJECT, OWNER_AND_DACL, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), &mut sd) };
+    if err != 0 {
+        return Err(format!("reading the security of {}: Windows error {err}", file.display()));
+    }
+    let mut text: *mut u16 = std::ptr::null_mut();
+    // SAFETY: `sd` is the descriptor just returned; `text` receives a string freed by `take_wide`.
+    let ok = unsafe { ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, 1, OWNER_AND_DACL, &mut text, std::ptr::null_mut()) };
+    let sddl = if ok != 0 { Ok(take_wide(text)) } else { Err(last("writing the security descriptor as text")) };
+    // SAFETY: `sd` was allocated by GetNamedSecurityInfoW and is freed once.
+    unsafe { LocalFree(sd) };
+    Ok((sddl?, current_user_sid()?))
+}
+
+fn current_user_sid() -> Result<String, String> {
+    let mut token: Handle = std::ptr::null_mut();
+    // SAFETY: the out pointer is a local; the token is closed below.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(last("opening the process token"));
+    }
+    let mut buf = vec![0u8; 512];
+    let mut returned = 0u32;
+    // SAFETY: the buffer is `buf.len()` bytes and lives across the call.
+    let ok = unsafe { GetTokenInformation(token, TOKEN_USER_CLASS, buf.as_mut_ptr() as *mut c_void, buf.len() as u32, &mut returned) };
+    // SAFETY: `token` was opened above.
+    unsafe { CloseHandle(token) };
+    if ok == 0 {
+        return Err(last("reading the caller's account"));
+    }
+    // SAFETY: TOKEN_USER starts with a pointer to the SID, which lies inside `buf`; the buffer is 8-byte aligned enough via Vec<u8> read_unaligned.
+    let sid = unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const *mut c_void) };
+    let mut text: *mut u16 = std::ptr::null_mut();
+    // SAFETY: `sid` points into `buf`, alive here; `text` receives a string freed by `take_wide`.
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
+        return Err(last("writing the caller's account as text"));
+    }
+    Ok(take_wide(text))
 }

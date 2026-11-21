@@ -180,7 +180,10 @@ pub fn to_tile(list: &Sdk) -> Result<Tile, ConvertError> {
                 if access_nodes < limits::MAX_ACCESS && !h.name.is_empty() {
                     access_nodes += 1;
                     let name: String = h.name.chars().take(limits::MAX_ACCESS_TEXT / 4).collect();
-                    out.push(Op::Access { id, role: role(h.role), r: rect(r), name, value: String::new(), flags: 0 });
+                    // the state and a field's value cross as the ABI's flag bits and value text (cut like the name); a secret field says no value
+                    let flags = h.state & iyakki_tile_abi::access_flags::ALL;
+                    let value: String = if flags & iyakki_tile_abi::access_flags::SECRET != 0 { String::new() } else { h.value.chars().take(limits::MAX_ACCESS_TEXT / 4).collect() };
+                    out.push(Op::Access { id, role: role(h.role), r: rect(r), name, value, flags });
                 }
             }
         }

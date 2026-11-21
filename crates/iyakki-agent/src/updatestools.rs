@@ -389,7 +389,13 @@ impl Backend for RealBackend {
         let (running, variant) = self.running();
         let centre = crate::devmode::centre::Centre::real(self.svc.dir());
         let host = url.trim_start_matches("https://").split('/').next().unwrap_or("").to_string();
-        let s = crate::sysupdate::fetch_for_centre(self.svc.dir(), &*st, url, centre.key(), &running, &variant).inspect_err(|_| (self.audit)("system.update.fetch", &format!("refused from {host} (assistant)")))?;
+        // the person's apps may hear that the download ended, with the fixed name only (F-SDK-207)
+        let told = |ok: bool| crate::appevent_more::transfer_finished(&*self.svc.app_events, &self.user, "download", "system update", ok);
+        let s = crate::sysupdate::fetch_for_centre(self.svc.dir(), &*st, url, centre.key(), &running, &variant).inspect_err(|_| {
+            (self.audit)("system.update.fetch", &format!("refused from {host} (assistant)"));
+            told(false);
+        })?;
+        told(true);
         (self.audit)("system.update.fetch", &format!("opened {} from {host} (assistant)", s.release.version));
         Ok(format!("The signature is good. IYAKKI {} ({}) was downloaded from {host}, is unpacked and listed in Settings -> System update; nothing was installed.", s.release.version, s.release.variant))
     }

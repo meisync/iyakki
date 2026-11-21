@@ -45,27 +45,47 @@ impl Source for SystemSource {
     }
     fn nonce(&self) -> [u8; 16] {
         let mut b = [0u8; 16];
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            let _ = f.read_exact(&mut b);
-        }
+        let _ = iyakki_sec::random_fill(&mut b);
         b
     }
 }
 
-/// Plain HTTP over TCP with a short time limit; an `https://` address is refused (no TLS client is used for cameras here).
+/// HTTP over TCP with a short time limit. An `https://` address is spoken through the camera's pinned certificate ([`crate::camtls::connect_for`],
+/// the same approval card as the camera's stream) when the transport was made with [`HttpTransport::with_tls`]; without it `https://` is refused.
 pub struct HttpTransport {
     pub timeout: Duration,
+    /// Where the pins are kept and which camera the certificate belongs to.
+    pub tls: Option<(std::path::PathBuf, String)>,
 }
 
 impl Default for HttpTransport {
     fn default() -> Self {
-        HttpTransport { timeout: Duration::from_secs(3) }
+        HttpTransport { timeout: Duration::from_secs(3), tls: None }
+    }
+}
+
+impl HttpTransport {
+    pub fn with_tls(data: std::path::PathBuf, camera_id: &str) -> HttpTransport {
+        HttpTransport { tls: Some((data, camera_id.to_string())), ..Default::default() }
     }
 }
 
 /// `(host:port, path)` of an `http://` URL.
 pub fn split_http(url: &str) -> Result<(String, String), String> {
-    let rest = url.strip_prefix("http://").ok_or("only http:// camera control addresses are used")?;
+    let (tls, hp, path) = split_url(url)?;
+    if tls {
+        return Err("only http:// camera control addresses are used".into());
+    }
+    Ok((hp, path))
+}
+
+/// `(encrypted, host:port, path)` of an `http://` or `https://` URL (default ports 80 and 443).
+pub fn split_url(url: &str) -> Result<(bool, String, String), String> {
+    let (tls, rest) = match (url.strip_prefix("http://"), url.strip_prefix("https://")) {
+        (Some(r), _) => (false, r),
+        (_, Some(r)) => (true, r),
+        _ => return Err("only http:// and https:// camera control addresses are used".into()),
+    };
     let (hp, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
@@ -73,22 +93,56 @@ pub fn split_http(url: &str) -> Result<(String, String), String> {
     if hp.is_empty() || hp.contains('@') {
         return Err("the camera control address has no host".into());
     }
-    let hp = if hp.contains(':') && !hp.ends_with(']') { hp.to_string() } else { format!("{hp}:80") };
-    Ok((hp, path.to_string()))
+    let hp = if hp.contains(':') && !hp.ends_with(']') { hp.to_string() } else { format!("{hp}:{}", if tls { 443 } else { 80 }) };
+    Ok((tls, hp, path.to_string()))
+}
+
+/// Read an HTTP answer until the peer closes, the announced body is complete, or `deadline` passes (a read that times out is tried again
+/// until then: the encrypted stream wakes up every 200 ms).
+fn read_answer(r: &mut dyn Read, deadline: std::time::Instant) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while buf.len() < (1 << 20) {
+        match r.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buf[..i]).to_ascii_lowercase();
+                    let want = head.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse::<usize>().ok());
+                    if want.is_some_and(|w| buf.len() >= i + 4 + w) {
+                        break;
+                    }
+                }
+            }
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) && std::time::Instant::now() < deadline => continue,
+            Err(_) => break,
+        }
+    }
+    buf
 }
 
 impl Transport for HttpTransport {
     fn post(&self, url: &str, soap_action: &str, body: &str) -> Result<String, String> {
-        let (hp, path) = split_http(url)?;
-        let addr = std::net::ToSocketAddrs::to_socket_addrs(&hp).map_err(|_| "the camera's address does not resolve".to_string())?.next().ok_or("the camera's address does not resolve")?;
-        let mut s = TcpStream::connect_timeout(&addr, self.timeout).map_err(|_| "the camera did not answer".to_string())?;
-        let _ = s.set_read_timeout(Some(self.timeout));
-        let _ = s.set_write_timeout(Some(self.timeout));
+        let (tls, hp, path) = split_url(url)?;
         let host = hp.rsplit_once(':').map(|x| x.0).unwrap_or(&hp);
         let req = format!("POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/soap+xml; charset=utf-8; action=\"{soap_action}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-        s.write_all(req.as_bytes()).map_err(|_| "the camera did not take the request".to_string())?;
-        let mut buf = Vec::new();
-        let _ = s.take(1 << 20).read_to_end(&mut buf);
+        let deadline = std::time::Instant::now() + self.timeout;
+        let buf = if tls {
+            let (data, id) = self.tls.as_ref().ok_or("an encrypted camera control address needs the camera's certificate to be pinned first")?;
+            let port: u16 = hp.rsplit_once(':').and_then(|x| x.1.parse().ok()).ok_or("the camera control address has no port")?;
+            let mut s = crate::camtls::connect_for(data, id, host.trim_matches(|c| c == '[' || c == ']'), port)?;
+            s.write_all(req.as_bytes()).map_err(|_| "the camera did not take the request".to_string())?;
+            let _ = s.flush();
+            read_answer(&mut s, deadline)
+        } else {
+            let addr = std::net::ToSocketAddrs::to_socket_addrs(&hp).map_err(|_| "the camera's address does not resolve".to_string())?.next().ok_or("the camera's address does not resolve")?;
+            let mut s = TcpStream::connect_timeout(&addr, self.timeout).map_err(|_| "the camera did not answer".to_string())?;
+            let _ = s.set_read_timeout(Some(self.timeout));
+            let _ = s.set_write_timeout(Some(self.timeout));
+            s.write_all(req.as_bytes()).map_err(|_| "the camera did not take the request".to_string())?;
+            read_answer(&mut s, deadline)
+        };
         let text = String::from_utf8_lossy(&buf).to_string();
         let (head, rest) = text.split_once("\r\n\r\n").ok_or("the camera sent no answer")?;
         let code: u32 = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
@@ -219,6 +273,15 @@ impl Onvif {
         self.call(ptz_url, "http://www.onvif.org/ver20/ptz/wsdl/ContinuousMove", &body).map(|_| ())
     }
 
+    /// Go to a place (`AbsoluteMove`): pan and tilt in the camera's normalised range -1 to 1 and zoom 0 to 1 (the generic ONVIF spaces).
+    pub fn move_absolute(&self, ptz_url: &str, profile: &str, pan: f32, tilt: f32, zoom: f32) -> Result<(), String> {
+        let body = format!(
+            "<AbsoluteMove xmlns=\"http://www.onvif.org/ver20/ptz/wsdl\"><ProfileToken>{}</ProfileToken><Position><PanTilt x=\"{pan:.3}\" y=\"{tilt:.3}\" xmlns=\"http://www.onvif.org/ver10/schema\"/><Zoom x=\"{zoom:.3}\" xmlns=\"http://www.onvif.org/ver10/schema\"/></Position></AbsoluteMove>",
+            esc(profile)
+        );
+        self.call(ptz_url, "http://www.onvif.org/ver20/ptz/wsdl/AbsoluteMove", &body).map(|_| ())
+    }
+
     /// The camera's saved positions as `(token, name)`, at most 32 (`GetPresets`).
     pub fn presets(&self, ptz_url: &str, profile: &str) -> Result<Vec<(String, String)>, String> {
         let body = format!("<GetPresets xmlns=\"http://www.onvif.org/ver20/ptz/wsdl\"><ProfileToken>{}</ProfileToken></GetPresets>", esc(profile));
@@ -288,6 +351,7 @@ impl PtzCamera {
         match cmd.checked()? {
             PtzCommand::Stop => self.client.stop(&self.ptz_url, &self.profile),
             PtzCommand::Move { pan, tilt, zoom } => self.client.move_continuous(&self.ptz_url, &self.profile, pan, tilt, zoom),
+            PtzCommand::Absolute { pan, tilt, zoom } => self.client.move_absolute(&self.ptz_url, &self.profile, pan, tilt, zoom),
         }
     }
 }
@@ -295,16 +359,40 @@ impl PtzCamera {
 /// The device service address of a camera whose stream address is `address` (`rtsp://host:554/...` or `http://host/...`): the same host on
 /// the ONVIF port `onvif_port` (80 by default), path `/onvif/device_service`.
 pub fn device_url(address: &str, onvif_port: Option<u16>) -> Option<String> {
+    device_url_for(address, false, onvif_port.unwrap_or(80))
+}
+
+/// The same with the scheme chosen: `tls` makes it `https://` (the usual port is then 443).
+pub fn device_url_for(address: &str, tls: bool, port: u16) -> Option<String> {
     let rest = address.split_once("://")?.1;
     let hostport = rest.split('/').next()?.rsplit('@').next()?;
     let host = if hostport.starts_with('[') { hostport.split_once(']').map(|x| format!("{}]", x.0))? } else { hostport.split(':').next()?.to_string() };
     if host.is_empty() {
         return None;
     }
-    Some(match onvif_port {
-        Some(p) if p != 80 => format!("http://{host}:{p}/onvif/device_service"),
-        _ => format!("http://{host}/onvif/device_service"),
-    })
+    let (scheme, usual) = if tls { ("https", 443) } else { ("http", 80) };
+    Some(if port == usual { format!("{scheme}://{host}/onvif/device_service") } else { format!("{scheme}://{host}:{port}/onvif/device_service") })
+}
+
+/// What to try for the device service of a camera, in order: `(encrypted, port)`. A camera whose own stream address is `https://` is tried
+/// encrypted first on that port; then the plain ports of [`candidate_ports`]; then the usual encrypted ones (443, 8443). The first that
+/// answers is used.
+pub fn candidate_endpoints(address: &str) -> Vec<(bool, u16)> {
+    let mut v: Vec<(bool, u16)> = Vec::new();
+    if let Some(rest) = address.strip_prefix("https://") {
+        let hostport = rest.split('/').next().unwrap_or("").rsplit('@').next().unwrap_or("");
+        let p = hostport.rsplit_once(':').filter(|(h, _)| !h.ends_with(']') || hostport.contains(']')).and_then(|(_, p)| p.parse::<u16>().ok()).unwrap_or(443);
+        v.push((true, p));
+    }
+    for p in candidate_ports(address) {
+        v.push((false, p));
+    }
+    for p in [443u16, 8443] {
+        if !v.contains(&(true, p)) {
+            v.push((true, p));
+        }
+    }
+    v
 }
 
 /// The ports to try for the device service of a camera, in order: the port its own `http://` stream address names, then the usual ones

@@ -322,7 +322,8 @@ fn resizing_changes_the_picture_and_is_clamped_to_the_room_in_the_file() {
 #[test]
 fn a_program_that_is_missing_or_exits_at_once_is_reported_not_hung() {
     assert!(WebView::start(Config::new("/nonexistent/helper", Hello::default())).is_err());
-    let mut v = WebView::start(Config::new("/bin/true", Hello::default())).unwrap();
+    let true_program = if std::path::Path::new("/bin/true").exists() { "/bin/true" } else { "/usr/bin/true" }; // macOS has no /bin/true
+    let mut v = WebView::start(Config::new(true_program, Hello::default())).unwrap();
     let ev = until(&mut v, 10, |_, e| e.iter().any(|x| matches!(x, Event::Exited(_))));
     // however the helper's end shows (a closed connection, a broken pipe, an exit status), the person is told it is gone
     assert!(ev.iter().any(|e| matches!(e, Event::Exited(w) if !w.is_empty())));
@@ -615,6 +616,9 @@ fn a_page_that_asks_for_a_key_system_and_one_with_a_manifest_reach_the_shell() {
     v.send(ToHelper::Navigate("fake://drm".into()));
     let ev = until(&mut v, 10, |_, e| e.contains(&Event::KeySystem("org.w3.clearkey".into())));
     assert!(ev.contains(&Event::KeySystem("com.widevine.alpha".into())));
+    v.send(ToHelper::Navigate("fake://access".into()));
+    let ev = until(&mut v, 10, |_, e| e.iter().any(|e| matches!(e, Event::PageAccess(_))));
+    assert!(ev.iter().any(|e| matches!(e, Event::PageAccess(j) if j.contains("\"Pricing\"") && j.contains("\"img\""))));
     v.send(ToHelper::Navigate("fake://manifest".into()));
     let ev = until(&mut v, 10, |_, e| e.iter().any(|e| matches!(e, Event::PageMeta { .. })));
     assert!(ev.iter().any(|e| matches!(e, Event::PageMeta { manifest_url, manifest, icon } if manifest_url.ends_with("app.webmanifest") && manifest.contains("Fake App") && icon.ends_with("icon.png"))));
@@ -629,10 +633,12 @@ fn the_helper_source_scopes_the_main_frame_reports_key_systems_and_page_meta_wit
     let hdr = std::fs::read_to_string(format!("{dir}proto.h")).unwrap();
     let probe = std::fs::read_to_string(format!("{dir}site-probe.js")).unwrap();
     let make = std::fs::read_to_string(format!("{dir}Makefile")).unwrap();
-    assert!(hdr.contains("F_RESPONSE_HEADERS, F_NAV_BLOCKED, F_KEY_SYSTEM, F_PAGE_META }") && hdr.contains("T_MEDIA_POLICY = 0x18, T_SITE_SCOPE"));
+    assert!(hdr.contains("F_RESPONSE_HEADERS, F_NAV_BLOCKED, F_KEY_SYSTEM, F_PAGE_META, F_PAGE_ACCESS }") && hdr.contains("T_MEDIA_POLICY = 0x18, T_SITE_SCOPE"));
     assert_eq!(iyakki_webview::proto::FromHelper::NavigationBlocked(String::new()).encode()[4], 0x94);
     assert_eq!(iyakki_webview::proto::FromHelper::KeySystem(String::new()).encode()[4], 0x95);
     assert_eq!(iyakki_webview::proto::FromHelper::PageMeta { manifest_url: String::new(), manifest: String::new(), icon: String::new() }.encode()[4], 0x96);
+    assert_eq!(iyakki_webview::proto::FromHelper::PageAccess(String::new()).encode()[4], 0x97);
+    assert!(src.contains("send_str_msg(F_PAGE_ACCESS, t + 7)") && probe.contains("post('access ' + s)") && probe.contains("slice(0, 120)"));
     assert_eq!(iyakki_webview::proto::ToHelper::SiteScope(vec![]).encode()[4], 0x19);
     // the scope is judged on the main frame's own load events (an iframe of another origin is not touched) and on window.open
     assert!(src.contains("case T_SITE_SCOPE: set_scope(&r)") && src.contains("!in_scope(going)") && src.contains("webkit_web_view_stop_loading(v)") && src.contains("send_str_msg(F_NAV_BLOCKED"));
@@ -655,4 +661,65 @@ fn the_helper_source_raises_the_va_decoders_only_when_asked_and_only_when_a_rend
     assert!(src.contains("software decoding stays"), "and it says so when it cannot");
     // the build side is the opt-in VA-API fragment (never in a release image: the codecs are the chip's, the legal note of docs/FULL-BROWSER.md stands)
     assert!(frag.lines().any(|l| l.trim() == "BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_VA=y") && frag.lines().any(|l| l.trim() == "BR2_PACKAGE_LIBVA=y"));
+}
+
+#[test]
+fn the_helper_source_puts_plug_in_scripts_and_styles_on_their_sites_only_and_sets_the_user_agent_from_the_snapshot() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/webview/wpe-helper/");
+    let src = std::fs::read_to_string(format!("{dir}helper.c")).unwrap();
+    let ext = std::fs::read_to_string(format!("{dir}extsnap.h")).unwrap();
+    // the snapshot of a plug-in change reaches apply_plugins, which replaces what the last snapshot added
+    assert!(src.contains("    apply_plugins();\n}") && src.contains("webkit_user_content_manager_remove_script(G.ucm") && src.contains("webkit_user_content_manager_remove_style_sheet(G.ucm"));
+    // the site list is the engine's allow list, top frame only, and an empty list is never handed over (the parser drops such an entry)
+    assert!(src.contains("webkit_user_script_new(x->body, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME") && src.contains("webkit_user_style_sheet_new(x->body, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME"));
+    assert!(src.contains("(const char *const *)x->sites.allow"));
+    assert!(ext.contains("used == 0 || !x.body[0]") && ext.contains("without a usable site"));
+    // the User-Agent goes onto the live settings and an empty one returns to the engine's own
+    assert!(src.contains("webkit_settings_set_user_agent(st, want ? want : G.default_ua)") && src.contains("G.default_ua = g_strdup(webkit_settings_get_user_agent(st))"));
+    // the plug-in hooks are read only with their capabilities
+    assert!(ext.contains("\"web.content.script\"") && ext.contains("\"web.user.agent\"") && ext.contains("xs_hook_cap(kind)"));
+}
+
+#[test]
+fn the_helper_source_acts_on_the_media_policy_and_the_cache_limit_with_the_message_numbers_the_shell_writes() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/webview/wpe-helper/");
+    let src = std::fs::read_to_string(format!("{dir}helper.c")).unwrap();
+    let hdr = std::fs::read_to_string(format!("{dir}proto.h")).unwrap();
+    let make = std::fs::read_to_string(format!("{dir}Makefile")).unwrap();
+    assert!(hdr.contains("T_MEDIA_POLICY = 0x18, T_SITE_SCOPE, T_CACHE_LIMIT }"), "0x18, 0x19, 0x1a in order");
+    assert_eq!(iyakki_webview::proto::ToHelper::MediaPolicy { max_height: 0, codecs: true }.encode()[4], 0x18);
+    assert_eq!(iyakki_webview::proto::ToHelper::CacheLimit { disk_mb: 1 }.encode()[4], 0x1a);
+    // the media policy: the script is for every page, replaced on a change, removed when nothing is asked; the open page and the engine's ranks follow
+    assert!(src.contains("case T_MEDIA_POLICY: media_policy(&r)") && src.contains("webkit_user_content_manager_remove_script(G.ucm, G.cap_script)") && src.contains("if (h > 0 || !codecs)"));
+    assert!(src.contains("g_strconcat(pre, MEDIA_CAP_JS, NULL)") && src.contains("webkit_web_view_evaluate_javascript(G.view, pre") && src.contains("setenv(\"GST_PLUGIN_FEATURE_RANK\", rank, 1)"));
+    assert!(make.contains("media-cap.h: media-cap.js") && make.contains("mediapolicy.h media-cap.h"));
+    // the cache limit: kept by the helper, checked when it arrives and after a page loaded, and only the disk cache is emptied
+    assert!(src.contains("case T_CACHE_LIMIT: set_cache_limit(&r)") && src.contains("enforce_cache_limit(0)") && src.contains("cl_over(dir, G.cache_limit_mb)"));
+    assert!(src.contains("webkit_website_data_manager_clear(m, WEBKIT_WEBSITE_DATA_DISK_CACHE, 0, NULL, NULL, NULL)") && src.contains("30 * G_USEC_PER_SEC"));
+}
+
+#[test]
+fn the_helper_starts_the_screen_portal_only_when_asked_passes_the_shells_feed_on_and_the_portal_answers_only_with_a_feed() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/webview/wpe-helper/");
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/");
+    let src = std::fs::read_to_string(format!("{dir}helper.c")).unwrap();
+    let portal = std::fs::read_to_string(format!("{dir}screenportal.c")).unwrap();
+    let make = std::fs::read_to_string(format!("{dir}Makefile")).unwrap();
+    let mk = std::fs::read_to_string(format!("{root}buildroot/package/iyakki-webview-helper/iyakki-webview-helper.mk")).unwrap();
+    let frag = std::fs::read_to_string(format!("{root}buildroot/configs/iyakki_web_screen.fragment")).unwrap();
+    let build = std::fs::read_to_string(format!("{root}buildroot/build.sh")).unwrap();
+    // the helper: only with IYAKKI_WEBVIEW_SCREEN=1, before the engine's processes, the bus address into the environment, the shell's path passed on
+    assert!(src.contains("getenv(\"IYAKKI_WEBVIEW_SCREEN\")") && src.contains("setenv(\"DBUS_SESSION_BUS_ADDRESS\", bus, 1)") && src.contains("portal_start();   /* the screen portal, before the engine's processes exist"));
+    assert!(src.contains("portal_feed(screen_path)") && src.contains("\"feed%s%s\\n\"") && src.contains("did not come up in six seconds"));
+    // the portal: the four methods, the person's allow is the shell's (Start needs a feed), nothing but the whole screen and no cursor
+    for m in ["CreateSession", "SelectSources", "Start", "OpenPipeWireRemote"] {
+        assert!(portal.contains(&format!("<method name='{m}'>")), "{m}");
+    }
+    assert!(portal.contains("!pp_may_start(feed_path) || start_pipeline() != 0") && portal.contains("queue_response(sender, req, 2, FALSE)") && portal.contains("\"org.freedesktop.portal.Desktop\""));
+    assert!(portal.contains("pipewiresink") && portal.contains("node.name=iyakki-screen") && portal.contains("sf_read(feed_path, last_seq, &f)"));
+    // built when it can (an image without PipeWire still builds), installed next to the helper, off in a release image until it has been run
+    assert!(make.contains("iyakki-screenportal: screenportal.c portalpure.h screenfeed.h") && mk.contains("-$(TARGET_MAKE_ENV) $(MAKE) $(TARGET_CONFIGURE_OPTS) -C $(@D) iyakki-screenportal"));
+    assert!(mk.contains("/usr/libexec/iyakki/iyakki-screenportal"));
+    assert!(frag.lines().any(|l| l == "BR2_PACKAGE_PIPEWIRE=y") && frag.lines().any(|l| l == "BR2_PACKAGE_PIPEWIRE_GSTREAMER=y"));
+    assert!(build.contains("WEB_SCREEN:-0") && build.contains("iyakki_web_screen.fragment"), "opt-in, default off");
 }

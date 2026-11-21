@@ -33,11 +33,11 @@ pub(super) struct MediaState {
 }
 
 /// What a media request needs: the shared parts, this session's number, the person and the device.
-struct Ctx {
-    host: Arc<MediaHost>,
-    session: u64,
-    person: String,
-    dev: Device,
+pub(super) struct Ctx {
+    pub(super) host: Arc<MediaHost>,
+    pub(super) session: u64,
+    pub(super) person: String,
+    pub(super) dev: Device,
 }
 
 impl Session<'_> {
@@ -78,7 +78,7 @@ impl Session<'_> {
         }
     }
 
-    fn decide_cap(&self, c: &Ctx, cap: &str, unit: Option<&str>, label: &str) -> Result<(), Denial> {
+    pub(super) fn decide_cap(&self, c: &Ctx, cap: &str, unit: Option<&str>, label: &str) -> Result<(), Denial> {
         let caller = Caller { app: "client".into(), kind: CallerKind::Client { device_id: c.dev.id.clone() }, person: c.person.clone(), device: c.dev.name.clone() };
         self.ep.broker.decide(&Call { caller: &caller, capability: cap, unit, label })
     }
@@ -252,6 +252,10 @@ impl Session<'_> {
     /// A binary message from the client: the microphone or camera it offered. With no consumer on the instance yet the data is checked and
     /// dropped.
     pub(super) fn client_binary(&mut self, data: &[u8]) {
+        // a chunk of a file the client is uploading (files.rs)
+        if let Some((proto::STREAM_FILE_IN, payload)) = proto::split_binary(data) {
+            return self.file_chunk(payload);
+        }
         let Some(host) = self.ep.media.clone() else { return self.complain(ErrorCode::Unsupported, "binary messages to the instance are not used yet") };
         let (Some((session, _)), Some(_)) = (self.open.as_ref().map(|(i, k)| (*i, k.clone())), self.person.as_ref()) else { return self.complain(ErrorCode::NotSignedIn, "sign in first") };
         let kind = match proto::split_binary(data) {

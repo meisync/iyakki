@@ -149,6 +149,15 @@ impl CameraHub {
         Busy(self)
     }
 
+    /// The mark of [`CameraHub::begin`] without a guard borrowing the hub (the trait object and the socket carry no lifetimes): set, and cleared by [`CameraHub::busy_clear`].
+    pub fn busy_set(&self, user: &str, what: &str) {
+        *self.busy.lock().unwrap_or_else(|e| e.into_inner()) = Some((user.to_string(), what.to_string()));
+    }
+
+    pub fn busy_clear(&self) {
+        *self.busy.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
     /// What the assistant is doing with the camera right now (`None`: nothing). The shell shows it on every screen.
     pub fn in_use(&self) -> Option<String> {
         if let Some((_, what)) = self.busy.lock().unwrap_or_else(|e| e.into_inner()).clone() {

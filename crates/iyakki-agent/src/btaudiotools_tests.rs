@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 
 use crate::agent::{Risk, ToolDef, Tools};
 use crate::btaudiotools::*;
-use iyakki_devctl::a2dp::{AudioControl, AudioDeviceView, AudioState, AudioView};
-use iyakki_devctl::bthid::{DeviceView, Devices, LinkState};
+use iyakki_core_local::devctl::a2dp::{AudioControl, AudioDeviceView, AudioState, AudioView};
+use iyakki_core_local::devctl::bthid::{DeviceView, Devices, LinkState};
 
 struct Base;
 impl Tools for Base {
@@ -150,7 +150,7 @@ fn disconnect_and_pairing_act_and_the_pairing_card_says_who_answers_the_number()
 
 #[test]
 fn the_keys_of_a_phone_change_the_volume_and_the_player_only_when_something_can_change_and_clearing_stops_them() {
-    use iyakki_devctl::avrcp::{Act, MediaKey};
+    use iyakki_core_local::devctl::avrcp::{Act, MediaKey};
     struct Off;
     impl iyakki_proxy::Upstream for Off {
         fn request(&self, _: &str, _: &str, _: &[(String, String)], _: &[u8]) -> Result<iyakki_proxy::UpstreamResponse, String> {
@@ -197,17 +197,17 @@ fn the_keys_of_a_phone_change_the_volume_and_the_player_only_when_something_can_
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let s2 = seen.clone();
     install_remote(&svc, "alice", move |who, what| s2.lock().unwrap().push(format!("{who}: {what}")));
-    iyakki_devctl::a2dp_sys::run_remote_for_test(Act::SetPercent(30));
+    iyakki_core_local::devctl::a2dp_sys::run_remote_for_test(Act::SetPercent(30));
     assert_eq!(svc.master().percent, 30);
     assert_eq!(seen.lock().unwrap().as_slice(), ["alice: bluetooth.remote volume 30"]);
     clear_remote();
-    iyakki_devctl::a2dp_sys::run_remote_for_test(Act::SetPercent(90));
+    iyakki_core_local::devctl::a2dp_sys::run_remote_for_test(Act::SetPercent(90));
     assert_eq!(svc.master().percent, 30, "after sign-out the keys change nothing");
 }
 
 // ---------------------------------------------------------------------------------------------- sending sound to headphones
 
-use iyakki_devctl::a2dp_send::{SendControl, SendView};
+use iyakki_core_local::devctl::a2dp_send::{SendControl, SendView};
 
 #[derive(Default)]
 struct FakeSend {
@@ -295,4 +295,22 @@ fn no_headphones_two_headphones_and_a_refusing_speaker_each_say_why() {
     // without a sending side the tools say so instead of failing oddly
     let (t, _) = rig(vec![dev("AA:BB:CC:DD:EE:05", "Buds", "headphones")], None, true);
     assert!(t.call("bluetooth_audio_send_start", &json!({})).unwrap_err().contains("not available here"));
+}
+
+#[test]
+fn the_last_headphones_are_remembered_to_break_the_tie_between_two_paired_sinks_and_stopping_forgets_them() {
+    let dir = std::env::temp_dir().join(format!("iyakki-btmem-{}-remember", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("bluetooth-sink.json");
+    let two = vec![dev("AA:BB:CC:DD:EE:05", "Buds", "headphones"), dev("AA:BB:CC:DD:EE:06", "Boom", "speaker")];
+    let t = send_rig(two.clone(), Arc::new(FakeSend::default())).with_memory(file.clone());
+    assert!(t.refusal("bluetooth_audio_send_start", &json!({})).unwrap().contains("more than one"));
+    t.call("bluetooth_audio_send_start", &json!({"device": "boom", "mute_speakers": false})).unwrap();
+    assert_eq!(t.remembered(), Some(("AA:BB:CC:DD:EE:06".into(), false)));
+    // a new process (a new tool object) meant the same speaker without being told
+    let again = send_rig(two, Arc::new(FakeSend::default())).with_memory(file.clone());
+    assert!(again.preview("bluetooth_audio_send_start", &json!({})).unwrap().contains("“Boom”"));
+    t.call("bluetooth_audio_send_stop", &json!({})).unwrap();
+    assert!(t.remembered().is_none() && !file.exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }

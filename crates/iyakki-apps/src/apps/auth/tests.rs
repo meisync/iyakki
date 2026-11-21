@@ -125,7 +125,7 @@ impl Fx {
         crate::ui::set_from_click(false);
     }
     fn audit(&self) -> String {
-        std::fs::read_to_string(self.cx.audit.path()).unwrap_or_default()
+        std::fs::read_to_string(self.cx.audit.path_buf()).unwrap_or_default()
     }
     /// Whether the audit log has a line of this action with this detail.
     fn logged(&self, event: &str, detail: &str) -> bool {

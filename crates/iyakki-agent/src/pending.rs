@@ -690,12 +690,7 @@ pub fn run_check(command: &str, cwd: &str) -> (bool, String) {
         Ok(f) => f,
         Err(e) => return (false, format!("could not run the check: {e}")),
     };
-    let mut cmd = std::process::Command::new("sh");
-    cmd.arg("-c").arg(command).stdin(std::process::Stdio::null()).stdout(out).stderr(err);
-    if Path::new(cwd).is_dir() {
-        cmd.current_dir(cwd);
-    }
-    let mut child = match cmd.spawn() {
+    let mut child = match iyakki_core_local::starters::shell_line_spawn(command, cwd, out, err) {
         Ok(c) => c,
         Err(e) => {
             let _ = fs::remove_file(&log);

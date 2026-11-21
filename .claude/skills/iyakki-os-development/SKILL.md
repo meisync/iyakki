@@ -55,6 +55,12 @@ Everything goes through the IYAKKI core (owner, 2026-11-14): the app layer never
 9. Tests must not read the real HOME without a `// home-ok: why` comment.
 10. A fix to a security tightening must not lock a person out: when home folders were made private, accounts with no passwd entry lost access to their own home. Check both sides of an ownership change.
 
+### Unit test practice: lock what is shared, release it when the test is done (owner 2026-11-19)
+- Any test that touches a resource shared by the whole test process (environment variables, current folder, a process-wide hook or override, the audio mixer, input state, the clipboard, the cluster, a fixed port, a clock override) takes a named lock first, with `iyakki_testkit` (a guard that tolerates poisoning), and holds it only as long as the test needs the resource.
+- Release the lock, and give the resource back, as soon as the test is done or no longer needs it: let the guard drop at the end of the test, or earlier in an inner block. Restore what you changed (environment, hooks, overrides) in the guard's drop, so a failing test cannot leave it set for the next one.
+- Never rely on tests running in a lucky order or on a sleep; use one lock for each kind of resource so unrelated tests still run in parallel. Do not hold two locks in different orders in different tests.
+- The helpers, the rules and the flake hunter are in `docs/development/FLAKY-TESTS.md`; the ratchet `flaky_pattern_ratchet` only lets the risky patterns shrink.
+
 ## 7. Building, testing and pushing an image
 1. Signed images need the Secure Boot key and certificate in `IYAKKI_SB_KEY` and `IYAKKI_SB_CERT` (kept outside the repo); an unsigned build is refused by a device that expects signed ones, so set them on every repack and lean-image build.
 2. `dist/buildroot/nightly-push.sh -o PACKDIR --version V [--layers]` builds the program, repacks, makes the lean image and an update pack, boots it in QEMU through the real chain and prints the update commands. It never sends anything to a device. The version label must sort above the one on the device (a plain `1113a` looks older than `0.1.0-alpha.2`); the first push to a device must be an ordinary pack, not a layered one.
@@ -77,3 +83,8 @@ Everything goes through the IYAKKI core (owner, 2026-11-14): the app layer never
 
 ## 10. Quick start for a change
 1. Read the row(s) in `FEATURES.md` and the plan docs named in their Notes. 2. Write the failing test, then the code. 3. Add the chat tool and its approval, reachability and routing entries. 4. Update the row, run the matrix script, add or fix the KI. 5. Run the checks in section 5. 6. Commit, bundle or push to the working remote, and say what you could not verify.
+
+## 11. Machine-made test evidence (`./run.sh autotest`)
+
+Test rises from runs, not from prose (docs/development/AUTOTEST.md). Scenarios live in `dist/autotest/scenarios/<ROW>.scn` (the dist/devtest format plus `row:`, `clause:`, `not-covered:`, `human:`, `feature-sha:` headers); evidence goes under `~/iyakki-work/autotest/` (never the repo) with one level per kind: qemu, browser, machine-NAME, human; never merge levels. Check a scenario with `./run.sh autotest --list` and `--dry-run`, run it with `--profile qemu --image BUILD_DIR --rows ID` (one run at a time, never while the gate runs). Then `python3 dist/features/migrate-impl-test.py --from-autotest DIR --image-commit SHA` (dry run; `--apply` writes). It raises Test only to 70, from two consecutive PASS runs on the image commit that cover every clause of the current Feature text; a non-empty `not-covered`, SKIP, BLOCKED, stale or flaky result raises nothing, and QEMU never sets 100 (switch off). Never edit a result by hand, never write `covered` for a clause the steps do not check, never put the evidence in the repo. A person's answers use the human schema (`dist/autotest/humanschema.py`).
+

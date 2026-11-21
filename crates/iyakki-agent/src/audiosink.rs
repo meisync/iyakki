@@ -196,7 +196,7 @@ impl Output {
             Imp::Stream(_) => Err("a sentence of a reading is complete when it is queued".into()),
             Imp::Cmd { child, stdin } => {
                 // the output's own volume, then IYAKKI's volume and mute (HDMI has no hardware volume)
-                let vol = self.volume as i32 * crate::audioout::global().gain() as i32 / 100;
+                let vol = self.volume as i32 * crate::audioout::output_state().gain() as i32 / 100;
                 let mut bytes = Vec::with_capacity(pcm.len() * 2);
                 for s in pcm {
                     bytes.extend_from_slice(&((*s as i32 * vol / 100) as i16).to_le_bytes());

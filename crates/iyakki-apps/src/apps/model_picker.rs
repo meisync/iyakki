@@ -201,7 +201,7 @@ pub(crate) fn build(cx: &AppCx, plain: Vec<(String, String)>, top: Option<TopRow
             }
             items.push((e.provider.clone(), String::new()));
             rows.push(MRow::Head(e.id.clone()));
-            for mi in cx.ext_status().models_for(agent.as_ref()) {
+            for mi in iyakki_shared::extagent::models_with(cx.ext_status().cli_models(&agent.as_ref().id()), agent.as_ref()) {
                 if cur_agent == Some(e.id.as_str()) && cur_model == Some(mi.id.as_str()) {
                     chosen_at = Some(items.len());
                 }

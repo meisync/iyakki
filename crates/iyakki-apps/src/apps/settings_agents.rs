@@ -115,7 +115,7 @@ impl SettingsApp {
                 Err(_) => self.fail("The system vault is locked or empty. Add the key in Settings → Vault first."),
             },
             Key::Char('m') => {
-                let items = model_items(&cx.ext_status(), agent.as_ref());
+                let items = model_items(&*cx.ext_status(), agent.as_ref());
                 self.modal = Some(Modal::Pick(PickKind::AgentModel(id.clone()), Picker::new(&format!("Model for {label}"), items)));
             }
             Key::Char('a') => {
@@ -281,7 +281,7 @@ impl SettingsApp {
                 self.open_form(FormKind::AgentModel(id.clone()), f);
                 return true;
             }
-            let Some(mi) = cx.ext_status().models_for(agent.as_ref()).into_iter().find(|m| model_item(m) == item) else { return true };
+            let Some(mi) = iyakki_shared::extagent::models_with(cx.ext_status().cli_models(&agent.as_ref().id()), agent.as_ref()).into_iter().find(|m| model_item(m) == item) else { return true };
             self.save_model(cx, id, &mi.id);
             return true;
         }
@@ -334,7 +334,7 @@ impl SettingsApp {
                 let key = cfg.cfg_of(&id).filter(|c| !c.1.is_empty()).and_then(|c| svc.secrets().resolve(&c.1, None).ok());
                 let agent: std::sync::Arc<dyn ExternalAgent> = std::sync::Arc::from(agent);
                 let ws = std::env::temp_dir();
-                self.start("testing", move || JobOut::Msg(test_agent(&svc.ext_status(), svc.extagent_facet(), agent, &ws, key)));
+                self.start("testing", move || JobOut::Msg(test_agent(&*svc.ext_status(), svc.extagent_facet(), agent, &ws, key)));
             }
             ConfirmKind::CheckModels(id) if self.admin(cx) => {
                 let (svc, id) = (Self::svc(cx).clone(), id.clone());
@@ -399,7 +399,7 @@ impl SettingsApp {
             y += 6.0 * s;
             let fix = cache.get(&id).map(|s| s.fix).unwrap_or_default();
             let cur = ag.cfg_model();
-            let models = cache.models_for(ag.as_ref());
+            let models = iyakki_shared::extagent::models_with(cache.cli_models(&ag.id()), ag.as_ref());
             let src = models.first().map_or("", |m| m.source.label());
             let list = models.iter().map(|m| if m.id == cur { format!("[{}]", m.label.split(" (").next().unwrap_or(&m.label)) } else { m.label.split(" (").next().unwrap_or(&m.label).to_string() }).collect::<Vec<_>>().join(" · ");
             let t = g.fit(13.0 * s, &format!("Models ({src}, press m): {list}"), Face::Sans, a.w);
@@ -456,8 +456,8 @@ fn model_item(m: &iyakki_extagentx::ModelInfo) -> String {
     format!("{}{}  [{}]{}", m.label, if m.note.is_empty() { String::new() } else { format!(" — {}", m.note) }, m.source.label(), if m.available == Some(false) { " not available on your plan" } else { "" })
 }
 
-fn model_items(status: &extagent::StatusCache, agent: &dyn ExternalAgent) -> Vec<String> {
-    let mut v: Vec<String> = status.models_for(agent).iter().map(model_item).collect();
+fn model_items(status: &dyn iyakki_agent_api::ExtStatusApi, agent: &dyn ExternalAgent) -> Vec<String> {
+    let mut v: Vec<String> = iyakki_shared::extagent::models_with(status.cli_models(&agent.id()), agent).iter().map(model_item).collect();
     v.push("Custom model id…".into());
     v
 }
@@ -472,7 +472,7 @@ fn cli_id(agent: &str) -> Option<&'static str> {
 }
 
 /// The test button: the version, the sign-in status, then one tiny request through the same machinery a chat uses.
-fn test_agent(status: &extagent::StatusCache, runner: std::sync::Arc<dyn iyakki_agent_api::ExtAgentFacet>, agent: std::sync::Arc<dyn ExternalAgent>, ws: &std::path::Path, key: Option<zeroize::Zeroizing<String>>) -> Result<String, String> {
+fn test_agent(status: &dyn iyakki_agent_api::ExtStatusApi, runner: std::sync::Arc<dyn iyakki_agent_api::ExtAgentFacet>, agent: std::sync::Arc<dyn ExternalAgent>, ws: &std::path::Path, key: Option<zeroize::Zeroizing<String>>) -> Result<String, String> {
     let st = extagent::detect(agent.as_ref(), crate::agent().exec().system().as_ref(), ws);
     status.set(&agent.id(), st.clone());
     if !st.ready() {

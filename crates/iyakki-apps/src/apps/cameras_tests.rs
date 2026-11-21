@@ -49,7 +49,7 @@ fn usb_cameras_come_from_the_shared_camera_module_one_per_physical_camera_and_op
     let cx = admin_cx("cams-usb");
     let (_m, op, u) = usb("cams-usb", false);
     let hub = hub_with(&cx, u);
-    let src = ShellCameras { hub: hub.clone(), who: who_for(&cx) };
+    let src = ShellCameras::new(hub.clone(), who_for(&cx));
     let list = api::CameraSource::cameras(&src);
     assert_eq!(list.len(), 1, "the picture node and the metadata node are one camera");
     assert_eq!((list[0].name.as_str(), list[0].kind, list[0].address.as_str()), ("HD Webcam", api::Kind::Usb, ""));
@@ -68,7 +68,7 @@ fn usb_cameras_come_from_the_shared_camera_module_one_per_physical_camera_and_op
 fn a_yuyv_only_camera_is_snapshotted_through_the_encoder() {
     let cx = admin_cx("cams-yuyv");
     let (_m, _op, u) = usb("cams-yuyv", true);
-    let src = ShellCameras { hub: hub_with(&cx, u), who: who_for(&cx) };
+    let src = ShellCameras::new(hub_with(&cx, u), who_for(&cx));
     let id = api::CameraSource::cameras(&src)[0].id.clone();
     frame_of(&src, &id, false);
     let p = api::CameraSource::snapshot(&src, &id).unwrap();
@@ -101,11 +101,11 @@ fn the_tile_shows_the_red_band_for_the_usb_camera_and_a_network_camera_goes_live
         g.clear_hits();
         app.render(&mut g, R::new(0.0, 46.0, 1200.0, 654.0), 1.0, &cx, tick);
         tick += 20;
-        let live = iyakki_tile_api::cameras::CameraSource::cameras(&ShellCameras { hub: hub.clone(), who: who_for(&cx) }).iter().filter(|c| c.status == api::Status::Live).count();
+        let live = iyakki_tile_api::cameras::CameraSource::cameras(&ShellCameras::new(hub.clone(), who_for(&cx))).iter().filter(|c| c.status == api::Status::Live).count();
         if live == 2 {
             break;
         }
-        assert!(t.elapsed() < Duration::from_secs(12), "not both live: {:?}", iyakki_tile_api::cameras::CameraSource::cameras(&ShellCameras { hub: hub.clone(), who: who_for(&cx) }).iter().map(|c| (c.name.clone(), c.status.clone())).collect::<Vec<_>>());
+        assert!(t.elapsed() < Duration::from_secs(12), "not both live: {:?}", iyakki_tile_api::cameras::CameraSource::cameras(&ShellCameras::new(hub.clone(), who_for(&cx))).iter().map(|c| (c.name.clone(), c.status.clone())).collect::<Vec<_>>());
         std::thread::sleep(Duration::from_millis(30));
     }
     assert!(app.inner().privacy_banner_shown(), "the USB camera is on the screen, so the band is");
@@ -173,7 +173,7 @@ fn recording_through_the_shell_keeps_its_key_in_the_owners_vault_shows_the_red_s
     let cx = admin_cx("cams-rec");
     let cam = FakeCamera::rtsp(Config { user: Some(("admin".into(), "pw-12345".into())), digest: true, frames: vec![JPG.to_vec()], interval_ms: 20, ..Default::default() });
     let hub = hub_with(&cx, Arc::new(iyakki_shared::cameras::NoUsb));
-    let src = ShellCameras { hub: hub.clone(), who: who_for(&cx) };
+    let src = ShellCameras::new(hub.clone(), who_for(&cx));
     let id = api::CameraSource::save(&src, None, &api::NewCam { name: "Front door".into(), address: format!("rtsp://127.0.0.1:{}/live", cam.port), user: "admin".into(), allowed: vec![] }, Some("pw-12345")).unwrap();
     let data = cx.data_dir().to_path_buf();
     // off by default: no mark, no sign, no key, nothing contacted
@@ -212,7 +212,7 @@ fn motion_through_the_shell_keeps_the_key_in_the_owners_vault_shows_the_red_sign
     let hub = hub_with(&cx, Arc::new(iyakki_shared::cameras::NoUsb));
     let motion = iyakki_agent::camsource::motion_from(&iyakki_agent::services::Services::from_handle(&cx.services), &hub_for(&cx));
     assert!(motion.has_sink(), "alerts go to the inbox");
-    let src = ShellCameras { hub: hub.clone(), who: who_for(&cx) };
+    let src = ShellCameras::new(hub.clone(), who_for(&cx));
     let id = api::CameraSource::save(&src, None, &api::NewCam { name: "Front door".into(), address: "rtsp://127.0.0.1:9/live".into(), user: "admin".into(), allowed: vec![] }, Some("pw-12345")).unwrap();
     let data = cx.data_dir().to_path_buf();
     // off by default: no key, no sign, no mark

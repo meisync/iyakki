@@ -17,7 +17,7 @@
 //! block list in the core image's first sector.
 
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::fs::FileExt;
+use crate::posix::FileExt;
 use std::time::Instant;
 
 use iyakki_storage::gpt::{self, Entry, Guid, Table};

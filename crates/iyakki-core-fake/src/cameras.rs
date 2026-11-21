@@ -305,6 +305,15 @@ impl Cameras for FakeCameras {
         Ok(Some(f))
     }
 
+    fn listen(&self, user: &str, view: &str, camera: &str) -> Result<Option<iyakki_core_api::cameras::CamSound>, String> {
+        let mut s = lock(&self.st);
+        let v = mine(&mut s, user, view)?;
+        if !v.cameras.iter().any(|c| c == camera) {
+            return Err(NOT_YOURS.into());
+        }
+        Err(iyakki_core_api::cameras::NO_VIEW_SOUND.into())
+    }
+
     fn overlay(&self, user: &str, view: &str, camera: &str) -> Result<Overlay, String> {
         let mut s = lock(&self.st);
         let v = mine(&mut s, user, view)?;
@@ -493,6 +502,18 @@ mod tests {
         assert!(f.list("eve", "app").is_empty());
         assert_eq!(f.open("bob", "app", &spec(&["yard"])).unwrap_err(), NOT_YOURS);
         assert_eq!(f.open("bob", "app", &spec(&["nothing"])).unwrap_err(), NOT_YOURS, "the same words for a camera that is not there");
+    }
+
+    #[test]
+    fn an_embedded_view_carries_no_sound_and_another_persons_view_or_camera_is_refused_like_an_unknown_one() {
+        let f = rig();
+        let v = f.open("amy", "app", &spec(&["front"])).unwrap();
+        assert_eq!(f.listen("amy", &v.id, "front").unwrap_err(), iyakki_core_api::cameras::NO_VIEW_SOUND);
+        assert_eq!(f.listen("amy", &v.id, "yard").unwrap_err(), NOT_YOURS);
+        assert!(f.listen("bob", &v.id, "front").is_err());
+        let mut s = spec(&["front"]);
+        s.audio = true;
+        assert_eq!(f.open("amy", "app", &s).unwrap_err(), iyakki_core_api::cameras::NO_VIEW_SOUND);
     }
 
     #[test]

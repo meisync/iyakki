@@ -82,10 +82,11 @@ pub enum Preset {
     StoreNodePort,
     DnsService,
     WebServer,
+    MediaServer,
 }
 
 impl Preset {
-    pub const ALL: [Preset; 8] = [Preset::Ssh, Preset::RemoteDesktop, Preset::SharedFolders, Preset::K3sApi, Preset::NodePorts, Preset::StoreNodePort, Preset::DnsService, Preset::WebServer];
+    pub const ALL: [Preset; 9] = [Preset::Ssh, Preset::RemoteDesktop, Preset::SharedFolders, Preset::K3sApi, Preset::NodePorts, Preset::StoreNodePort, Preset::DnsService, Preset::WebServer, Preset::MediaServer];
     pub fn id(self) -> &'static str {
         match self {
             Preset::Ssh => "ssh",
@@ -96,6 +97,7 @@ impl Preset {
             Preset::StoreNodePort => "store",
             Preset::DnsService => "dns",
             Preset::WebServer => "web",
+            Preset::MediaServer => "media",
         }
     }
     pub fn label(self) -> &'static str {
@@ -108,6 +110,7 @@ impl Preset {
             Preset::StoreNodePort => "Private store (NodePort 30301)",
             Preset::DnsService => "Allow DNS service (port 53) to this machine",
             Preset::WebServer => "Web server (ports 80 and 443)",
+            Preset::MediaServer => "Media server (UPnP/DLNA)",
         }
     }
     pub fn explain(self) -> &'static str {
@@ -120,6 +123,7 @@ impl Preset {
             Preset::StoreNodePort => "Lets your local network reach the private app store's NodePort. This machine itself always can.",
             Preset::DnsService => "For a machine that runs a DNS server: lets your local network ask it (TCP and UDP 53). Looking names up from this machine always works without it.",
             Preset::WebServer => "For a machine that runs a web server: lets your local network open its web pages (TCP 80 and 443).",
+            Preset::MediaServer => "Lets TVs, phones and speakers on your local network find and play your shared audio and video (UDP 1900 to be found, TCP 8181-8190 to play). Only needed while the media server is on; the internet never reaches it.",
         }
     }
     pub fn from_id(s: &str) -> Option<Preset> {

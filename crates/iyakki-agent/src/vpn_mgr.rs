@@ -63,6 +63,8 @@ struct Applied {
     guard: bool,
     /// HYBRID with accounts chosen: the policy routing that is in place (taken out first when the tunnel goes).
     policy: Option<iyakki_vpn::policyroute::PolicyPlan>,
+    /// The dial hook of the core's clients is installed (name and URL rules mark their sockets).
+    dial_hook: bool,
     /// HYBRID: the forwarder state machine, the host routes it has made, and (when real sockets are on) the thread that serves it.
     fwd: Option<Arc<Mutex<Forwarder>>>,
     host_routes: Arc<Mutex<BTreeSet<IpAddr>>>,
@@ -636,6 +638,9 @@ impl Manager {
     }
 
     fn undo(&self, a: &Applied, drop_guard: bool) {
+        if a.dial_hook {
+            iyakki_proxy::dial::set_hook(None);
+        }
         if let Some(plan) = &a.policy {
             self.sys.remove_policy(plan);
         }
@@ -773,7 +778,7 @@ impl Manager {
         let guard_spec = self.guard_spec(p, &net, &ctx, &eps).map_err(|e| hard(e.to_string()))?;
         let dns_rules = !full && p.settings.filters.len() > p.settings.filters.nets().len();
         let dns_port = self.dns_io.map_or(DNS_PORT, |d| d.0);
-        let mut capture = if dns_rules { Some(plan::dns_capture(dns_port).map_err(|e| hard(e.to_string()))?) } else { None };
+        let capture = if dns_rules { Some(plan::dns_capture(dns_port).map_err(|e| hard(e.to_string()))?) } else { None };
         if !full {
             a.fwd = Some(Arc::new(Mutex::new(self.forwarder(p, &ctx, &pins))));
         }
@@ -809,19 +814,7 @@ impl Manager {
             self.sys.ip(&r.ip_args(true)).map_err(|e| soft(format!("could not add the route {}: {e}", r.dest)))?;
             a.routes.push(r.clone());
         }
-        if !full && !p.settings.policy_uids.is_empty() {
-            // F-VPN-08: the plan is applied only now that the tunnel is up; the LAN, the cluster and the servers are always left out
-            let include: Vec<Cidr> = p.settings.filters.nets().iter().filter(|(_, inc)| *inc).map(|(c, _)| *c).collect();
-            let mut exclude: Vec<Cidr> = net.lan.clone();
-            exclude.extend(ctx.cluster.iter().copied());
-            exclude.extend(pins.iter().map(|ip| host_cidr(*ip)));
-            let planned = iyakki_vpn::policyroute::plan_policy_routes(&iyakki_vpn::policyroute::PolicyInput { ifname: IFNAME, table: iyakki_vpn::policyroute::DEFAULT_TABLE, mark: iyakki_vpn::policyroute::DEFAULT_MARK, priority: iyakki_vpn::policyroute::DEFAULT_PRIORITY, include: &include, exclude: &exclude, uids: &p.settings.policy_uids });
-            match planned.map_err(|e| e.to_string()).and_then(|plan| self.sys.install_policy(&plan).map(|()| plan)) {
-                Ok(plan) => a.policy = Some(plan),
-                Err(e) if p.settings.fail_closed => return Err(hard(format!("the chosen accounts need policy routing: {e}"))),
-                Err(e) => rt_warnings.push(format!("the chosen accounts are not sent through the VPN: {e}")),
-            }
-        }
+        self.install_hybrid_policy(p, &net, &ctx, &pins, full, dns_rules, a, rt_warnings)?;
         if !dns.is_empty() {
             let cur = self.sys.read_resolv().unwrap_or_default();
             // never save our own file as "the original" (a crash left it behind)
@@ -831,23 +824,8 @@ impl Manager {
             a.resolv = true;
             self.sys.write_resolv(&plan::resolv_conf(&dns)).map_err(|e| soft(format!("could not set the VPN's DNS: {e}")))?;
         }
-        // the forwarder must be listening and answering before the redirect rule sends the machine's DNS to it
-        if let (Some(_), Some((port, mark))) = (&capture, self.dns_io) {
-            if let Err(e) = self.start_dns_loop(w, &ctx, a, port, mark) {
-                if p.settings.fail_closed {
-                    return Err(hard(format!("domain rules need the DNS forwarder: {e}")));
-                }
-                rt_warnings.push(format!("domain rules will not work: {e}"));
-                capture = None;
-            }
-        }
-        if let Some(c) = &capture {
-            match self.sys.install_dns_capture(c) {
-                Ok(()) => a.capture = true,
-                Err(e) if p.settings.fail_closed => return Err(hard(format!("domain rules need the DNS capture rule: {e}"))),
-                Err(e) => rt_warnings.push(format!("domain rules will not work: {e}")),
-            }
-        }
+        let allowed_all: Vec<Cidr> = w.peers.iter().flat_map(|p| p.allowed_ips.iter().copied()).collect();
+        self.install_dns_rules(p, &ctx, &w.dns, &w.addresses, &allowed_all, capture, a, rt_warnings)?;
         // the firewall may count the tunnel's own network as the local network (its setting "Networks of a connected VPN")
         let nets: Vec<String> = w.addresses.iter().map(|c| c.network()).map(|n| format!("{}/{}", n.addr, n.prefix)).collect();
         self.sys.tunnel_networks(&nets);
@@ -888,9 +866,7 @@ impl Manager {
             }
         }
         let full = p.settings.mode == Mode::Full;
-        if !full {
-            rt_warnings.push("domain rules are not used for OpenVPN profiles; address rules are".into());
-        }
+        let dns_rules = !full && p.settings.filters.len() > p.settings.filters.nets().len();
         let guard_spec = self.guard_spec(p, &net, &ctx, &eps).map_err(|e| hard(e.to_string()))?;
         if let Some(spec) = &guard_spec {
             self.sys.install_guard(spec).map_err(|e| hard(format!("not connected, because the guard could not be put in place first: {e}")))?;
@@ -901,7 +877,7 @@ impl Manager {
         }
         let mut proc = launcher.launch(&text, IFNAME).map_err(soft)?;
         drop(text);
-        let up = crate::vpn_openvpn::await_up(&mut *proc, &o.routes, o.redirect_gateway, full, &ctx);
+        let up = crate::vpn_openvpn::await_up_with(&mut *proc, &o.routes, o.redirect_gateway, full, full || dns_rules, &ctx);
         let checked = match up {
             Ok(c) => c,
             Err(e) => {
@@ -932,7 +908,9 @@ impl Manager {
             self.sys.ip(&r.ip_args(true)).map_err(|e| soft(format!("could not add the route {}: {e}", r.dest)))?;
             a.routes.push(r.clone());
         }
-        if !checked.dns.is_empty() {
+        // HYBRID: policy routing for the marked sockets, then the DNS forwarder and capture for the domain rules (as for WireGuard)
+        self.install_hybrid_policy(p, &net, &ctx, &pins, full, dns_rules, a, rt_warnings)?;
+        if full && !checked.dns.is_empty() {
             let cur = self.sys.read_resolv().unwrap_or_default();
             if cur.lines().next() != Some(plan::DNS_MARKER) {
                 self.sys.write_backup(&cur).map_err(soft)?;
@@ -940,18 +918,80 @@ impl Manager {
             a.resolv = true;
             self.sys.write_resolv(&plan::resolv_conf(&checked.dns)).map_err(|e| soft(format!("could not set the VPN's DNS: {e}")))?;
         }
+        if dns_rules {
+            let dns_port = self.dns_io.map_or(DNS_PORT, |d| d.0);
+            let capture = Some(plan::dns_capture(dns_port).map_err(|e| hard(e.to_string()))?);
+            a.fwd = Some(Arc::new(Mutex::new(self.forwarder(p, &ctx, &pins))));
+            self.install_dns_rules(p, &ctx, &checked.dns, &checked.addresses, &checked.allowed, capture, a, rt_warnings)?;
+        }
         let nets: Vec<String> = checked.addresses.iter().map(|c| c.network()).map(|n| format!("{}/{}", n.addr, n.prefix)).collect();
         self.sys.tunnel_networks(&nets);
         Ok(())
     }
 
+    /// HYBRID: policy routing for the chosen accounts and for the core's own marked sockets (name and URL rules), and the dial hook.
+    /// The same for a WireGuard and an OpenVPN profile.
+    #[allow(clippy::too_many_arguments)]
+    fn install_hybrid_policy(&self, p: &Profile, net: &crate::vpn_sys::NetInfo, ctx: &Context, pins: &[IpAddr], full: bool, dns_rules: bool, a: &mut Applied, rt_warnings: &mut Vec<String>) -> Result<(), Fail> {
+        // name and URL rules are decided by the application layer too (reader browser, HTTP client): their sockets carry the plan's mark
+        let app_sockets = !full && dns_rules;
+        if !full && (!p.settings.policy_uids.is_empty() || app_sockets) {
+            // F-VPN-08: the plan is applied only now that the tunnel is up; the LAN, the cluster and the servers are always left out
+            let include: Vec<Cidr> = p.settings.filters.nets().iter().filter(|(_, inc)| *inc).map(|(c, _)| *c).collect();
+            let mut exclude: Vec<Cidr> = net.lan.clone();
+            exclude.extend(ctx.cluster.iter().copied());
+            exclude.extend(pins.iter().map(|ip| host_cidr(*ip)));
+            let planned = iyakki_vpn::policyroute::plan_policy_routes(&iyakki_vpn::policyroute::PolicyInput { ifname: IFNAME, table: iyakki_vpn::policyroute::DEFAULT_TABLE, mark: iyakki_vpn::policyroute::DEFAULT_MARK, priority: iyakki_vpn::policyroute::DEFAULT_PRIORITY, include: &include, exclude: &exclude, uids: &p.settings.policy_uids, app_sockets });
+            match planned.map_err(|e| e.to_string()).and_then(|plan| self.sys.install_policy(&plan).map(|()| plan)) {
+                Ok(plan) => {
+                    if app_sockets {
+                        // from here the clients of the core open the sockets of chosen destinations through the helper or with the mark
+                        let sys = self.sys.clone();
+                        let hook = crate::tunnel_connect::dial_hook_with(p.settings.filters.clone(), plan.mark(), Arc::new(move |addr, mark, t| sys.marked_connect(addr, mark, t)));
+                        iyakki_proxy::dial::set_hook(Some(hook));
+                        a.dial_hook = true;
+                    }
+                    a.policy = Some(plan)
+                }
+                Err(e) if p.settings.fail_closed => return Err(hard(format!("the chosen accounts need policy routing: {e}"))),
+                Err(e) => rt_warnings.push(format!("the chosen accounts are not sent through the VPN: {e}")),
+            }
+        }
+        Ok(())
+    }
+
+    /// HYBRID with domain rules: the forwarder's socket loop and the capture rule that sends the machine's DNS to it. The same for a
+    /// WireGuard and an OpenVPN profile (`dns` are the tunnel's resolvers, `tunnel_addrs` its own addresses, `allowed` what it carries).
+    #[allow(clippy::too_many_arguments)]
+    fn install_dns_rules(&self, p: &Profile, ctx: &Context, dns: &[IpAddr], tunnel_addrs: &[Cidr], allowed: &[Cidr], mut capture: Option<plan::DnsCaptureSpec>, a: &mut Applied, rt_warnings: &mut Vec<String>) -> Result<(), Fail> {
+        // the forwarder must be listening and answering before the redirect rule sends the machine's DNS to it
+        if let (Some(_), Some((port, mark))) = (&capture, self.dns_io) {
+            if let Err(e) = self.start_dns_loop(dns, tunnel_addrs, allowed, ctx, a, port, mark) {
+                if p.settings.fail_closed {
+                    return Err(hard(format!("domain rules need the DNS forwarder: {e}")));
+                }
+                rt_warnings.push(format!("domain rules will not work: {e}"));
+                capture = None;
+            }
+        }
+        if let Some(c) = &capture {
+            match self.sys.install_dns_capture(c) {
+                Ok(()) => a.capture = true,
+                Err(e) if p.settings.fail_closed => return Err(hard(format!("domain rules need the DNS capture rule: {e}"))),
+                Err(e) => rt_warnings.push(format!("domain rules will not work: {e}")),
+            }
+        }
+        Ok(())
+    }
+
     /// Binds the forwarder's loopback sockets and starts serving them. Needs a DNS server in the profile that is reachable through
     /// the tunnel (a host route is added when its address is not inside the tunnel's own network) and at least one system resolver.
-    fn start_dns_loop(&self, w: &WgConfig, ctx: &Context, a: &mut Applied, port: u16, mark: Option<u32>) -> Result<(), String> {
-        let (servers, _) = check_dns(&w.dns.iter().map(|i| i.to_string()).collect::<Vec<_>>(), ctx).map_err(|e| e.to_string())?;
+    #[allow(clippy::too_many_arguments)]
+    fn start_dns_loop(&self, dns: &[IpAddr], tunnel_addrs: &[Cidr], allowed: &[Cidr], ctx: &Context, a: &mut Applied, port: u16, mark: Option<u32>) -> Result<(), String> {
+        let (servers, _) = check_dns(&dns.iter().map(|i| i.to_string()).collect::<Vec<_>>(), ctx).map_err(|e| e.to_string())?;
         let vpn = *servers.first().ok_or("the profile lists no DNS server for the tunnel names (add DNS = ... to the profile)")?;
-        let in_tunnel_net = w.addresses.iter().any(|c| c.network().contains_ip(vpn));
-        let allowed = w.peers.iter().any(|p| p.allowed_ips.iter().any(|c| c.contains_ip(vpn)));
+        let in_tunnel_net = tunnel_addrs.iter().any(|c| c.network().contains_ip(vpn));
+        let allowed = allowed.iter().any(|c| c.contains_ip(vpn));
         if !in_tunnel_net && !allowed {
             return Err(format!("the VPN's DNS server {vpn} is not inside the peer's AllowedIPs, so the tunnel would drop the questions"));
         }

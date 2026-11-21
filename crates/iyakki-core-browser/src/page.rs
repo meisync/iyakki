@@ -177,6 +177,7 @@ impl Pen {
                     }
                     self.y += size * 0.5;
                 }
+                Block::Mark { .. } => {}
                 Block::Rule => {
                     self.out.push(Line { y: self.y + 6.0, h: 12.0, runs: Vec::new(), rule: true, pre: false });
                     self.y += 14.0;
@@ -300,7 +301,7 @@ pub fn frame(i: &FrameIn) -> String {
                 if let Some(l) = r.link {
                     if l < i.link_count.min(MAX_LINK_ACTIONS) {
                         c.line(r.x, y + line.h - 2.0, r.x + r.w, y + line.h - 2.0, line_w, pal.link);
-                        c.hit(Rect::new(r.x, y, r.w, line.h), Hit { action: l as u32 + 1, name: r.text.clone(), role: Role::Link });
+                        c.hit(Rect::new(r.x, y, r.w, line.h), Hit { action: l as u32 + 1, name: r.text.clone(), role: Role::Link, ..Default::default() });
                     }
                 }
             }

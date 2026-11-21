@@ -16,7 +16,8 @@ pub struct ShellUsage(std::sync::Arc<dyn api::UsageSource>);
 
 impl ShellUsage {
     pub fn of(cx: &AppCx) -> ShellUsage {
-        ShellUsage(cx.b4().usage_source().expect("the agent core serves the usage log"))
+        // a core that does not serve the usage log to this program (the UI over the socket) shows no numbers
+        ShellUsage(cx.b4().usage_source().unwrap_or_else(|| std::sync::Arc::new(api::NoUsage)))
     }
 }
 

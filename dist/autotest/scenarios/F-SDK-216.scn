@@ -1,0 +1,8 @@
+# autotest pilot, batch A (2026-11-21). Written against the Feature text with sha 7cc7f26e1d1986ef; honest subset only: everything not checked is under not-covered.
+row: F-SDK-216
+targets: qemu
+profile: ram
+feature-sha: 7cc7f26e1d1986ef
+doc: the app_permissions_status chat tool answers without values
+human: chat-status | Ask the assistant what each app holds now and the last permission change told to it. Expect: A list of apps with permission names only, no values.
+not-covered: the app_permissions_status chat tool answers without values

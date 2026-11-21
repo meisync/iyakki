@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 /// The machine's accounts (`users.json`) as the service's authenticator. The store's own rules apply: Argon2id, one verification
 /// for unknown names too, a throttle per account after failures.
-pub struct ShellAuth(pub Arc<Mutex<UserStore>>);
+pub struct ShellAuth(pub iyakki_accounts::UsersRef);
 
 fn principal(name: &str, role: iyakki_sec::policy::Role, policy: iyakki_sec::policy::Policy) -> Principal {
     Principal { user: name.to_string(), role: role.name().to_string(), admin: role == iyakki_sec::policy::Role::Admin, policy }
@@ -34,11 +34,11 @@ impl Authenticator for ShellAuth {
     }
 }
 
-pub struct ShellAudit(pub Arc<AuditLog>);
+pub struct ShellAudit(pub Arc<dyn Fn(&str, &str, &str) + Send + Sync>);
 
 impl AuditSink for ShellAudit {
     fn record(&self, user: &str, event: &str, detail: &str) {
-        self.0.record(user, event, detail);
+        (self.0)(user, event, detail);
     }
 }
 
@@ -131,8 +131,9 @@ pub fn load(ask: &Ask) -> Result<webservice::config::Checked, String> {
 /// running system. The shell's own environment (`ShellEnv`) is turned into one of these ([`ServiceEnv::from_shell`]); a build without
 /// the shell makes one itself ([`ServiceEnv::headless`]). Nothing below this line knows which of the two it got.
 pub struct ServiceEnv {
-    pub store: Arc<Mutex<UserStore>>,
-    pub audit: Arc<AuditLog>,
+    pub store: iyakki_accounts::UsersRef,
+    /// Writes one line of the machine's audit log: `(person, event, detail)`.
+    pub audit: Arc<dyn Fn(&str, &str, &str) + Send + Sync>,
     pub services: Arc<iyakki_agent::services::Services>,
     pub host: Arc<dyn iyakki_agent::HostApi>,
 }
@@ -141,7 +142,7 @@ impl ServiceEnv {
     /// The same accounts, audit log, services and host the shell works over (one set of them on a machine).
     #[cfg(feature = "shell")]
     pub fn from_shell(env: &iyakki_shell::shell::ShellEnv) -> ServiceEnv {
-        ServiceEnv { store: env.store.clone(), audit: env.audit.clone(), services: iyakki_agent::services::Services::from_handle(&env.services), host: env.host.clone() }
+        ServiceEnv { store: env.store.clone(), audit: { let a = env.audit.clone(); Arc::new(move |u: &str, e: &str, d: &str| a.record(u, e, d)) }, services: iyakki_agent::services::Services::from_handle(&env.services), host: env.host.clone() }
     }
 }
 
@@ -177,9 +178,10 @@ impl ServiceEnv {
             iyakki_agent::clock::set_chosen_zone(&st.get().time.zone);
         }
         let store = UserStore::open(users).map_err(|e| format!("the accounts could not be read: {e}"))?;
-        let audit = Arc::new(AuditLog::new(audit));
-        audit.flush_notes();
-        Ok(ServiceEnv { store: Arc::new(Mutex::new(store)), audit, services, host })
+        let log = Arc::new(AuditLog::new(audit));
+        log.flush_notes();
+        let audit: Arc<dyn Fn(&str, &str, &str) + Send + Sync> = Arc::new(move |u: &str, e: &str, d: &str| log.record(u, e, d));
+        Ok(ServiceEnv { store: iyakki_accounts::UsersRef::of_store(&Arc::new(Mutex::new(store))), audit, services, host })
     }
 }
 
@@ -241,7 +243,7 @@ mod tests {
         let mut s = UserStore::open(&dir.join("users.json")).unwrap();
         s.add_local("ann", "ann-password-1", iyakki_sec::policy::Role::User).unwrap();
         s.add_local("root", "root-password-1", iyakki_sec::policy::Role::Admin).unwrap();
-        let auth = ShellAuth(Arc::new(Mutex::new(s)));
+        let auth = ShellAuth(iyakki_accounts::UsersRef::of_store(&Arc::new(Mutex::new(s))));
         let p = auth.login("ann", "ann-password-1").unwrap();
         assert_eq!((p.user.as_str(), p.role.as_str(), p.admin), ("ann", "user", false));
         assert!(auth.login("root", "root-password-1").unwrap().admin);

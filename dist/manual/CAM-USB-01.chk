@@ -1,0 +1,22 @@
+scenario: CAM-USB-01
+title: USB or built-in camera
+area: Camera
+rows: F-CAM-02, F-CAM-16, F-HW-03
+machines: any
+needs: person
+prereq: A camera is connected or built in.
+step: Open CAMERAS.
+expect: The camera is listed by name.
+clause: F-CAM-16.listed
+step: Open it and look at the live picture.
+expect: The picture shows what is in front of the camera, upright, smooth (about 15 pictures a second or more) and in natural colours.
+clause: F-CAM-02.live
+step: Take a snapshot.
+expect: A message says where the picture was saved and the file opens in Files.
+clause: F-CAM-02.snapshot
+step: Cover the lens, then uncover it.
+expect: The picture goes dark and returns; no error stays on screen.
+clause: F-HW-03.cover
+step: Close CAMERAS.
+expect: The camera's indicator light (if it has one) goes off.
+clause: F-CAM-02.light

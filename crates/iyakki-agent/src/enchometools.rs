@@ -27,8 +27,9 @@ pub const RECOVERY: &str = "encrypted_home_new_recovery_key";
 pub const ADMIN_SLOT: &str = "encrypted_home_set_admin_slot";
 pub const PLAN: &str = "encrypted_home_plan_move";
 pub const MOVE: &str = "encrypted_home_move_files";
+pub const EXPORT: &str = "encrypted_home_export_luks2";
 
-const ALL: [&str; 8] = [STATUS, CREATE, LOCK, UNLOCK, RECOVERY, ADMIN_SLOT, PLAN, MOVE];
+const ALL: [&str; 9] = [STATUS, CREATE, LOCK, UNLOCK, RECOVERY, ADMIN_SLOT, PLAN, MOVE, EXPORT];
 
 pub fn is_enchome_tool(n: &str) -> bool {
     ALL.contains(&n)
@@ -97,6 +98,7 @@ impl Tools for EncHomeTools {
         v.push(def(RECOVERY, "Make a new recovery key (the old one stops working). The person approves a card, types their password and sees the key once on the screen.", Risk::Ask, none.clone()));
         v.push(def(ADMIN_SLOT, "Allow (enable true) or remove (enable false) an optional administrator slot. With it an administrator can open the home and reset the password without data loss; without it only the person's password and recovery key can. The person approves a card and types the passwords into a form.", Risk::Ask, json!({"type": "object", "properties": {"enable": {"type": "boolean"}}, "required": ["enable"]})));
         v.push(def(PLAN, "Show what moving the existing home folder into an encrypted one would copy (files, size, free space needed). Changes nothing.", Risk::Safe, none.clone()));
+        v.push(def(EXPORT, "Export the LOCKED encrypted home as a standard LUKS2 file (opens with `cryptsetup luksOpen` and the same password on any Linux computer), written to the data folder, never over an existing file. The person approves a card, then types their password into a masked form. You never get the password, the volume key or the file's contents. Refused while the home is open (lock it first).", Risk::Ask, none.clone()));
         v.push(def(MOVE, "Move the existing files into a new encrypted home: copy, check every file with SHA-256, then switch; the old folder is kept until the person agrees to remove it. Opt-in: only when the person asks. The person approves a card, then types their password into a form that shows the plan first.", Risk::Ask, none));
         v
     }
@@ -113,6 +115,7 @@ impl Tools for EncHomeTools {
             CREATE => self.form_request(Request::Create, "create", "After the person types their sign-in password, a recovery key appears once; they must write it down and type it back before it counts as saved."),
             UNLOCK => self.form_request(Request::Unlock, "unlock", "The person can use the password, or the recovery key if the password no longer works."),
             RECOVERY => self.form_request(Request::ChangeRecovery, "recovery", "The old recovery key stops working as soon as the new one is made."),
+            EXPORT => self.form_request(Request::Export, "export", "The file is written once the person has typed the password; it is the home's encrypted data in the standard LUKS2 format."),
             MOVE => self.form_request(Request::Migrate, "move", "The form shows what will be copied first; nothing is touched until the person presses Move."),
             ADMIN_SLOT => {
                 let on = Self::enable(args)?;
@@ -138,6 +141,7 @@ impl Tools for EncHomeTools {
             LOCK => "Lock the encrypted home (unmount and close it)".into(),
             UNLOCK => "Open the encrypted home (you type your password or recovery key on the screen)".into(),
             RECOVERY => "Make a new recovery key for the encrypted home (the old one stops working)".into(),
+            EXPORT => "Export my locked encrypted home as a standard LUKS2 file (you type your password on the screen)".into(),
             MOVE => "Move my existing files into an encrypted home (copy, check every file, switch; the old folder is kept)".into(),
             ADMIN_SLOT => match Self::enable(args) {
                 Ok(true) => "Allow an administrator slot: an administrator password could then open my encrypted home".into(),
@@ -151,6 +155,7 @@ impl Tools for EncHomeTools {
     fn preview(&self, name: &str, args: &Value) -> Option<String> {
         match name {
             CREATE => Some("Settings, Encrypted home opens with a masked password box. A recovery key is then shown once; you type it back to confirm.\nAn encrypted folder protects your files if the computer or drive is lost or stolen while signed out. It does not protect a signed-in, unlocked computer. System files stay readable.\nThe assistant never sees the password or the key.".into()),
+            EXPORT => Some("A masked password box opens in Settings, Encrypted home. Your whole encrypted home is then copied, as it is (still encrypted), into one standard LUKS2 file in the data folder. The recovery key and the administrator slot are not part of it. The folder must be locked first.".into()),
             UNLOCK => Some("A masked box opens in Settings, Encrypted home. The assistant never sees what you type.".into()),
             RECOVERY => Some("The old recovery key stops working. A new one is shown once on your screen; you type it back to confirm.".into()),
             LOCK => Some("Your private folder is unmounted and closed. Close the apps and files that use it first.".into()),
@@ -241,7 +246,8 @@ impl Backend for RealBackend {
         let st = env.status(&self.user).state;
         match (r, st) {
             (Request::Create | Request::Migrate, State::Locked | State::Open | State::Damaged) => return Err("This account already has an encrypted home.".into()),
-            (Request::Unlock | Request::ChangeRecovery | Request::AdminSlotOn | Request::AdminSlotOff, State::NotSetUp) => return Err("There is no encrypted home yet; encrypted_home_create makes one.".into()),
+            (Request::Unlock | Request::ChangeRecovery | Request::AdminSlotOn | Request::AdminSlotOff | Request::Export, State::NotSetUp) => return Err("There is no encrypted home yet; encrypted_home_create makes one.".into()),
+            (Request::Export, State::Open) => return Err("The encrypted home is open; lock it first (encrypted_home_lock), then export.".into()),
             (Request::Unlock, State::Open) => return Err("The encrypted home is already open.".into()),
             _ => {}
         }

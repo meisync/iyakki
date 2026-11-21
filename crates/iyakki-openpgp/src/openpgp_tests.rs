@@ -71,3 +71,18 @@ fn the_big_number_power_is_right() {
     let r = Big::from_be(&[4]).modpow(&Big::from_be(&[13]), &Big::from_be(&[0x01, 0xf1]));
     assert_eq!(r.to_be(2), vec![0x01, 0xbd]);
 }
+
+#[test]
+fn comment_lines_before_a_block_are_ignored_and_several_blocks_join() {
+    let one = dearmor(KEY).unwrap();
+    let other = dearmor(OTHER_KEY).unwrap();
+    let mut file = b"# a note about where the keys came from\n".to_vec();
+    file.extend_from_slice(KEY);
+    file.extend_from_slice(b"\n# another note\n");
+    file.extend_from_slice(OTHER_KEY);
+    let both = dearmor(&file).unwrap();
+    assert_eq!(both, [one.clone(), other].concat());
+    assert_eq!(rsa_keys(&file).unwrap().len(), rsa_keys(KEY).unwrap().len() + rsa_keys(OTHER_KEY).unwrap().len());
+    // text with no block is returned as it is
+    assert_eq!(dearmor(b"plain").unwrap(), b"plain".to_vec());
+}

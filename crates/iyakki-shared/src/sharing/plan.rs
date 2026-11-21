@@ -34,7 +34,7 @@ fn link_local(c: &Cidr) -> bool {
 
 /// Can this interface carry shared internet at all (by kind)?
 pub fn shareable_kind(k: LinkKind) -> bool {
-    matches!(k, LinkKind::Ethernet | LinkKind::Usb | LinkKind::Thunderbolt | LinkKind::Wifi)
+    matches!(k, LinkKind::Ethernet | LinkKind::Usb | LinkKind::Thunderbolt | LinkKind::Wifi | LinkKind::BluetoothNap)
 }
 
 /// Is the interface free to be given to other computers? `Err` is the reason in a few words.
@@ -44,6 +44,10 @@ pub fn free_for_sharing(i: &IfaceInfo) -> Result<(), ShareError> {
     }
     // a Wi-Fi interface is only ever shared as the hotspot this computer made itself, never a client interface
     if i.kind == LinkKind::Wifi && i.name != crate::wifi_ap::AP_IFACE {
+        return Err(ShareError::NotShareable(i.name.clone()));
+    }
+    // likewise the Bluetooth access point is only ever the one this computer made itself
+    if i.kind == LinkKind::BluetoothNap && i.name != iyakki_devctl::BT_NAP_IFACE {
         return Err(ShareError::NotShareable(i.name.clone()));
     }
     if i.default_route || i.cidrs.iter().any(|c| !link_local(c)) {
@@ -109,14 +113,18 @@ pub fn make_plan(ifs: &[IfaceInfo], req: &Request, wifi_ap: bool, resolvers: &[I
         return Err(ShareError::BadHours);
     }
     // a hotspot request: the access point is made by the service when it starts, so it is planned as if it were already there
+    if req.wifi && req.nap {
+        return Err(ShareError::NotShareable("a Wi-Fi hotspot and a Bluetooth access point together".into()));
+    }
     let (with_ap, req_ap);
-    let (ifs, req) = if req.wifi {
+    let (ifs, req) = if req.wifi || req.nap {
+        let (name, kind) = if req.wifi { (crate::wifi_ap::AP_IFACE, LinkKind::Wifi) } else { (iyakki_devctl::BT_NAP_IFACE, LinkKind::BluetoothNap) };
         let mut v = ifs.to_vec();
-        if !v.iter().any(|i| i.name == crate::wifi_ap::AP_IFACE) {
-            v.push(IfaceInfo::new(crate::wifi_ap::AP_IFACE, LinkKind::Wifi));
+        if !v.iter().any(|i| i.name == name) {
+            v.push(IfaceInfo::new(name, kind));
         }
         with_ap = v;
-        req_ap = Request { via: Some(crate::wifi_ap::AP_IFACE.into()), ..req.clone() };
+        req_ap = Request { via: Some(name.into()), ..req.clone() };
         (&with_ap[..], &req_ap)
     } else {
         (ifs, req)
@@ -142,7 +150,10 @@ pub fn make_plan(ifs: &[IfaceInfo], req: &Request, wifi_ap: bool, resolvers: &[I
     if down.kind == LinkKind::Other {
         return Err(ShareError::NotShareable(down.name.clone()));
     }
-    down.kind.probe(wifi_ap)?;
+    // the service checks that the Bluetooth access point can be made before it makes it (`Os::nap_available`)
+    if !(req.nap && down.kind == LinkKind::BluetoothNap) {
+        down.kind.probe(wifi_ap)?;
+    }
     // the internet connection
     let up: &IfaceInfo = match &req.uplink {
         Some(u) => {
@@ -168,7 +179,7 @@ pub fn make_plan(ifs: &[IfaceInfo], req: &Request, wifi_ap: bool, resolvers: &[I
     if r.is_empty() {
         r = FALLBACK_RESOLVERS.to_vec();
     }
-    Ok(Plan { uplink: up.name.clone(), down: down.name.clone(), net, isolate: req.isolate, allow_lan: req.allow_lan, idle_secs: u64::from(req.idle_hours) * 3600, resolvers: r, members: Vec::new(), pool: super::POOL_SIZE, kind: down.kind })
+    Ok(Plan { uplink: up.name.clone(), down: down.name.clone(), net, isolate: req.isolate, allow_lan: req.allow_lan, idle_secs: u64::from(req.idle_hours) * 3600, resolvers: r, members: Vec::new(), pool: if down.kind == LinkKind::BluetoothNap { super::POOL_SIZE.min(iyakki_devctl::bnep_nap::MAX_PHONES as u8) } else { super::POOL_SIZE }, kind: down.kind })
 }
 
 /// The administrator's policy applied to a plan: who may start through this kind, which interfaces, how many devices.

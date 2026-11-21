@@ -26,14 +26,14 @@ pub struct Local {
     pub abbrev: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct TType {
     off: i32,
     dst: bool,
     abbrev: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Rule {
     month: u32,
     week: u32,
@@ -41,13 +41,14 @@ struct Rule {
     secs: i32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Posix {
     std: TType,
     dst: Option<(TType, Rule, Rule)>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// A time zone as data: it travels over the UI socket (F-SPLIT-03) so the core computes in the zone the shell shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Zone {
     trans: Vec<(i64, usize)>,
     types: Vec<TType>,

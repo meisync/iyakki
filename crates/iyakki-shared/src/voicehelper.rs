@@ -2,7 +2,7 @@
 
 
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HelperState {
     /// Listening; the browser has not connected yet.
     Waiting,

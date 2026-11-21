@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use crate::agent::{hard_ask, Risk, ToolDef, Tools};
 use crate::bluetoothtools::*;
-use iyakki_devctl::bthid::{DeviceView, Devices, LinkState};
+use iyakki_core_local::devctl::bthid::{DeviceView, Devices, LinkState};
 
 struct Base;
 impl Tools for Base {
@@ -110,7 +110,7 @@ fn disconnect_and_forget_act_on_the_named_device_and_unknown_or_ambiguous_names_
 
 // ---- a phone's Bluetooth tethering
 
-use iyakki_devctl::bt_pan::{Tether, TetherState, TetherView};
+use iyakki_core_local::devctl::bt_pan::{Tether, TetherState, TetherView};
 
 struct FakeTether {
     view: Mutex<TetherView>,

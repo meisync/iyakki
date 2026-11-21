@@ -6,7 +6,7 @@
 //! * [`StoreUpdates`]: the periodic update check (its last answer, whether one is due, running one) and the setup wizards an install queued.
 //! * [`StoreCatalog`]: small questions about the store's own files (the private store card, the words of a permission, the stores on sticks, the
 //!   start of a new project).
-//! * [`StoreDrivers`]: the drivers of this machine (what the machine is, what is on offer, what is installed, a pack made from a folder or a file).
+//! * [`StoreDrivers`]: a driver pack made from a folder or a file (the reads of the machine are the core's `Os::drivers`).
 //! * [`StoreComponents`]: the system components of the pinned private stores (channel, last check, review, the approved install).
 //!
 //! The data types are the pure ones in `iyakki-shared` (`store_tilehub`, `store_updatecheck`, `store_compapply`, `store_wizardhook`).
@@ -17,7 +17,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use iyakki_drivers::{apply, Machine, Row};
 
 use iyakki_sec::policy::Policy;
 use iyakki_shared::store_compapply::{ApplyResult, Review, StoreLine};
@@ -57,7 +56,7 @@ pub trait StoreHub: Send + Sync {
 }
 
 /// A setup wizard an install or an update queued, with what it will ask and run in one line.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WizardLine {
     pub pending: Pending,
     /// The wizard's outline when the installed app still has it, otherwise empty.
@@ -92,7 +91,7 @@ pub trait StoreUpdates: Send + Sync {
 }
 
 /// The review of the system components of one store, bound to the channel it was made for.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ComponentReview {
     pub store: String,
     pub channel: String,
@@ -139,24 +138,10 @@ pub trait StoreComponents: Send + Sync {
 /// The most a driver file the person points at may hold (a pack made from a file is refused above it).
 pub const MAX_DRIVER_FILE: u64 = 16 * 1024 * 1024;
 
-/// The drivers of this machine (docs/MAC-HARDWARE.md): what the machine is, what the store offers for it, what is installed, and the pack
-/// text the normal install review takes for a folder or a file. The install itself goes through that review, never through this facet.
+/// The pack side of the drivers (docs/MAC-HARDWARE.md): the pack text the normal install review takes for a folder or a file. What the machine is,
+/// what is on offer, what is installed and whether one is off are the core's reads (`Os::drivers`, F-ARCH-05), not this facet's. The install
+/// itself goes through that review, never through this facet.
 pub trait StoreDrivers: Send + Sync {
-    fn machine(&self) -> Machine {
-        Machine::default()
-    }
-    /// The "Drivers for this machine" list (empty for a machine none of the entries applies to).
-    fn rows(&self) -> Vec<Row> {
-        Vec::new()
-    }
-    fn installed(&self) -> Vec<apply::Record> {
-        Vec::new()
-    }
-    /// Is the installed driver `id` set aside (turned off)?
-    fn is_disabled(&self, id: &str) -> bool {
-        let _ = id;
-        false
-    }
     /// The pack text and the names of the files taken from `dir` for driver `id` (the caller checked that the person may read `dir`).
     fn folder_package(&self, id: &str, dir: &Path, now: i64) -> Result<(String, Vec<String>), String> {
         let _ = (id, dir, now);

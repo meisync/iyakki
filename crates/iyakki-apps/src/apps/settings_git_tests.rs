@@ -354,7 +354,7 @@ fn add_connection_opens_the_wizard_from_the_page_and_saves_a_row_with_the_token_
         draw(&mut a, &cx, w, h);
     }
     // not in the audit, the settings or any file under the services folder
-    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
     assert!(!audit.contains("FAKEFAKE"));
     let mut stack = vec![cx.data_dir().to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -445,7 +445,7 @@ fn test_edit_make_default_and_remove_work_on_the_selected_connection() {
     assert!(conns.get("home-gitea").is_none());
     assert!(!keys_of(&cx).conns().token_present(&iyakki_shared::gitconn::Connection { token_vault: "git.conn.home-gitea.token".into(), ..Default::default() }));
     // the audit names, not tokens
-    let log = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    let log = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
     for want in ["git.connect.add", "git.connect.default", "git.connect.test", "git.connect.remove"] {
         assert!(log.contains(want), "{want} in {log}");
     }

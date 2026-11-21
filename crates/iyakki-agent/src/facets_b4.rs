@@ -34,6 +34,7 @@ impl ServicesFacetB4 for ServicesB4 {
         let tools = if admin { Arc::new(crate::domainstools::DomainTools::new(tools, crate::domains::Manager::shared(svc, &env.user, audit_fn(env)))) as Arc<dyn Tools> } else { tools };
         let backend = crate::browsershort::FileBackend { data: svc.dir().to_path_buf(), user: env.user.clone(), audit: audit_fn(env) };
         let tools: Arc<dyn Tools> = Arc::new(crate::browsershort::ShortTools::new(tools, Arc::new(backend)));
+        let tools: Arc<dyn Tools> = Arc::new(crate::webacceltools::AccelTools::new(tools, Arc::new(crate::webacceltools::RealBackend { data: svc.dir().to_path_buf(), audit: audit_fn(env) }), &crate::webengine::safe_name(&env.user), admin));
         if admin {
             Arc::new(crate::webgraphicstools::GraphicsTools::new(tools, Arc::new(crate::webgraphicstools::RealBackend { data: svc.dir().to_path_buf(), audit: audit_fn(env) })))
         } else {
@@ -82,6 +83,7 @@ impl ServicesFacetB4 for ServicesB4 {
                 None => svc.router_project_verifier(std::path::Path::new("")),
             })
             .with_fleet(svc.router_fleet_runner(parts.os.clone(), parts.os.fleet(), audit_fn(env)));
+        crate::routertools::publish_registry(&be);
         Arc::new(crate::routertools::RouterTools::new(inner, Arc::new(be)).with_scope(&parts.scope))
     }
 
@@ -89,6 +91,7 @@ impl ServicesFacetB4 for ServicesB4 {
         let svc = &self.svc;
         let tools: Arc<dyn Tools> = Arc::new(crate::doctortools::DoctorTools::new(inner, Arc::new(crate::doctortools::RealBackend { svc: svc.clone(), policy: env.policy.clone(), user: env.user.clone(), audit_recent: env.audit_recent.clone() })));
         let tools: Arc<dyn Tools> = Arc::new(crate::sessionlogtools::SessionLogTools::new(tools, Arc::new(crate::sessionlogtools::RealBackend { svc: svc.clone(), policy: env.policy.clone(), user: env.user.clone(), audit: audit_fn(env) })));
+        let tools: Arc<dyn Tools> = Arc::new(crate::manualtools::ManualTools::new(tools, Arc::new(crate::manualtools::RealBackend::new(env.policy.clone(), &env.user, svc.dir(), audit_fn(env)))));
         let guest = env.role == Role::Guest;
         Arc::new(crate::lockscreentools::LockTools::new(tools, Arc::new(crate::lockscreentools::RealBackend { dir: svc.dir().to_path_buf(), user: env.user.clone(), guest, audit: audit_fn(env) })))
     }
@@ -188,9 +191,11 @@ impl ServicesFacetB4 for ServicesB4 {
         let Some(env) = crate::settingstools::Env::from_base(base) else { return Vec::new() };
         let mut out = Vec::new();
         out.extend(crate::settingstools_memory::entries(&env));
-        out.extend(crate::settingstools_ytdlp::entries(&env));
+        out.extend(crate::settingstools_ytdlp::entries_for(&env, Arc::new(crate::settingstools_ytdlp::RealLibrary { svc: self.svc.clone(), admin: env.admin })));
         out.extend(crate::settingstools_cast::entries(&env));
+        out.extend(crate::settingstools_datasci::entries(&env));
         out.extend(crate::settingstools_camtrust::entries(&env));
+        out.extend(crate::settingstools_alexa::entries(&env));
         out.extend(crate::settingstools_linux::entries(&env, linux));
         out.extend(crate::settingstools_access::entries(&env));
         out.extend(crate::settingstools_machine::entries(&env));
@@ -248,7 +253,7 @@ impl ServicesFacetB4 for ServicesB4 {
     }
     fn camera_source(&self, hub: Arc<dyn std::any::Any + Send + Sync>, who: Box<dyn std::any::Any + Send>) -> Option<Arc<dyn iyakki_tile_api::cameras::CameraSource>> {
         match (hub.downcast::<crate::cameras::Hub>(), who.downcast::<crate::cameras::Who>()) {
-            (Ok(hub), Ok(who)) => Some(Arc::new(crate::camsource::HubSource { hub, who: *who })),
+            (Ok(hub), Ok(who)) => Some(Arc::new(crate::camsource::HubSource::new(hub, *who))),
             _ => None,
         }
     }
@@ -274,10 +279,12 @@ impl ServicesFacetB4 for ServicesB4 {
             let limits = iyakki_shared::agent::RunLimits { approval_timeout: std::time::Duration::from_secs(1800), ..iyakki_shared::agent::RunLimits::default() };
             crate::agent::start_with(chat.clone(), tools, history, limits, crate::assistrun::Assist::off())
         });
+        // a cloud session (the switch on and a device connected) hears the device's microphone and answers through the device's speaker
+        let (audio, speaker) = crate::voiceassist_ports::cloud_ports(&svc).unwrap_or_else(|| (Box::new(crate::voiceassist_ports::RecorderAudio::new(recorders, svc.clone())), ServicesB1::system_speaker(&svc)));
         let ports = iyakki_shared::voiceassist::Ports {
-            audio: Box::new(crate::voiceassist_ports::RecorderAudio::new(recorders, svc.clone())),
+            audio,
             stt: ServicesB1::voice_stt(&svc),
-            speaker: ServicesB1::system_speaker(&svc),
+            speaker,
             agent: Box::new(crate::voiceassist_ports::RunAgent::new(&format!("{BASE_SYSTEM}{}", crate::voiceassisttools::PROMPT_RULE), start)),
             log: ServicesB1::voice_turn_log(&svc, &user),
         };
@@ -302,7 +309,7 @@ impl ServicesFacetB4 for ServicesB4 {
             secrets: Arc::new(crate::cameras::VaultCamSecrets(self.svc.clone())),
             people,
             usb,
-            h264: Arc::new(crate::cameras::NoH264),
+            h264: crate::camdecode::addon(),
             encode,
             after_save,
             audit,
@@ -344,7 +351,7 @@ impl ServicesFacetB4 for ServicesB4 {
 
     fn wrap_bluetooth_tools(&self, inner: Arc<dyn Tools>, env: &ChainEnv) -> Arc<dyn Tools> {
         if env.policy.manage_settings {
-            Arc::new(crate::bluetoothpair::BluetoothPairTools::real(Arc::new(crate::btaudiotools::BtAudioTools::real(Arc::new(crate::bluetoothtools::BluetoothTools::real(inner))))))
+            Arc::new(crate::bluetoothpair::BluetoothPairTools::real(Arc::new(crate::btaudiotools::BtAudioTools::real(Arc::new(crate::bluetoothtools::BluetoothTools::real(inner))).with_memory(self.svc.dir().join("bluetooth-sink.json")))))
         } else {
             inner
         }
@@ -423,6 +430,39 @@ impl iyakki_agent_api::HelpersB4 for RealHelpersB4 {
     }
     fn upnp_start_for(&self, data_dir: &std::path::Path, user: &str, audit: iyakki_agent_api::AuditLineB4) -> Result<String, String> {
         crate::upnp_serve::start_for(data_dir, user, audit)
+    }
+    fn cast_find(&self) -> Result<Vec<String>, String> {
+        crate::upnp_cast_desk::find()
+    }
+    fn cast_items(&self, user: &str) -> Vec<(String, String, bool)> {
+        crate::upnp_cast_desk::items(user)
+    }
+    fn cast_play(&self, user: &str, name: &str, item: &str) -> Result<String, String> {
+        crate::upnp_cast_desk::play(user, name, item)
+    }
+    fn cast_stop(&self, name: &str) -> Result<String, String> {
+        crate::upnp_cast_desk::stop(name)
+    }
+    fn cast_move(&self, name: &str, action: &str, secs: i64) -> Result<String, String> {
+        use crate::upnp_cast_desk::Move;
+        let m = match action {
+            "pause" => Move::Pause,
+            "resume" => Move::Resume,
+            "by" => Move::By(secs),
+            "to" => Move::To(u64::try_from(secs).map_err(|_| "a place to jump to is from 0 to 86399 seconds".to_string())?),
+            _ => return Err("the move is pause, resume, by or to".into()),
+        };
+        crate::upnp_cast_desk::control(name, m)
+    }
+    fn cast_progress(&self, name: &str) -> Result<(String, Option<u64>), String> {
+        crate::upnp_cast_desk::progress(name)
+    }
+    fn datasci_state(&self, data_dir: &std::path::Path) -> (String, String) {
+        let (c, t) = crate::datasci_run::state_text(data_dir, &iyakki_shared::datasci::PINS);
+        (c.to_string(), t)
+    }
+    fn datasci_verify(&self, data_dir: &std::path::Path, user: &str) -> Result<String, String> {
+        crate::datasci_run::verify_for(data_dir, user)
     }
     fn upnp_subscribers(&self, user: &str) -> (String, Vec<(String, String, i64)>) {
         let list = crate::upnp_serve::subscriptions_for(user);

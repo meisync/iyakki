@@ -191,7 +191,7 @@ fn the_display_is_drawn_without_stealing_focus_and_the_screen_stays_the_same() {
         assert_eq!((sh.screen_name(), sh.hits().len()), before, "{w}x{h}: same screen, same click regions");
         let s = scale_for(w, h);
         let r = crate::fnkeys::osd_rect(w as f32, h as f32, s, 40.0 * s, true);
-        let p = g.pm.pixel((r.x + 40.0 * s) as u32, (r.y + r.h / 2.0) as u32).unwrap();
+        let p = g.pm_mut().pixel((r.x + 40.0 * s) as u32, (r.y + r.h / 2.0) as u32).unwrap();
         assert!(p.blue() > 20, "{w}x{h}: the display is on the picture");
     }
 }

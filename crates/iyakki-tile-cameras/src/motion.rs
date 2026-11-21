@@ -539,7 +539,7 @@ impl MotionView {
         self.pic = Some(img);
         if let Some((_, pm)) = &self.pix {
             let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
-            g.pm.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(dw / iw, 0.0, 0.0, dh / ih, dx, dy), None);
+            g.pm_mut().draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(dw / iw, 0.0, 0.0, dh / ih, dx, dy), None);
         } else {
             g.text(pic.x + 12.0 * s, pic.y + pic.h / 2.0 - 8.0 * s, 13.0 * s, MUTED, "Waiting for a picture from the camera.", Face::Sans);
         }
@@ -675,7 +675,7 @@ impl MotionView {
             let tw = (w - list_w - 16.0 * s).min(pm.width() as f32 * 2.0 * s);
             let k = tw / pm.width() as f32;
             let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
-            g.pm.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(k, 0.0, 0.0, k, tx, area.y + 74.0 * s), None);
+            g.pm_mut().draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(k, 0.0, 0.0, k, tx, area.y + 74.0 * s), None);
             g.text(tx, area.y + 78.0 * s + pm.height() as f32 * k, 11.0 * s, DIM, "Thumbnail (areas under a privacy mask are black)", Face::Sans);
         }
         self.draw_note(g, area, s);

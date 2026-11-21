@@ -362,7 +362,7 @@ pub struct DashApp {
 }
 
 /// The accounts of this machine, for sharing: names from the user store, homes where the agent puts them.
-struct StorePeople(Arc<std::sync::Mutex<crate::accounts::UserStore>>);
+struct StorePeople(crate::accounts::UsersRef);
 
 impl People for StorePeople {
     fn exists(&self, name: &str) -> bool {
@@ -775,6 +775,8 @@ impl DashApp {
         self.data.clear();
         self.var_opts.clear();
         self.scroll = 0.0;
+        // a spoken request that names no dashboard means this one (D-GEMVOICE-40-NAMING)
+        self.env.dashboards().note_opened(&d.id);
         self.state.lock().unwrap_or_else(|e| e.into_inner()).load(d);
         self.sync();
         self.screen = Screen::Board;

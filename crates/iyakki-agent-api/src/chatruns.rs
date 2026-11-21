@@ -16,6 +16,7 @@ use crate::facets_b4::ChatRun;
 
 /// What a UI asks for when it starts a run: data only.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RunRequest {
     pub user: String,
     pub prompt: String,
@@ -29,10 +30,20 @@ pub struct RunRequest {
     pub workdir: Option<String>,
     /// An external coding agent chosen in the chat.
     pub ext: Option<String>,
+    /// The model chosen with the external agent (none: the one of its settings).
+    pub ext_model: Option<String>,
+    /// Continue a paused Autopilot series.
+    pub resume: bool,
     /// An Autopilot series toward the prompt as the goal.
     pub autopilot: bool,
     /// Approvals are answered by the run's own rules (Auto mode).
     pub auto_approve: bool,
+    /// The states a run reads, given by the name the core handed out when the UI attached them (an empty name: none). The core resolves a name for the
+    /// user who sent it only; the dashboard, the flow, the task list and the cluster of a workspace stay on their side of the socket until they move.
+    pub dash: Option<String>,
+    pub flows: Option<String>,
+    pub tasks: Option<String>,
+    pub cluster: Option<String>,
 }
 
 /// The core's way to build the tool chain and begin a run for a request (the real one is wired in `iyakki-compose`).

@@ -21,29 +21,28 @@ pub use iyakki_shared::power::{PowerSettings};
 pub use iyakki_shared::power::{ButtonAction, LidAction, Profile, SLEEP_CHOICES};
 use std::path::{Path, PathBuf};
 
+use iyakki_core_local::fanctl::Fan;
+
 pub use iyakki_shared::power::{Caps, Idle, PowerEnv, lid_step, button_press, idle_action, limits, sleep_listing, Lid, Do, FanCard};
 
 
 
 /// The fan control card, or `None` when this computer has no fan IYAKKI could run. `dir` is the settings folder the service reads.
 pub fn fan_card(env: &PowerEnv, dir: &Path) -> Option<FanCard> {
-    if !iyakki_drivers::fanservice::supported(&env.root) {
+    if !Fan::supported(&env.root) {
         return None;
     }
-    let s = iyakki_drivers::fanservice::load(dir);
-    let rep = iyakki_drivers::fanservice::status(dir);
+    let fan = Fan::in_dir(dir);
+    let (s, rep) = (fan.setting(), fan.report());
     Some(FanCard { enabled: s.enabled, line: format!("{}. {}", s.describe(), rep) })
 }
 
 /// Turns fan control on or off (the same file the chat tool `fan_control_set` writes; init applies it within seconds). Returns the new state.
 pub fn fan_toggle(env: &PowerEnv, dir: &Path) -> Result<bool, String> {
-    if !iyakki_drivers::fanservice::supported(&env.root) {
+    if !Fan::supported(&env.root) {
         return Err("This computer has no applesmc fan with a temperature input, so there is nothing to control.".into());
     }
-    let mut s = iyakki_drivers::fanservice::load(dir);
-    s.enabled = !s.enabled;
-    iyakki_drivers::fanservice::save(dir, &s)?;
-    Ok(s.enabled)
+    Fan::in_dir(dir).toggle()
 }
 
 
@@ -67,7 +66,7 @@ pub fn caps(env: &PowerEnv) -> Caps {
         }
     }
     c.sleep = sleep_listing(&env.read("power/state"));
-    c.t2 = iyakki_drivers::macboard::is_t2(&env.read("class/dmi/id/product_name")) && env.read("class/dmi/id/sys_vendor").starts_with("Apple");
+    c.t2 = iyakki_core_local::machinefacts::is_apple_t2(&env.read("class/dmi/id/product_name"), &env.read("class/dmi/id/sys_vendor"));
     c.laptop = crate::battery::read(&crate::battery::BatteryEnv::at(&env.root)).shown();
     c.lid = lid_state(&env.proc).is_some();
     c

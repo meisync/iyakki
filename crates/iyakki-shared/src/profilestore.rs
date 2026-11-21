@@ -30,7 +30,7 @@ impl Status {
 }
 
 /// What happened at sign-in (for one audit line and one toast).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SignIn {
     /// Protection is off for this person: nothing was done.
     Off,

@@ -182,24 +182,25 @@ pub struct RealBackend {
 
 impl RealBackend {
     fn dir(&self) -> PathBuf {
-        self.svc.dir().join(iyakki_storage::crashlog::LOG_SUBDIR)
+        iyakki_core_local::keptlog::KeptLog::under(self.svc.dir()).dir().to_path_buf()
     }
 }
 
 impl Backend for RealBackend {
     fn note(&self) -> Note {
-        use iyakki_storage::crashlog as cl;
+        use iyakki_core_local::keptlog::{self as cl, KeptLog};
         let dir = self.dir();
-        let u = cl::read_unclean(&dir);
-        let log = u.as_ref().map(|u| u.file.clone()).filter(|f| !f.is_empty() && dir.join(f).is_file()).or_else(|| cl::latest_crash(&dir));
-        Note { unclean: u.map(|u| (cl::wall(u.started), u.uptime_s, u.last_line, u.seen)).filter(|(_, _, _, seen)| !*seen), last_how: cl::last_finished(&dir).map(|f| f.how), log }
+        let kept = KeptLog::at(&dir);
+        let u = kept.unclean();
+        let log = u.as_ref().map(|u| u.file.clone()).filter(|f| !f.is_empty() && dir.join(f).is_file()).or_else(|| kept.latest_crash());
+        Note { unclean: u.map(|u| (cl::wall(u.started), u.uptime_s, u.last_line, u.seen)).filter(|(_, _, _, seen)| !*seen), last_how: kept.last_finished().map(|f| f.how), log }
     }
     fn may_copy(&self) -> bool {
         self.policy.manage_settings
     }
     fn copy(&self, name: &str) -> Result<PathBuf, String> {
         let home = crate::scope::home_root_for_writes(&self.user, self.svc.dir());
-        let p = iyakki_storage::crashlog::copy_to_folder(&self.dir(), name, &home, crate::clock::now_unix())?;
+        let p = iyakki_core_local::keptlog::KeptLog::at(&self.dir()).copy_to(name, &home, crate::clock::now_unix())?;
         (self.audit)("system.unclean-shutdown.copy", &format!("the kept kernel log {name} was copied to a file in the home folder (assistant)"));
         Ok(p)
     }

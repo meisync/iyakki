@@ -80,7 +80,7 @@ fn draw(m: &mut LoginModal) -> Gfx {
 }
 
 fn audit_text(cx: &AppCx) -> String {
-    std::fs::read_to_string(cx.audit.path()).unwrap_or_default()
+    std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default()
 }
 
 fn type_text(m: &mut LoginModal, cx: &AppCx, t: &str) {
@@ -117,7 +117,7 @@ fn the_login_button_shows_only_for_an_installed_tool_with_the_account_in_the_chi
     assert_eq!(chip(&State::SignedOut), ("not signed in".to_string(), ERR));
     // signed in: the chip names the account and Logout appears
     std::fs::write(st.join("signedin"), "").unwrap();
-    cx.ext_status().refresh_one(cx.agents_cfg(), extagent::CLAUDE_CODE, None);
+    cx.ext_status().refresh_one(cx.agents_cfg(), extagent::CLAUDE_CODE);
     let s = settle_status(&cx, |s| matches!(s, State::SignedIn(_)));
     assert_eq!(chip(&s).0, "signed in as me@example.test, claude.ai");
     let g = draw_app(&mut app);
@@ -230,7 +230,7 @@ fn cancel_stops_the_program_and_is_audited_and_leaving_with_escape_does_the_same
 fn logout_runs_the_vendors_command_and_the_chip_goes_back() {
     let (cx, d, tools) = setup("alog6");
     std::fs::write(tools.join("state/signedin"), "").unwrap();
-    cx.ext_status().refresh_one(cx.agents_cfg(), extagent::CLAUDE_CODE, None);
+    cx.ext_status().refresh_one(cx.agents_cfg(), extagent::CLAUDE_CODE);
     settle_status(&cx, |s| matches!(s, State::SignedIn(_)));
     let home = d.join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -481,7 +481,7 @@ fn with_the_vault_locked_the_token_stays_where_it_is_and_the_dialog_says_how_to_
 
 fn settle_status_for(cx: &AppCx, agent: &str, want: impl Fn(&State) -> bool) -> State {
     let t0 = Instant::now();
-    cx.ext_status().refresh_one(cx.agents_cfg(), agent, None);
+    cx.ext_status().refresh_one(cx.agents_cfg(), agent);
     loop {
         let s = state(cx, agent, true);
         if want(&s) {
@@ -490,7 +490,7 @@ fn settle_status_for(cx: &AppCx, agent: &str, want: impl Fn(&State) -> bool) -> 
         assert!(t0.elapsed() < Duration::from_secs(20), "status stayed {s:?}: {:?} / {:?}", cx.ext_status().get(agent), { let c = cx.agents_cfg(); (c.vault_logins, c.vault_locked, c.env, cx.vault().user_get(&cx.session.user, "github-copilot").map(|v| v.len()).map_err(|e| e.to_string())) });
         std::thread::sleep(Duration::from_millis(30));
         if t0.elapsed().as_millis() % 700 < 40 {
-            cx.ext_status().refresh_one(cx.agents_cfg(), agent, None);
+            cx.ext_status().refresh_one(cx.agents_cfg(), agent);
         }
     }
 }
@@ -550,7 +550,7 @@ fn qr_modules_are_whole_pixels_with_a_quiet_zone_of_four_on_white() {
     let (m, total) = qr_metrics(600.0, q.size);
     assert_eq!((sq.w, sq.h, sq.x, sq.y), (total, total, sq.x.round(), 11.0), "a whole-pixel square");
     let px = |x: f32, y: f32| {
-        let p = g.pm.pixel(x as u32, y as u32).unwrap();
+        let p = g.pm_ref().pixel(x as u32, y as u32).unwrap();
         (p.red(), p.green(), p.blue())
     };
     let white = (255, 255, 255);

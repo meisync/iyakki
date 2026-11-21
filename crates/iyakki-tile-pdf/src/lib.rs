@@ -96,6 +96,9 @@ struct Opened {
     fields: Vec<(String, String, String)>,
     /// The fields the viewer can change.
     edits: Vec<EditableField>,
+    /// Push buttons and signature fields: for each field name what a click says, and for a reset button the changes it makes.
+    row_notes: Vec<(String, String)>,
+    resets: Vec<(String, Vec<(String, String)>)>,
     repaired: bool,
 }
 
@@ -154,7 +157,28 @@ fn worker(bytes: Arc<Vec<u8>>, password: String, rx: Receiver<Job>, tx: Sender<D
     let sizes: Vec<(f32, f32)> = (0..doc.page_count().min(50_000)).map(|i| doc.page_size(i).map(|(w, h)| (w as f32, h as f32)).unwrap_or((612.0, 792.0))).collect();
     let fields = doc.form_fields().into_iter().map(|f| (f.name, f.kind, f.value)).collect();
     let edits: Vec<EditableField> = doc.editable_fields().into_iter().filter(|f| f.editable()).collect();
-    let _ = tx.send(Done::Opened(Opened { pages: doc.page_count(), sizes, title: info.title, author: info.author, fields, edits, repaired: info.repaired }));
+    // push buttons and signatures: read, never run or made; a reset button's changes are worked out now, from the file
+    let mut row_notes: Vec<(String, String)> = Vec::new();
+    let mut resets: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    for b in doc.form_buttons() {
+        let label = if b.caption.is_empty() { b.name.clone() } else { b.caption.clone() };
+        match doc.reset_plan(&b.name) {
+            Ok(plan) => {
+                row_notes.push((b.name.clone(), format!("{label}: puts {} field{} back to the default; Save copy keeps it", plan.changes.len(), if plan.changes.len() == 1 { "" } else { "s" })));
+                resets.push((b.name.clone(), plan.changes));
+            }
+            Err(e) => row_notes.push((b.name.clone(), e)),
+        }
+    }
+    for sg in doc.form_signatures() {
+        let note = if sg.signed {
+            format!("{}: signed{}{}{}; not verified here{}", sg.name, sg.signer.as_ref().map(|n| format!(" by {n}")).unwrap_or_default(), sg.reason.as_ref().map(|r| format!(", {r}")).unwrap_or_default(), sg.date.as_ref().map(|d| format!(", {d}")).unwrap_or_default(), if sg.changed_after_signing == Some(true) { "; the file was changed after signing" } else { "" })
+        } else {
+            format!("{}: not signed (this viewer does not sign)", sg.name)
+        };
+        row_notes.push((sg.name.clone(), note));
+    }
+    let _ = tx.send(Done::Opened(Opened { pages: doc.page_count(), sizes, title: info.title, author: info.author, fields, edits, row_notes, resets, repaired: info.repaired }));
     let glyphs = ShellGlyphs { g: RefCell::new(Gfx::new(64, 64)) };
     // pages with no text of their own, read from their pictures (kept for a while: reading takes seconds)
     let mut ocr_cache: std::collections::HashMap<usize, Vec<iyakki_pdf::text::TextLine>> = std::collections::HashMap::new();
@@ -291,6 +315,9 @@ pub struct PdfView {
     pub fields: Vec<(String, String, String)>,
     /// The fields that can be filled in, the changes not saved yet (field, new value), and the field being typed into.
     edits: Vec<EditableField>,
+    /// What a click on a push button or a signature row says, and the changes of each reset button.
+    row_notes: Vec<(String, String)>,
+    resets: Vec<(String, Vec<(String, String)>)>,
     pending: Vec<(String, String)>,
     editing: Option<(String, TextField)>,
     /// Where the file came from, and the host's rules for saving a filled-in copy.
@@ -358,6 +385,8 @@ impl PdfView {
             author: String::new(),
             fields: vec![],
             edits: vec![],
+            row_notes: vec![],
+            resets: vec![],
             pending: vec![],
             editing: None,
             src: None,
@@ -554,6 +583,8 @@ impl PdfView {
                     self.author = o.author;
                     self.fields = o.fields;
                     self.edits = o.edits;
+                    self.row_notes = o.row_notes;
+                    self.resets = o.resets;
                     self.repaired = o.repaired;
                     if let Some(p) = self.want_page.take() {
                         self.goto(p);
@@ -763,6 +794,18 @@ impl PdfView {
     /// A row of the form list was clicked: a text field opens for typing, a check box flips, a choice goes to the next option.
     fn field_clicked(&mut self, row: usize) {
         let Some((name, _, _)) = self.fields.get(row).cloned() else { return };
+        // a reset button puts its fields back as changes waiting to be saved; other buttons and signatures say what they are
+        if let Some((_, changes)) = self.resets.iter().find(|(n, _)| *n == name).cloned() {
+            for (field, value) in changes {
+                self.set_pending(&field, value);
+            }
+            self.status = self.row_notes.iter().find(|(n, _)| *n == name).map(|(_, t)| t.clone());
+            return;
+        }
+        if let Some((_, note)) = self.row_notes.iter().find(|(n, _)| *n == name) {
+            self.status = Some(note.clone());
+            return;
+        }
         let Some(e) = self.edits.iter().find(|e| e.name == name).cloned() else {
             self.status = Some(format!("{name} cannot be filled in here (read-only, a push button, a signature or a radio button with no named states)."));
             return;
@@ -1255,7 +1298,7 @@ impl PdfView {
                 let shown = new.unwrap_or(v);
                 let line = g.fit(11.5 * s, &format!("{}{n} ({k}): {shown}", if new.is_some() { "* " } else { "" }), Face::Sans, r.w - 12.0 * s);
                 g.text(r.x + 8.0 * s, y, 11.5 * s, if new.is_some() { OK } else if fillable { TEXT } else { MUTED }, &line, Face::Sans);
-                if fillable {
+                if fillable || self.row_notes.iter().any(|(rn, _)| rn == n) {
                     g.hit(R::new(r.x + 4.0 * s, y - 2.0 * s, r.w - 8.0 * s, 16.0 * s), Event::Tab(TAB_BASE + T_FROW + i), &format!("Fill in {n}"));
                 }
                 y += 16.0 * s;
@@ -1340,7 +1383,7 @@ impl PdfView {
         g.clipped(view, |g| {
             g.rect(ox + 3.0 * s, oy + 3.0 * s, pw, ph, rgb(12, 13, 18));
             let paint = tiny_skia::PixmapPaint { opacity: if stale { 0.6 } else { 1.0 }, quality: tiny_skia::FilterQuality::Nearest, ..tiny_skia::PixmapPaint::default() };
-            g.pm.draw_pixmap(ox.round() as i32, oy.round() as i32, (*pm).as_ref(), &paint, tiny_skia::Transform::identity(), None);
+            g.pm_mut().draw_pixmap(ox.round() as i32, oy.round() as i32, (*pm).as_ref(), &paint, tiny_skia::Transform::identity(), None);
             if !stale {
                 for r in &picked {
                     let pts = [(r[0], r[1]), (r[2], r[1]), (r[2], r[3]), (r[0], r[3])].map(|(x, y)| (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]));

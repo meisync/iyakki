@@ -369,3 +369,37 @@ fn the_bundle_manifest_alpha3_wrote_is_read_with_its_members_and_wizard_and_keep
     assert!(n.manifest.ext.is_newer());
     assert!(n.manifest.ext.contents.is_empty() && n.manifest.ext.wizards.is_empty());
 }
+
+// ---- F-CORE-23 / finding F-9: the developer-mode state file (a Spec with current 0 and no migrations)
+
+fn alpha7() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/compat/alpha7")
+}
+
+#[test]
+fn the_developer_mode_state_alpha7_wrote_is_read_a_newer_file_is_kept_and_a_damaged_one_is_moved_aside() {
+    use iyakki_sec::policy::Role;
+    let golden = fs::read_to_string(alpha7().join("devmode-state-v0.json")).unwrap();
+    let root = tmp("devmode-state");
+    let (state, admin) = (root.join("devmode/state.json"), Role::Admin.template());
+    put(&state, &golden);
+    let dm = crate::devmode::DevMode::open(&root);
+    let st = dm.state();
+    assert!(st.enabled && st.by == "admin" && (st.since, st.until, st.port) == (1_700_000_000, 1_700_007_200, 2222));
+    assert_eq!(fs::read_to_string(&state).unwrap(), golden, "reading changes nothing");
+    // a change is written whole and keeps what was there
+    dm.set_port(&admin, "admin", 3333).unwrap();
+    let now: serde_json::Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+    assert_eq!((now["port"].as_u64(), now["by"].as_str(), now["until"].as_i64()), (Some(3333), Some("admin"), Some(1_700_007_200)));
+    // a file of a newer release is read, never rewritten, and the sentence says to update
+    let newer = golden.replace('{', "{\n  \"schema\": 1,");
+    put(&state, &newer);
+    assert_eq!(dm.state().port, 2222);
+    assert!(dm.set_port(&admin, "admin", 4444).unwrap_err().contains("newer IYAKKI"));
+    assert_eq!(fs::read_to_string(&state).unwrap(), newer);
+    // a damaged file is moved aside, not read as "on", and the defaults apply
+    put(&state, "{\"enabled\": tru");
+    assert!(!dm.state().enabled);
+    assert!(fs::read_dir(root.join("devmode")).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("state.json.corrupt-")));
+    let _ = fs::remove_dir_all(&root);
+}

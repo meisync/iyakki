@@ -348,9 +348,86 @@ pub fn kept_members(store: &Store, kind: &str) -> Vec<KeptMember> {
     out
 }
 
+/// A kept member that passed its kind's schema, with the bundle it came from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Kept<T> {
+    pub bundle: String,
+    pub id: String,
+    pub value: T,
+}
+
+fn typed<T>(store: &Store, kind: &str, read: impl Fn(&serde_json::Value) -> Result<T, String>) -> Vec<Kept<T>> {
+    kept_members(store, kind).into_iter().filter_map(|m| read(&m.value).ok().map(|value| Kept { bundle: m.bundle, id: m.id, value })).collect()
+}
+
+/// The desktop-view templates of installed bundles, for the template list (Settings, Desktop views). A member that fails the schema is left out.
+pub fn view_templates(store: &Store) -> Vec<Kept<iyakki_shared::views::UserTemplate>> {
+    typed(store, "template", iyakki_shared::bundle_members::view_template)
+}
+
+/// The agent presets of installed bundles, for the agent picker.
+pub fn agent_presets(store: &Store) -> Vec<Kept<iyakki_shared::bundle_members::AgentPreset>> {
+    typed(store, "agent", iyakki_shared::bundle_members::agent_preset)
+}
+
+/// The extension members of installed bundles, for the extension list (the Store's Installed page).
+pub fn extension_lines(store: &Store) -> Vec<Kept<iyakki_shared::bundle_members::ExtensionLine>> {
+    typed(store, "extension", iyakki_shared::bundle_members::extension_line)
+}
+
+/// What `store_bundle_members` says: every installed bundle with its members (all kinds), and the kept, verified content of the data kinds.
+/// Read-only. `kind` narrows the list to one kind.
+pub fn members_text(store: &Store, kind: Option<&str>) -> String {
+    let root = store.dir().join("bundles");
+    let mut dirs: Vec<(String, PathBuf)> = Vec::new();
+    let mut stack = vec![(String::new(), root)];
+    while let Some((key, d)) = stack.pop() {
+        if d.join("index.json").is_file() {
+            dirs.push((key.clone(), d.clone()));
+        }
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            if e.path().is_dir() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                stack.push((if key.is_empty() { name } else { format!("{key}/{name}") }, e.path()));
+            }
+        }
+    }
+    dirs.sort();
+    let mut out = String::new();
+    for (key, d) in dirs {
+        let members: Vec<Member> = read_index(&d).into_iter().filter(|m| kind.is_none_or(|k| m.kind == k)).collect();
+        if members.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("{key}:\n"));
+        for m in members {
+            let kept = if matches!(m.kind.as_str(), "agent" | "template" | "theme" | "extension") {
+                match std::fs::read(canon(&d, &m.id)).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) {
+                    Some(v @ serde_json::Value::Object(_)) => {
+                        let schema = match m.kind.as_str() {
+                            "template" => iyakki_shared::bundle_members::view_template(&v).err(),
+                            "agent" => iyakki_shared::bundle_members::agent_preset(&v).err(),
+                            "extension" => iyakki_shared::bundle_members::extension_line(&v).err(),
+                            _ => None,
+                        };
+                        let note = schema.map(|e| format!(" · not offered, {e}")).unwrap_or_default();
+                        format!(" · kept: {}{note}", v.to_string().chars().take(300).collect::<String>())
+                    }
+                    _ => " · kept copy missing or not a JSON object".to_string(),
+                }
+            } else {
+                String::new()
+            };
+            out.push_str(&format!("  {} ({}){}{}\n", m.id, m.kind, if m.title.is_empty() { String::new() } else { format!(" {}", m.title) }, kept));
+        }
+    }
+    if out.is_empty() { "No bundle members are installed.".into() } else { out }
+}
+
 // ------------------------------------------------------------------------------------------------ the real backend
 
 pub struct LiveMembers<'a> {
+    pub store: &'a Store,
     pub svc: &'a Services,
     pub actor: &'a Actor,
     pub scope: &'a Scope,
@@ -360,8 +437,8 @@ pub struct LiveMembers<'a> {
 }
 
 impl<'a> LiveMembers<'a> {
-    pub fn new(store: &Store, svc: &'a Services, actor: &'a Actor, scope: &'a Scope) -> Self {
-        LiveMembers { svc, actor, scope, now: store.now(), data_dir: store.data_dir().to_path_buf(), home: store.flows_home.clone() }
+    pub fn new(store: &'a Store, svc: &'a Services, actor: &'a Actor, scope: &'a Scope) -> Self {
+        LiveMembers { store, svc, actor, scope, now: store.now(), data_dir: store.data_dir().to_path_buf(), home: store.flows_home.clone() }
     }
 
     fn flows(&self) -> Result<iyakki_flow::store::FlowStore, String> {
@@ -369,6 +446,45 @@ impl<'a> LiveMembers<'a> {
         let t = self.now.saturating_mul(1000);
         let home = self.home.clone().unwrap_or_else(|| crate::scope::home_root(u, &self.data_dir));
         Ok(iyakki_flow::store::FlowStore::new(&home.join("Flows"), Arc::new(move || t)))
+    }
+
+    /// Whose theme folder a theme member goes to: the person's own, or everybody's for a shared install.
+    fn theme_user(&self) -> Option<&str> {
+        match self.scope {
+            Scope::User(u) => Some(u.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Start a nested `tile` member (KI-891): the signed package of its own goes through the same review and install as any app (its signer
+    /// must be trusted here, the level and the revocations are checked), under the actor and scope of the bundle, and it becomes an app of its
+    /// own with its own approvals. Three more rules: it may not be a bundle itself (one level only), it may ask the core for nothing the member
+    /// did not declare in the bundle (the person approved exactly those on the card), and a name that is already installed is refused.
+    fn start_nested_tile(&self, m: &Member, text: &str) -> Result<(), String> {
+        let p = nested_tile(text)?;
+        let key = super::install::record_key("tile", self.scope, &p.manifest.name);
+        if self.store.records().contains_key(&key) {
+            return Err(format!("an app named {:?} is already installed; remove it first", p.manifest.name));
+        }
+        let review = self.store.review(self.svc, self.actor, text.as_bytes().to_vec(), None, "bundle member", false, self.scope.clone(), false, &[]);
+        if let Some(why) = &review.refusal {
+            return Err(format!("the nested app {:?} cannot be installed: {why}", p.manifest.name));
+        }
+        use iyakki_shared::store_trust::Level;
+        if !matches!(review.verdict.level, Level::Official | Level::Verified | Level::Trusted) {
+            return Err(format!("the nested app {:?} cannot be installed: its signer is not trusted here (a nested app needs an official, verified or trusted signer, and this one is {})", p.manifest.name, review.verdict.level.id()));
+        }
+        if !review.members.is_empty() {
+            return Err(format!("the nested app {:?} carries members of its own; a nested app is one level only", p.manifest.name));
+        }
+        if !review.permissions.is_empty() {
+            return Err(format!("the nested app {:?} asks for permissions of its own; a nested app may only use the capabilities declared for the member", p.manifest.name));
+        }
+        let declared: Vec<&str> = m.capabilities.iter().map(|c| c.name.as_str()).collect();
+        if let Some(extra) = review.core_requests.iter().find(|r| !declared.contains(&r.name.as_str())) {
+            return Err(format!("the nested app {:?} asks for {:?}, which the bundle did not declare for this member", p.manifest.name, extra.name));
+        }
+        self.store.install(self.svc, self.actor, &review, iyakki_shared::store_install::Confirm::all()).map(|_| ()).map_err(|e| format!("the nested app {:?} was not installed: {e}", p.manifest.name))
     }
 
     fn text<'b>(&self, bytes: &'b [u8]) -> Result<&'b str, String> {
@@ -436,7 +552,7 @@ impl MemberBackend for LiveMembers<'_> {
         match m.kind() {
             MemberKind::Mcp => mcp_member(text).map(|s| format!("runs this program on the computer when the assistant uses it: {}{}", s.command, if s.args.is_empty() { String::new() } else { format!(" {}", s.args.join(" ")) })).unwrap_or_default(),
             MemberKind::Tool => tool_member(text).map(|(n, d)| format!("kept as a description of the tool {n}{}; nothing runs and an administrator switches it on later", if d.is_empty() { String::new() } else { format!(" ({d})") })).unwrap_or_default(),
-            MemberKind::Tile => nested_tile(text).map(|p| format!("kept as the signed app {} {}; it is not installed or opened by this bundle", p.manifest.name, p.manifest.version)).unwrap_or_default(),
+            MemberKind::Tile => nested_tile(text).map(|p| format!("installs the signed app {} {} as an app of its own (its signer must be trusted here, it asks for nothing this member did not declare, and it goes away with the bundle)", p.manifest.name, p.manifest.version)).unwrap_or_default(),
             _ => String::new(),
         }
     }
@@ -459,6 +575,12 @@ impl MemberBackend for LiveMembers<'_> {
             MemberKind::Mcp => mcp_member(text).map(|_| ()),
             MemberKind::Tool => tool_member(text).map(|_| ()),
             MemberKind::Tile => nested_tile(text).map(|_| ()),
+            MemberKind::Theme => match serde_json::from_str::<serde_json::Value>(text) {
+                Ok(v) => iyakki_shared::bundle_members::theme_text(&v).map(|_| ()),
+                Err(_) => Err("the file is a JSON object".into()),
+            },
+            MemberKind::Template => serde_json::from_str::<serde_json::Value>(text).map_err(|_| "the file is a JSON object".to_string()).and_then(|v| iyakki_shared::bundle_members::view_template(&v).map(|_| ())),
+            MemberKind::Agent => serde_json::from_str::<serde_json::Value>(text).map_err(|_| "the file is a JSON object".to_string()).and_then(|v| iyakki_shared::bundle_members::agent_preset(&v).map(|_| ())),
             _ => match serde_json::from_str::<serde_json::Value>(text) {
                 Ok(v) if v.is_object() => Ok(()),
                 _ => Err("the file is a JSON object".into()),
@@ -483,6 +605,15 @@ impl MemberBackend for LiveMembers<'_> {
                 self.flows()?.create(flow, &self.actor.user).map(|_| ())
             }
             MemberKind::Mcp => self.svc.mcp.add(mcp_member(text)?),
+            MemberKind::Theme => {
+                let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+                iyakki_shared::bundle_members::put_theme(&self.data_dir, self.theme_user(), &m.id, &v)
+            }
+            MemberKind::Template | MemberKind::Agent => {
+                let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+                iyakki_shared::bundle_members::put_data_member(&self.data_dir, &m.kind, self.theme_user(), &m.id, &v)
+            }
+            MemberKind::Tile => self.start_nested_tile(m, text),
             _ => Ok(()),
         }
     }
@@ -507,6 +638,23 @@ impl MemberBackend for LiveMembers<'_> {
                 // only what the bundle put there: a server the administrator changed by hand since is left alone
                 match self.svc.mcp.list().into_iter().find(|x| x.name == s.name) {
                     Some(now) if now == s => self.svc.mcp.remove(&s.name),
+                    _ => Ok(()),
+                }
+            }
+            MemberKind::Theme => {
+                let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+                iyakki_shared::bundle_members::drop_theme(&self.data_dir, self.theme_user(), &m.id, &v)
+            }
+            MemberKind::Template | MemberKind::Agent => {
+                let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+                iyakki_shared::bundle_members::drop_data_member(&self.data_dir, &m.kind, self.theme_user(), &m.id, &v)
+            }
+            MemberKind::Tile => {
+                // only the app this bundle put there: one the administrator installed or replaced since is left alone
+                let p = nested_tile(text)?;
+                let key = super::install::record_key("tile", self.scope, &p.manifest.name);
+                match self.store.records().get(&key) {
+                    Some(r) if r.sha256 == p.manifest.sha256 => self.store.remove(self.svc, self.actor, "tile", &p.manifest.name, self.scope),
                     _ => Ok(()),
                 }
             }

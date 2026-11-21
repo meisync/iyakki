@@ -15,6 +15,10 @@ struct Fake {
     asked_list: Cell<u32>,
     released: Cell<u32>,
     kept: RefCell<Vec<Vec<String>>>,
+    listens: RefCell<Vec<(String, bool)>>,
+    trust: RefCell<Option<String>>,
+    approved: RefCell<Vec<(String, String)>>,
+    listen_answer: RefCell<iyakki_tile_api::cameras::Listen>,
 }
 
 fn cam(id: &str, name: &str, kind: Kind, status: Status, manage: bool) -> CamInfo {
@@ -27,7 +31,7 @@ fn solid(seq: u64, c: [u8; 3]) -> Frame {
 
 impl Fake {
     fn new(n: usize) -> Fake {
-        let f = Fake { cams: RefCell::new(vec![]), frames: RefCell::new(HashMap::new()), viewed: RefCell::new(vec![]), saved: RefCell::new(vec![]), removed: RefCell::new(vec![]), snaps: RefCell::new(vec![]), snap_result: RefCell::new(Ok("/home/amy/Pictures/camera-x.jpg".into())), save_result: RefCell::new(Ok("id".into())), asked_list: Cell::new(0), released: Cell::new(0), kept: RefCell::new(vec![]) };
+        let f = Fake { cams: RefCell::new(vec![]), frames: RefCell::new(HashMap::new()), viewed: RefCell::new(vec![]), saved: RefCell::new(vec![]), removed: RefCell::new(vec![]), snaps: RefCell::new(vec![]), snap_result: RefCell::new(Ok("/home/amy/Pictures/camera-x.jpg".into())), save_result: RefCell::new(Ok("id".into())), asked_list: Cell::new(0), released: Cell::new(0), kept: RefCell::new(vec![]), listens: RefCell::new(vec![]), trust: RefCell::new(None), approved: RefCell::new(vec![]), listen_answer: RefCell::new(iyakki_tile_api::cameras::Listen::Playing) };
         for i in 0..n {
             f.cams.borrow_mut().push(cam(&format!("c{i}"), &format!("Cam {i}"), Kind::Network, Status::Live, true));
             f.frames.borrow_mut().insert(format!("c{i}"), solid(1, [10, 200, 10]));
@@ -60,6 +64,18 @@ impl CameraSource for Fake {
     }
     fn people(&self) -> Vec<String> {
         vec!["bob".into(), "root".into()]
+    }
+    fn trust_waiting(&self, _id: &str) -> Option<String> {
+        self.trust.borrow().clone()
+    }
+    fn trust_approve(&self, id: &str, shown: &str) -> Result<String, String> {
+        self.approved.borrow_mut().push((id.into(), shown.into()));
+        *self.trust.borrow_mut() = None;
+        Ok("The certificate of this camera is trusted.".into())
+    }
+    fn listen(&self, id: &str, on: bool) -> iyakki_tile_api::cameras::Listen {
+        self.listens.borrow_mut().push((id.into(), on));
+        if on { self.listen_answer.borrow().clone() } else { iyakki_tile_api::cameras::Listen::Off }
     }
     fn release_local(&self) {
         self.released.set(self.released.get() + 1);
@@ -406,4 +422,70 @@ fn every_frame_tells_the_source_which_cameras_it_drew_so_the_rest_of_the_compute
     key(&mut a, &cx, 'a');
     draw(&mut a, &cx);
     assert!(last(&f).is_empty(), "the add form shows no live picture");
+}
+
+#[test]
+fn listening_is_a_key_in_the_large_view_it_is_asked_for_on_every_frame_and_ends_when_the_view_does() {
+    use iyakki_tile_api::cameras::Listen;
+    let f = Fake::new(2);
+    let cx = cx_of(&f);
+    let mut a = CamerasApp::new();
+    draw(&mut a, &cx);
+    key(&mut a, &cx, 'l');
+    assert!(f.listens.borrow().is_empty(), "nothing is listened to from the grid");
+    a.handle(&Event::Key(Key::Enter), &cx);
+    let g = draw(&mut a, &cx);
+    assert!(g.hits.iter().any(|h| matches!(h.ev, Event::Tab(36))), "a Listen button on the large view");
+    assert!(f.listens.borrow().is_empty(), "no sound until the person asks");
+    key(&mut a, &cx, 'l');
+    draw(&mut a, &cx);
+    draw(&mut a, &cx);
+    assert_eq!(f.listens.borrow().iter().filter(|(id, on)| id == "c0" && *on).count(), 2, "every drawn frame feeds the speaker");
+    // the camera has no sound yet: the words say so
+    *f.listen_answer.borrow_mut() = Listen::Waiting;
+    draw(&mut a, &cx);
+    assert_eq!(a.listen_words("c0").as_deref(), Some("Listening: no sound from this camera yet"));
+    *f.listen_answer.borrow_mut() = Listen::Unavailable("Camera sound plays through IYAKKI's mixer; switch it on in Settings, Sound.".into());
+    draw(&mut a, &cx);
+    assert!(a.listen_words("c0").unwrap().contains("mixer"));
+    // the same key stops it
+    key(&mut a, &cx, 'l');
+    assert_eq!(f.listens.borrow().last(), Some(&("c0".to_string(), false)));
+    assert!(a.listen_words("c0").is_none());
+    // leaving the large view ends it too
+    key(&mut a, &cx, 'l');
+    draw(&mut a, &cx);
+    a.handle(&Event::Key(Key::Esc), &cx);
+    draw(&mut a, &cx);
+    assert_eq!(f.listens.borrow().last(), Some(&("c0".to_string(), false)), "back to the grid lets the speaker go");
+}
+
+#[test]
+fn a_camera_whose_certificate_waits_shows_a_card_with_the_fingerprint_and_only_the_persons_yes_trusts_it() {
+    let f = Fake::new(1);
+    let cx = cx_of(&f);
+    let mut a = CamerasApp::new();
+    draw(&mut a, &cx);
+    a.handle(&Event::Key(Key::Enter), &cx);
+    let g = draw(&mut a, &cx);
+    assert!(!g.hits.iter().any(|h| matches!(h.ev, Event::Tab(37))), "no button while nothing waits");
+    key(&mut a, &cx, 't');
+    assert!(!a.asking_to_trust(), "nothing waits: a sentence, no card");
+    assert!(a.note().is_some_and(|(t, ok)| t.contains("no certificate") && !ok));
+    *f.trust.borrow_mut() = Some("AA:BB:CC:DD".into());
+    draw_at(&mut a, &cx, 100, 1200, 700, 1.0);
+    let g = draw_at(&mut a, &cx, 200, 1200, 700, 1.0);
+    assert!(g.hits.iter().any(|h| matches!(h.ev, Event::Tab(37))), "a button once a certificate waits");
+    key(&mut a, &cx, 't');
+    assert!(a.asking_to_trust());
+    let g = draw(&mut a, &cx);
+    assert!(g.hits.iter().any(|h| matches!(h.ev, Event::Key(Key::Char('y')))), "a yes button on the card");
+    // Esc is no: nothing was approved
+    a.handle(&Event::Key(Key::Esc), &cx);
+    assert!(!a.asking_to_trust() && f.approved.borrow().is_empty());
+    // y approves exactly the fingerprint that was shown
+    key(&mut a, &cx, 't');
+    key(&mut a, &cx, 'y');
+    assert_eq!(*f.approved.borrow(), vec![("c0".to_string(), "AA:BB:CC:DD".to_string())]);
+    assert!(!a.asking_to_trust());
 }

@@ -165,6 +165,7 @@ pub fn host() -> &'static BrowserExtensionHost {
         // not through register(): that calls changed(), which is fine, but keeps the first generation at 1
         if let Ok(mut v) = h.exts.write() {
             v.push(Arc::new(HeaderRulesExtension));
+            v.push(Arc::new(crate::browserplugins::PluginsExtension));
         }
         h
     })

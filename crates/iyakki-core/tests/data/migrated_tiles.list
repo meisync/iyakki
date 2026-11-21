@@ -9,3 +9,8 @@ crates/iyakki-apps/src/apps/data.rs 5
 crates/iyakki-apps/src/apps/auth/mod.rs 4
 crates/iyakki-apps/src/apps/camera.rs 3
 crates/iyakki-apps/src/apps/users.rs 3
+crates/iyakki-apps/src/apps/runs.rs 7
+crates/iyakki-apps/src/apps/doctor.rs 7
+crates/iyakki-apps/src/apps/checkup.rs 6
+crates/iyakki-apps/src/apps/scan.rs 4
+crates/iyakki-apps/src/apps/linuxwin.rs 5

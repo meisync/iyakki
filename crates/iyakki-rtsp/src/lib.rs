@@ -15,6 +15,7 @@
 
 pub mod auth;
 pub mod client;
+pub mod g711;
 pub mod hash;
 pub mod httpmjpeg;
 pub mod jpegtab;

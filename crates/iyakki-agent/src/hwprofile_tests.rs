@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use iyakki_hwinfo::DmiIdentity;
+use iyakki_core_local::hwinfo::DmiIdentity;
 use serde_json::{json, Value};
 
 use crate::agent::{Risk, ToolDef, Tools};

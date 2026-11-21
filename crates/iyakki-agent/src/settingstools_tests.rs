@@ -21,7 +21,7 @@ pub(crate) fn rig(tag: &str, admin: bool) -> Rig {
     let audits = Arc::new(Mutex::new(Vec::new()));
     let a2 = audits.clone();
     let settings = Arc::new(Mutex::new(crate::settings::SettingsStore::open(&dir.join("settings.json")).expect("settings")));
-    let env = Env { dir: dir.clone(), user: "ada".into(), admin, settings, audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
+    let env = Env { dir: dir.clone(), user: "ada".into(), admin, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
     Rig { dir, audits, env }
 }
 
@@ -50,7 +50,7 @@ pub(crate) fn assert_policy(t: &SettingsTools, reads: &[&str], changes: &[&str])
 fn views_tools_follow_the_policy_and_change_the_pages_file() {
     let r = rig("views", false);
     let t = tools(&r, crate::settingstools_views::entries(&r.env));
-    assert_policy(&t, &["views_list"], &["views_make", "views_rename", "views_delete", "views_lock", "views_keys", "views_switch"]);
+    assert_policy(&t, &["views_list"], &["views_make", "views_rename", "views_delete", "views_lock", "views_keys", "views_switch", "views_share"]);
     assert!(t.call("views_list", &json!({})).unwrap().contains("1. Main (showing)"));
     assert!(t.call("views_make", &json!({"name": "Docs"})).unwrap().contains("Docs"));
     assert!(t.call("views_make", &json!({"template": "media"})).unwrap().contains("Media"));
@@ -69,6 +69,16 @@ fn views_tools_follow_the_policy_and_change_the_pages_file() {
     assert!(t.call("views_keys", &json!({"single_apps": ["../x"]})).is_err() && t.call("views_keys", &json!({"single_apps": "edit"})).is_err());
     assert!(t.call("views_list", &json!({})).unwrap().contains("One window per app: browser, edit"));
     t.call("views_keys", &json!({"remember_layout": true, "single_apps": []})).unwrap();
+    // the person's own step keys: both or none, letters the shell does not use, two different keys; the page reads the same file
+    let out = t.call("views_keys", &json!({"custom_prev": "j", "custom_next": "k"})).unwrap();
+    assert!(out.contains("Ctrl+Alt+J (previous) / Ctrl+Alt+K (next)"), "{out}");
+    assert_eq!(crate::views::Views::load(&r.dir, "ada").custom_keys, Some(crate::views::CustomKeys { prev: "KeyJ".into(), next: "KeyK".into() }));
+    for bad in [json!({"custom_prev": "q", "custom_next": "k"}), json!({"custom_prev": "j", "custom_next": "j"}), json!({"custom_prev": "j"}), json!({"custom_prev": "1", "custom_next": "k"})] {
+        assert!(t.call("views_keys", &bad).is_err(), "{bad}");
+    }
+    assert_eq!(crate::views::Views::load(&r.dir, "ada").custom_keys.map(|c| c.prev), Some("KeyJ".into()), "a refused call changes nothing");
+    t.call("views_keys", &json!({"custom_prev": "", "custom_next": ""})).unwrap();
+    assert_eq!(crate::views::Views::load(&r.dir, "ada").custom_keys, None);
     assert!(t.call("views_delete", &json!({"view": "Media 2"})).is_ok());
     assert!(t.call("views_delete", &json!({"view": "9"})).is_err());
     let msg = t.call("views_switch", &json!({"view": "Notes"})).unwrap();
@@ -76,6 +86,12 @@ fn views_tools_follow_the_policy_and_change_the_pages_file() {
     let id = crate::views::Views::load(&r.dir, "ada").find("Notes").unwrap();
     assert_eq!(crate::views::take_switch(&r.dir, "ada"), Some(id));
     assert_eq!(crate::views::take_switch(&r.dir, "ada"), None);
+    let shared = t.call("views_share", &json!({"view": "Notes"})).unwrap();
+    assert!(shared.contains("Notes"), "{shared}");
+    assert_eq!(crate::views::take_share(&r.dir, "ada"), Some(id));
+    assert_eq!(crate::views::take_share(&r.dir, "ada"), None);
+    assert!(t.call("views_share", &json!({"view": "9"})).is_err());
+    assert!(r.audits.lock().unwrap().iter().any(|a| a.starts_with("view.share.request")));
     assert!(r.audits.lock().unwrap().iter().any(|a| a.starts_with("view.lock")));
     let _ = std::fs::remove_dir_all(&r.dir);
 }
@@ -97,6 +113,9 @@ fn own_view_templates_are_kept_by_chat_and_make_views() {
 #[test]
 fn backup_tools_follow_the_policy_keep_secrets_out_of_the_chat_and_stay_inside_the_home() {
     let r = rig("backup-tools", false);
+    // the person's home is this test's own folder (the tools read $HOME): not the real home, which parallel runs share
+    let rig_dir = r.env.dir.to_string_lossy().to_string();
+    let _home = iyakki_testkit::EnvGuard::set(&[("HOME", Some(rig_dir.as_str()))]);
     let t = tools(&r, crate::settingstools_backup::entries(&r.env));
     assert_policy(&t, &["backup_status", "backup_inspect", "checkup_result_verify"], &["backup_create", "backup_restore", "backup_schedule", "edit_run_stop", "edit_run_input"]);
     let home = crate::scope::home_root(&r.env.user, &r.env.dir);
@@ -126,6 +145,12 @@ fn backup_tools_follow_the_policy_keep_secrets_out_of_the_chat_and_stay_inside_t
     std::fs::write(home.join("pass.txt"), "correct horse battery\n").unwrap();
     let said = t.call("backup_schedule", &json!({"passphrase_file": "pass.txt"})).unwrap();
     assert!(said.contains("encrypted with the passphrase in the file") && !said.contains("correct horse"), "{said}");
+    // a share and a chain length (F-BACKUP-04, F-BACKUP-06): a bad address and a chain of one are refused, the password file is read at run time only
+    assert!(t.call("backup_schedule", &json!({"share": "http://x/y"})).is_err());
+    assert!(t.call("backup_schedule", &json!({"full_every": 1})).unwrap_err().contains("full_every"), "a chain of one is refused while the schedule is on");
+    let said = t.call("backup_schedule", &json!({"enabled": true, "share": "nfs://nas/export/b", "full_every": 7, "passphrase_file": "pass.txt"})).unwrap();
+    assert!(said.contains("the share nfs://nas/export/b") && said.contains("incremental links") && said.contains("after 7 files"), "{said}");
+    assert!(t.describe("backup_schedule", &json!({"share": "nfs://nas/export/b"})).contains("into nfs://nas/export/b"));
     assert!(t.describe("backup_schedule", &json!({"enabled": false})).starts_with("Turn off"));
     assert!(t.call("backup_schedule", &json!({"enabled": false})).unwrap().contains("No scheduled backup"));
     assert!(r.audits.lock().unwrap().iter().any(|l| l.starts_with("backup.schedule")));

@@ -35,7 +35,7 @@ pub enum Answer {
     Block,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConsentChoice {
     pub answer: Answer,
     pub label: String,
@@ -44,7 +44,7 @@ pub struct ConsentChoice {
 /// The `payload` of a question a client device asked (`ConsentStore::create_device`): the shell shows these over the screen.
 pub const DEVICE_PAYLOAD: &str = "client-device";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConsentRequest {
     pub id: String,
     pub user: String,
@@ -344,7 +344,7 @@ type AuditSink = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
 /// Everything about the assistant's use of the browser: the job queue, the questions, the grants and the budgets.
 pub struct BrowserState {
     pub jobs: Arc<BrowserJobs>,
-    pub consent: ConsentStore,
+    pub consent: Arc<ConsentStore>,
     users: Mutex<HashMap<String, UserBrowser>>,
     audit: Mutex<Option<AuditSink>>,
     /// Moves the clock forward (tests of the 30 minute expiry).
@@ -365,7 +365,7 @@ impl BrowserState {
     pub fn new() -> BrowserState {
         BrowserState {
             jobs: Arc::new(BrowserJobs::new()),
-            consent: ConsentStore::new(),
+            consent: Arc::new(ConsentStore::new()),
             users: Mutex::new(HashMap::new()),
             audit: Mutex::new(None),
             shift: AtomicI64::new(0),

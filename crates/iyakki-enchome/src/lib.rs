@@ -11,10 +11,13 @@
 //!
 //! Honest limit: nothing here has run on a real kernel yet (the kernel needs `DM_CRYPT`, `XTS`, `BLK_DEV_DM` and loop first).
 
+pub mod export;
 pub mod form;
 pub mod migrate;
 pub mod testkit;
 
+#[cfg(test)]
+mod export_tests;
 #[cfg(test)]
 mod form_tests;
 #[cfg(test)]
@@ -65,12 +68,15 @@ pub enum HomeError {
     Volume(String),
     Kernel(String),
     Io(String),
+    /// The person cancelled a move before the switch: what was built is gone and the plain home was never touched.
+    Cancelled,
 }
 
 impl std::fmt::Display for HomeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             HomeError::WrongSecret => write!(f, "The password or recovery key is wrong."),
+            HomeError::Cancelled => write!(f, "The move was cancelled. Nothing was changed: your files are where they were and the new encrypted folder was deleted."),
             HomeError::Throttled(s) => write!(f, "Too many wrong tries. Wait {s} seconds and try again."),
             HomeError::NoHome => write!(f, "There is no encrypted home for this account."),
             HomeError::AlreadyExists => write!(f, "This account already has an encrypted home."),
@@ -804,7 +810,13 @@ pub fn take_banner(user: &str) -> Option<String> {
     banners().lock().unwrap_or_else(|e| e.into_inner()).remove(user)
 }
 
-fn set_banner(user: &str, text: &str) {
+/// The banner text without taking it: the sign-in screen's home shows it as a message and the Settings page still gets it.
+pub fn peek_banner(user: &str) -> Option<String> {
+    banners().lock().unwrap_or_else(|e| e.into_inner()).get(user).cloned()
+}
+
+/// Leave a banner for `user` (what sign-in does when the private folder stays sealed).
+pub fn set_banner(user: &str, text: &str) {
     banners().lock().unwrap_or_else(|e| e.into_inner()).insert(user.to_string(), text.to_string());
 }
 

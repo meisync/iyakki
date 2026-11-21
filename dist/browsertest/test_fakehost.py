@@ -99,5 +99,19 @@ class Pair(unittest.TestCase):
         self.assertEqual(answers[0][2], b"zz")
 
 
+
+
+class FakeHostServesEveryClientPageFile(unittest.TestCase):
+    def test_every_path_of_the_real_client_page_is_served_by_the_fake_host(self):
+        import re
+        import fakehost
+        root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+        src = open(os.path.join(root, "crates/iyakki-remote/src/clientpage.rs")).read()
+        paths = re.search(r"pub const PATHS: \[&str; \d+\] = \[([^\]]+)\]", src).group(1)
+        real = set(re.findall(r'"(/connect[^"]*)"', paths))
+        files, _csp, _perm = fakehost.page_files(root)
+        self.assertEqual(real - set(files), set(), "the real page asks for files the harness does not serve (404 in the console)")
+
+
 if __name__ == "__main__":
     unittest.main()

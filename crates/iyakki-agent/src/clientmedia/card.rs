@@ -22,6 +22,7 @@ pub fn card_text(device: &str, person: &str, capability: &str, label: &str) -> (
         "client.camera.offer" => "send its camera to this machine".to_string(),
         "client.microphone.offer" => "send its microphone to this machine".to_string(),
         "clipboard.client" => "put text on this machine's clipboard".to_string(),
+        "files.client" => format!("send files between your home folder and the device ({label})"),
         "camera.view" => format!("show you a camera of this machine ({label})"),
         "speaker.play" => "play this machine's sound on the device".to_string(),
         _ => format!("use {capability} ({label})"),

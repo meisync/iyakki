@@ -467,6 +467,16 @@ impl Store {
     /// Install what was reviewed. The review is made again from the same bytes first; if the answer differs the
     /// install stops (a revocation list may have arrived while the person was reading).
     pub fn install(&self, svc: &Services, actor: &Actor, review: &Review, confirm: Confirm) -> Result<Record, InstallError> {
+        let r = self.install_reviewed(svc, actor, review, confirm);
+        // an install that was tried and did not finish is a `transfer.finished` too, outcome `failed` (F-SDK-207); a refusal, a missing
+        // confirmation or a changed review is not: nothing was fetched or written. The name is the app's, never an address or a reason.
+        if matches!(r, Err(InstallError::Failed(_))) {
+            crate::appevent_more::transfer_finished(&*svc.app_events, &actor.user, "install", &review.name, false);
+        }
+        r
+    }
+
+    fn install_reviewed(&self, svc: &Services, actor: &Actor, review: &Review, confirm: Confirm) -> Result<Record, InstallError> {
         if let Some(why) = &review.refusal {
             return Err(InstallError::Refused(why.clone()));
         }
@@ -603,6 +613,8 @@ impl Store {
         if old.is_none() {
             crate::appevent_sources::app_changed(&*svc.app_events, &actor.user, &rec.key(), "installed");
         }
+        // an install (first or update) that finished is a `transfer.finished` (F-SDK-207); the name is the app's, never a path or address
+        crate::appevent_more::transfer_finished(&*svc.app_events, &actor.user, "install", &rec.name, true);
         Ok(rec)
     }
 
@@ -854,6 +866,33 @@ pub(crate) mod tests {
 
     fn acme_cert(f: &Fx, key: &SigningKey, nb: i64, na: i64) -> Cert {
         Cert::issue(&f.root, Publisher { id: "acme".into(), name: "Acme".into(), url: String::new() }, &public_key_hex(key), nb, na, &["skill", "tool"])
+    }
+
+    #[test]
+    fn an_install_that_was_tried_and_failed_is_told_as_a_failed_transfer_and_a_refusal_is_not() {
+        let f = fx("xfer-fail");
+        let a = user("alice");
+        use iyakki_core_api::appevents::AppEvents;
+        let hub = &*f.svc.app_events;
+        hub.register("alice", "sample", "transfer.finished", "").unwrap();
+        hub.start("alice", "sample");
+        let show = |e: &iyakki_core_api::appevents::AppEvent| format!("{:?}", e.payload);
+        let bytes = skill_pkg("1.0.0", Some(&f.root), None, &meta("iyakki", &[]));
+        let r = review(&f, &a, bytes, me());
+        // nothing confirmed that must be: a refusal before anything is tried says nothing
+        let mut needs = r.clone();
+        needs.refusal = Some("no".into());
+        assert!(matches!(f.store.install(&f.svc, &a, &needs, Confirm::default()), Err(InstallError::Refused(_))));
+        assert!(hub.poll("alice", "sample", 10).is_empty(), "a refusal is not a transfer");
+        // the copy of the package cannot be written (its folder is a file): the install fails after it began
+        let _ = std::fs::remove_dir_all(f.store.dir().join("pkgs"));
+        std::fs::create_dir_all(f.store.dir()).unwrap();
+        std::fs::write(f.store.dir().join("pkgs"), b"not a folder").unwrap();
+        let failed = f.store.install(&f.svc, &a, &r, Confirm::default());
+        assert!(matches!(failed, Err(InstallError::Failed(_))), "{failed:?}");
+        let got: Vec<String> = hub.poll("alice", "sample", 10).iter().map(show).collect();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].contains("failed") && got[0].contains("meeting-notes") && !got[0].contains(&r.sha256), "{got:?}");
     }
 
     #[test]

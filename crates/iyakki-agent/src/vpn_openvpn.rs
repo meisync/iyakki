@@ -58,6 +58,11 @@ fn fail(msg: &str, hard: bool) -> UpError {
 /// Read the program's log until the tunnel is up. Returns what the server pushed, checked. Refuses (hard) a bad password or
 /// certificate (retrying with the same ones only gets the account locked), (soft) a server that did not answer in time.
 pub fn await_up(p: &mut dyn OvpnProc, profile_routes: &[Cidr], profile_redirect: bool, full: bool, ctx: &Context) -> Result<Checked, UpError> {
+    await_up_with(p, profile_routes, profile_redirect, full, full, ctx)
+}
+
+/// As [`await_up`]; `want_dns` keeps the pushed DNS servers for a HYBRID profile with domain rules.
+pub fn await_up_with(p: &mut dyn OvpnProc, profile_routes: &[Cidr], profile_redirect: bool, full: bool, want_dns: bool, ctx: &Context) -> Result<Checked, UpError> {
     let mut pushed: Option<Pushed> = None;
     let (mut idle, mut lines) = (0u32, 0u32);
     loop {
@@ -84,7 +89,7 @@ pub fn await_up(p: &mut dyn OvpnProc, profile_routes: &[Cidr], profile_redirect:
                     },
                     Event::Up => {
                         let Some(v) = pushed else { return Err(fail("the tunnel came up but the server's settings were not seen (the program's log level is too low)", true)) };
-                        return ovpnrun::check_pushed(&v, profile_routes, profile_redirect, full, ctx).map_err(|e| fail(&format!("the server's settings were refused: {e}"), true));
+                        return ovpnrun::check_pushed_with(&v, profile_routes, profile_redirect, full, want_dns, ctx).map_err(|e| fail(&format!("the server's settings were refused: {e}"), true));
                     }
                     Event::AuthFailed => return Err(fail("the OpenVPN server refused the user name or password", true)),
                     Event::TlsFailed => return Err(fail("the secure handshake with the OpenVPN server failed: check the certificates in the profile", false)),
@@ -131,14 +136,7 @@ impl OvpnLauncher for RealLauncher {
                 return Err(e.to_string());
             }
         };
-        let mut child = match std::process::Command::new(&self.binary)
-            .args(&args)
-            .env_clear()
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
+        let mut child = match iyakki_core_local::starters::openvpn_spawn(std::path::Path::new(&self.binary), &args) {
             Ok(c) => c,
             Err(e) => {
                 let _ = std::fs::remove_file(&path);
@@ -185,7 +183,7 @@ impl OvpnProc for RealProc {
     fn stop(&mut self) {
         if self.alive() {
             // the program ends its tunnel cleanly on SIGTERM; `kill` is the last resort
-            let _ = std::process::Command::new("kill").args(["-TERM", &self.child.id().to_string()]).status();
+            iyakki_core_local::starters::terminate(self.child.id());
             for _ in 0..50 {
                 if !self.alive() {
                     break;

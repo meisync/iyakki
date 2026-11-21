@@ -220,6 +220,8 @@ pub fn presence_plain_with(svc: &crate::services::Services, item: Item, lemonade
             Some(r) => Presence::Installed(format!("{} files, {}", r.files.iter().filter(|f| !f.starts_with("licences/")).count(), r.version)),
             None => Presence::Missing,
         },
+        Item::BrowserPackage => crate::browserpkg::installed_version(data).map_or(Presence::Missing, |v| Presence::Installed(format!("version {v}"))),
+        Item::YtDlp => if crate::ytdlp::installed(data) { Presence::Installed("yt-dlp".into()) } else { Presence::Missing },
         Item::DataScience => iyakki_shared::datasci::installed(data).map_or(Presence::Missing, |s| Presence::Installed(format!("{} files; {}", s.files.len(), s.selftest))),
         Item::MacCamera => match crate::camfw::read_outcome(data) {
             Some(o) if o.installed => Presence::Installed(if o.firmware_version.is_empty() { o.headline } else { format!("firmware {}", o.firmware_version) }),
@@ -388,7 +390,14 @@ pub fn gather_facts(svc: &crate::services::Services) -> Facts {
 
 /// The rows not shown for these GPUs: the NVIDIA driver entry needs an NVIDIA GPU.
 pub fn hidden_items(gpus: &[crate::gpu::Gpu]) -> Vec<Item> {
-    if crate::gpu::has_nvidia(gpus) { Vec::new() } else { vec![Item::GpuNvidia] }
+    let mut v = Vec::new();
+    if !crate::gpu::has_nvidia(gpus) {
+        v.push(Item::GpuNvidia);
+    }
+    if !iyakki_shared::gpu_rocm::any_usable(gpus) {
+        v.push(Item::GpuRocm);
+    }
+    v
 }
 
 /// What the item's button says: Install, Upgrade to a newer version, or (nothing newer / unknown) Update or Reinstall.
@@ -961,10 +970,20 @@ pub trait StepEnv {
     fn install_av_addon(&mut self) -> Result<String, String> {
         Err("the audio and video add-on cannot be installed here".into())
     }
+    /// Install the optional browser package from the store the person pinned (`browserpkg.rs`, F-BROW-40); the version installed. The Store's
+    /// confirm step was the person's approval; the signed description, size and checksum are checked before anything is kept.
+    fn install_browser_package(&mut self) -> Result<String, String> {
+        Err("the browser package cannot be installed here".into())
+    }
     /// Install the data science toolkit (`datasci_install.rs`); the sentence the self-test saw. Fails closed while the pin table is not
     /// filled in.
     fn data_science(&mut self) -> Result<String, String> {
         Err("the data science toolkit cannot be installed here".into())
+    }
+    /// Fetch the video-site extractor from its vendor, check it against the pinned SHA-256 and put it in the tools folder (`ytdlp.rs`); the
+    /// sentence the person reads. Fails closed while the pin row is missing.
+    fn ytdlp_install(&mut self) -> Result<String, String> {
+        Err("the video-site downloader cannot be installed here".into())
     }
     /// Build the browser add-on in an isolated k3s Job (`avbuild.rs`) and put the package in /local/packages; it is NOT installed.
     fn build_av_addon(&mut self) -> Result<String, String> {
@@ -2085,15 +2104,33 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
         }
         Item::GpuVulkan => crate::gpu_steps::run_vulkan(env, wait, poll),
         Item::GpuNvidia => crate::gpu_steps::run_nvidia(env, wait, poll),
+        Item::GpuRocm => crate::gpu_steps::run_rocm(env, wait, poll),
         Item::MacFirmware => {
             let line = env.mac_firmware()?;
             mark_verified(env, Item::MacFirmware, &line)?;
+            Ok(())
+        }
+        Item::BrowserPackage => {
+            env.say("[0/2] reading the package description from the store you pinned and checking its signature, size and checksum");
+            let line = env.install_browser_package()?;
+            env.say(&format!("[1/2] installed: {line}"));
+            mark_verified(env, item, &line)?;
+            env.say("[2/2] done: a browser tab opened from now on can use the full web engine (network and sound only)");
             Ok(())
         }
         Item::DataScience => {
             env.say(iyakki_shared::datasci::LICENCE);
             let line = env.data_science()?;
             mark_verified(env, Item::DataScience, &line)?;
+            Ok(())
+        }
+        Item::YtDlp => {
+            env.say(iyakki_shared::quickinstall::Item::YtDlp.licence());
+            env.say("[0/2] fetching the program from its vendor and checking it against the pinned checksum");
+            let line = env.ytdlp_install()?;
+            env.say(&format!("[1/2] {line}"));
+            mark_verified(env, Item::YtDlp, &line)?;
+            env.say("[2/2] done: ask the assistant to save a video (media_download_site); each download asks first");
             Ok(())
         }
         Item::FwHardware => Err("the hardware firmware has its own job: `iyakki quick-install fw-hardware`".into()),
@@ -2280,8 +2317,32 @@ impl StepEnv for RealEnv {
     fn registry_on_other_cluster(&mut self) -> bool {
         self.registry.target.is_some()
     }
+    fn ytdlp_install(&mut self) -> Result<String, String> {
+        let p = crate::ytdlp::install(&self.data, include_str!("../../../legal/downloads.txt"), &crate::settingstools_ytdlp::VendorFetch).map_err(|r| r.to_string())?;
+        Ok(format!("installed at {}", p.display()))
+    }
     fn data_science(&mut self) -> Result<String, String> {
-        crate::datasci_install::install(&*self.streamer, &self.data, &iyakki_shared::datasci::PINS, &mut |d| crate::datasci_install::no_runner(d), &mut |l| crate::qprintln!("{l}"))
+        // the self-test runs in the person's Linux apps sandbox (the one the "linux-apps" item makes) with no network
+        let exe = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
+        let la = crate::linuxapps::LinuxApps::new(&self.data, &self.user, &exe, std::sync::Arc::new(crate::wsexec::System));
+        let root = la.rootfs_of("debian");
+        let scratch = self.data.join("datasci.scratch");
+        // refused before the first byte is downloaded when the sandbox for the self-test is not there
+        crate::datasci_install::runner_ready(&root)?;
+        let r = crate::datasci_install::install(
+            &*self.streamer,
+            &self.data,
+            &iyakki_shared::datasci::PINS,
+            &mut |d| {
+                if !root.is_dir() {
+                    return Err("the toolkit self-test runs in the Linux apps sandbox, which is not installed yet: install Linux apps first".into());
+                }
+                crate::datasci_run::selftest(&crate::sandbox::exec::SelfLauncher, &root, d, &scratch)
+            },
+            &mut |l| crate::qprintln!("{l}"),
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+        r
     }
 
     fn linux_apps(&mut self) -> Result<String, String> {
@@ -2399,6 +2460,9 @@ impl StepEnv for RealEnv {
         let r = crate::avbuild::build(&cx);
         let progress = lines.borrow().join("\n");
         r.map(|m| format!("{progress}\n{m}"))
+    }
+    fn install_browser_package(&mut self) -> Result<String, String> {
+        crate::browserpkg_tools::install_with_streamer(&self.data, self.streamer.clone())
     }
     fn install_av_addon(&mut self) -> Result<String, String> {
         let places = crate::avaddon_install::Places::here(&self.data);
@@ -2627,10 +2691,8 @@ impl StepEnv for RealEnv {
             // the Mac firmware: the packs it names are recorded and their files are in the firmware folder
             Item::MacFirmware => {
                 let o = crate::macfw::read_outcome(&self.data).ok_or("the run left no result to check")?;
-                let (fs, _) = iyakki_drivers::apply::Fs::for_data(&self.data);
-                let look = |id: &str| {
-                    iyakki_drivers::apply::read_record(&fs, id).map(|r| (r.files.len(), r.files.iter().filter(|f| fs.fw_root.join(f).exists()).count()))
-                };
+                let drivers = iyakki_core_local::LocalDrivers::system(&self.data);
+                let look = |id: &str| iyakki_core_api::drivers::Drivers::pack_files(&drivers, id);
                 let (w, b) = (look(crate::macfw::PACK_WIFI), look(crate::macfw::PACK_BT));
                 verify::mac_firmware_note(o.installed, &[(crate::macfw::PACK_WIFI, o.wifi_files, w.map(|x| x.0), w.map_or(0, |x| x.1)), (crate::macfw::PACK_BT, o.bt_files, b.map(|x| x.0), b.map_or(0, |x| x.1))])
             }

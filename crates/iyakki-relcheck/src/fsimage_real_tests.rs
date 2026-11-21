@@ -170,7 +170,11 @@ fn a_gpt_disk_made_by_sgdisk_mkfs_fat_and_mtools_is_walked_and_the_real_tools_li
     let theirs = names_by_mtools(&img, 2048 * 512);
     assert_eq!(ours, theirs, "the scan and mtools list the same files of the FAT volume");
     assert!(ours.contains(&"boot/bzimage".to_string()) && ours.contains(&"boot/grub/themes/a-long-theme-file-name.txt".to_string()), "{ours:?}");
-    assert_eq!(skipped.len(), 2, "the ext4 and the swap partitions are said, not read: {skipped:?}");
+    // the ext4 volume is read now (an empty one: only lost+found), the swap partition is said, not read
+    assert_eq!(skipped.len(), 1, "only the swap partition is said: {skipped:?}");
+    assert!(skipped[0].starts_with("partition 3 "), "{skipped:?}");
+    let (all, _) = crate::fsimage::disk_list(&std::fs::read(&img).unwrap()).unwrap();
+    assert!(all.iter().any(|e| e.path == "p2/lost+found"), "the ext4 volume of partition 2 is listed");
     // the sizes the scan reads are the sizes the files have
     let (list, _) = crate::fsimage::disk_list(&std::fs::read(&img).unwrap()).unwrap();
     let sz = |p: &str| list.iter().find(|e| e.path.eq_ignore_ascii_case(p)).map(|e| e.size);

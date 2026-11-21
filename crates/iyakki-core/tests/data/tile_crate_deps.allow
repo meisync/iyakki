@@ -3,3 +3,6 @@
 # The list may only shrink: a line that no longer matches a real dependency fails the test until it is removed.
 # (`iyakki-tile-usage` needs only `iyakki-uikit` and `iyakki-tile-api`, see docs/development/COMPILE-SPLIT-PILOT.md.)
 iyakki-tile-pdf iyakki-pdf the reader library is the tile's engine: a parser and renderer for untrusted files with no I/O and no agent (it depends on iyakki-web for the picture decoders); removed if the engine ever moves behind a tile-api trait (docs/development/COMPILE-SPLIT-PILOT-5.md)
+iyakki-tile-hostfiles iyakki-hostfiles the rules of the host-files bridge (import, mounts, export; no agent) are the dialog's engine; removed if they ever move behind a tile-api trait
+iyakki-tile-board iyakki-board-model the board's data and logic (features file, dependencies, assignment, results, coverage) as a pure leaf crate that iyakki-shared re-exports; the tile cannot name iyakki-shared (alpha.7 S2, D-S2-01)
+iyakki-tile-board iyakki-clock times and days on the board cards (std only leaf crate, split out of the agent; alpha.7 S2, D-S2-01)

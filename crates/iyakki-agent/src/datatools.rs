@@ -439,6 +439,18 @@ fn open_new(svc: &Arc<dyn DataService>, user: &str, real: &Path) -> Result<iyakk
     Ok(info)
 }
 
+/// Open a table file the program just put in the person's home in the Data service, so the DATA tab lists it; one sentence for the model.
+pub fn register_file(user: &str, real: &Path) -> Result<String, String> {
+    let real = std::fs::canonicalize(real).map_err(|e| e.to_string())?;
+    let info = open_new(&service_for(user), user, &real)?;
+    Ok(format!("Added to Data as {} ({} rows, {} columns); data_query with handle {} reads it.", real.file_name().and_then(|n| n.to_str()).unwrap_or("a table"), n(info.rows), info.columns.len(), info.handle))
+}
+
+/// The file a Data handle of this person was opened from, while it is still open.
+pub fn handle_source(user: &str, handle: &str) -> Option<std::path::PathBuf> {
+    source_of(user, &DatasetHandle(handle.trim().to_string()))
+}
+
 fn create_table(args: &Value, p: &Policy, user: &str, cwd: &Path, roots: &crate::scope::FileRoots) -> Result<String, String> {
     if p.fs_write.is_empty() {
         return Err("your account may not write files".into());

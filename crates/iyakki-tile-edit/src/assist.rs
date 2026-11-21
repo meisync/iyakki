@@ -66,7 +66,11 @@ impl<S: Source> EditTile<S> {
             self.note = "The text is too long to send to the assistant.".into();
             return true;
         }
-        let args = json!({"path": self.path.trim(), "text": text, "instruction": words});
+        let mut args = json!({"path": self.path.trim(), "text": text, "instruction": words});
+        // the selected lines go along as context (F-WEB-59): the first and last line number and the selected text, 4000 characters at most
+        if let (Some((a, b)), Some(sel)) = (self.buf.selection(), self.buf.selected_text().filter(|t| !t.is_empty())) {
+            args["selection"] = json!({"from": a.0 + 1, "to": b.0 + 1, "text": sel.chars().take(4000).collect::<String>()});
+        }
         match call_json(&mut self.src, "assist", "ask", &args.to_string()) {
             Ok(v) => match v["id"].as_str().filter(|s| !s.is_empty()) {
                 Some(id) => {

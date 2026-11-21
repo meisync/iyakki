@@ -223,7 +223,9 @@ fn a_gpt_install_on_a_512_byte_disk_is_complete_and_verified() {
     if let Some(o) = tool("parted", &["-s", fs, "unit", "MiB", "print"]) {
         assert!(o.contains("Partition Table: gpt") && o.contains("bios_grub") && o.contains("esp") && o.contains("IYAKKI-DATA"), "parted: {o}");
     }
-    if let Some(o) = tool("fdisk", &["-l", fs]) {
+    // only util-linux's fdisk has `-l` (the Mac's fdisk does not): skip any other one
+    if tool("fdisk", &["--version"]).is_some_and(|v| v.contains("util-linux")) {
+        let o = tool("fdisk", &["-l", fs]).unwrap();
         assert!(o.contains("Disklabel type: gpt") && o.contains("BIOS boot") && o.contains("EFI System") && o.contains("Linux filesystem"), "fdisk -l: {o}");
     }
 }

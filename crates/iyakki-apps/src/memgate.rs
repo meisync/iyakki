@@ -60,7 +60,7 @@ pub fn class_of(app: PApp) -> AppClass {
     match app {
         PApp::Browser | PApp::Ide | PApp::Camera | PApp::Data | PApp::Dash | PApp::Flows | PApp::Media | PApp::Voice | PApp::LinuxWin | PApp::Lab => AppClass::Heavy,
         PApp::Checkup | PApp::Chat | PApp::Rag | PApp::Edit | PApp::Mcp | PApp::Cli | PApp::Store | PApp::Skills | PApp::Tales | PApp::Scan | PApp::Mesh | PApp::Runs | PApp::System | PApp::Usage | PApp::Calendar | PApp::Remote | PApp::Cameras | PApp::Pdf | PApp::Sample | PApp::Markdown => AppClass::Medium,
-        PApp::Users | PApp::Settings | PApp::Inbox | PApp::Radio | PApp::K8s | PApp::Disks | PApp::Git | PApp::Doctor | PApp::Learn | PApp::DevTools | PApp::Auth => AppClass::Light,
+        PApp::Users | PApp::Settings | PApp::Inbox | PApp::Radio | PApp::K8s | PApp::Disks | PApp::Git | PApp::Doctor | PApp::Learn | PApp::DevTools | PApp::Auth | PApp::Firewall => AppClass::Light,
     }
 }
 
@@ -77,9 +77,9 @@ impl MemFacts {
     }
 
     /// Count the memory compression saved (F-BOOT-31): only while the experiment is On, half of the saving, never past `total`.
-    pub fn with_compressed_credit(self, experiment: iyakki_zram::compressed::Experiment, stored_orig: u64, ram_used: u64) -> MemFacts {
-        let credit = iyakki_zram::compressed::gate_credit(experiment, stored_orig, ram_used);
-        MemFacts { total: self.total, available: iyakki_zram::compressed::available_with_credit(self.available, self.total, credit) }
+    pub fn with_compressed_credit(self, experiment: iyakki_core_api::device_types::zram::compressed::Experiment, stored_orig: u64, ram_used: u64) -> MemFacts {
+        let credit = iyakki_core_api::device_types::zram::compressed::gate_credit(experiment, stored_orig, ram_used);
+        MemFacts { total: self.total, available: iyakki_core_api::device_types::zram::compressed::available_with_credit(self.available, self.total, credit) }
     }
 }
 
@@ -99,8 +99,8 @@ pub fn compressed_figures(root: &Path) -> (u64, u64) {
     let meminfo = std::fs::read_to_string(root.join("proc/meminfo")).unwrap_or_default();
     let kb = |key: &str| meminfo.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(':')?.split_whitespace().next()?.parse::<u64>().ok()).unwrap_or(0).saturating_mul(1024);
     let (mut orig, mut used) = (kb("Zswapped"), kb("Zswap"));
-    let env = iyakki_zram::apply::Env::under(root);
-    if let Some(z) = iyakki_zram::stats::zram_stats(&env) {
+    let env = iyakki_core_api::device_types::zram::apply::Env::under(root);
+    if let Some(z) = iyakki_core_api::device_types::zram::stats::zram_stats(&env) {
         orig = orig.saturating_add(z.orig);
         used = used.saturating_add(z.mem_used);
     }
@@ -111,8 +111,8 @@ pub fn compressed_figures(root: &Path) -> (u64, u64) {
 /// line say so), half of what zram and zswap saved is added to what is available, never past the total.
 pub fn read_mem_credited(root: &Path, cmdline: &str, conf: &str) -> MemFacts {
     let base = read_mem(root);
-    let (experiment, _) = iyakki_zram::compressed::resolve_experiment(cmdline, conf);
-    if !base.known() || experiment == iyakki_zram::compressed::Experiment::Off {
+    let (experiment, _) = iyakki_core_api::device_types::zram::compressed::resolve_experiment(cmdline, conf);
+    if !base.known() || experiment == iyakki_core_api::device_types::zram::compressed::Experiment::Off {
         return base;
     }
     let (orig, used) = compressed_figures(root);
@@ -121,7 +121,7 @@ pub fn read_mem_credited(root: &Path, cmdline: &str, conf: &str) -> MemFacts {
 
 /// The real machine's memory, with the credit of compressed memory when the experiment is on.
 pub fn read_mem_now() -> MemFacts {
-    let conf = std::fs::read_to_string(iyakki_zram::CONF_PATH).unwrap_or_default();
+    let conf = std::fs::read_to_string(iyakki_core_api::device_types::zram::CONF_PATH).unwrap_or_default();
     read_mem_credited(Path::new("/"), &crate::host().cmdline(), &conf)
 }
 
@@ -135,9 +135,9 @@ pub fn read_mem_os(os: &dyn iyakki_core_api::Os) -> MemFacts {
     }
     let base = MemFacts { total, available };
     let cmdline = os.sysinfo().cmdline().unwrap_or_default();
-    let conf = std::fs::read_to_string(iyakki_zram::CONF_PATH).unwrap_or_default();
-    let (experiment, _) = iyakki_zram::compressed::resolve_experiment(&cmdline, &conf);
-    if experiment == iyakki_zram::compressed::Experiment::Off {
+    let conf = std::fs::read_to_string(iyakki_core_api::device_types::zram::CONF_PATH).unwrap_or_default();
+    let (experiment, _) = iyakki_core_api::device_types::zram::compressed::resolve_experiment(&cmdline, &conf);
+    if experiment == iyakki_core_api::device_types::zram::compressed::Experiment::Off {
         return base;
     }
     let (orig, used) = compressed_figures(Path::new("/"));

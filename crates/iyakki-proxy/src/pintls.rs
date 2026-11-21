@@ -250,6 +250,14 @@ pub fn open_tls(url: &str, headers: &[(String, String)], mode: &TlsMode) -> Resu
 }
 
 fn open_with_roots(url: &str, headers: &[(String, String)], mode: &TlsMode, trusted: rustls::RootCertStore) -> Result<StreamHead, String> {
+    open_method("GET", url, headers, &[], mode, trusted)
+}
+
+/// Any request over TLS checked the way `mode` says (the pinned relay uses POST). `Content-Length` is set from `body`; the connection is closed after the answer.
+fn open_method(method: &str, url: &str, headers: &[(String, String)], body: &[u8], mode: &TlsMode, trusted: rustls::RootCertStore) -> Result<StreamHead, String> {
+    if !matches!(method, "GET" | "POST") {
+        return Err("only GET and POST are sent over a pinned connection".into());
+    }
     let (host, port, target) = split_https(url)?;
     let why = Arc::new(Mutex::new(None));
     let verifier: Arc<dyn ServerCertVerifier> = match mode {
@@ -264,15 +272,21 @@ fn open_with_roots(url: &str, headers: &[(String, String)], mode: &TlsMode, trus
     let sock = connect(&host, port)?;
     let mut tls = rustls::StreamOwned::new(conn, sock);
     let host_header = if port == 443 { host.clone() } else { format!("{host}:{port}") };
-    let mut req = format!("GET {target} HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) Iyakki/0.1\r\nConnection: close\r\n");
+    let mut req = format!("{method} {target} HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) Iyakki/0.1\r\nConnection: close\r\n");
     for (k, v) in headers {
-        if k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') && !v.contains(['\r', '\n']) {
+        // the framing headers are ours alone
+        if k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') && !v.contains(['\r', '\n']) && !k.eq_ignore_ascii_case("content-length") && !k.eq_ignore_ascii_case("transfer-encoding") && !k.eq_ignore_ascii_case("host") {
             req.push_str(&format!("{k}: {v}\r\n"));
         }
     }
+    if method == "POST" {
+        req.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
     req.push_str("\r\n");
     let explain = |e: std::io::Error| why.lock().unwrap().clone().unwrap_or_else(|| e.to_string());
-    tls.write_all(req.as_bytes()).and_then(|_| tls.flush()).map_err(explain)?;
+    let mut out = req.into_bytes();
+    out.extend_from_slice(body);
+    tls.write_all(&out).and_then(|_| tls.flush()).map_err(explain)?;
     // the answer's head, a byte at a time so that nothing of the body is taken
     let mut head = Vec::new();
     let mut b = [0u8; 1];
@@ -293,6 +307,39 @@ fn open_with_roots(url: &str, headers: &[(String, String)], mode: &TlsMode, trus
     let chunked = hs.iter().any(|(k, v)| k == "transfer-encoding" && v.to_ascii_lowercase().contains("chunked"));
     let body: Box<dyn Read + Send> = if chunked { Box::new(Chunked { inner: tls, left: 0, done: false }) } else { Box::new(tls) };
     Ok(StreamHead { status, headers: hs, body })
+}
+
+/// The most an answer through [`PinnedUpstream`] may be (a relay's list of sealed envelopes or a short sentence).
+pub const PINNED_MAX_BODY: u64 = 4 * 1024 * 1024;
+
+/// HTTPS requests to ONE server whose leaf certificate has a known SHA-256 fingerprint (the owner's relay): the same check as
+/// [`TlsMode::Pin`], for GET and POST, with the whole answer read (bounded). Nothing else is ever trusted by this transport; an empty
+/// or malformed fingerprint is refused before any connection, so an unset pin fails closed.
+pub struct PinnedUpstream {
+    fp: String,
+}
+
+impl PinnedUpstream {
+    /// `fingerprint` is 64 hex digits (any spacing or colons).
+    pub fn new(fingerprint: &str) -> Result<PinnedUpstream, String> {
+        let fp = crate::certinfo::norm_fingerprint(fingerprint);
+        if fp.len() != 64 {
+            return Err("the certificate fingerprint is 64 hexadecimal digits (SHA-256)".into());
+        }
+        Ok(PinnedUpstream { fp })
+    }
+}
+
+impl super::Upstream for PinnedUpstream {
+    fn request(&self, method: &str, url: &str, headers: &[(String, String)], body: &[u8]) -> Result<super::UpstreamResponse, String> {
+        let head = open_method(method, url, headers, body, &TlsMode::Pin(self.fp.clone()), roots())?;
+        let mut out = Vec::new();
+        head.body.take(PINNED_MAX_BODY + 1).read_to_end(&mut out).map_err(|e| e.to_string())?;
+        if out.len() as u64 > PINNED_MAX_BODY {
+            return Err("the server's answer is too large".into());
+        }
+        Ok(super::UpstreamResponse { status: head.status, body: out })
+    }
 }
 
 #[cfg(test)]
@@ -427,6 +474,79 @@ mod tests {
         let port2 = serve(vec![other.der.clone()], &other.key, false);
         let e = open_tls(&url(port2), &[], &TlsMode::Pin(fp(&l))).err().unwrap();
         assert!(e.contains(CHANGED) && e.contains(&fp(&other)), "{e}");
+    }
+
+    /// A TLS server on localhost that keeps what each request sent and answers with the given status and body.
+    fn serve_echo(l: &Made, status: &'static str, answer: &'static str) -> (u16, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let cfg = Arc::new(
+            rustls::ServerConfig::builder_with_provider(provider())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![CertificateDer::from(l.der.clone())], rustls::pki_types::PrivateKeyDer::try_from(l.key.serialize_der()).unwrap())
+                .unwrap(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for s in listener.incoming().flatten() {
+                let mut s = s;
+                let mut c = rustls::ServerConnection::new(cfg.clone()).unwrap();
+                let mut t = rustls::Stream::new(&mut c, &mut s);
+                let mut seen = Vec::new();
+                let mut b = [0u8; 1];
+                let mut need = None;
+                loop {
+                    match t.read(&mut b) {
+                        Ok(1) => seen.push(b[0]),
+                        _ => break,
+                    }
+                    if need.is_none() && seen.ends_with(b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&seen).to_ascii_lowercase();
+                        let n: usize = head.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+                        need = Some(seen.len() + n);
+                    }
+                    if need.is_some_and(|n| seen.len() >= n) {
+                        break;
+                    }
+                }
+                let _ = tx.send(seen);
+                let _ = t.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len()).as_bytes());
+                let _ = t.flush();
+                c.send_close_notify();
+                let _ = c.complete_io(&mut s);
+            }
+        });
+        (port, rx)
+    }
+
+    #[test]
+    fn a_pinned_upstream_posts_and_gets_only_to_the_certificate_it_was_given_and_an_unset_pin_fails_closed() {
+        use crate::Upstream;
+        let root = ca("Test Root");
+        let l = leaf(&["localhost"], &root, None, None);
+        let (port, seen) = serve_echo(&l, "200 OK", "[\"ab\"]");
+        let up = PinnedUpstream::new(&fp(&l)).unwrap();
+        let r = up.request("POST", &format!("https://localhost:{port}/v1/relay/post"), &[("Content-Type".into(), "application/octet-stream".into()), ("Content-Length".into(), "999".into())], b"sealed-bytes").unwrap();
+        assert_eq!((r.status, r.body.as_slice()), (200, &b"[\"ab\"]"[..]));
+        let sent = String::from_utf8_lossy(&seen.recv().unwrap()).to_string();
+        assert!(sent.starts_with("POST /v1/relay/post HTTP/1.1\r\n") && sent.contains("Content-Length: 12\r\n") && !sent.contains("999") && sent.ends_with("sealed-bytes"), "{sent}");
+        let r = up.request("GET", &format!("https://localhost:{port}/v1/relay/fetch/abc"), &[], b"").unwrap();
+        assert_eq!(r.status, 200);
+        // another certificate on the address is refused and says so
+        let other = leaf(&["localhost"], &root, None, None);
+        let (port2, _) = serve_echo(&other, "200 OK", "x");
+        let e = up.request("GET", &format!("https://localhost:{port2}/"), &[], b"").err().unwrap();
+        assert!(e.contains(CHANGED), "{e}");
+        // an error answer still comes back as a status, and other methods and plain http are refused before any connection
+        let (port3, _) = serve_echo(&l, "403 Forbidden", "no");
+        assert_eq!(up.request("POST", &format!("https://localhost:{port3}/"), &[], b"x").unwrap().status, 403);
+        assert!(up.request("DELETE", &format!("https://localhost:{port}/"), &[], b"").is_err());
+        assert!(up.request("GET", "http://localhost/", &[], b"").is_err());
+        // no fingerprint, a short one and a non-hex one fail closed
+        assert!(PinnedUpstream::new("").is_err() && PinnedUpstream::new("AB:CD").is_err() && PinnedUpstream::new(&"zz".repeat(32)).is_err());
+        assert!(PinnedUpstream::new(&fp(&l).to_ascii_lowercase().replace(':', " ")).is_ok());
     }
 
     #[test]

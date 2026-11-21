@@ -347,7 +347,7 @@ impl Builder {
                     }
                     let mut efont = 0usize;
                     let lines: Vec<Ln> = if crate::shaped::needs(text) {
-                        let ls = crate::shaped::layout(text, size, cw - indent, &mut replaced);
+                        let ls = crate::shaped::layout_weight(text, size, cw - indent, &mut replaced, bold);
                         if ls.iter().all(|l| l.clusters.is_empty()) {
                             continue;
                         }

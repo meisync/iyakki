@@ -12,7 +12,7 @@ use super::*;
 use iyakki_shared::sharing::control::{self, Backend};
 use iyakki_shared::sharing::plan::{apply_policy, make_plan};
 use iyakki_shared::sharing::policy::Who;
-use iyakki_shared::sharing::view::{choices_with, warnings, Choices};
+use iyakki_shared::sharing::view::{choices_full, warnings, Choices};
 use iyakki_shared::sharing::{human_duration, IfaceInfo, Request, State, Status, DEFAULT_IDLE_HOURS, MAX_IDLE_HOURS};
 use std::sync::Arc;
 use std::time::Instant;
@@ -26,6 +26,8 @@ pub(super) struct SharePanel {
     seen: Option<(Instant, Vec<IfaceInfo>, bool, Status)>,
     /// Why the Wi-Fi hotspot is not offered, asked together with the look at the machine (only while it is not offered).
     wifi_why: Option<String>,
+    /// Why letting phones connect over Bluetooth is not offered (`None`: it is), asked together with the look at the machine.
+    nap_why: Option<String>,
     pub(super) col: usize,
     pub(super) up_sel: usize,
     pub(super) down_sel: usize,
@@ -42,13 +44,44 @@ pub(super) struct SharePanel {
 
 impl Default for SharePanel {
     fn default() -> SharePanel {
-        SharePanel { open: false, backend: None, ttl_ms: 2000, seen: None, wifi_why: None, col: 1, up_sel: 0, down_sel: 0, hours: DEFAULT_IDLE_HOURS, isolate: true, allow_lan: false, armed: false, can_start: true, scroll: 0.0, max: 0.0 }
+        SharePanel { open: false, backend: None, ttl_ms: 2000, seen: None, wifi_why: None, nap_why: None, col: 1, up_sel: 0, down_sel: 0, hours: DEFAULT_IDLE_HOURS, isolate: true, allow_lan: false, armed: false, can_start: true, scroll: 0.0, max: 0.0 }
+    }
+}
+
+/// The sharing of a core that does not serve it to this program (the UI over the socket, D-SPLIT-03-QUIET): nothing listed, nothing on, and every
+/// request refused in words.
+struct NotServedBackend;
+
+impl Backend for NotServedBackend {
+    fn interfaces(&self) -> Vec<IfaceInfo> {
+        Vec::new()
+    }
+    fn wifi_ap(&self) -> bool {
+        false
+    }
+    fn wifi_ap_why(&self) -> Option<String> {
+        Some("Sharing is not served over the UI socket yet.".into())
+    }
+    fn status(&self) -> Status {
+        Status::default()
+    }
+    fn request(&self) -> iyakki_shared::sharing::Request {
+        Default::default()
+    }
+    fn submit(&self, _r: &iyakki_shared::sharing::Request) -> Result<(), String> {
+        Err("Sharing is not served over the UI socket yet.".into())
+    }
+    fn policy(&self) -> iyakki_shared::sharing::policy::Policy {
+        Default::default()
+    }
+    fn set_policy(&self, _p: &iyakki_shared::sharing::policy::Policy, _by: &str, _admin: bool) -> Result<String, String> {
+        Err("Sharing is not served over the UI socket yet.".into())
     }
 }
 
 impl SharePanel {
     fn backend(&mut self, cx: &AppCx) -> Arc<dyn Backend> {
-        self.backend.get_or_insert_with(|| crate::agent().host_probe().sharing_backend(cx.data_dir()).expect("the real core serves sharing")).clone()
+        self.backend.get_or_insert_with(|| crate::agent().host_probe().sharing_backend(cx.data_dir()).unwrap_or_else(|| Arc::new(NotServedBackend))).clone()
     }
 
     fn look(&mut self, cx: &AppCx) -> (Vec<IfaceInfo>, bool, Status) {
@@ -57,6 +90,7 @@ impl SharePanel {
             let b = self.backend(cx);
             let wifi = b.wifi_ap();
             self.wifi_why = if wifi { None } else { b.wifi_ap_why() };
+            self.nap_why = b.nap_why();
             self.seen = Some((Instant::now(), b.interfaces(), wifi, b.status()));
         }
         let (_, i, w, s) = self.seen.clone().expect("just set");
@@ -65,7 +99,7 @@ impl SharePanel {
 
     pub(super) fn choices(&mut self, cx: &AppCx) -> Choices {
         let (i, w, _) = self.look(cx);
-        choices_with(&i, w, self.wifi_why.as_deref())
+        choices_full(&i, w, self.wifi_why.as_deref(), self.nap_why.as_deref())
     }
 
     pub(super) fn status(&mut self, cx: &AppCx) -> Status {
@@ -408,6 +442,10 @@ impl SettingsApp {
                 lines.push((format!("Security: {}  (e or a click changes it; a card that cannot do WPA3 itself keeps WPA2)", hotspot_security_text(&self.share.backend(cx).hotspot_security())), 13.0, TEXT, Face::Sans));
                 lines.push(("It uses this computer's own Wi-Fi card next to its connection to your router. The internet comes from the source above; devices that join get the same protection as on a cable (isolated from each other unless you turn that off). Change the name or password with n (or: iyakki share wifi-set NAME PASSWORD).".into(), 12.0, DIM, Face::Sans));
             }
+        }
+        if c.downs.get(self.share.down_sel).is_some_and(|d| d.name == iyakki_shared::sharing::NAP_IFACE) {
+            lines.push(("Bluetooth".into(), 14.0, TEXT, Face::Bold));
+            lines.push(("Phones connect to this computer and use its internet (at most seven at a time, isolated from each other unless you turn that off). For a few minutes after sharing starts this computer is visible to phones: pair from the phone (accept the number it shows), then in the phone's Bluetooth settings for this computer switch on Internet access. The access point is made when sharing starts and removed when it stops.".into(), 12.0, DIM, Face::Sans));
         }
         let (h, iso, lan) = if on { (st.idle_hours, st.isolate, self.share.allow_lan) } else { (self.share.hours, self.share.isolate, self.share.allow_lan) };
         lines.push(("Options".into(), 14.0, TEXT, Face::Bold));

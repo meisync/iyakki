@@ -11,7 +11,7 @@ pub const MAX_PACKAGE_BYTES: usize = 64 * 1024;
 
 pub const MAX_EXTENSION_PACKAGE_BYTES: usize = 12 * 1024 * 1024; // room for a ~7.5 MB kernel module in base64 (the Mac mini Wi-Fi driver pack)
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PkgError {
     #[error("{0}")]
     Invalid(String),
@@ -29,7 +29,7 @@ pub enum PkgError {
     Storage(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Trust {
     /// Signed by a key listed in `trusted-keys.txt`, with the label given there.
     Trusted(String),
@@ -55,7 +55,7 @@ pub struct Installed {
     pub signer: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Manifest {
     pub kind: String,
     pub name: String,
@@ -69,7 +69,7 @@ pub struct Manifest {
     pub cert: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Package {
     pub manifest: Manifest,
     pub payload: String,
@@ -88,7 +88,7 @@ pub fn newer(new: &str, old: &str) -> bool {
 }
 
 /// What the person is asked to approve.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Review {
     pub package: Package,
     pub trust: Trust,

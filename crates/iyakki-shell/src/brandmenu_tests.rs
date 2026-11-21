@@ -386,3 +386,40 @@ fn the_video_firmware_and_folder_boxes_have_browse_inside_the_panel_and_the_pick
     m.pick_for = PickFor::Video;
     assert!(m.pick.is_open());
 }
+
+#[test]
+fn a_looks_menu_list_orders_and_hides_its_entries_and_the_default_menu_stays_as_it_was() {
+    use iyakki_uikit::look::MenuEntry as M;
+    let mut m = opened();
+    let plain: Vec<Page> = m.shown().iter().map(|e| e.0).collect();
+    assert_eq!(plain.len(), ENTRIES.len() - 1, "an account that is not an administrator has no Developer mode entry");
+    assert!(!plain.contains(&Page::Home) && !plain.contains(&Page::Lock), "with no Look menu nothing is added to today's menu");
+    m.set_look_menu(Some(vec![M::Chat, M::Settings, M::Files, M::Lock, M::SignOut, M::Power]));
+    let pages: Vec<Page> = m.shown().iter().map(|e| e.0).collect();
+    let tail: Vec<Page> = pages.iter().copied().skip_while(|p| !matches!(p, Page::Chat | Page::Settings | Page::Files | Page::Lock | Page::SignOut | Page::Power)).collect();
+    assert_eq!(tail, [Page::Chat, Page::Settings, Page::Files, Page::Lock, Page::SignOut, Page::Power], "the Look's order");
+    assert!(!pages.contains(&Page::Home) && !pages.contains(&Page::Apps), "an entry the Look leaves out is not shown");
+    assert!(pages.contains(&Page::About) && pages.contains(&Page::Media), "the machine's own entries stay");
+    m.set_look_menu(None);
+    assert_eq!(m.shown().iter().map(|e| e.0).collect::<Vec<_>>(), plain);
+}
+
+#[test]
+fn the_looks_action_entries_ask_the_shell_to_act_by_key_enter_and_click() {
+    use iyakki_uikit::look::MenuEntry as M;
+    let mut m = opened();
+    m.set_look_menu(Some(vec![M::Home, M::Settings, M::Lock, M::SignOut, M::Power, M::Files, M::Chat, M::Apps]));
+    assert_eq!(m.handle_key(&Key::Char('k')), Outcome::Act(Page::Lock));
+    assert_eq!(m.handle_key(&Key::Char('o')), Outcome::Act(Page::SignOut));
+    assert_eq!(m.handle_key(&Key::Char('w')), Outcome::Act(Page::Power));
+    assert_eq!(m.handle_key(&Key::Char('h')), Outcome::Act(Page::Home));
+    let i = m.shown().iter().position(|e| e.0 == Page::Files).unwrap();
+    assert_eq!(m.handle_hit(&Event::Tab(ENTRY + i)), Outcome::Act(Page::Files));
+    assert_eq!(m.page, Page::Menu, "an action is not a page");
+    let keys: Vec<char> = m.shown().iter().map(|e| e.3).collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), keys.len(), "every entry has a key of its own");
+    assert!(ENTRIES.iter().all(|e| e.0 != Page::Home), "the default menu has no action entries");
+}

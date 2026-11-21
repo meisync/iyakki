@@ -147,6 +147,11 @@ pub trait QuickInstallFacet: Send + Sync {
     fn ollama_host_info(&self, _data: &Path) -> HostInfo {
         HostInfo::default()
     }
+    /// The Store card of the optional browser package (F-BROW-40): its version, size and what it replaces, read from the store the person
+    /// pinned through `upstream`, or the plain reason it could not be read. A network read: callers run it off the screen's thread.
+    fn browser_package_card(&self, _data: &Path, _upstream: Arc<dyn iyakki_proxy::Upstream>) -> Result<Vec<String>, String> {
+        Err("the browser package card is not available here".into())
+    }
 }
 
 /// The machine check-up (`iyakki_agent::checkup`): what needs the real machine; the steps themselves are pure (`iyakki_shared::checkup`).

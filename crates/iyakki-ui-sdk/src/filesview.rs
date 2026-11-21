@@ -483,7 +483,7 @@ impl FilesView {
                 if mw > 0.0 {
                     c.text(r.right() - mw, r.y + ((r.h - fs * 0.85) / 2.0).max(0.0), fs * 0.85, th.muted, &meta, TextStyle::Regular);
                 }
-                c.hit(r, Hit { action: self.base + A_ROW0 + (i - self.scroll) as u32, name: name.clone(), role: Role::ListItem });
+                c.hit(r, Hit { action: self.base + A_ROW0 + (i - self.scroll) as u32, name: name.clone(), role: Role::ListItem, ..Default::default() });
             }
             if l.truncated {
                 let s = m.size(TypeRole::Caption);

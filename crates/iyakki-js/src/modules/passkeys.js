@@ -41,8 +41,8 @@
   };
   class AuthenticatorResponse { constructor(clientDataJSON) { this.clientDataJSON = clientDataJSON; } }
   class AuthenticatorAttestationResponse extends AuthenticatorResponse {
-    constructor(c, a, pk) { super(c); this.attestationObject = a; this._pk = pk; }
-    getTransports() { return ['internal']; }
+    constructor(c, a, pk, transports) { super(c); this.attestationObject = a; this._pk = pk; this._t = Array.isArray(transports) ? transports.map(String) : ['internal']; }
+    getTransports() { return this._t.slice(); }
     getPublicKeyAlgorithm() { return -7; }
     getAuthenticatorData() { return null; }
   }
@@ -50,7 +50,7 @@
     constructor(c, a, s, u) { super(c); this.authenticatorData = a; this.signature = s; this.userHandle = u; }
   }
   class PublicKeyCredential {
-    constructor(id, raw, response) { this.id = id; this.rawId = raw; this.type = 'public-key'; this.response = response; this.authenticatorAttachment = 'platform'; }
+    constructor(id, raw, response, attachment) { this.id = id; this.rawId = raw; this.type = 'public-key'; this.response = response; this.authenticatorAttachment = attachment === 'cross-platform' ? 'cross-platform' : 'platform'; }
     getClientExtensionResults() { return {}; }
     toJSON() { return { id: this.id, rawId: this.id, type: this.type }; }
     static isUserVerifyingPlatformAuthenticatorAvailable() { return Promise.resolve(false); }
@@ -73,14 +73,15 @@
           const params = Array.isArray(p.pubKeyCredParams) ? p.pubKeyCredParams : [];
           if (params.length > 0 && !params.some((x) => x && x.type === 'public-key' && x.alg === -7)) throw new DOMException('Only ES256 (-7) passkeys can be made here.', 'NotSupportedError');
           const sel = p.authenticatorSelection || {};
-          if (sel.authenticatorAttachment === 'cross-platform') throw new DOMException('A security key is not available here; only a passkey kept on this computer.', 'NotSupportedError');
           const r = call('create', {
             rpId: p.rp.id === undefined ? '' : String(p.rp.id), rpName: String(p.rp.name || ''), challenge: enc(bytesOf(p.challenge, 'the challenge')),
             userHandle: enc(bytesOf(p.user.id, 'the user id')), userName: String(p.user.name || p.user.displayName || ''),
             exclude: ids(p.excludeCredentials, 'excludeCredentials'),
+            attachment: sel.authenticatorAttachment === 'cross-platform' ? 'cross-platform' : '', uv: String(sel.userVerification || p.userVerification || ''),
+            resident: sel.residentKey === 'required' || sel.requireResidentKey === true,
           });
           if (r.error) throw fail(r.error);
-          resolve(new PublicKeyCredential(r.credentialId, dec(r.credentialId), new AuthenticatorAttestationResponse(dec(r.clientDataJSON), dec(r.attestationObject))));
+          resolve(new PublicKeyCredential(r.credentialId, dec(r.credentialId), new AuthenticatorAttestationResponse(dec(r.clientDataJSON), dec(r.attestationObject), null, r.transports), r.attachment));
         } catch (e) { reject(e && e.message !== undefined && !(e instanceof DOMException) && !(e instanceof TypeError) ? fail(e.message) : e); }
       });
     },
@@ -88,9 +89,9 @@
       return new Promise((resolve, reject) => {
         try {
           const p = pre(o);
-          const r = call('get', { rpId: p.rpId === undefined ? '' : String(p.rpId), challenge: enc(bytesOf(p.challenge, 'the challenge')), allow: ids(p.allowCredentials, 'allowCredentials') });
+          const r = call('get', { rpId: p.rpId === undefined ? '' : String(p.rpId), challenge: enc(bytesOf(p.challenge, 'the challenge')), allow: ids(p.allowCredentials, 'allowCredentials'), uv: String(p.userVerification || '') });
           if (r.error) throw fail(r.error);
-          resolve(new PublicKeyCredential(r.credentialId, dec(r.credentialId), new AuthenticatorAssertionResponse(dec(r.clientDataJSON), dec(r.authenticatorData), dec(r.signature), r.userHandle ? dec(r.userHandle) : null)));
+          resolve(new PublicKeyCredential(r.credentialId, dec(r.credentialId), new AuthenticatorAssertionResponse(dec(r.clientDataJSON), dec(r.authenticatorData), dec(r.signature), r.userHandle ? dec(r.userHandle) : null), r.attachment));
         } catch (e) { reject(e && e.message !== undefined && !(e instanceof DOMException) && !(e instanceof TypeError) ? fail(e.message) : e); }
       });
     },

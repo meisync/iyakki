@@ -721,6 +721,149 @@
         ],
         "type": "object"
       },
+      "HookCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "content_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "flow": {
+            "type": "string"
+          },
+          "max_body": {
+            "type": "integer"
+          },
+          "methods": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "rate_per_min": {
+            "type": "integer"
+          },
+          "signed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "flow"
+        ],
+        "type": "object"
+      },
+      "HookList": {
+        "additionalProperties": false,
+        "properties": {
+          "hooks": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "hooks"
+        ],
+        "type": "object"
+      },
+      "HookPublic": {
+        "additionalProperties": false,
+        "properties": {
+          "minutes": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "minutes"
+        ],
+        "type": "object"
+      },
+      "HookReveal": {
+        "additionalProperties": false,
+        "properties": {
+          "flow": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "secret": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "shown_once": {
+            "type": "boolean"
+          },
+          "waiting": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "waiting"
+        ],
+        "type": "object"
+      },
+      "HookSecret": {
+        "additionalProperties": false,
+        "properties": {
+          "flow": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "secret": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "shown_once": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "shown_once"
+        ],
+        "type": "object"
+      },
+      "HookState": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "open_to_public": {
+            "type": "boolean"
+          },
+          "public_until": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "Html": {
+        "type": "string"
+      },
       "LoginRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1355,6 +1498,128 @@
       "Text": {
         "type": "string"
       },
+      "TileBundle": {
+        "additionalProperties": false,
+        "properties": {
+          "bridge": {
+            "type": "string"
+          },
+          "caps": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "frame": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "page": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "type": "object"
+      },
+      "TileBundleCall": {
+        "additionalProperties": false,
+        "properties": {
+          "args": {
+            "type": "object"
+          },
+          "call": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "call"
+        ],
+        "type": "object"
+      },
+      "TileBundleInstall": {
+        "additionalProperties": false,
+        "properties": {
+          "caps": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "files": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "base64": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "base64"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "files"
+        ],
+        "type": "object"
+      },
+      "TileBundleResult": {
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "value": {}
+        },
+        "required": [
+          "ok"
+        ],
+        "type": "object"
+      },
+      "TileBundles": {
+        "additionalProperties": false,
+        "properties": {
+          "bundles": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "bundles"
+        ],
+        "type": "object"
+      },
       "TileEvents": {
         "additionalProperties": false,
         "properties": {
@@ -1530,6 +1795,38 @@
           "version",
           "api",
           "profile"
+        ],
+        "type": "object"
+      },
+      "VoiceOffer": {
+        "additionalProperties": false,
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "offer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "addr",
+          "offer"
+        ],
+        "type": "object"
+      },
+      "VoiceReturn": {
+        "additionalProperties": false,
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "offer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "addr",
+          "offer"
         ],
         "type": "object"
       },
@@ -2436,7 +2733,7 @@
             "bearer": []
           }
         ],
-        "summary": "WebSocket (Upgrade; the upgrade itself is answered before the ordinary sign-in, because a browser cannot send a header, and signs in by its first message). The first message is {\"type\":\"auth\",\"token\":...}; the token is never in the address. Then the caller's own `notification`, `count` and `approval` events and `changed` (an area name, after any change made through the API), a ping every 25 seconds. Capped per person and per tenant.",
+        "summary": "WebSocket (Upgrade; the upgrade itself is answered before the ordinary sign-in, because a browser cannot send a header, and signs in by its first message). The first message is {\"type\":\"auth\",\"token\":...}; the token is never in the address. Then the caller's own `notification`, `count` and `approval` events, `data_import` (`id`, `tool`, `status`: denied, done or failed; never rows or arguments), `tile` (`call`, `tile`, `tool`, `verdict`: the answer to a tile's question) and `changed` (an area name, after any change made through the API), a ping every 25 seconds. Capped per person and per tenant.",
         "x-access": "user"
       }
     },
@@ -4002,6 +4299,517 @@
         ],
         "summary": "Read-only: the branch, ahead and behind, and the changed files of a clone. Query: `folder`, `scope`, `namespace`. No address with a password is ever shown.",
         "x-access": "user"
+      }
+    },
+    "/api/v1/hooks": {
+      "get": {
+        "operationId": "hooks_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HookList"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The caller's webhooks (a secret address that starts one of their flows): id, flow, on or off, signed, published, open to the public until, the last 20 deliveries. Never the address or the secret.",
+        "x-access": "user"
+      },
+      "post": {
+        "operationId": "hooks_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HookCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HookSecret"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Add a webhook to one of the caller's flows (`flow`, optional `signed` default true, `methods`, `max_body`, `content_types`, `rate_per_min`). It is OFF until switched on and needs the flow published. The answer holds the secret address (`path`, `/hooks/<id>/<token>`) and, when signed, the shared secret: shown this once, never audited.",
+        "x-access": "user",
+        "x-audited": true
+      }
+    },
+    "/api/v1/hooks/reveal": {
+      "get": {
+        "operationId": "hooks_reveal",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HookReveal"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The address and secret the assistant's webhook tool left for the caller (the assistant never sees them): returned once, then gone.",
+        "x-access": "user"
+      }
+    },
+    "/api/v1/hooks/{id}/disable": {
+      "post": {
+        "operationId": "hooks_disable",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HookState"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Switch a webhook off (it answers 404 and any opening to the public closes).",
+        "x-access": "user",
+        "x-audited": true
+      }
+    },
+    "/api/v1/hooks/{id}/enable": {
+      "post": {
+        "operationId": "hooks_enable",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HookState"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Switch a webhook on (the flow must be published with the trigger).",
+        "x-access": "user",
+        "x-audited": true
+      }
+    },
+    "/api/v1/hooks/{id}/public": {
+      "post": {
+        "operationId": "hooks_public",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HookPublic"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HookState"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Let a webhook take senders from outside the local network for `minutes` (at most 10080 = 7 days; 0 closes it).",
+        "x-access": "user",
+        "x-audited": true
+      }
+    },
+    "/api/v1/hooks/{id}/regenerate": {
+      "post": {
+        "operationId": "hooks_regenerate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HookSecret"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Make a webhook's secret address (and shared secret) again; the old ones stop working at once. The new ones are in the answer, once.",
+        "x-access": "user",
+        "x-audited": true
       }
     },
     "/api/v1/login": {
@@ -8739,6 +9547,146 @@
         "x-access": "public"
       }
     },
+    "/api/v1/voice/offer": {
+      "get": {
+        "operationId": "voice_offer",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VoiceOffer"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The audio address and the one-link certificate this cloud machine offers to a connector that carries the person's microphone to My IYAKKI (F-VOICE-38). Only while the cloud audio stream switch is on (it is off by default) and an audio address is configured; the person still answers a card on their own computer before any sound leaves it. The certificate is for this link alone and the device trusts exactly it.",
+        "x-access": "user",
+        "x-audited": true
+      }
+    },
+    "/api/v1/voice/return": {
+      "post": {
+        "operationId": "voice_return",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VoiceReturn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The device's own audio address and certificate for the answer's sound (F-VOICE-61), sent by the connector after the person said yes on their own computer. Only while the cloud audio stream switch is on and a cloud voice session is listening; the answer travels only to the certificate offered here. Body: addr (host:port) and offer (the certificate offer as JSON text). The audit line names the person, never the address or the certificate.",
+        "x-access": "user",
+        "x-audited": true
+      }
+    },
     "/api/v1/webaccess": {
       "get": {
         "operationId": "webaccess_get",
@@ -9061,6 +10009,106 @@
         },
         "security": [],
         "summary": "Readiness: 200 when the data directory is writable and the services started, else 503.",
+        "x-access": "public"
+      }
+    },
+    "/tiles/app.css": {
+      "get": {
+        "operationId": "tile_page_css",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Html"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          }
+        },
+        "security": [],
+        "summary": "The style sheet of a tile's page.",
+        "x-access": "public"
+      }
+    },
+    "/tiles/app.js": {
+      "get": {
+        "operationId": "tile_page_js",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Html"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          }
+        },
+        "security": [],
+        "summary": "The script of a tile's page (same origin only, no eval, the token kept in memory).",
+        "x-access": "public"
+      }
+    },
+    "/tiles/{id}/app": {
+      "get": {
+        "operationId": "tile_page",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Html"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          }
+        },
+        "security": [],
+        "summary": "A tile's own page (static HTML with a canvas; signs in itself and drives the tile over the events route). No data of anyone is in it; strict content policy; `window.iyakki` is its bridge.",
         "x-access": "public"
       }
     }

@@ -43,17 +43,30 @@ impl SoundProbeFacet for RealSoundProbe {
     fn system_recorders(&self) -> Option<Arc<dyn iyakki_shared::voicedesk::Recorders>> {
         Some(Arc::new(crate::voicedesk::SystemRecorders))
     }
-    fn sounddoctor_scan(&self, asound: &Path, proc_root: &Path, helper: u32, own_pid: u32, playing: bool) -> iyakki_shared::sounddoctor::Obs {
-        crate::sounddoctor::scan(asound, proc_root, helper, own_pid, playing)
+    fn sounddoctor_scan_via(&self, route: &dyn iyakki_core_api::AudioRoute, helper: u32, own_pid: u32, playing: bool) -> iyakki_shared::sounddoctor::Obs {
+        crate::sounddoctor::scan_via(route, helper, own_pid, playing)
     }
-    fn sounddoctor_is_engine(&self, proc_root: &Path, helper: u32, pid: u32) -> bool {
-        crate::sounddoctor::is_engine(proc_root, helper, pid)
+    fn sounddoctor_is_engine_via(&self, route: &dyn iyakki_core_api::AudioRoute, helper: u32, pid: u32) -> bool {
+        crate::sounddoctor::is_engine_via(route, helper, pid)
+    }
+    fn system_audio_route(&self) -> std::sync::Arc<dyn iyakki_core_api::AudioRoute> {
+        std::sync::Arc::new(iyakki_core_local::audioroute::LocalAudioRoute::system())
     }
     fn audio_mixing(&self) -> bool {
         crate::audiosink::mixing()
     }
     fn bluetooth_audio_install(&self, play_cmd: Box<dyn Fn() -> String + Send + Sync>) {
         crate::btaudiotools::install(move || play_cmd())
+    }
+    fn bluetooth_sound_view(&self) -> iyakki_agent_api::BtSoundView {
+        let t = crate::btsound::view_tools();
+        iyakki_agent_api::BtSoundView { active: crate::btsound::active(&t), line: t.sound_line(), sinks: t.sinks() }
+    }
+    fn bluetooth_sound_start(&self, data: &Path, address: &str) -> Result<String, String> {
+        crate::btsound::start(data, address)
+    }
+    fn bluetooth_sound_stop(&self, data: &Path) -> Result<String, String> {
+        crate::btsound::stop(data)
     }
 }
 

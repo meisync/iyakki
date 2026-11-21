@@ -1,0 +1,19 @@
+scenario: SND-EAR-04
+title: MacBook speakers loud enough, no distortion
+area: Sound
+rows: F-DRIVERS-27, F-SND-05
+machines: macbookpro, macbook
+needs: person
+prereq: A MacBook with the Apple speakers. No headphones plugged in.
+step: Open Settings, Sound, choose the built-in speakers and set the volume to the middle.
+expect: The speakers are listed and chosen.
+clause: F-SND-05.chosen
+step: Press Play test tone.
+expect: You hear two clear notes at a comfortable loudness, not very quiet and not distorted. Both speakers play.
+clause: F-DRIVERS-27.loud
+step: Set the volume to the top and play the tone once.
+expect: The tone is loud and clean; there is no rattling, popping or the sound dropping out.
+clause: F-DRIVERS-27.clean
+step: Play a radio station in the RADIO tile for one minute.
+expect: Music plays without clicks or stutters for the whole minute.
+clause: F-SND-05.stream

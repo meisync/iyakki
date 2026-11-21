@@ -87,7 +87,7 @@ impl FlowsApp {
         if self.book.dismissed(&s.id) {
             return None;
         }
-        failfix::failure_of(&self.env.engine().get_run(&s.id)?)
+        failfix::failure_of(&self.env.get_run(&s.id)?)
     }
 
     /// Look at the open flow's last run: show the card when it failed, and (once per failed run, only when the assistant is
@@ -130,7 +130,7 @@ impl FlowsApp {
     /// The flow's own settings (nothing selected), where the permissions are: for a step that stopped for want of one.
     pub(super) fn open_flow_settings(&mut self) {
         let in_design = self.tab == Tab::Design && self.cur.is_some();
-        let flow = self.fail.as_ref().map(|f| f.flow_id.clone()).filter(|_| !in_design).or_else(|| self.run_id.as_ref().and_then(|r| self.env.engine().get_run(r)).map(|r| r.flow_id));
+        let flow = self.fail.as_ref().map(|f| f.flow_id.clone()).filter(|_| !in_design).or_else(|| self.run_id.as_ref().and_then(|r| self.env.get_run(r)).map(|r| r.flow_id));
         if let Some(id) = flow {
             if self.cur.as_deref() != Some(id.as_str()) {
                 self.open_flow(&id);
@@ -148,9 +148,9 @@ impl FlowsApp {
         let line = self.env.refresh_model_lists();
         let run = self.run_id.clone().or_else(|| self.fail.as_ref().map(|f| f.run_id.clone()));
         let mut retried = false;
-        if let Some(r) = run.as_deref().and_then(|r| self.env.engine().get_run(r)) {
+        if let Some(r) = run.as_deref().and_then(|r| self.env.get_run(r)) {
             for (id, n) in &r.nodes {
-                if n.needs_person && n.permission == "choice" && self.env.engine().retry_node(&r.id, id).is_ok() {
+                if n.needs_person && n.permission == "choice" && self.env.retry_node(&r.id, id).is_ok() {
                     retried = true;
                 }
             }
@@ -242,8 +242,8 @@ impl FlowsApp {
         };
         let mut req = iyakki_flow::StartRequest::new(&run.flow_id).trigger("manual", &self.env.who());
         req.inputs = run.inputs.clone();
-        req.draft = self.env.store().published(&run.flow_id).is_none();
-        match self.env.engine().start_run(req) {
+        req.draft = self.env.published(&run.flow_id).is_none();
+        match self.env.start_run(req) {
             Ok(o) => {
                 self.refresh_runs();
                 self.select_run(&o.run_id, false);

@@ -69,7 +69,7 @@ pub struct ProviderLimits {
     pub silence_secs: u32,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SettingsError {
     #[error("{0}")]
     Invalid(String),
@@ -154,6 +154,8 @@ pub struct Settings {
     pub keyboard: crate::keyboard::KeyboardSettings,
     /// Settings -> Battery (laptops): percentage in the top bar, low-battery warnings, shutdown at the critical level.
     pub battery: iyakki_battery::BatterySettings,
+    /// Settings -> Radio: reconnect tries and moving on to the next station when a live station drops (F-RADIO-17).
+    pub radio: crate::radiorecover::RadioRecover,
     /// Settings -> Power: the power profile, sleep after idle (F-PWR-01).
     pub power: crate::power::PowerSettings,
     /// Settings -> System update: how often to look for updates, and the system update index an administrator set (F-UPD-04).
@@ -201,11 +203,50 @@ fn bad<T>(s: impl Into<String>) -> Result<T, SettingsError> {
 }
 
 impl Settings {
+    /// Add a provider or replace the one with the same id (the change `SettingsStore::upsert_provider` makes).
+    pub fn put_provider(&mut self, p: ProviderCfg) {
+        match self.providers.iter_mut().find(|x| x.id == p.id) {
+            Some(slot) => *slot = p,
+            None => self.providers.push(p),
+        }
+    }
+
+    /// Remove a provider and clear the chat and embedding choices that pointed at it.
+    pub fn drop_provider(&mut self, id: &str) {
+        self.providers.retain(|p| p.id != id);
+        if self.chat.as_ref().is_some_and(|c| c.provider == id) {
+            self.chat = None;
+        }
+        if self.embedding.as_ref().is_some_and(|c| c.provider == id) {
+            self.embedding = None;
+        }
+    }
+
+    pub fn put_external(&mut self, e: ExtEntry) {
+        match self.external_rag.iter_mut().find(|x| x.backend.id() == e.backend.id()) {
+            Some(slot) => *slot = e,
+            None => self.external_rag.push(e),
+        }
+    }
+
+    pub fn drop_external(&mut self, id: &str) {
+        self.external_rag.retain(|e| e.backend.id() != id)
+    }
+
+    pub fn put_secret_provider(&mut self, alias: &str, cfg: SecretProviderCfg) {
+        self.secret_providers.insert(alias.into(), cfg);
+    }
+
+    pub fn drop_secret_provider(&mut self, alias: &str) {
+        self.secret_providers.remove(alias);
+    }
+
     pub fn provider(&self, id: &str) -> Option<&ProviderCfg> {
         self.providers.iter().find(|p| p.id == id)
     }
 
     pub fn validate(&self) -> Result<(), SettingsError> {
+        self.radio.validate().map_err(SettingsError::Invalid)?;
         if !self.time.zone.is_empty() && iyakki_clock::Zone::named(&self.time.zone).is_none() {
             return bad(format!("unknown time zone `{}`", self.time.zone));
         }
@@ -289,6 +330,8 @@ pub struct SettingsStore {
     /// The computer this install runs on (`hwprofile`): its per-computer values are put over the settings when it is attached and
     /// written to its profile after every change.
     computers: Option<crate::hwprofile::Computers>,
+    /// Counts the changes made to the stored settings: a writer that read the settings at one count and replaces them at another has been overtaken.
+    generation: u64,
 }
 
 impl SettingsStore {
@@ -307,7 +350,7 @@ impl SettingsStore {
         if read_only.is_none() {
             current.schema = SCHEMA.current;
         }
-        Ok(SettingsStore { path: path.into(), current, read_only, computers: None })
+        Ok(SettingsStore { path: path.into(), current, read_only, computers: None, generation: 0 })
     }
 
     /// Why this store cannot be changed (a newer release wrote the file), if so.
@@ -324,6 +367,7 @@ impl SettingsStore {
     pub fn attach_computers(&mut self, c: crate::hwprofile::Computers) {
         c.apply(&mut self.current);
         self.computers = Some(c);
+        self.generation += 1;
     }
 
     pub fn computers(&self) -> Option<&crate::hwprofile::Computers> {
@@ -352,14 +396,27 @@ impl SettingsStore {
                 log::warn!("computer profile: {e}");
             }
         }
+        self.generation += 1;
         Ok(())
     }
 
+    /// How many changes the store has taken (see [`replace_if`](Self::replace_if)).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Put `next` in place of the stored settings, but only when nothing changed since the caller read generation `generation`
+    /// (`Ok(false)`: it was overtaken, nothing was written). The same rules as [`update`](Self::update): it must validate and save.
+    /// This is how a screen that does not share the store's memory (it holds a connection to the core) changes settings.
+    pub fn replace_if(&mut self, generation: u64, next: Settings) -> Result<bool, SettingsError> {
+        if generation != self.generation {
+            return Ok(false);
+        }
+        self.update(|s| *s = next).map(|_| true)
+    }
+
     pub fn upsert_provider(&mut self, p: ProviderCfg) -> Result<(), SettingsError> {
-        self.update(|s| match s.providers.iter_mut().find(|x| x.id == p.id) {
-            Some(slot) => *slot = p,
-            None => s.providers.push(p),
-        })
+        self.update(|s| s.put_provider(p))
     }
 
     /// Removing a provider also clears chat/embedding choices that pointed at it.
@@ -367,15 +424,7 @@ impl SettingsStore {
         if self.current.provider(id).is_none() {
             return bad(format!("no provider `{id}`"));
         }
-        self.update(|s| {
-            s.providers.retain(|p| p.id != id);
-            if s.chat.as_ref().is_some_and(|c| c.provider == id) {
-                s.chat = None;
-            }
-            if s.embedding.as_ref().is_some_and(|c| c.provider == id) {
-                s.embedding = None;
-            }
-        })
+        self.update(|s| s.drop_provider(id))
     }
 
     pub fn set_chat(&mut self, c: Option<ModelChoice>) -> Result<(), SettingsError> {
@@ -387,26 +436,19 @@ impl SettingsStore {
     }
 
     pub fn upsert_external(&mut self, e: ExtEntry) -> Result<(), SettingsError> {
-        self.update(|s| match s.external_rag.iter_mut().find(|x| x.backend.id() == e.backend.id()) {
-            Some(slot) => *slot = e,
-            None => s.external_rag.push(e),
-        })
+        self.update(|s| s.put_external(e))
     }
 
     pub fn remove_external(&mut self, id: &str) -> Result<(), SettingsError> {
-        self.update(|s| s.external_rag.retain(|e| e.backend.id() != id))
+        self.update(|s| s.drop_external(id))
     }
 
     pub fn upsert_secret_provider(&mut self, alias: &str, cfg: SecretProviderCfg) -> Result<(), SettingsError> {
-        self.update(|s| {
-            s.secret_providers.insert(alias.into(), cfg);
-        })
+        self.update(|s| s.put_secret_provider(alias, cfg))
     }
 
     pub fn remove_secret_provider(&mut self, alias: &str) -> Result<(), SettingsError> {
-        self.update(|s| {
-            s.secret_providers.remove(alias);
-        })
+        self.update(|s| s.drop_secret_provider(alias))
     }
 }
 

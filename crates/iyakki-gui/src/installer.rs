@@ -310,7 +310,7 @@ fn step_of(w: &Option<Wizard>) -> usize {
     match w.as_ref().map(|w| w.page) {
         None => 0,
         Some(Page::Drive) => 1,
-        Some(Page::Mode | Page::Choose | Page::Sizes) => 2,
+        Some(Page::Mode | Page::Choose | Page::Sizes | Page::Shrink) => 2,
         Some(Page::Plan) => 3,
         Some(Page::Confirm) => 4,
         Some(Page::Progress) => 5,
@@ -410,7 +410,7 @@ impl App {
                     next = wiz.handle(WKey::Enter);
                 }
             }
-            Page::Mode | Page::Choose | Page::Sizes => {
+            Page::Mode | Page::Choose | Page::Sizes | Page::Shrink => {
                 ui.heading("What to do with the drive");
                 ui.label(format!("{} ({})", wiz.disk().path, human_size(wiz.disk().size_bytes)));
                 ui.add_space(6.0);
@@ -428,8 +428,17 @@ impl App {
                     });
                 }
                 ui.checkbox(&mut wiz.req.keep_esp, "Dual boot: keep the existing EFI System Partition (only the folder EFI/IYAKKI and a boot entry are added)");
-                ui.add_space(6.0);
                 let mode = wiz.mode();
+                // legacy BIOS boot of a shared disk (F-INST-13): the old boot sectors are saved first, `iyakki-usb --bios-restore` puts them back
+                if mode != Mode::WholeDisk {
+                    ui.checkbox(&mut wiz.req.bios, "Also start this disk on older PCs through legacy BIOS (the old boot sectors are saved to a file first)");
+                    if wiz.req.bios {
+                        ui.checkbox(&mut wiz.req.bios_replace, "Allow replacing another system's boot code (it must then be chained from IYAKKI's menu; the save file undoes it)");
+                    } else {
+                        wiz.req.bios_replace = false;
+                    }
+                }
+                ui.add_space(6.0);
                 if mode == Mode::WholeDisk {
                     ui.colored_label(red, "Everything on the drive will be erased.");
                 } else if mode == Mode::Reuse {
@@ -622,7 +631,7 @@ fn shrink_panel(ui: &mut egui::Ui, st: &mut ShrinkUi, (writer, elevation, shared
         if !st.open {
             return;
         }
-        ui.label("Have a backup of what matters. Only an unmounted ext2/3/4 or NTFS partition can be shrunk; its start never moves.");
+        ui.label("Have a backup of what matters. Only an unmounted ext2/3/4, NTFS, FAT32 or exFAT partition can be shrunk (FAT32 and exFAT only down to just after its last file); its start never moves.");
         for c in iyakki_usb::resize_step::candidates(d) {
             ui.horizontal(|ui| {
                 ui.monospace(format!("{:<12} {:>9}  {}", c.name, human_size(c.bytes), c.fs));

@@ -21,17 +21,89 @@ pub trait RemoteDesktop: Send {
     fn size(&self) -> Option<(u32, u32)>;
     /// Sign out of the tenant and end the connection.
     fn close(&self);
+    /// The native tiles the tenant offers this person (F-CLOUD-76): empty when it offers none (or does not run the tile service).
+    fn tiles(&self) -> Vec<TenantTile> {
+        Vec::new()
+    }
+    /// Where those tiles' frames come from.
+    fn frames(&self) -> Option<Arc<dyn crate::apps::tile_remote::RemoteFrames>> {
+        None
+    }
+    /// How the sealed browser data is carried to this tenant and back (F-VAULT-11): `None` when the tenant has no file service.
+    fn carrier(&self) -> Option<Arc<dyn iyakki_agent_api::ProfileCarrier>> {
+        None
+    }
+}
+
+/// The tenant's file service as the carrier of the sealed browser data.
+struct FilesCarrier(iyakki_link::cloudcarrier::TenantFiles);
+
+impl iyakki_agent_api::ProfileCarrier for FilesCarrier {
+    fn put(&self, bytes: &[u8]) -> Result<(), String> {
+        self.0.put(bytes).map(|_| ())
+    }
+    fn get(&self) -> Result<Option<Vec<u8>>, String> {
+        self.0.get()
+    }
+}
+
+impl Drop for FilesCarrier {
+    fn drop(&mut self) {
+        self.0.sign_out();
+    }
+}
+
+/// One of a tenant's native tiles, as the shell lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TenantTile {
+    pub id: String,
+    pub title: String,
+    pub ticks: bool,
+}
+
+/// The tenant's tile service over the pinned, signed-in connection (`iyakki_link::cloudtiles`): the list is read once at sign-in, every
+/// frame request opens its own pinned connection.
+struct TileLink {
+    c: iyakki_link::cloudtiles::TileConnector,
+}
+
+impl crate::apps::tile_remote::RemoteFrames for TileLink {
+    fn frame(&self, id: &str, w: i32, h: i32, reset: bool, events: &[serde_json::Value]) -> Result<(bool, serde_json::Value), String> {
+        let r = iyakki_link::cloudtiles::FrameRequest { width: w.max(1) as u32, height: h.max(1) as u32, scale_pct: 100, dark: true, reset, events: events.to_vec() };
+        self.c.frame(id, &r).map(|f| (f.redraw, f.frame))
+    }
+}
+
+impl Drop for TileLink {
+    fn drop(&mut self) {
+        self.c.sign_out();
+    }
 }
 
 /// The real thing: the connector's client.
 pub struct ClientDesktop {
     c: cc::Client,
     size: std::sync::Mutex<Option<(u32, u32)>>,
+    tiles: Vec<TenantTile>,
+    link: Option<Arc<TileLink>>,
+    carrier: Option<Arc<FilesCarrier>>,
 }
 
 impl ClientDesktop {
     pub fn new(c: cc::Client) -> ClientDesktop {
-        ClientDesktop { c, size: std::sync::Mutex::new(None) }
+        ClientDesktop { c, size: std::sync::Mutex::new(None), tiles: Vec::new(), link: None, carrier: None }
+    }
+
+    /// Also sign in to the tenant's tile service with the same account; a tenant without one (or any failure) leaves the desktop as it is.
+    pub fn with_tiles(mut self, t: &Target, user: &str, password: &str) -> ClientDesktop {
+        if let Ok(c) = iyakki_link::cloudtiles::TileConnector::sign_in(t, user, password) {
+            self.tiles = c.tiles().unwrap_or_default().into_iter().map(|t| TenantTile { id: t.id, title: t.title, ticks: t.ticks }).collect();
+            self.link = Some(Arc::new(TileLink { c }));
+        }
+        if let Ok(f) = iyakki_link::cloudcarrier::TenantFiles::sign_in(t, user, password) {
+            self.carrier = Some(Arc::new(FilesCarrier(f)));
+        }
+        self
     }
 }
 
@@ -58,6 +130,15 @@ impl RemoteDesktop for ClientDesktop {
     fn close(&self) {
         self.c.close()
     }
+    fn tiles(&self) -> Vec<TenantTile> {
+        self.tiles.clone()
+    }
+    fn frames(&self) -> Option<Arc<dyn crate::apps::tile_remote::RemoteFrames>> {
+        self.link.clone().map(|l| l as Arc<dyn crate::apps::tile_remote::RemoteFrames>)
+    }
+    fn carrier(&self) -> Option<Arc<dyn iyakki_agent_api::ProfileCarrier>> {
+        self.carrier.clone().map(|c| c as Arc<dyn iyakki_agent_api::ProfileCarrier>)
+    }
 }
 
 /// What the shell asks of the network: look at a server's certificate, and sign in. Tests replace it.
@@ -73,7 +154,7 @@ impl Connector for RealConnector {
         cc::probe(addr, std::time::Duration::from_secs(6))
     }
     fn connect(&self, t: &Target, user: &str, password: &str, size: (u32, u32)) -> Result<Box<dyn RemoteDesktop>, String> {
-        cc::Client::connect(t, user, password, size).map(|c| Box::new(ClientDesktop::new(c)) as Box<dyn RemoteDesktop>)
+        cc::Client::connect(t, user, password, size).map(|c| Box::new(ClientDesktop::new(c).with_tiles(t, user, password)) as Box<dyn RemoteDesktop>)
     }
 }
 
@@ -139,6 +220,15 @@ impl Session {
     pub fn send(&self, i: Input) {
         self.desktop.send(i)
     }
+    pub fn tiles(&self) -> Vec<TenantTile> {
+        self.desktop.tiles()
+    }
+    pub fn frames(&self) -> Option<Arc<dyn crate::apps::tile_remote::RemoteFrames>> {
+        self.desktop.frames()
+    }
+    pub fn carrier(&self) -> Option<Arc<dyn iyakki_agent_api::ProfileCarrier>> {
+        self.desktop.carrier()
+    }
 }
 
 /// All open tenants and which one is shown.
@@ -168,7 +258,9 @@ impl Hub {
         if i >= self.sessions.len() {
             return;
         }
-        self.sessions.remove(i).desktop.close();
+        let gone = self.sessions.remove(i);
+        iyakki_apps::agent().profile_store().set_tenant_carrier(&gone.name, None);
+        gone.desktop.close();
         self.active = match self.active {
             Some(a) if a == i => None,
             Some(a) if a > i => Some(a - 1),
@@ -178,6 +270,7 @@ impl Hub {
 
     pub fn close_all(&mut self) {
         for s in self.sessions.drain(..) {
+            iyakki_apps::agent().profile_store().set_tenant_carrier(&s.name, None);
             s.desktop.close();
         }
         self.active = None;
@@ -293,6 +386,8 @@ mod fake {
         pub pic: Option<Picture>,
         pub sent: Vec<Input>,
         pub closed: bool,
+        pub tiles: Vec<TenantTile>,
+        pub frames: Option<Arc<dyn crate::apps::tile_remote::RemoteFrames>>,
     }
 
     /// A tenant's desktop for tests: its state is shared so a test can look at what was sent and change the picture.
@@ -316,6 +411,12 @@ mod fake {
         pub fn is_closed(&self) -> bool {
             self.0.lock().unwrap().closed
         }
+        /// The tenant offers these tiles and answers their frame requests with `frames`.
+        pub fn offer_tiles(&self, tiles: &[(&str, &str, bool)], frames: Arc<dyn crate::apps::tile_remote::RemoteFrames>) {
+            let mut s = self.0.lock().unwrap();
+            s.tiles = tiles.iter().map(|(id, title, ticks)| TenantTile { id: (*id).into(), title: (*title).into(), ticks: *ticks }).collect();
+            s.frames = Some(frames);
+        }
     }
 
     impl RemoteDesktop for FakeDesktop {
@@ -338,6 +439,12 @@ mod fake {
             let mut s = self.0.lock().unwrap();
             s.closed = true;
             s.status = Some(Status::Closed("closed".into()));
+        }
+        fn tiles(&self) -> Vec<TenantTile> {
+            self.0.lock().unwrap().tiles.clone()
+        }
+        fn frames(&self) -> Option<Arc<dyn crate::apps::tile_remote::RemoteFrames>> {
+            self.0.lock().unwrap().frames.clone()
         }
     }
 

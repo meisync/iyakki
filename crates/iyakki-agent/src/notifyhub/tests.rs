@@ -39,6 +39,7 @@ struct FakeEnv {
     rules: Mutex<Rules>,
     locked: Mutex<bool>,
     approvals: Mutex<Vec<Pending>>,
+    push: Mutex<Option<Arc<dyn super::service::PushSender>>>,
 }
 
 struct Env(Arc<FakeEnv>);
@@ -61,6 +62,9 @@ impl HubEnv for Env {
     }
     fn tenant_name(&self) -> String {
         "Acme".into()
+    }
+    fn push_sender(&self) -> Option<Arc<dyn super::service::PushSender>> {
+        self.0.push.lock().unwrap().clone()
     }
 }
 
@@ -103,6 +107,32 @@ fn email(details: bool) -> Channel {
     c.password = "vault:notify.channel/mailpw".into();
     c.username = "alerts".into();
     c.addresses = [("ann", "ann@example.org"), ("bob", "bob@example.org")].into_iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    c
+}
+
+/// A push sender with a fixed list of people who saved a browser; records what it was asked to push.
+#[derive(Default)]
+struct FakePush {
+    people: Vec<&'static str>,
+    sent: Mutex<Vec<(String, Severity, String, String)>>,
+}
+
+impl super::service::PushSender for FakePush {
+    fn can_push(&self, p: &str) -> bool {
+        self.people.contains(&p)
+    }
+    fn push(&self, p: &str, sev: Severity, title: &str, body: &str, _now: u64) -> Result<(), String> {
+        self.sent.lock().unwrap().push((p.into(), sev, title.into(), body.into()));
+        Ok(())
+    }
+}
+
+fn push_channel(details: bool) -> Channel {
+    let mut c = webhook(details);
+    c.key = "/push".into();
+    c.kind = ChKind::Push;
+    c.url = String::new();
+    c.signing_secret = String::new();
     c
 }
 
@@ -818,4 +848,45 @@ fn the_hub_publishes_a_notification_and_the_count_to_the_person_it_is_for() {
     let evs = r.hub.bus.drain(ann, std::time::Duration::ZERO).unwrap();
     assert!(evs.iter().any(|e| e.contains("\"type\":\"notification\"") && e.contains("disk full")) && evs.iter().any(|e| e.contains("\"type\":\"count\"")));
     assert!(r.hub.bus.drain(cat, std::time::Duration::ZERO).unwrap().is_empty());
+}
+
+#[test]
+fn a_push_channel_pushes_only_to_people_with_a_saved_browser_and_says_only_the_summary_by_default() {
+    let r = rig("push", vec![push_channel(false)]);
+    let fake = Arc::new(FakePush { people: vec!["ann"], ..FakePush::default() });
+    *r.env.push.lock().unwrap() = Some(fake.clone());
+    let rec = r.hub.emit_at(&note(Severity::High, "Nightly backup failed", "volume 7 is full", people(&["ann", "bob"])), T0).unwrap();
+    assert_eq!(rec.queued, 1, "bob saved no browser");
+    assert_eq!(r.tick(T0 + 1).delivered, 1);
+    let sent = fake.sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!((sent[0].0.as_str(), sent[0].1, sent[0].2.as_str()), ("ann", Severity::High, "IYAKKI"));
+    assert!(sent[0].3.contains("waiting for you") && !sent[0].3.contains("volume 7"), "no title or body leaves without the details switch: {}", sent[0].3);
+    assert!(r.net.posts.lock().unwrap().is_empty() && r.net.mails.lock().unwrap().is_empty(), "push does not use the webhook or mail path");
+}
+
+#[test]
+fn a_push_channel_with_details_acknowledged_sends_the_title_and_body() {
+    let r = rig("push-details", vec![push_channel(true)]);
+    let fake = Arc::new(FakePush { people: vec!["ann"], ..FakePush::default() });
+    *r.env.push.lock().unwrap() = Some(fake.clone());
+    r.hub.emit_at(&note(Severity::Normal, "Nightly backup finished", "all 12 volumes", people(&["ann"])), T0).unwrap();
+    r.tick(T0 + 1);
+    let sent = fake.sent.lock().unwrap().clone();
+    assert_eq!((sent[0].2.as_str(), sent[0].3.as_str()), ("Nightly backup finished", "all 12 volumes"));
+}
+
+#[test]
+fn a_hub_without_a_push_sender_queues_nothing_for_a_push_channel_and_an_unreachable_one_retries() {
+    let r = rig("push-none", vec![push_channel(false)]);
+    let rec = r.hub.emit_at(&note(Severity::Normal, "x", "y", people(&["ann"])), T0).unwrap();
+    assert_eq!(rec.queued, 0, "fails closed: no sender, no push");
+    assert_eq!(r.hub.inbox.list("ann").len(), 1, "the inbox still has it");
+    // a sender that was there when it was queued and is gone at delivery: the delivery is retried, never dropped as sent
+    let r = rig("push-gone", vec![push_channel(false)]);
+    *r.env.push.lock().unwrap() = Some(Arc::new(FakePush { people: vec!["ann"], ..FakePush::default() }));
+    r.hub.emit_at(&note(Severity::Normal, "x", "y", people(&["ann"])), T0).unwrap();
+    *r.env.push.lock().unwrap() = None;
+    let rep = r.tick(T0 + 1);
+    assert_eq!((rep.delivered, rep.retried), (0, 1));
 }

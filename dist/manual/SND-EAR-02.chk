@@ -1,0 +1,16 @@
+scenario: SND-EAR-02
+title: Volume keys and the master volume
+area: Sound
+rows: F-SND-04, F-KBD-01
+machines: any
+needs: person
+prereq: Sound plays (open RADIO, pick a station, or use the test tone in Settings, Sound).
+step: Press the keyboard's volume up key three times, then the volume down key three times.
+expect: A volume indicator appears each time and the loudness follows the keys you press, up and then back down to where it began.
+clause: F-KBD-01.keys
+step: Open Settings, Sound while the sound is playing and look at the slider.
+expect: The slider shows the same volume the keys set. Moving it changes what you hear at once.
+clause: F-SND-04.one-volume
+step: Mute with the key, then change the volume with the slider.
+expect: The sound stays muted until you unmute, or the mute ends in a way the screen explains; no sound comes out silently stuck at an unknown state.
+clause: F-SND-04.mute-slider

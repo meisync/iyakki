@@ -35,6 +35,7 @@ pub mod reader;
 pub mod style;
 pub mod svg;
 pub mod url;
+pub mod webm;
 pub mod webp;
 
 pub use cookies::{Cookie, CookieStore};
@@ -42,6 +43,8 @@ pub use doc::{Block, Control, ControlKind, Doc, Form, ImageRef, SelectOption, Sp
 pub use fetch::{fetch_following, load, load_request, load_with, Fetch, Jar, ExtraHeaders, Loaded, Renderer, Request, Response};
 pub use url::{form_urlencode, SearchEngine, Url};
 
+#[cfg(test)]
+mod doc_serde_tests;
 #[cfg(test)]
 mod fuzzkit;
 #[cfg(test)]

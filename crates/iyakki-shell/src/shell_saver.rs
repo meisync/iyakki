@@ -167,6 +167,11 @@ impl Shell {
 
     /// How often the backend must redraw at least (ms): the desktop every 100 ms, the saver once a second (its own frames come
     /// earlier), nothing while the screen is off.
+    /// Whether the frame is drawn on every core (the Look's `parallel_draw`, off by default; F-SHELL-64).
+    pub fn parallel_draw(&self) -> bool {
+        self.look.surface.parallel_draw
+    }
+
     pub fn redraw_interval_ms(&self) -> u64 {
         // a paired computer is asking for the screen while the saver or the black screen covers it: draw soon, so the request wakes the
         // display. (Found on the Mac mini 2018 after six idle hours: the black screen drew once a minute, and `dev state` gave up after ten

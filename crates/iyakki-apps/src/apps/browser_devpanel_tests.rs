@@ -567,6 +567,29 @@ fn emptying_the_readers_cache_tells_the_full_engine_to_empty_its_own_before_the_
 }
 
 #[test]
+fn the_readers_cache_size_reaches_the_full_engines_disk_cache_limit_and_again_when_the_choice_changes() {
+    use iyakki_web::net::CacheSize;
+    let (_fake, cx, mut a, _g) = in_full("full_cachelimit", "--static");
+    let told = |a: &BrowserApp| -> Vec<u32> { a.full.as_ref().unwrap().log.iter().filter_map(|l| l.split("cache limit: ").nth(1).and_then(|r| r.split(' ').next()).and_then(|n| n.parse().ok())).collect() };
+    pump(&mut a, &cx, "the first limit", |a| !told(a).is_empty());
+    let first = told(&a);
+    assert_eq!(first.len(), 1, "told once, before the first page: {first:?}");
+    assert!(first[0] >= 1, "a limit, never none, for the person's own choice");
+    // the same page again: not told again
+    a.open_url("b.org/x", &cx);
+    pump(&mut a, &cx, "the next page", |a| a.full.as_ref().is_some_and(|f| f.log.iter().any(|l| l.contains("Navigate") && l.contains("b.org"))));
+    assert_eq!(told(&a).len(), 1);
+    // Small and Large are different budgets on the same machine: the engine hears the change
+    let mut c = browser_config::load(&cx);
+    c.cache = CacheSize::Small;
+    browser_config::save(&cx, &c);
+    a.open_url("c.org/x", &cx);
+    pump(&mut a, &cx, "the changed limit", |a| told(a).len() >= 2);
+    let all = told(&a);
+    assert!(all.len() == 2 && all[1] < all[0], "the smaller choice is a smaller limit: {all:?}");
+}
+
+#[test]
 fn the_video_cap_and_the_decoder_choice_reach_the_full_engine_before_a_page_and_again_when_they_change() {
     let (_fake, cx, mut a, _g) = in_full("full_media", "--static");
     let said = |a: &BrowserApp, what: &str| a.full.as_ref().unwrap().log.iter().filter(|l| l.contains("media policy") && l.contains(what)).count();
@@ -581,4 +604,69 @@ fn the_video_cap_and_the_decoder_choice_reach_the_full_engine_before_a_page_and_
     a.open_url("a.org", &cx);
     pump(&mut a, &cx, "the next page", |a| a.full.as_ref().is_some_and(|f| f.url == "https://a.org/"));
     assert_eq!(said(&a, "max_height 480, codecs false"), 1);
+}
+
+/// Run `js` in the reader's real script engine (QuickJS) over `html` and return the text it evaluates to. The engine is the one that
+/// runs the reader's pages, so the scripts that go to the full engine (the tree, the console wrapper) are run for real, not only matched.
+fn run_in_real_script_engine(html: &str, js: &str) -> String {
+    let url = iyakki_web::Url::parse("https://a.org/").unwrap();
+    let web: std::sync::Arc<dyn iyakki_web::Fetch> = std::sync::Arc::new(iyakki_web::fetch::NoNetwork);
+    let out = std::sync::Mutex::new(String::new());
+    iyakki_js::run_page_with(html, &url, web, |_| true, &iyakki_js::SiteData::default(), iyakki_js::Limits::default(), |e| {
+        *out.lock().unwrap() = e.eval("test", js).unwrap_or_else(|x| format!("THROWN {x}"));
+    });
+    let s = out.lock().unwrap().clone();
+    s
+}
+
+#[test]
+fn the_tree_script_run_in_a_real_script_engine_returns_bounded_json_without_typed_values() {
+    use super::inspecthost::{tree_from_full_answer, FULL_TREE_SCRIPT_FOR_TESTS};
+    let page = "<body id=main class=\"wide dark\"><h1 title=\"T\">Hello   tree</h1><input type=password name=pw value=hunter2 data-x=1><textarea id=t>secret note</textarea><script id=s>var token='abc';</script><style>p{}</style><select><option>one</option></select></body>";
+    let ans = run_in_real_script_engine(page, FULL_TREE_SCRIPT_FOR_TESTS);
+    assert!(!ans.starts_with("THROWN"), "{ans}");
+    let j: serde_json::Value = serde_json::from_str(&ans).unwrap();
+    assert_eq!(j["x"], serde_json::Value::Bool(false));
+    assert!(ans.contains("\"n\":\"html\"") && ans.contains("Hello tree") && ans.contains("\"main\"") && ans.contains("\"pw\""), "{ans}");
+    // no typed value, no data attribute, no content of script, style, textarea or select
+    for secret in ["hunter2", "secret note", "token", "abc", "data-x", "one"] {
+        assert!(!ans.contains(secret), "{secret} travelled: {ans}");
+    }
+    // what the engine answers is exactly what the shell turns into the inspector's tree (the answer travels as a JSON string)
+    let t = tree_from_full_answer(&serde_json::to_string(&ans).unwrap()).unwrap();
+    assert!(t.nodes.len() >= 8 && !t.truncated);
+}
+
+#[test]
+fn the_tree_script_stops_at_1500_nodes_and_14_levels_in_a_real_script_engine() {
+    use super::inspecthost::{tree_from_full_answer, FULL_TREE_SCRIPT_FOR_TESTS};
+    let wide = format!("<body><ul>{}</ul></body>", "<li>x</li>".repeat(2000));
+    let ans = run_in_real_script_engine(&wide, FULL_TREE_SCRIPT_FOR_TESTS);
+    let j: serde_json::Value = serde_json::from_str(&ans).unwrap();
+    assert_eq!(j["x"], serde_json::Value::Bool(true), "the cut is said");
+    let t = tree_from_full_answer(&serde_json::to_string(&ans).unwrap()).unwrap();
+    assert!(t.nodes.len() <= 1502 && t.truncated, "{} nodes", t.nodes.len());
+    let deep = format!("<body>{}deep{}</body>", "<div>".repeat(40), "</div>".repeat(40));
+    let ans = run_in_real_script_engine(&deep, FULL_TREE_SCRIPT_FOR_TESTS);
+    let levels = ans.matches("\"n\":\"div\"").count();
+    assert!(levels > 8 && levels < 16, "{levels} levels: {ans}");
+    // long text is cut at 200 characters
+    let long = format!("<body><p>{}</p></body>", "y".repeat(900));
+    let ans = run_in_real_script_engine(&long, FULL_TREE_SCRIPT_FOR_TESTS);
+    assert!(ans.contains(&"y".repeat(200)) && !ans.contains(&"y".repeat(201)), "cut at 200");
+}
+
+#[test]
+fn the_console_wrapper_run_in_a_real_script_engine_shows_values_like_a_console_and_errors_are_caught_by_the_helper() {
+    use super::inspecthost::full_console_script_for_tests;
+    let run = |expr: &str| run_in_real_script_engine("<body></body>", &full_console_script_for_tests(expr));
+    assert_eq!(run("1+2"), "3");
+    assert_eq!(run("'a\"b'"), "\"a\\\"b\"");
+    assert_eq!(run("({a:[1,2],b:null})"), "{\"a\":[1,2],\"b\":null}");
+    assert_eq!(run("undefined"), "undefined");
+    assert_eq!(run("document.body.tagName"), "\"BODY\"");
+    // a thrown error is not caught by the wrapper: the helper's evaluate call answers it as a failure with the engine's message
+    assert!(run("null.x").starts_with("THROWN"), "{}", run("null.x"));
+    // the expression is a string literal: a closing quote or a line break in it cannot break out of the wrapper
+    assert_eq!(run("'x\\u0022);1;('"), r#""x\");1;(""#);
 }

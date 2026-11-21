@@ -15,6 +15,8 @@ pub mod link;
 pub mod pins;
 pub mod serve;
 pub mod share;
+pub mod voice;
+pub mod voicecapture;
 pub mod window;
 pub mod windowcmd;
 
@@ -26,7 +28,7 @@ use iyakki_link::cloudclient::{probe_der, Client, Pin, Status, Target};
 use iyakki_link::rawlink::{Auth, FilesApi, LinkError, RawWs};
 use iyakki_link::sigscheme::DeviceKey;
 
-pub const USAGE: &str = "usage: iyakki-connect <command>\n  probe HOST[:PORT]          show the certificate (names, validity, SHA-256) without trusting it\n  pin HOST[:PORT] [--yes]    remember the certificate (trust on first use); a changed one is refused\n  unpin HOST[:PORT]          forget a pin (the next pin is a new first use)\n  pins                       list the pinned tenants\n  tenants HOST[:PORT] USER   list the tenants this account may use (* marks the one the sign-in is in); the password is read from stdin\n  switch HOST[:PORT] USER TENANT   work in another tenant this account belongs to (the server checks it and says what it stopped and locked); the password is read from stdin
+pub const USAGE: &str = "usage: iyakki-connect <command>\n  probe HOST[:PORT]          show the certificate (names, validity, SHA-256) without trusting it\n  pin HOST[:PORT] [--yes]    remember the certificate (trust on first use); a changed one is refused\n  unpin HOST[:PORT]          forget a pin (the next pin is a new first use)\n  pins                       list the pinned tenants\n  tenants HOST[:PORT] USER   list the tenants this account may use (* marks the one the sign-in is in); the password is read from stdin\n  voice HOST[:PORT] USER [--return LISTEN ADVERTISE]     (EXPERIMENTAL) send this computer's microphone to My IYAKKI on the instance, only after you answer its card here; the password is read from stdin, then your answer\n  switch HOST[:PORT] USER TENANT   work in another tenant this account belongs to (the server checks it and says what it stopped and locked); the password is read from stdin
   login HOST[:PORT] USER     check a sign-in; the password is read from stdin or typed (no echo), never from arguments\n  login HOST[:PORT] USER --key   the same with the device key (nothing secret is sent)\n  key new [--force]          make this device's Ed25519 key (mode 600 in the configuration folder)\n  key enroll HOST[:PORT] USER   sign in with the password once and enrol this device's key (then use --key)\n  key show                   print the public key (ssh-ed25519 line) for the tenant's owner to enrol\n  key import-ssh PATH [--force]   use an unencrypted OpenSSH ssh-ed25519 private key (no RSA)\n  key import-agent [NAME] [--force]   sign with an ssh-ed25519 key an ssh-agent holds (SSH_AUTH_SOCK); the secret stays in the agent\n  serve HOST[:PORT] --user NAME [--key] [--share DIR [--write]] [--open] [--port N]\n                             show the desktop in your browser at a link on 127.0.0.1 (one-time token); --share DIR lets\n                             the page exchange files with that one folder (read-only unless --write; needs a password sign-in)\n  window LINK|ADDRESS|NAME [--name NAME] [--yes] [--browser PATH] [--no-browser]   (EXPERIMENTAL)\n                             open a client window for an IYAKKI instance in your installed browser (application mode, private profile): LINK is\n                             the one-time link from Settings (https://host/connect#token, with ?pin= it needs no question); the device key stays here\n  devices                    list the instances this computer has a device on\n  devices forget NAME        forget one (deletes its key here; revoke the device on the instance too)\n";
 
 /// Exit status of a hard stop because the certificate is not the pinned one.
@@ -171,6 +173,44 @@ pub fn run(args: &[String], ctx: &Ctx, input: &mut dyn BufRead, out: &mut dyn Wr
             let key = devkey::import_ssh(std::path::Path::new(path))?;
             devkey::KeyFile::new(ctx.store.dir()).store(&key, flag("--force"))?;
             say(out, format!("imported the key\n{}", devkey::show(&key)))
+        }
+        ("voice", [addr, user, rest @ ..]) => {
+            // `--return LISTEN ADVERTISE`: play the answer's sound here too (the address the cloud machine can reach this computer at)
+            let ret_args = match rest {
+                [] => None,
+                [flag, listen, advertise] if *flag == "--return" => Some((listen.to_string(), advertise.to_string())),
+                _ => return Err(Fail::Error(USAGE.into())),
+            };
+            let pin = ctx.store.get(addr)?.ok_or_else(|| Fail::Error(format!("{addr} is not pinned: run `iyakki-connect pin {addr}` first")))?;
+            let mut password = String::new();
+            input.read_line(&mut password).map_err(|e| Fail::Error(e.to_string()))?;
+            let password = password.trim_end_matches(['\r', '\n']).to_string();
+            if password.is_empty() {
+                return Err(Fail::Error("no password given (type it at the prompt or pipe it in on standard input)".into()));
+            }
+            let target = Target { addr: addr.to_string(), pin };
+            let fail = |e: LinkError| match e {
+                LinkError::PinChanged(m) => Fail::PinChanged(m),
+                LinkError::Refused(m) => Fail::Error(format!("sign-in refused: {m}")),
+                LinkError::Other(m) => Fail::Error(m),
+            };
+            let api = FilesApi::login(&target, user.trim(), &password).map_err(fail)?;
+            let offer = api.voice_offer().map_err(fail)?;
+            // Ctrl+C ends the session (the same flag `serve` waits on)
+            unsafe {
+                libc::signal(libc::SIGINT, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
+            }
+            let mic: Box<dyn iyakki_audiolink::Mic> = Box::new(voicecapture::CommandMic::for_this_system().map_err(Fail::Error)?);
+            let ret = match ret_args {
+                None => None,
+                Some((listen, advertise)) => {
+                    let end = std::sync::Arc::new(voice::ReturnEnd::new(&listen, &advertise).map_err(Fail::Error)?);
+                    let sink = Box::new(voicecapture::CommandSink::for_this_system().map_err(Fail::Error)?);
+                    let api = std::sync::Arc::new(api);
+                    Some(voice::Return { end, sink, tell: Box::new(move |a, o| api.voice_return(a, o).map_err(|e| match e { LinkError::PinChanged(m) | LinkError::Refused(m) | LinkError::Other(m) => m })) })
+                }
+            };
+            voice::session_with_return(offer, input, out, mic, &STOP, ret).map_err(Fail::Error)
         }
         ("tenants", [addr, user]) => {
             let pin = ctx.store.get(addr)?.ok_or_else(|| Fail::Error(format!("{addr} is not pinned: run `iyakki-connect pin {addr}` first")))?;
@@ -415,10 +455,11 @@ pub fn main_with(args: &[String]) -> i32 {
     let tty = unsafe { libc::isatty(0) } == 1;
     let ctx = Ctx { store: pins::Store::new(&dir), timeout: Duration::from_secs(8), interactive: tty };
     let mut stdout = std::io::stdout();
-    let wants_password = !args.iter().any(|a| a == "--key") && (matches!(args.first().map(String::as_str), Some("login" | "serve")) || (args.first().map(String::as_str) == Some("key") && args.get(1).map(String::as_str) == Some("enroll")));
+    let wants_password = !args.iter().any(|a| a == "--key") && (matches!(args.first().map(String::as_str), Some("login" | "serve" | "voice")) || (args.first().map(String::as_str) == Some("key") && args.get(1).map(String::as_str) == Some("enroll")));
     let mut input: Box<dyn BufRead> = if tty && wants_password {
         match read_password_no_echo("Password: ") {
-            Some(p) => Box::new(std::io::Cursor::new(format!("{p}\n"))),
+            // the password first, then the terminal itself (`voice` asks its card there)
+            Some(p) => Box::new(std::io::BufReader::new(std::io::Read::chain(std::io::Cursor::new(format!("{p}\n")), std::io::stdin()))),
             None => {
                 eprintln!("iyakki-connect: cannot read the password from the terminal");
                 return 1;

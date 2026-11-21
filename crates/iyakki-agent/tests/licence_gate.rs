@@ -56,7 +56,7 @@ fn sources() -> String {
     let mut files: Vec<PathBuf> = Vec::new();
     for crate_dir in ["crates/iyakki-agent/src", "crates/iyakki-shared/src"] {
         let dir = repo().join(crate_dir);
-        files.extend(std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(".rs") && !n.ends_with("_tests.rs") && ["quickinstall", "gpu_", "voicepack", "fwextra", "regsetup", "clis", "datasci"].iter().any(|k| n.starts_with(k)))));
+        files.extend(std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(".rs") && !n.ends_with("_tests.rs") && ["quickinstall", "gpu_", "voicepack", "fwextra", "regsetup", "clis", "datasci", "ytdlp", "applevm"].iter().any(|k| n.starts_with(k)))));
     }
     files.sort();
     files.iter().map(|f| std::fs::read_to_string(f).unwrap_or_default()).collect::<Vec<_>>().join("\n")
@@ -67,12 +67,22 @@ fn every_quick_install_item_and_cli_has_an_inventory_row_and_no_row_is_left_over
     let rows = rows();
     let mut want: Vec<String> = Item::ALL.iter().map(|i| i.id().to_string()).collect();
     want.extend(CATALOG.iter().map(|d| format!("cli:{}", d.id)));
+    // the Apple Silicon VM recipe's pinned downloads (applevm.rs)
+    want.extend(["applevm-image", "applevm-k3s", "applevm-k3s-installer"].map(String::from));
+    want.push(iyakki_agent::ytdlp::ROW_ID.to_string());
     for w in &want {
         assert!(rows.iter().any(|r| &r.id == w), "legal/downloads.txt has no row for `{w}` (add its licence, delivery and pin)");
     }
     for r in &rows {
         assert!(want.contains(&r.id), "legal/downloads.txt row `{}` matches no Quick install item or CLI any more", r.id);
     }
+    // the recipe's rows carry the pins of applevm.rs
+    let r = rows.iter();
+    let pin = |id: &str| r.clone().find(|x| x.id == id).unwrap_or_else(|| panic!("{id}")).pin.clone();
+    assert_eq!(pin("applevm-image"), "20261026-2643");
+    assert!(iyakki_agent::applevm::IMAGE_URL.contains(&pin("applevm-image")));
+    assert_eq!(pin("applevm-k3s"), format!("sha256:{}", iyakki_agent::applevm::K3S_BINARY_SHA256));
+    assert_eq!(pin("applevm-k3s-installer"), format!("sha256:{}", iyakki_agent::applevm::K3S_INSTALLER_SHA256));
     // the items the owner named
     for must in ["clickhouse", "gitea", "graph-db", "prometheus"] {
         assert!(rows.iter().any(|r| r.id == must), "{must}");

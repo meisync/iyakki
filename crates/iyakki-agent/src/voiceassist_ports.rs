@@ -187,6 +187,29 @@ impl SystemSpeaker {
     }
 }
 
+/// The sentence-to-WAV step of a cloud session's mouth: the chosen reading voice (the same choice and consent as [`SystemSpeaker`]).
+pub fn cloud_synth(svc: Arc<Services>) -> Arc<dyn Fn(&str) -> Result<Vec<u8>, String> + Send + Sync> {
+    Arc::new(move |text: &str| {
+        use crate::story::Synth;
+        let me = SystemSpeaker::new(svc.clone());
+        let (engine, voice) = me.engine().ok_or_else(|| "No reading voice is set up (Settings -> Voice).".to_string())?;
+        if vd::consent_text(&svc, &engine, false).is_some() {
+            return Err("The reading voice is on another machine you have not agreed to send text to yet.".into());
+        }
+        let speed = svc.voice_settings().speed_pct as f32 / 100.0;
+        vd::ChoiceSynth { svc: svc.clone(), engine, opts: crate::voice::SpeakOpts { voice, speed, lang: None } }.synth(text)
+    })
+}
+
+/// The cloud session's microphone and mouth, when a session listens and the switch is on: the device's sound is what the assistant hears (the
+/// listener hands it out once) and the answer goes back over the pinned link. `None` otherwise: the machine's own microphone and speaker.
+pub fn cloud_ports(svc: &Arc<Services>) -> Option<(Box<dyn AudioIn>, Box<dyn Speaker>)> {
+    let l = svc.cloud_voice_listener()?;
+    let ear = l.take_audio()?;
+    let l2 = l.clone();
+    Some((Box::new(ear), Box::new(crate::cloudvoice::CloudSpeaker::new(cloud_synth(svc.clone()), Arc::new(move || l2.return_target())))))
+}
+
 impl Speaker for SystemSpeaker {
     fn say(&mut self, text: &str) -> Result<(), String> {
         use crate::story::{Sink, Synth};

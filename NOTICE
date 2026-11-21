@@ -22,7 +22,7 @@ nanomp3 / nanomp3-core 0.2 (MIT OR Apache-2.0), a pure Rust port of minimp3 (CC0
 The text is drawn with the DejaVu fonts (DejaVu Sans, Bold and Mono), which are free to use and redistribute under the
 Bitstream Vera / DejaVu license; the license text is in crates/iyakki-shell/assets/DEJAVU-LICENSE.txt and travels with the fonts.
 Settings also offers Liberation Sans, Sans Bold and Mono (Digitized data copyright (c) 2010 Google Corporation, copyright (c) 2012 Red Hat, Inc.; SIL Open Font License 1.1, text in crates/iyakki-shell/assets/LIBERATION-LICENSE.txt).
-Hindi, Bengali, Gurmukhi, Gujarati, Tamil, Telugu, Kannada, Malayalam, Arabic and Hebrew text is drawn with Noto Sans fonts (Copyright Google Inc. / Google LLC), licensed under the SIL Open Font License 1.1; the license text is in crates/iyakki-shell/assets/NOTO-OFL-LICENSE.txt. Text shaping uses rustybuzz (MIT) and unicode-bidi (MIT or Apache-2.0).
+Hindi, Bengali, Gurmukhi, Gujarati, Tamil, Telugu, Kannada, Malayalam, Thai, Armenian, Georgian, Ethiopic, Sinhala, Khmer, Lao, Myanmar, Arabic and Hebrew text is drawn with Noto Sans fonts (Tibetan: Noto Serif Tibetan) (Copyright Google Inc. / Google LLC), licensed under the SIL Open Font License 1.1; the license text is in crates/iyakki-shell/assets/NOTO-OFL-LICENSE.txt. Text shaping uses rustybuzz (MIT) and unicode-bidi (MIT or Apache-2.0).
 
 Radio stations offered as starting points were taken from the public Radio Browser directory (https://www.radio-browser.info);
 the station names and streams belong to their broadcasters, and IYAKKI only links to the public streams.

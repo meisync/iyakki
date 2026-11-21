@@ -4,6 +4,9 @@
 //! (Helvetica, the size and colour of the field's default appearance string) so that readers which draw the stored appearance show
 //! the new value, and the form is marked `NeedAppearances` so readers that draw their own do so too.
 //!
+//! Also read, never carried out except the first: signature fields (what the file says of the signer; nothing is verified) and push
+//! buttons (caption and action; only a form reset is done, as changes to the fields: sending and scripts are described, not run).
+//!
 //! What it does: text fields (single and multi-line, password, comb: each character in its own cell), choice fields (the value must be one of the options unless the
 //! field accepts typed text), check boxes, radio buttons. What it refuses, with the reason: protected files, files whose cross-reference was damaged
 //! and rebuilt, read-only fields, push buttons, signatures and radio buttons that name no states. Radio buttons: the value must be one
@@ -405,6 +408,214 @@ impl Document {
         }
         out.extend_from_slice(format!("startxref\n{xref_at}\n%%EOF\n").as_bytes());
         Ok(out)
+    }
+}
+
+/// A signature field as the file shows it. Nothing is verified here: no digest is checked and no certificate chain is followed, so
+/// `signed` only says that the file holds a signature value, and the other texts are what the signer wrote into it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignatureInfo {
+    pub name: String,
+    pub signed: bool,
+    pub signer: Option<String>,
+    pub reason: Option<String>,
+    pub location: Option<String>,
+    pub contact: Option<String>,
+    /// The signing time as the file writes it (`D:20260101120000Z`).
+    pub date: Option<String>,
+    pub sub_filter: Option<String>,
+    /// The file is longer than what the signature covers: something was appended after signing (a filled-in field does that).
+    pub changed_after_signing: Option<bool>,
+}
+
+/// What a push button does when pressed. Only a reset is carried out here; the others need the network or a script engine and are
+/// described, not run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ButtonAction {
+    /// Put fields back to their default values: `fields` are the names listed (empty: the whole form), `exclude` says the list is the
+    /// fields to leave alone.
+    Reset { fields: Vec<String>, exclude: bool },
+    Submit { url: String },
+    OpenUri(String),
+    Script,
+    Named(String),
+    Other(String),
+    None,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ButtonInfo {
+    pub name: String,
+    pub caption: String,
+    pub action: ButtonAction,
+}
+
+/// What pressing a reset button changes: `(field, value)` pairs for `fill_form`, and the fields it leaves alone with the reason.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ResetPlan {
+    pub changes: Vec<(String, String)>,
+    pub skipped: Vec<(String, String)>,
+}
+
+impl Document {
+    /// The signature fields of the form with what the file says about each (nothing is verified).
+    pub fn form_signatures(&self) -> Vec<SignatureInfo> {
+        let f = &self.file;
+        let mut out = Vec::new();
+        for fl in self.editable_fields().into_iter().filter(|x| x.kind == FieldKind::Signature) {
+            let fd = f.load(fl.obj.0);
+            let v = fd.dict().map(|d| f.get(d, "V")).unwrap_or(Obj::Null);
+            let vd = v.dict().cloned();
+            let text = |k: &str| vd.as_ref().and_then(|d| f.get(d, k).str_bytes().map(text_string)).filter(|t| !t.is_empty());
+            let range: Vec<i64> = vd.as_ref().and_then(|d| f.get(d, "ByteRange").arr().map(|a| a.iter().filter_map(|x| f.resolve(x).int()).collect())).unwrap_or_default();
+            let changed = (range.len() == 4).then(|| range[2].saturating_add(range[3]) < f.data.len() as i64);
+            out.push(SignatureInfo {
+                name: fl.name.clone(),
+                signed: vd.is_some(),
+                signer: text("Name"),
+                reason: text("Reason"),
+                location: text("Location"),
+                contact: text("ContactInfo"),
+                date: text("M"),
+                sub_filter: vd.as_ref().and_then(|d| f.get(d, "SubFilter").name().map(str::to_string)),
+                changed_after_signing: changed,
+            });
+        }
+        out
+    }
+
+    /// The push buttons of the form with their captions and what they do.
+    pub fn form_buttons(&self) -> Vec<ButtonInfo> {
+        let f = &self.file;
+        let mut out = Vec::new();
+        for fl in self.editable_fields().into_iter().filter(|x| x.kind == FieldKind::Push) {
+            let widget = fl.widgets.first().map(|(n, _)| f.load(*n)).or_else(|| Some(f.load(fl.obj.0)));
+            let wd = widget.as_ref().and_then(|w| w.dict().cloned());
+            let caption = wd.as_ref().and_then(|d| f.get(d, "MK").dict().and_then(|mk| f.get(mk, "CA").str_bytes().map(text_string))).unwrap_or_default();
+            // the action is on the widget, or on the field when the field is its own widget
+            let action = wd.as_ref().map(|d| f.get(d, "A")).filter(|a| a.dict().is_some()).or_else(|| f.load(fl.obj.0).dict().map(|d| f.get(d, "A")).filter(|a| a.dict().is_some()));
+            out.push(ButtonInfo { name: fl.name.clone(), caption, action: action.map(|a| self.button_action(&a)).unwrap_or(ButtonAction::None) });
+        }
+        out
+    }
+
+    fn button_action(&self, a: &Obj) -> ButtonAction {
+        let f = &self.file;
+        let Some(d) = a.dict() else { return ButtonAction::None };
+        match f.get(d, "S").name() {
+            Some("ResetForm") => {
+                let exclude = f.get(d, "Flags").int().unwrap_or(0) & 1 != 0;
+                let mut fields = Vec::new();
+                if let Some(list) = f.get(d, "Fields").arr() {
+                    for item in list.iter().take(2000) {
+                        match f.resolve(item) {
+                            Obj::Str(s) => fields.push(text_string(&s)),
+                            other => {
+                                // a reference to a field: its full name is looked up among the fields
+                                if let Obj::Ref(n, _) = item {
+                                    if let Some(fl) = self.editable_fields().into_iter().find(|e| e.obj.0 == *n) {
+                                        fields.push(fl.name);
+                                    }
+                                }
+                                let _ = other;
+                            }
+                        }
+                    }
+                }
+                ButtonAction::Reset { fields, exclude }
+            }
+            Some("SubmitForm") => {
+                let target = f.get(d, "F");
+                let url = match &target {
+                    Obj::Str(s) => text_string(s),
+                    Obj::Dict(fd) => f.get(fd, "F").str_bytes().map(text_string).unwrap_or_default(),
+                    _ => String::new(),
+                };
+                ButtonAction::Submit { url }
+            }
+            Some("URI") => ButtonAction::OpenUri(f.get(d, "URI").str_bytes().map(text_string).unwrap_or_default()),
+            Some("JavaScript") => ButtonAction::Script,
+            Some("Named") => ButtonAction::Named(f.get(d, "N").name().unwrap_or("").to_string()),
+            Some(other) => ButtonAction::Other(other.to_string()),
+            None => ButtonAction::None,
+        }
+    }
+
+    /// What pressing the reset button `button` changes, as changes to give to [`Document::fill_form`]. Fields the viewer cannot change
+    /// (read-only ones, radio groups, choice fields whose default is not one of their options) are listed with the reason and left alone.
+    pub fn reset_plan(&self, button: &str) -> Result<ResetPlan, String> {
+        let buttons = self.form_buttons();
+        let b = match buttons.iter().find(|b| b.name == button).or_else(|| buttons.iter().find(|b| b.name.eq_ignore_ascii_case(button))) {
+            Some(b) => b,
+            None => return Err(format!("there is no push button named {button:?}")),
+        };
+        let ButtonAction::Reset { fields, exclude } = &b.action else {
+            return Err(match &b.action {
+                ButtonAction::Submit { url } => format!("the button {button:?} sends the form to {}: sending is not done by this viewer", if url.is_empty() { "a server" } else { url }),
+                ButtonAction::OpenUri(u) => format!("the button {button:?} opens {u}: use the browser for that"),
+                ButtonAction::Script => format!("the button {button:?} runs a script, which this viewer does not run"),
+                ButtonAction::Named(n) => format!("the button {button:?} does the viewer command {n:?}, which is not a form reset"),
+                ButtonAction::Other(k) => format!("the button {button:?} does a {k} action, which this viewer does not carry out"),
+                _ => format!("the button {button:?} has no action"),
+            });
+        };
+        let f = &self.file;
+        let mut plan = ResetPlan::default();
+        for fl in self.editable_fields() {
+            let listed = fields.iter().any(|n| *n == fl.name);
+            let in_scope = if fields.is_empty() { true } else { listed != *exclude };
+            if !in_scope || matches!(fl.kind, FieldKind::Push | FieldKind::Signature | FieldKind::Other) {
+                continue;
+            }
+            if fl.read_only {
+                plan.skipped.push((fl.name.clone(), "read-only".into()));
+                continue;
+            }
+            // the default value: the field's own DV, else (inherited from a parent) the parent's, else empty
+            let dv = {
+                let mut node = f.load(fl.obj.0);
+                let mut found: Option<Obj> = None;
+                for _ in 0..10 {
+                    let Some(d) = node.dict().cloned() else { break };
+                    if let Some(v) = d.get("DV") {
+                        found = Some(v.clone());
+                        break;
+                    }
+                    match d.get("Parent") {
+                        Some(Obj::Ref(n, _)) => node = f.load(*n),
+                        _ => break,
+                    }
+                }
+                found.map(|v| show(f, &v)).unwrap_or_default()
+            };
+            match &fl.kind {
+                FieldKind::Text { .. } => {
+                    if fl.value != dv {
+                        plan.changes.push((fl.name.clone(), dv));
+                    }
+                }
+                FieldKind::Choice { options, edit } => {
+                    if fl.value == dv {
+                        continue;
+                    }
+                    if *edit || options.is_empty() || options.iter().any(|o| *o == dv) {
+                        plan.changes.push((fl.name.clone(), dv));
+                    } else {
+                        plan.skipped.push((fl.name.clone(), "its default is not one of its choices".into()));
+                    }
+                }
+                FieldKind::Check { on } => {
+                    let want_on = dv == *on;
+                    let is_on = fl.value == *on;
+                    if want_on != is_on {
+                        plan.changes.push((fl.name.clone(), if want_on { on.clone() } else { "off".into() }));
+                    }
+                }
+                FieldKind::Radio { .. } => plan.skipped.push((fl.name.clone(), "radio groups cannot be cleared here".into())),
+                _ => {}
+            }
+        }
+        Ok(plan)
     }
 }
 

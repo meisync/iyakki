@@ -63,7 +63,7 @@ fn near(p: [u8; 4], c: [u8; 4]) -> bool {
 }
 
 fn px(g: &Gfx, x: f32, y: f32) -> [u8; 4] {
-    let p = g.pm.pixel(x as u32, y as u32).unwrap();
+    let p = g.pm_ref().pixel(x as u32, y as u32).unwrap();
     [p.red(), p.green(), p.blue(), p.alpha()]
 }
 

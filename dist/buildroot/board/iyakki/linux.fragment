@@ -177,6 +177,9 @@ CONFIG_TUN=y
 # profile is enabled; selects the ChaCha20-Poly1305/Curve25519 library code and NET_UDP_TUNNEL. GPL-2.0 kernel code, source via legal-info/.
 CONFIG_WIREGUARD=m
 CONFIG_VETH=m
+# A dummy interface: IYAKKI's own node-address interface and, on a machine that stays offline on purpose, the default route that lets k3s start (F-K8S-13).
+# Built in so that `ip link add ... type dummy` needs no module load.
+CONFIG_DUMMY=y
 CONFIG_BRIDGE=y
 CONFIG_VLAN_8021Q=m
 CONFIG_MACVLAN=m

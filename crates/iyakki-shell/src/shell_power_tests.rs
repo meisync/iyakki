@@ -209,7 +209,7 @@ fn closing_the_lid_locks_or_sleeps_as_chosen_and_only_when_it_closes() {
     assert_eq!(slept(&host), 1);
     run(&mut sh, &clock, 20_000, 250);
     assert_eq!(slept(&host), 1, "the lid staying shut does not sleep it again");
-    let audit = std::fs::read_to_string(sh.env.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(sh.env.audit.path_buf()).unwrap_or_default();
     assert!(audit.contains("power.lock") && audit.contains("power.sleep") && audit.contains("lid closed"), "{audit}");
 }
 

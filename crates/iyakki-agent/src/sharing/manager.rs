@@ -56,6 +56,17 @@ pub trait Os {
     fn wifi_ap_start(&mut self) -> Result<String, String>;
     /// End the access point (not an error when it is not there).
     fn wifi_ap_stop(&mut self);
+    /// Can this computer be a Bluetooth network access point (a powered controller and the BNEP kernel support)? `Err` is the reason.
+    fn nap_available(&mut self) -> Result<(), String> {
+        Err(super::ShareError::BluetoothNotAvailable.line())
+    }
+    /// Start the Bluetooth access point (the server loop and its `iyaknap0` interface; devices that connect are phones) and return the
+    /// interface name. `isolate`: phones must not see each other.
+    fn nap_start(&mut self, _isolate: bool) -> Result<String, String> {
+        Err(super::ShareError::BluetoothNotAvailable.line())
+    }
+    /// End the Bluetooth access point (not an error when it is not running).
+    fn nap_stop(&mut self) {}
 }
 
 pub enum Inbound {
@@ -132,6 +143,9 @@ impl Manager {
                 if s.downstream == crate::wifi_ap::AP_IFACE {
                     os.wifi_ap_stop();
                 }
+                if s.downstream == iyakki_core_local::btshare::NAP_IFACE {
+                    os.nap_stop();
+                }
                 let _ = os.remove_address(&s.downstream, s.address, s.prefix);
                 if matches!(s.previous_forward.as_str(), "0" | "1") {
                     let _ = os.forward_set(&s.previous_forward);
@@ -181,6 +195,17 @@ impl Manager {
     }
 
     fn start(&mut self, os: &mut dyn Os, req: &Request) -> Result<Session, ShareError> {
+        if req.nap {
+            // Bluetooth: the access point (its interface is a TAP the server loop makes) first, then the same steps as any cable
+            os.nap_available().map_err(|_| ShareError::BluetoothNotAvailable)?;
+            let nap = os.nap_start(req.isolate).map_err(ShareError::Machine)?;
+            let req = Request { via: Some(nap), ..req.clone() };
+            let r = self.start_plan(os, &req);
+            if r.is_err() {
+                os.nap_stop();
+            }
+            return r;
+        }
         if !req.wifi {
             return self.start_plan(os, req);
         }
@@ -383,6 +408,9 @@ impl Manager {
         let _ = os.remove_address(&s.saved.downstream, s.saved.address, s.saved.prefix);
         if s.plan.kind == LinkKind::Wifi {
             os.wifi_ap_stop();
+        }
+        if s.plan.kind == LinkKind::BluetoothNap {
+            os.nap_stop();
         }
         os.save_saved(None);
         os.audit(&format!("share: stopped ({why}), {n} device(s) were connected, {} bytes in, {} bytes out", s.rx, s.tx));

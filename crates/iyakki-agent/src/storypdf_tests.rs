@@ -55,8 +55,11 @@ fn a_story_without_pictures_or_in_another_script_is_handled_in_plain_words() {
     // Tamil is shaped now (F-PDF-16); a script with no bundled font is still refused in plain words
     let tamil = parse_story("# \u{0b95}\u{0ba4}\u{0bc8}\n\n\u{0b92}\u{0bb0}\u{0bc1} \u{0b95}\u{0bbe}\u{0bb2}\u{0ba4}\u{0bcd}\u{0ba4}\u{0bbf}\u{0bb2}\u{0bcd}\n", true);
     assert!(story_pdf(&tamil, &StoryOptions::default(), &[], PageSize::A4, None).is_ok(), "Tamil is written with the shaped layout");
+    // Armenian, Georgian and Ethiopic are drawn now; Chinese, Japanese and Korean still have no glyphs
     let ethiopic = parse_story("# \u{1230}\u{120b}\u{121d}\n\n\u{1230}\u{120b}\u{121d} \u{12d3}\u{1208}\u{121d}\n", true);
-    let e = story_pdf(&ethiopic, &StoryOptions::default(), &[], PageSize::A4, None).err().expect("refused");
+    assert!(story_pdf(&ethiopic, &StoryOptions::default(), &[], PageSize::A4, None).is_ok(), "Ethiopic is written now");
+    let chinese = parse_story("# \u{4e2d}\u{6587}\n\n\u{4e2d}\u{6587} \u{6545}\u{4e8b}\n", true);
+    let e = story_pdf(&chinese, &StoryOptions::default(), &[], PageSize::A4, None).err().expect("refused");
     assert!(e.contains("cannot be written in a PDF yet") && e.contains("Nothing was saved"), "{e}");
     assert!(story_pdf(&parse_story("", true), &StoryOptions::default(), &[], PageSize::A4, None).err().unwrap().contains("no story"));
 }

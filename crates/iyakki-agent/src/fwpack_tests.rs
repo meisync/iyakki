@@ -468,7 +468,7 @@ fn an_installed_pack_is_a_driver_pack_on_the_data_volume_that_a_restart_links_ag
         let link = fs.fw_root.join("rtl_nic/rtl8168h-2.fw");
         assert!(std::fs::read_link(&link).is_ok(), "{}", link.display());
         let _ = std::fs::remove_file(&link);
-        let log = apply::apply_boot(&fs, &iyakki_drivers::run::Dry);
+        let log = apply::apply_boot(&fs, &iyakki_core_local::driver_packs::run::Dry);
         assert!(log.iter().any(|l| l.contains("fw-realtek-net")), "{log:?}");
         assert!(std::fs::read_link(&link).is_ok(), "linked again at start");
         assert_eq!(std::fs::read(fs.pack_dir("fw-realtek-net").join("files/rtl_nic/rtl8168h-2.fw")).unwrap(), fake_files()[0].1);

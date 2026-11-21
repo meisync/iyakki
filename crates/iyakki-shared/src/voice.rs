@@ -14,7 +14,7 @@ pub const DEFAULT_PLAY_CMD: &str = "aplay -q";
 /// speed (1.0 = normal). An HTTP engine gets `voice` and `speed` in the request body; a command gets them where it says
 /// `{voice}`, `{speed}` (for example 1.2) or `{length_scale}` (1 / speed, what piper's `--length_scale` takes). A command
 /// without those words simply ignores them.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SpeakOpts {
     pub voice: Option<String>,
     pub speed: f32,

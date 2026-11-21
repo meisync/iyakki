@@ -314,7 +314,7 @@ impl CheckupApp {
                     let (dw, dh) = ((fw * k).floor().max(1.0), (fh * k).floor().max(1.0));
                     g.rrect(r.x, r.y, dw + 4.0 * s, dh + 4.0 * s, 4.0 * s, rgb(8, 10, 20));
                     let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
-                    g.pm.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(dw / fw, 0.0, 0.0, dh / fh, (r.x + 2.0 * s).round(), (r.y + 2.0 * s).round()), None);
+                    g.pm_mut().draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(dw / fw, 0.0, 0.0, dh / fh, (r.x + 2.0 * s).round(), (r.y + 2.0 * s).round()), None);
                 }
             }
         }

@@ -520,8 +520,17 @@ fn a_run_lights_the_graph_and_a_blocked_run_waits_for_you_on_the_board() {
     assert_eq!(f.app.tab, Tab::Run, "starting a run shows it");
     let run = f.app.run_id.clone().unwrap();
     f.env.engine.wait_for(&run, Duration::from_secs(30), |r| r.status == RunStatus::Blocked).unwrap();
-    tick(&mut f, 12);
-    let g = draw(&mut f);
+    // (the page learns of the blocked run on a later beat: draw until the buttons are there, on the wall clock)
+    let approve_wall = std::time::Instant::now();
+    let mut g;
+    loop {
+        tick(&mut f, 12);
+        g = draw(&mut f);
+        if has_hit(&g, "Approve") && has_hit(&g, "Reject") || approve_wall.elapsed() > std::time::Duration::from_secs(30) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert!(has_hit(&g, "Approve") && has_hit(&g, "Reject"), "a waiting approval can be decided");
     // the counts in the header and the board lane
     assert_eq!(f.app.counts.needs_you, 1);
@@ -946,7 +955,7 @@ fn a_step_refused_for_its_program_offers_an_admin_one_click_allow_after_a_confir
 
 // ------------------------------------------------------------------------------------------------ browser steps
 
-/// A page engine that answers every script with `{"ok":true}`, follows `Navigate` and draws a flat 320x240 picture: enough for the
+/// A page engine that answers every script with `{"ok":true}` plus a quiet page probe (no requests in flight; without it the open waits out its whole timeout for the page to settle), follows `Navigate` and draws a flat 320x240 picture: enough for the
 /// run view to have a browser session to show.
 struct MiniPage {
     state: iyakki_shared::browserjobs::PageState,
@@ -963,7 +972,7 @@ impl iyakki_shared::browserjobs::PageEngine for MiniPage {
                 self.state.title = "Mini page".into();
                 self.state.loading = false;
             }
-            ToHelper::Script { id, .. } => self.scripts.push((id, true, "{\"ok\":true}".into())),
+            ToHelper::Script { id, .. } => self.scripts.push((id, true, "{\"ok\":true,\"inflight\":0,\"quiet_ms\":1000,\"ready\":\"complete\"}".into())),
             _ => {}
         }
         true
@@ -1001,10 +1010,10 @@ fn mini_engine() -> iyakki_agent::flows::browser::EngineFactory {
             let mut page = MiniPage { state: iyakki_shared::browserjobs::PageState { ready: true, ..Default::default() }, scripts: vec![], color: [200, 60, 90, 255] };
             let mut sv = iyakki_shared::browserjobs::Servicer::new();
             while !flag.load(std::sync::atomic::Ordering::Relaxed) {
-                sv.service(&jobs, &key, &mut page);
+                sv.service(&*jobs, &key, &mut page);
                 std::thread::sleep(Duration::from_millis(3));
             }
-            sv.abort(&jobs, &key, "closed");
+            sv.abort(&*jobs, &key, "closed");
         });
         Ok(Box::new(MiniKeeper(stop, Some(t))) as iyakki_agent::flows::browser::EngineKeeper)
     })

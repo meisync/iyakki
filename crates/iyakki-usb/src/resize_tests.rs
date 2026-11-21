@@ -312,3 +312,300 @@ fn the_command_line_prints_a_plan_by_itself_and_shrinks_only_with_yes_and_the_dr
     assert!(run_cli(&["--shrink".into(), "x".into(), "--part".into(), "1".into()], &machine).unwrap_err().contains("--to-mib"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ---- FAT32 with our own code (no external tool does the shrinking)
+
+#[test]
+fn a_fat32_partition_is_shrunk_by_our_own_code_to_just_after_its_last_file_and_fsck_and_mtools_agree() {
+    if !need(&["sgdisk", "mkfs.fat", "fsck.fat", "mcopy", "mtype", "dd", "truncate"]) {
+        return;
+    }
+    let d = dir("fat32");
+    let disk = d.join("disk.img");
+    let ds = disk.to_str().unwrap();
+    let total = 300 * MB;
+    run("truncate", &["-s", &total.to_string(), ds]);
+    run("sgdisk", &["-o", ds]);
+    run("sgdisk", &["-n", "1:0:+200M", "-t", "1:0700", ds]);
+    let m0 = model(&disk, total);
+    // a FAT32 volume with one-sector clusters (so 200 MiB has far more than 65,525 clusters), files made by mtools near the front
+    let p = m0.part(1).unwrap();
+    let img = d.join("fs.img");
+    run("truncate", &["-s", &p.bytes(512).to_string(), img.to_str().unwrap()]);
+    run("mkfs.fat", &["-F", "32", "-s", "1", "-n", "WINDATA", img.to_str().unwrap()]);
+    let big: Vec<u8> = (0..3 * MB).map(|i| (i.wrapping_mul(17) >> 2) as u8).collect();
+    std::fs::write(d.join("big.bin"), &big).unwrap();
+    std::fs::write(d.join("note.txt"), b"keep me\n").unwrap();
+    run("mcopy", &["-i", img.to_str().unwrap(), d.join("big.bin").to_str().unwrap(), d.join("note.txt").to_str().unwrap(), "::/"]);
+    run("dd", &[&format!("if={}", img.display()), &format!("of={}", disk.display()), "bs=512", &format!("seek={}", p.first_lba), "conv=notrunc", "status=none"]);
+    let m = model(&disk, total);
+    assert_eq!(m.part(1).unwrap().fs, "fat32");
+    let tool = HostTools;
+    let min = find_minimum(&disk, &m, 1, &tool, None, &d).expect("our own code says a minimum");
+    // 65,525 one-sector clusters is the floor of a FAT32 volume, the files are 3 MiB at the front
+    assert!(min >= 33 * MB && min < 60 * MB, "{min}");
+    // below it: refused in words; above it: planned, with the honest warning
+    assert!(plan_shrink(&m, &ShrinkRequest { part: 1, new_bytes: 20 * MB }, Some(min)).unwrap_err().contains("needs at least"));
+    let plan = plan_shrink(&m, &ShrinkRequest { part: 1, new_bytes: 100 * MB }, Some(min)).unwrap();
+    assert!(plan.warnings.iter().any(|w| w.contains("moved to free space")), "{:?}", plan.warnings);
+    assert!(plan.text().contains("own FAT32 code"));
+    apply_shrink(&disk, &m, &plan, &confirm(&plan), &tool, None, &d, "").unwrap();
+    // judged by the real tools
+    let after = model(&disk, total);
+    assert_eq!(after.part(1).unwrap().sectors, 100 * MB / 512);
+    let f = d.join("after.img");
+    region(&disk, after.part(1).unwrap(), &f, 100 * MB);
+    let fsck = Command::new("fsck.fat").args(["-n", f.to_str().unwrap()]).output().unwrap();
+    assert!(fsck.status.success(), "fsck.fat after the shrink: {}{}", String::from_utf8_lossy(&fsck.stdout), String::from_utf8_lossy(&fsck.stderr));
+    assert_eq!(run("mtype", &["-i", f.to_str().unwrap(), "::/note.txt"]).trim(), "keep me");
+    let out = Command::new("mtype").args(["-i", f.to_str().unwrap(), "::/big.bin"]).output().unwrap();
+    assert!(out.status.success() && out.stdout == big, "the 3 MiB file reads back byte for byte");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn the_fat32_code_refuses_what_it_cannot_do_safely() {
+    use crate::fatshrink::*;
+    let d = dir("fat32-refuse");
+    let img = d.join("v.img");
+    // not a FAT32 volume at all, and a boot sector with the wrong numbers
+    std::fs::write(&img, vec![0u8; 4096]).unwrap();
+    assert!(minimum(&img).unwrap_err().contains("signature"));
+    let mut b = vec![0u8; 4096];
+    b[510] = 0x55;
+    b[511] = 0xAA;
+    std::fs::write(&img, &b).unwrap();
+    assert!(check(&img).unwrap_err().contains("not those of a FAT32"));
+    if need(&["mkfs.fat", "truncate"]) {
+        // a small FAT32 volume (fewer than 65,525 clusters would not be FAT32 by definition, so the tool makes 2 sectors per cluster here)
+        run("truncate", &["-s", &(64 * MB).to_string(), img.to_str().unwrap()]);
+        run("mkfs.fat", &["-F", "32", "-s", "1", img.to_str().unwrap()]);
+        check(&img).unwrap();
+        let min = minimum(&img).unwrap();
+        // the floor of 65,525 clusters holds even though the files are tiny
+        assert!(min >= 32 * MB);
+        assert!(shrink(&img, 20 * MB).unwrap_err().contains("cannot shrink below") || shrink(&img, 20 * MB).unwrap_err().contains("fewer than"));
+        assert!(shrink(&img, 64 * MB).unwrap_err().contains("not smaller"));
+        assert!(shrink(&img, 40 * MB + 1).unwrap_err().contains("whole number of sectors"));
+        // damage: a FAT entry pointing outside the volume is found by the check
+        let mut raw = std::fs::read(&img).unwrap();
+        let reserved = u16::from_le_bytes([raw[14], raw[15]]) as usize * 512;
+        raw[reserved + 100 * 4..reserved + 100 * 4 + 4].copy_from_slice(&0x0FFF_0000u32.to_le_bytes());
+        std::fs::write(&img, &raw).unwrap();
+        assert!(check(&img).unwrap_err().contains("differ") || check(&img).unwrap_err().contains("outside"));
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ---- exFAT with our own code
+
+#[test]
+fn an_exfat_partition_is_shrunk_by_our_own_code_to_its_last_allocated_cluster_and_fsck_agrees() {
+    if !need(&["sgdisk", "mkfs.exfat", "fsck.exfat", "dd", "truncate"]) {
+        return;
+    }
+    let d = dir("exfat");
+    let disk = d.join("disk.img");
+    let ds = disk.to_str().unwrap();
+    let total = 300 * MB;
+    run("truncate", &["-s", &total.to_string(), ds]);
+    run("sgdisk", &["-o", ds]);
+    run("sgdisk", &["-n", "1:0:+200M", "-t", "1:0700", ds]);
+    let m0 = model(&disk, total);
+    let p = m0.part(1).unwrap();
+    let img = d.join("fs.img");
+    run("truncate", &["-s", &p.bytes(512).to_string(), img.to_str().unwrap()]);
+    run("mkfs.exfat", &["-L", "WINDATA", img.to_str().unwrap()]);
+    run("dd", &[&format!("if={}", img.display()), &format!("of={}", disk.display()), "bs=512", &format!("seek={}", p.first_lba), "conv=notrunc", "status=none"]);
+    let m = model(&disk, total);
+    assert_eq!(m.part(1).unwrap().fs, "exfat");
+    let tool = HostTools;
+    let min = find_minimum(&disk, &m, 1, &tool, None, &d).expect("our own code says a minimum");
+    assert!(min < 20 * MB, "an empty volume ends just after its bitmap, up-case table and root: {min}");
+    assert!(plan_shrink(&m, &ShrinkRequest { part: 1, new_bytes: 1 * MB }, Some(min)).unwrap_err().contains("needs at least"));
+    let plan = plan_shrink(&m, &ShrinkRequest { part: 1, new_bytes: 100 * MB }, Some(min)).unwrap();
+    assert!(plan.warnings.iter().any(|w| w.contains("moved to free space")), "{:?}", plan.warnings);
+    assert!(plan.text().contains("own exFAT code"));
+    apply_shrink(&disk, &m, &plan, &confirm(&plan), &tool, None, &d, "").unwrap();
+    let after = model(&disk, total);
+    assert_eq!(after.part(1).unwrap().sectors, 100 * MB / 512);
+    let f = d.join("after.img");
+    region(&disk, after.part(1).unwrap(), &f, 100 * MB);
+    let fsck = Command::new("fsck.exfat").args(["-n", f.to_str().unwrap()]).output().unwrap();
+    assert!(fsck.status.success(), "fsck.exfat after the shrink: {}{}", String::from_utf8_lossy(&fsck.stdout), String::from_utf8_lossy(&fsck.stderr));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn the_exfat_code_moves_its_minimum_with_the_bitmap_and_refuses_what_it_cannot_do_safely() {
+    use crate::exfatshrink::*;
+    let d = dir("exfat-refuse");
+    let img = d.join("v.img");
+    std::fs::write(&img, vec![0u8; 4096]).unwrap();
+    assert!(minimum(&img).unwrap_err().contains("signature"));
+    if need(&["mkfs.exfat", "truncate"]) {
+        run("truncate", &["-s", &(64 * MB).to_string(), img.to_str().unwrap()]);
+        run("mkfs.exfat", &[img.to_str().unwrap()]);
+        check(&img).unwrap();
+        let min = minimum(&img).unwrap();
+        assert!(shrink(&img, 64 * MB).unwrap_err().contains("not smaller"));
+        assert!(shrink(&img, 40 * MB + 1).unwrap_err().contains("whole number of sectors"));
+        assert!(shrink(&img, min - 512).unwrap_err().contains("cannot shrink below"));
+        // a cluster far out marked used (as a file there would) moves the minimum past it and the check still passes
+        let raw = std::fs::read(&img).unwrap();
+        let heap = u32::from_le_bytes([raw[88], raw[89], raw[90], raw[91]]) as usize;
+        let spc = 1usize << raw[109];
+        let bps = 1usize << raw[108];
+        // find the bitmap through the root directory: its first cluster is in the 0x81 entry
+        let root = u32::from_le_bytes([raw[96], raw[97], raw[98], raw[99]]) as usize;
+        let rd = (heap + (root - 2) * spc) * bps;
+        let e = (0..spc * bps / 32).map(|i| rd + i * 32).find(|o| raw[*o] == 0x81).expect("bitmap entry");
+        let first = u32::from_le_bytes([raw[e + 20], raw[e + 21], raw[e + 22], raw[e + 23]]) as usize;
+        let bm = (heap + (first - 2) * spc) * bps;
+        let mut raw = raw;
+        let far = 5000usize; // cluster index 5000
+        raw[bm + far / 8] |= 1 << (far % 8);
+        std::fs::write(&img, &raw).unwrap();
+        let min2 = minimum(&img).unwrap();
+        assert_eq!(min2 as usize, (heap + (far + 2 - 1) * spc) * bps);
+        assert!(min2 > min);
+        // damage: a changed byte in the boot region is found by the checksum
+        raw[20] ^= 0xFF;
+        std::fs::write(&img, &raw).unwrap();
+        assert!(check(&img).unwrap_err().contains("checksum"));
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_btrfs_partition_is_planned_with_the_mounted_resize_and_xfs_is_told_it_cannot_shrink() {
+    let mut m = synthetic();
+    m.parts[0].fs = "btrfs".into();
+    let plan = plan_shrink(&m, &ShrinkRequest { part: 1, new_bytes: 50 * MB }, Some(20 * MB)).unwrap();
+    assert!(plan.steps.iter().any(|s| s.contains("btrfs (mounted for the resize)")), "{:?}", plan.steps);
+    let x = plan_shrink(&synthetic(), &ShrinkRequest { part: 2, new_bytes: 50 * MB }, Some(20 * MB)).unwrap_err();
+    assert!(x.contains("xfs cannot be made smaller by any tool"), "{x}");
+}
+
+/// A FAT32 volume of `mib` MiB with one-sector clusters in a file.
+fn fat32_image(d: &std::path::Path, name: &str, mib: u64) -> std::path::PathBuf {
+    let img = d.join(name);
+    run("truncate", &["-s", &(mib * MB).to_string(), img.to_str().unwrap()]);
+    run("mkfs.fat", &["-F", "32", "-s", "1", "-n", "MOVEDATA", img.to_str().unwrap()]);
+    img
+}
+
+fn mt(img: &std::path::Path, args: &[&str]) -> String {
+    let o = Command::new(args[0]).arg("-i").arg(img).args(&args[1..]).output().unwrap();
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+#[test]
+fn files_beyond_the_new_end_are_moved_below_it_and_every_file_reads_back_and_fsck_agrees() {
+    if !need(&["mkfs.fat", "fsck.fat", "mcopy", "mdel", "mmd", "mtype", "truncate"]) {
+        return;
+    }
+    use crate::fatshrink::*;
+    let d = dir("fat32-move");
+    let img = fat32_image(&d, "v.img", 150);
+    let i = img.to_str().unwrap();
+    // a filler that is deleted again pushes everything written after it far out (one-sector clusters: cluster number ~ MiB * 2048)
+    let filler = vec![1u8; 80 * 1024 * 1024];
+    std::fs::write(d.join("filler.bin"), &filler).unwrap();
+    run("mcopy", &["-i", i, d.join("filler.bin").to_str().unwrap(), "::/"]);
+    run("mmd", &["-i", i, "::/docs", "::/docs/deep", "::/a long directory name with spaces"]);
+    let big: Vec<u8> = (0..3 * MB).map(|k| (k.wrapping_mul(31) >> 3) as u8).collect();
+    std::fs::write(d.join("big.bin"), &big).unwrap();
+    std::fs::write(d.join("Long File Name Here.txt"), b"long name text\n").unwrap();
+    std::fs::write(d.join("small.txt"), b"small\n").unwrap();
+    run("mcopy", &["-i", i, d.join("big.bin").to_str().unwrap(), "::/docs/deep/big.bin"]);
+    run("mcopy", &["-i", i, d.join("Long File Name Here.txt").to_str().unwrap(), "::/docs/"]);
+    run("mcopy", &["-i", i, d.join("small.txt").to_str().unwrap(), "::/a long directory name with spaces/small.txt", ]);
+    run("mcopy", &["-i", i, d.join("small.txt").to_str().unwrap(), "::/top.txt"]);
+    run("mdel", &["-i", i, "::/filler.bin"]);
+    // the files reach far out, but only a few MiB of them exist: with moving the volume can be much smaller
+    let (with_moving, without) = (minimum(&img).unwrap(), minimum_without_moving(&img).unwrap());
+    assert!(without > 70 * MB, "without moving it is held up by the far files: {without}");
+    assert!(with_moving < 40 * MB, "with moving only what the files need (and the FAT32 floor) counts: {with_moving}");
+    check(&img).unwrap();
+    shrink(&img, 40 * MB).unwrap();
+    // the file system is smaller and judged by the real checker
+    let fsck = Command::new("fsck.fat").args(["-n", i]).output().unwrap();
+    assert!(fsck.status.success(), "fsck.fat after moving:\n{}{}", String::from_utf8_lossy(&fsck.stdout), String::from_utf8_lossy(&fsck.stderr));
+    let out = Command::new("mtype").args(["-i", i, "::/docs/deep/big.bin"]).output().unwrap();
+    assert!(out.status.success() && out.stdout == big, "the 3 MiB file in the nested folder reads back byte for byte");
+    assert_eq!(mt(&img, &["mtype", "::/docs/Long File Name Here.txt"]), "long name text\n");
+    assert_eq!(mt(&img, &["mtype", "::/a long directory name with spaces/small.txt"]), "small\n");
+    assert_eq!(mt(&img, &["mtype", "::/top.txt"]), "small\n");
+    assert!(mt(&img, &["mdir", "-/", "::/"]).contains("deep"), "the tree is still listed");
+    // after the move nothing lies beyond the new end any more
+    let (g_hi, used) = (minimum_without_moving(&img).unwrap(), crate::fatreloc::used_clusters(&img).unwrap());
+    assert!(g_hi <= 40 * MB + 512 && used > 6000, "{g_hi} {used}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_root_directory_beyond_the_new_end_is_moved_and_named_in_both_boot_sectors() {
+    if !need(&["mkfs.fat", "fsck.fat", "mcopy", "mmd", "mtype", "truncate"]) {
+        return;
+    }
+    use std::os::unix::fs::FileExt;
+    let d = dir("fat32-root-move");
+    let img = fat32_image(&d, "r.img", 120);
+    let i = img.to_str().unwrap();
+    std::fs::write(d.join("a.txt"), b"alpha\n").unwrap();
+    run("mmd", &["-i", i, "::/sub"]);
+    run("mcopy", &["-i", i, d.join("a.txt").to_str().unwrap(), "::/sub/a.txt"]);
+    run("mcopy", &["-i", i, d.join("a.txt").to_str().unwrap(), "::/root.txt"]);
+    // put the root directory far out by hand: copy its cluster to a free cluster near the end of the volume, chain it, free cluster 2,
+    // name it in the boot sector and its backup (a valid FAT32 state that mkfs never makes)
+    let f = std::fs::OpenOptions::new().read(true).write(true).open(&img).unwrap();
+    let mut b = vec![0u8; 512];
+    f.read_exact_at(&mut b, 0).unwrap();
+    let (reserved, nfats, fatsz, spc) = (u16::from_le_bytes([b[14], b[15]]) as u64, b[16] as u64, u32::from_le_bytes([b[36], b[37], b[38], b[39]]) as u64, b[13] as u64);
+    let backup = u16::from_le_bytes([b[50], b[51]]) as u64;
+    let data_start = reserved + nfats * fatsz;
+    let far: u32 = 200_000;
+    let mut cl = vec![0u8; (spc * 512) as usize];
+    f.read_exact_at(&mut cl, data_start * 512).unwrap();
+    f.write_all_at(&cl, (data_start + (far as u64 - 2) * spc) * 512).unwrap();
+    for copy in 0..nfats {
+        let fat_at = (reserved + copy * fatsz) * 512;
+        f.write_all_at(&0x0FFF_FFFFu32.to_le_bytes(), fat_at + far as u64 * 4).unwrap();
+        f.write_all_at(&0u32.to_le_bytes(), fat_at + 2 * 4).unwrap();
+    }
+    f.write_all_at(&far.to_le_bytes(), 44).unwrap();
+    f.write_all_at(&far.to_le_bytes(), backup * 512 + 44).unwrap();
+    drop(f);
+    assert_eq!(mt(&img, &["mtype", "::/root.txt"]), "alpha\n", "the hand-made layout is a valid volume");
+    crate::fatshrink::shrink(&img, 40 * MB).unwrap();
+    let f = std::fs::File::open(&img).unwrap();
+    for at in [0u64, backup * 512] {
+        let mut r = [0u8; 4];
+        f.read_exact_at(&mut r, at + 44).unwrap();
+        assert!(u32::from_le_bytes(r) < 41 * 2048 + 2, "the boot sector at {at} names a root below the new end: {}", u32::from_le_bytes(r));
+    }
+    let fsck = Command::new("fsck.fat").args(["-n", i]).output().unwrap();
+    assert!(fsck.status.success(), "fsck.fat:\n{}{}", String::from_utf8_lossy(&fsck.stdout), String::from_utf8_lossy(&fsck.stderr));
+    assert_eq!(mt(&img, &["mtype", "::/sub/a.txt"]), "alpha\n");
+    assert_eq!(mt(&img, &["mtype", "::/root.txt"]), "alpha\n");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn compacting_refuses_a_limit_the_files_do_not_fit_under_before_writing_anything() {
+    if !need(&["mkfs.fat", "mcopy", "truncate"]) {
+        return;
+    }
+    let d = dir("fat32-nofit");
+    let img = fat32_image(&d, "n.img", 100);
+    let big = vec![5u8; 6 * 1024 * 1024];
+    std::fs::write(d.join("big.bin"), &big).unwrap();
+    run("mcopy", &["-i", img.to_str().unwrap(), d.join("big.bin").to_str().unwrap(), "::/"]);
+    let before = std::fs::read(&img).unwrap();
+    let e = crate::fatreloc::compact(&img, 1000).unwrap_err();
+    assert!(e.contains("nothing was moved"), "{e}");
+    assert_eq!(std::fs::read(&img).unwrap(), before, "refused means untouched");
+    assert_eq!(crate::fatreloc::compact(&img, 100_000).unwrap(), crate::fatreloc::Moved { clusters: 0, chains: 0 }, "everything is below the limit: nothing to do");
+    let _ = std::fs::remove_dir_all(&d);
+}

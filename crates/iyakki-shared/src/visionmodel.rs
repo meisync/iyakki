@@ -1,6 +1,6 @@
 use crate::settings::ModelChoice;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Place {
     /// On this computer.
     Local,
@@ -21,7 +21,7 @@ impl Place {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum How {
     Own,
     Setting,
@@ -29,7 +29,7 @@ pub enum How {
     Auto,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Pick {
     pub provider: String,
     pub model: String,
@@ -55,7 +55,7 @@ impl Pick {
 }
 
 /// Why no vision model could be chosen; both are "needs your choice" failures (the fixing agent is not asked).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum VisionError {
     NoneFound(String),
     CloudOnly(String),
@@ -73,7 +73,7 @@ impl VisionError {
 
 
 /// A model that can see pictures, as a provider's list says.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Cand {
     pub provider: String,
     pub model: String,

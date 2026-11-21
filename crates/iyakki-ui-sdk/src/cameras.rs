@@ -116,6 +116,8 @@ pub struct Overlay {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Ptz {
     Move { pan: f32, tilt: f32, zoom: f32 },
+    /// Go to a place: pan and tilt -1.0 to 1.0 across the camera's range, zoom 0.0 (wide) to 1.0 (closest).
+    Absolute { pan: f32, tilt: f32, zoom: f32 },
     Stop,
 }
 

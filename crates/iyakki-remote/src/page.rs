@@ -125,7 +125,7 @@ function status(t) { const s = $("status"); s.textContent = t || ""; s.style.dis
 // ---- browser devices (clipboard images and HTML, sound, microphone, camera): media.js, the rules are in that file
 function sendBinary(u8) { if (ws && ws.readyState === 1) ws.send(u8); }
 const media = IyakkiMedia.create(
-  { nav: navigator, document, AudioContext: window.AudioContext || window.webkitAudioContext, ClipboardItem: window.ClipboardItem, Blob, TextEncoder,
+  { nav: navigator, document, AudioContext: window.AudioContext || window.webkitAudioContext, ClipboardItem: window.ClipboardItem, Blob, TextEncoder, TextDecoder,
     isSecureContext: window.isSecureContext, now: () => Date.now(), setInterval: (f, ms) => setInterval(f, ms) },
   { sendJson: (o) => send(o), sendBinary, onChange: (s) => renderDevices(s) });
 function mmss(n) { return Math.floor(n / 60) + ":" + String(n % 60).padStart(2, "0"); }

@@ -63,7 +63,7 @@ mod tests {
         let audits = Arc::new(Mutex::new(Vec::new()));
         let a2 = audits.clone();
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
-        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings, audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
+        let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
         let d = t.defs();
         assert_eq!(d.iter().find(|x| x.spec.name == "camera_vision_status").unwrap().risk, Risk::Safe);

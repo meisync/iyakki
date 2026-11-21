@@ -3,6 +3,7 @@
 
 
 /// What the screen asks of the worker.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Cmd {
     Tap,
     Stop,

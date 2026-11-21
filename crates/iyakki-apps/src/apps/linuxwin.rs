@@ -14,11 +14,10 @@ use std::time::{Duration, Instant};
 use iyakki_shared::linuxapps::LinuxApps;
 use iyakki_shared::linuxwin::{Program, Usage};
 use iyakki_shared::linuxwin::{self as lw, Window};
-use iyakki_shared::quickinstall as qi;
 use iyakki_rfb::{keysyms as ks, Event as RfbEvent, Link};
-use iyakki_sec::policy::CliLevel;
 use tiny_skia::Pixmap;
 
+use super::linuxwin_port::{CxPort, LinuxWinPort};
 use super::{App, AppCx, Flow};
 use crate::gfx::{Face, Gfx, Icon};
 use crate::safeclamp::SafeClamp;
@@ -135,12 +134,11 @@ pub struct LinuxWinApp {
     network: bool,
     checked: Instant,
     can_install: bool,
-    user: String,
     installing: bool,
     started_at: Instant,
     full_cli: bool,
     all_hosts: bool,
-    job_running: bool,
+    pub(super) job_running: bool,
     install_rx: Option<Receiver<Result<(), String>>>,
 }
 
@@ -263,20 +261,17 @@ pub fn mem_text(kb: u64) -> String {
 
 impl LinuxWinApp {
     pub fn new(cx: &AppCx) -> LinuxWinApp {
-        let data = cx.data_dir().to_path_buf();
-        let user = cx.session.user.clone();
-        let rig = Rig {
-            la: Arc::new(move || {
-                let exe = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
-                Ok(LinuxApps::new(&data, &user, &exe, crate::agent().exec().system()))
-            }),
-            spawn: Arc::new(lw::System),
-            proc_root: cx.core.host().proc_root(),
-        };
-        LinuxWinApp::with_rig(cx, rig)
+        let port = CxPort(cx);
+        LinuxWinApp::with_port(&port, port.rig())
     }
 
+    /// The tile with a rig of the caller's (tests) and the shell's context.
     pub fn with_rig(cx: &AppCx, rig: Rig) -> LinuxWinApp {
+        LinuxWinApp::with_port(&CxPort(cx), rig)
+    }
+
+    /// The tile over any port (a fake in tests).
+    pub fn with_port(port: &dyn LinuxWinPort, rig: Rig) -> LinuxWinApp {
         let mut a = LinuxWinApp {
             phase: Phase::NotInstalled,
             programs: Vec::new(),
@@ -305,23 +300,22 @@ impl LinuxWinApp {
             program_name: String::new(),
             network: false,
             checked: Instant::now(),
-            can_install: cx.session.policy.manage_settings,
-            user: cx.session.user.clone(),
+            can_install: port.can_install(),
             installing: false,
             started_at: Instant::now(),
-            full_cli: cx.session.policy.cli == CliLevel::Full,
-            all_hosts: cx.session.policy.net_hosts.iter().any(|h| h == "*"),
+            full_cli: port.full_cli(),
+            all_hosts: port.all_hosts(),
             job_running: false,
             install_rx: None,
         };
-        a.refresh(cx);
+        a.refresh(port);
         a
     }
 
     /// Read what is installed (files only) and set the phase when nothing is running.
-    pub fn refresh(&mut self, cx: &AppCx) {
+    pub fn refresh(&mut self, port: &dyn LinuxWinPort) {
         self.checked = Instant::now();
-        self.job_running = cx.jobs().visible(&self.user, qi::WORKSPACE).iter().any(|j| j.running() && qi::item_of(j) == Some(qi::Item::LinuxWindows));
+        self.job_running = port.base_install_running();
         if matches!(self.phase, Phase::Starting | Phase::Running) {
             return;
         }
@@ -353,8 +347,7 @@ impl LinuxWinApp {
     }
 
     /// Start the selected program: the sandbox, the display and the connection come up on a thread of their own.
-    pub fn start(&mut self, cx: &AppCx) {
-        let _ = cx;
+    pub fn start(&mut self) {
         let Some(p) = self.programs.get(self.sel).cloned() else { return self.say("Choose a program first (or install a test program).", false) };
         if !self.full_cli {
             return;
@@ -480,7 +473,7 @@ impl LinuxWinApp {
     }
 
     /// Put the window on screen aside (it keeps running) and show the list, to start another one beside it.
-    pub fn new_window(&mut self, cx: &AppCx) {
+    pub fn new_window(&mut self, port: &dyn LinuxWinPort) {
         if !self.running() {
             return;
         }
@@ -492,7 +485,7 @@ impl LinuxWinApp {
         self.parked.push(s);
         self.phase = Phase::Pick;
         self.note = None;
-        self.refresh(cx);
+        self.refresh(port);
         self.redraw = true;
     }
 
@@ -554,7 +547,7 @@ impl LinuxWinApp {
 
     // ---- the heartbeat
 
-    fn tick(&mut self, cx: &AppCx) {
+    fn tick(&mut self, port: &dyn LinuxWinPort) {
         if let Some(rx) = &self.install_rx {
             match rx.try_recv() {
                 Ok(r) => {
@@ -564,7 +557,7 @@ impl LinuxWinApp {
                         Ok(()) => self.say("Installed. It is in the list now.", true),
                         Err(e) => self.say(e, false),
                     }
-                    self.refresh(cx);
+                    self.refresh(port);
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.install_rx = None;
@@ -619,7 +612,7 @@ impl LinuxWinApp {
             self.maybe_resize();
             self.sample();
         } else if matches!(self.phase, Phase::NotInstalled | Phase::Pick) && self.checked.elapsed() > Duration::from_secs(3) {
-            self.refresh(cx);
+            self.refresh(port);
         }
     }
 
@@ -764,7 +757,7 @@ impl LinuxWinApp {
             return;
         }
         let src = pm.data();
-        let dst = g.pm.data_mut();
+        let dst = g.pm_mut().data_mut();
         for y in 0..rows {
             let dy = vy + y;
             if dy < 0 || dy >= gh {
@@ -779,7 +772,7 @@ impl LinuxWinApp {
         }
     }
 
-    fn panel(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx) {
+    fn panel(&mut self, g: &mut Gfx, area: R, s: f32) {
         let size = 13.0 * s;
         let lh = g.line_height(size, Face::Sans);
         let pad = 16.0 * s;
@@ -861,7 +854,6 @@ impl LinuxWinApp {
                     }
                     y += size * 3.0;
                 }
-                let _ = cx;
             }
             Phase::Running => {}
         }
@@ -870,8 +862,23 @@ impl LinuxWinApp {
         }
     }
 
+    /// Install the base system of the Linux windows (a detached job; administrators).
+    pub(super) fn install_base(&mut self, port: &dyn LinuxWinPort) {
+        if !self.can_install {
+            self.say("Only an administrator can install it.", false);
+            return;
+        }
+        match port.start_base_install() {
+            Ok(()) => {
+                self.job_running = true;
+                self.say("Started: Install Linux windows. Progress is beside the clock.", true);
+            }
+            Err(e) => self.say(e, false),
+        }
+    }
+
     /// Install one of the test programs on a thread (apt takes a while); the list refreshes after.
-    fn install_program(&mut self, i: usize, cx: &AppCx) {
+    fn install_program(&mut self, i: usize) {
         let Some((pkg, _)) = lw::TEST_PROGRAMS.get(i) else { return };
         if !self.can_install {
             return self.say("Only an administrator can install programs for the sandbox.", false);
@@ -892,7 +899,6 @@ impl LinuxWinApp {
             let _ = tx.send(r);
         });
         self.install_rx = Some(rx);
-        let _ = cx;
     }
 }
 
@@ -951,27 +957,28 @@ impl App for LinuxWinApp {
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        let port = &CxPort(cx);
         match ev {
-            Event::Tick => self.tick(cx),
-            Event::Tab(T_START) => self.start(cx),
+            Event::Tick => self.tick(port),
+            Event::Tab(T_START) => self.start(),
             Event::Tab(T_REFRESH) => {
                 if matches!(self.phase, Phase::Ended(_)) {
                     self.phase = Phase::Pick;
                 }
                 self.note = None;
-                self.refresh(cx);
+                self.refresh(port);
             }
             Event::Tab(T_STOP) => {
                 self.stop();
                 if self.parked.is_empty() {
                     self.phase = Phase::Pick;
-                    self.refresh(cx);
+                    self.refresh(port);
                 } else {
                     self.phase = Phase::Pick;
                     self.switch_to(self.parked.len() - 1);
                 }
             }
-            Event::Tab(T_NEW) => self.new_window(cx),
+            Event::Tab(T_NEW) => self.new_window(port),
             Event::Tab(i) if (T_SWITCH..T_SWITCH + lw::MAX_SLOTS as usize).contains(i) => self.switch_to(i - T_SWITCH),
             Event::Tab(T_COPY) => match self.remote_clip.clone().filter(|t| !t.is_empty()) {
                 Some(t) => {
@@ -984,21 +991,8 @@ impl App for LinuxWinApp {
                 Some(t) => self.paste_text(&t),
                 None => self.say("Your clipboard has no text.", false),
             },
-            Event::Tab(T_INSTALL_BASE) => {
-                if !self.can_install {
-                    self.say("Only an administrator can install it.", false);
-                } else {
-                    match qi::Launch::this_program(cx.data_dir()).and_then(|l| cx.b0().qi_start(&cx.session.user, qi::Item::LinuxWindows, &|_| false, &l)) {
-                        Ok(_) => {
-                            cx.audit.record(&cx.session.user, "quickinstall.start", "linux-windows");
-                            self.job_running = true;
-                            self.say("Started: Install Linux windows. Progress is beside the clock.", true);
-                        }
-                        Err(e) => self.say(e, false),
-                    }
-                }
-            }
-            Event::Tab(i) if (T_PROGRAM_INSTALL..T_PROGRAM_INSTALL + lw::TEST_PROGRAMS.len()).contains(i) => self.install_program(i - T_PROGRAM_INSTALL, cx),
+            Event::Tab(T_INSTALL_BASE) => self.install_base(port),
+            Event::Tab(i) if (T_PROGRAM_INSTALL..T_PROGRAM_INSTALL + lw::TEST_PROGRAMS.len()).contains(i) => self.install_program(i - T_PROGRAM_INSTALL),
             Event::Row(i) if self.phase == Phase::Pick => {
                 self.sel = (*i).min(self.programs.len().saturating_sub(1));
                 self.redraw = true;
@@ -1020,9 +1014,9 @@ impl App for LinuxWinApp {
                     self.sel += 1;
                     self.redraw = true;
                 }
-                Key::Enter if self.phase == Phase::Pick => self.start(cx),
+                Key::Enter if self.phase == Phase::Pick => self.start(),
                 Key::Char('r') | Key::Char('R') => {
-                    self.refresh(cx);
+                    self.refresh(port);
                 }
                 Key::Esc => return Flow::Back,
                 _ => {}
@@ -1073,13 +1067,13 @@ impl App for LinuxWinApp {
         Flow::Stay
     }
 
-    fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, _tick: u64) {
+    fn render(&mut self, g: &mut Gfx, area: R, s: f32, _cx: &AppCx, _tick: u64) {
         if self.running() {
             self.draw_running(g, area, s);
         } else {
             // the size a start asks the display for: what the window area will be below its strip
             self.view = layout(area, s).1;
-            self.panel(g, area, s, cx);
+            self.panel(g, area, s);
         }
     }
 }

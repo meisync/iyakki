@@ -454,6 +454,8 @@ type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 pub struct TileSdk {
     /// What the app has mounted inside its page (the screen paints it), when this system has an embed backend.
     pub embeds: Option<super::sdkv2_embed::EmbedBoard>,
+    /// What a media or dashboard viewer shows (the playback state and the dashboard's data), read through this app's own backends.
+    pub feeds: Option<Arc<super::sdkv2_embed::EmbedFeeds>>,
     app: String,
     user: String,
     llm: Arc<dyn LlmBackend>,
@@ -480,7 +482,14 @@ impl TileSdk {
         let st = State { saved, path: state_file.map(Path::to_path_buf), llm_calls: vec![], says: vec![], jobs: HashMap::new(), warned_day: 0 };
         let clock = ms_now();
         let v2 = super::sdkv2::Sdk2::new(app, user, out.clone(), super::sdkv2_backends::Backends::missing(), state_file.map(|p| p.with_extension("sdk2.json")), Zone::utc(), clock.clone());
-        TileSdk { embeds: None, app: app.into(), user: user.into(), llm, speech, meter, out, state: Mutex::new(st), clock, fakes: None, v2, on_shared: Mutex::new(Vec::new()) }
+        TileSdk { embeds: None, feeds: None, app: app.into(), user: user.into(), llm, speech, meter, out, state: Mutex::new(st), clock, fakes: None, v2, on_shared: Mutex::new(Vec::new()) }
+    }
+
+    /// What the media or dashboard viewer `id` shows now, when this system has the viewers' feeds.
+    pub fn embed_data(&self, id: u32) -> Option<super::sdkv2_embed::EmbedData> {
+        let (board, feeds) = (self.embeds.as_ref()?, self.feeds.as_ref()?);
+        let view = board.snapshot().into_iter().find(|v| v.id == id)?;
+        feeds.data(&super::sdkv2_backends::Who { app: self.app.clone(), user: self.user.clone() }, &view)
     }
 
     /// The SDK 1.2 part: its state, limits and backends.
@@ -528,6 +537,8 @@ impl TileSdk {
         let (board, pol) = (super::sdkv2_embed::EmbedBoard::default(), policy.clone());
         backends.embed = Arc::new(super::sdkv2_embed::EmbedEngine::new(board.clone(), files, Arc::new(move |h| pol.allows_host(h))));
         s.embeds = Some(board);
+        let feeds = super::sdkv2_embed::EmbedFeeds::new(backends.playback.clone(), Arc::new(super::sdkv2_engines::RealDash { svc: svc.clone(), policy: policy.clone() }), s.clock.clone());
+        s.feeds = Some(Arc::new(feeds));
         s.v2 = s.v2.with_backends(backends);
         s.bind_listener(listen);
         s

@@ -421,3 +421,287 @@ impl iyakki_proxy::Upstream for NoUp {
         Err("no network in this test".into())
     }
 }
+
+/// A TLS relay on loopback (a certificate of its own, made for the test): fetch answers an empty list, post answers 204.
+fn serve_tls_relay() -> (String, String) {
+    use std::io::{Read, Write};
+    let mut p = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    p.distinguished_name.push(rcgen::DnType::CommonName, "relay.test");
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = p.self_signed(&key).unwrap();
+    let der = cert.der().to_vec();
+    let fp = iyakki_proxy::certinfo::fingerprint(&der);
+    let cfg = Arc::new(
+        rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![rustls::pki_types::CertificateDer::from(der)], rustls::pki_types::PrivateKeyDer::try_from(key.serialize_der()).unwrap())
+            .unwrap(),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for s in listener.incoming().flatten() {
+            let mut s = s;
+            let mut c = rustls::ServerConnection::new(cfg.clone()).unwrap();
+            let mut t = rustls::Stream::new(&mut c, &mut s);
+            let mut seen = Vec::new();
+            let mut b = [0u8; 1];
+            let mut need = None;
+            loop {
+                match t.read(&mut b) {
+                    Ok(1) => seen.push(b[0]),
+                    _ => break,
+                }
+                if need.is_none() && seen.ends_with(b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&seen).to_ascii_lowercase();
+                    let n: usize = head.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+                    need = Some(seen.len() + n);
+                }
+                if need.is_some_and(|n| seen.len() >= n) {
+                    break;
+                }
+            }
+            let post = seen.starts_with(b"POST");
+            let resp: &[u8] = if post { b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n" } else { b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]" };
+            let _ = t.write_all(resp);
+            let _ = t.flush();
+            c.send_close_notify();
+            let _ = c.complete_io(&mut s);
+        }
+    });
+    (format!("https://localhost:{port}"), fp)
+}
+
+#[test]
+fn an_https_relay_is_only_used_with_its_certificate_fingerprint_and_only_for_that_certificate() {
+    use super::relay_link::*;
+    let r = rig("pin", true, true);
+    // nothing is connected to while the fingerprint is unset: the link is refused before any connection
+    let plain: Arc<dyn iyakki_proxy::Upstream> = Arc::new(NoUp);
+    assert!(link_for("https://relay.example", "", plain.clone()).err().unwrap().contains("fingerprint is not set"));
+    assert!(link_for("https://relay.example", "  ", plain.clone()).is_err());
+    assert!(link_for("https://relay.example", "AB:CD", plain.clone()).is_err(), "a short fingerprint is no pin");
+    // the summary says why the machine connects nowhere, and the settings check the fingerprint
+    r.dm.set_relay_url(&r.admin, "root", "https://relay.example").unwrap();
+    assert!(r.dm.relay_summary().contains("no certificate fingerprint is set"), "{}", r.dm.relay_summary());
+    assert!(r.dm.set_relay_pin(&r.admin, "root", "not a fingerprint").is_err() && r.dm.set_relay_pin(&r.admin, "root", "AB:CD").is_err());
+    assert!(r.dm.set_relay_pin(&Role::User.template(), "amy", &"ab".repeat(32)).is_err(), "administrators only");
+    assert_eq!(r.dm.relay_pin(), "");
+    // over real TLS to a relay with a certificate of its own: the right fingerprint works for post and fetch
+    let (base, fp) = serve_tls_relay();
+    r.dm.set_relay_url(&r.admin, "root", &base).unwrap();
+    r.dm.set_relay_pin(&r.admin, "root", &fp).unwrap();
+    assert_eq!(r.dm.relay_pin().len(), 64);
+    assert!(r.dm.relay_summary().contains("certificate "), "{}", r.dm.relay_summary());
+    let link = link_for(&base, &r.dm.relay_pin(), plain.clone()).unwrap();
+    link.post(b"sealed").unwrap();
+    assert!(link.fetch("abc").unwrap().is_empty());
+    // another certificate (even a valid-looking one) is refused: the pin is the only trust
+    let (base2, _) = serve_tls_relay();
+    let wrong = link_for(&base2, &r.dm.relay_pin(), plain.clone()).unwrap();
+    assert!(wrong.fetch("abc").unwrap_err().contains("changed"), "a different certificate is refused");
+    assert!(wrong.post(b"sealed").is_err());
+    // a plain http address keeps using the plain transport, which is the caller's choice
+    assert!(link_for("http://127.0.0.1:1", "", plain).is_ok());
+    // removing the pin makes the machine stop using the https relay again
+    r.dm.set_relay_pin(&r.admin, "root", "").unwrap();
+    assert!(r.dm.relay_summary().contains("no certificate fingerprint is set"));
+    let _ = std::fs::remove_dir_all(&r.dir);
+}
+
+// ------------------------------------------------------------------------------------------ the real relay server (iyakki-relay)
+
+/// The real `iyakki-relay` server on loopback over TLS (a certificate made for the test, a manual clock): returns its address, the
+/// certificate's fingerprint, the clock and the running handle. The listener is bound here and handed in, so the port is never freed.
+fn real_relay(max_wait_ms: u64) -> (String, String, iyakki_relay::ManualClock, iyakki_relay::server::Running) {
+    let mut p = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    p.distinguished_name.push(rcgen::DnType::CommonName, "relay.test");
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = p.self_signed(&key).unwrap();
+    let fp = iyakki_proxy::certinfo::fingerprint(cert.der());
+    let cfg = iyakki_relay::tls::config_from_pem(&cert.pem(), &key.serialize_pem()).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let clock = iyakki_relay::ManualClock::at(T0);
+    let limits = iyakki_relay::store::Limits { max_wait_ms, ..Default::default() };
+    let relay = Arc::new(iyakki_relay::http::Relay::new(iyakki_relay::store::Store::new(limits), Box::new(clock.clone()), Box::new(|_| {})));
+    let running = iyakki_relay::server::start(listener, cfg, relay, 16).unwrap();
+    (format!("https://localhost:{port}"), fp, clock, running)
+}
+
+#[test]
+fn the_relay_server_constants_are_the_clients_constants() {
+    use iyakki_relay::store as s;
+    assert_eq!((s::RELAY_PROTOCOL, s::MAX_ENVELOPE_BYTES, s::MAX_TTL_MS, s::MAX_SKEW_MS), (RELAY_PROTOCOL, MAX_ENVELOPE_BYTES, MAX_TTL_MS, MAX_SKEW_MS));
+    assert_eq!((s::MAILBOX_PER_MINUTE, s::MAILBOX_DEPTH), (MAILBOX_PER_MINUTE, MAILBOX_DEPTH));
+    // everything the client can encode is accepted by the server's header check
+    let mut st = s::Store::default();
+    for kind in ["open", "accept", "msg", "refused"] {
+        let e = Envelope { v: RELAY_PROTOCOL, mailbox: "c-0123456789abcdef".into(), from: "f".into(), seq: 1, sent_ms: T0, ttl_ms: 1000, kind: kind.into(), body: "00ff".into() };
+        st.post("p", &e.encode().unwrap(), T0).unwrap();
+    }
+    assert_eq!(st.waiting("c-0123456789abcdef"), 4);
+}
+
+#[test]
+fn a_computer_and_a_machine_use_the_real_relay_server_over_pinned_tls() {
+    use super::relay_link::*;
+    let r = rig("realsrv", true, true);
+    let (base, fp, clock, running) = real_relay(MAX_TTL_MS);
+    let plain: Arc<dyn iyakki_proxy::Upstream> = Arc::new(NoUp);
+    let link = link_for(&base, &fp, plain.clone()).unwrap();
+    let pump = |now: u64| {
+        let audit = |_: &str, _: &str| {};
+        let ask = |who: &str| r.asked.borrow_mut().push(who.to_string());
+        let cx = RelayCx { dm: &r.dm, policy: &r.admin, core: &r.core, gate: &r.gate, hostname: "iyakki-test", audit: &audit, ask: &ask };
+        pump_once(&link, &r.machine, &cx, now).unwrap()
+    };
+    let reply_of = |c: &RelayClient| -> Vec<Envelope> { link.fetch(&c.reply_mailbox()).unwrap().iter().map(|b| Envelope::decode(b).unwrap()).collect() };
+    let open = |c: &mut RelayClient| {
+        link.post(&c.open(clock.now_ms_for_test(), 60_000).unwrap().encode().unwrap()).unwrap();
+    };
+
+    // first contact: the machine raises its question and nothing runs; the client gets no answer
+    let mut c = r.client();
+    open(&mut c);
+    let p = pump(clock.now_ms_for_test());
+    assert_eq!((p.taken, p.replied, p.dropped), (1, 0, 1));
+    assert_eq!(*r.asked.borrow(), ["laptop"]);
+    assert!(reply_of(&c).is_empty());
+    // the administrator approves on the machine; a fresh open is answered
+    r.dm.approve_relay_computer(&r.admin, "root", "laptop", true).unwrap();
+    let mut c = RelayClient::new(SEED, &r.machine.public_hex(), T0 + 100).unwrap();
+    clock.advance(1000);
+    open(&mut c);
+    assert_eq!(pump(clock.now_ms_for_test()).replied, 1);
+    let got = reply_of(&c);
+    c.accept(&got[0]).unwrap();
+    // a round trip
+    let ask = |c: &mut RelayClient, route: &str, body: Value, ttl: u64| {
+        let req = c.request(route, &body, clock.now_ms_for_test(), ttl).unwrap();
+        link.post(&req.encode().unwrap()).unwrap();
+        req
+    };
+    ask(&mut c, "call", json!({"domain": "settings", "call": "schema", "args": {}}), 60_000);
+    assert_eq!(pump(clock.now_ms_for_test()).replied, 1);
+    let (st, v) = c.answer(&reply_of(&c)[0], clock.now_ms_for_test()).unwrap();
+    assert_eq!((st, v["ok"].as_bool()), (200, Some(true)), "{v}");
+    // replay: the relay carries the same envelope twice, the machine answers once
+    let req = ask(&mut c, "hello", json!({"contract": {"major": 0, "minor": 1}, "wants": []}), 60_000);
+    link.post(&req.encode().unwrap()).unwrap();
+    let p = pump(clock.now_ms_for_test());
+    assert_eq!((p.taken, p.replied, p.dropped), (2, 1, 1), "the second copy is a replay");
+    reply_of(&c);
+    // tampered: one flipped character in the sealed body is dropped
+    let mut forged = c.request("hello", &json!({"contract": {"major": 0, "minor": 1}, "wants": []}), clock.now_ms_for_test(), 60_000).unwrap();
+    let mut b = forged.body.clone().into_bytes();
+    let last = b.len() - 1;
+    b[last] = if b[last] == b'0' { b'1' } else { b'0' };
+    forged.body = String::from_utf8(b).unwrap();
+    link.post(&forged.encode().unwrap()).unwrap();
+    let p = pump(clock.now_ms_for_test());
+    assert_eq!((p.taken, p.replied, p.dropped), (1, 0, 1));
+    // expiry: a request queued while the machine is away is gone after its ttl, and the machine never sees it
+    ask(&mut c, "hello", json!({"contract": {"major": 0, "minor": 1}, "wants": []}), 30_000);
+    clock.advance(31_000);
+    let p = pump(clock.now_ms_for_test());
+    assert_eq!(p.taken, 0, "expired at the relay, not delivered");
+    // a mailbox that was never written to is simply empty
+    assert!(link.fetch("nobody-here").unwrap().is_empty());
+    // the wrong certificate: another server, the first one's fingerprint
+    let (base2, fp2, _clock2, running2) = real_relay(MAX_TTL_MS);
+    let wrong = link_for(&base2, &fp, plain.clone()).unwrap();
+    assert!(wrong.fetch("abc").unwrap_err().contains("changed"));
+    assert!(wrong.post(b"x").is_err());
+    assert!(link_for(&base2, &fp2, plain).unwrap().fetch("abc").unwrap().is_empty());
+    running2.stop();
+    running.stop();
+}
+
+trait NowForTest {
+    fn now_ms_for_test(&self) -> u64;
+}
+impl NowForTest for iyakki_relay::ManualClock {
+    fn now_ms_for_test(&self) -> u64 {
+        use iyakki_relay::Clock;
+        self.now_ms()
+    }
+}
+
+/// A run against an `iyakki-relay` on another computer (the owner's trial setup; see docs/RELAY.md). Ignored: it needs
+/// `IYAKKI_RELAY_TEST_URL` (https://localhost:PORT or any name in the certificate), `IYAKKI_RELAY_TEST_PIN` (the certificate's SHA-256
+/// fingerprint) and `IYAKKI_RELAY_TEST_SHORT_URL` (a second relay started with a `--max-wait-ms` under five seconds, same certificate).
+/// Both roles run here with the real clock; only the relay is remote.
+#[test]
+#[ignore = "needs a running iyakki-relay; see docs/RELAY.md"]
+fn live_a_computer_and_a_machine_use_a_relay_on_another_computer_over_pinned_tls() {
+    use super::relay_link::*;
+    let (Ok(url), Ok(pin), Ok(short_url)) = (std::env::var("IYAKKI_RELAY_TEST_URL"), std::env::var("IYAKKI_RELAY_TEST_PIN"), std::env::var("IYAKKI_RELAY_TEST_SHORT_URL")) else {
+        panic!("set IYAKKI_RELAY_TEST_URL, IYAKKI_RELAY_TEST_PIN and IYAKKI_RELAY_TEST_SHORT_URL");
+    };
+    let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let r = rig("live", true, true);
+    let plain: Arc<dyn iyakki_proxy::Upstream> = Arc::new(NoUp);
+    let link = link_for(&url, &pin, plain.clone()).unwrap();
+    let short = link_for(&short_url, &pin, plain.clone()).unwrap();
+    let pump = |l: &HttpLink| {
+        let audit = |_: &str, _: &str| {};
+        let ask = |who: &str| r.asked.borrow_mut().push(who.to_string());
+        let cx = RelayCx { dm: &r.dm, policy: &r.admin, core: &r.core, gate: &r.gate, hostname: "iyakki-test", audit: &audit, ask: &ask };
+        pump_once(l, &r.machine, &cx, now()).unwrap()
+    };
+    let replies = |l: &HttpLink, c: &RelayClient| -> Vec<Envelope> { l.fetch(&c.reply_mailbox()).unwrap().iter().map(|b| Envelope::decode(b).unwrap()).collect() };
+    // 1. first contact needs approval on the machine
+    let mut c = RelayClient::new(SEED, &r.machine.public_hex(), now()).unwrap();
+    link.post(&c.open(now(), 60_000).unwrap().encode().unwrap()).unwrap();
+    let p = pump(&link);
+    assert_eq!((p.taken, p.replied, p.dropped), (1, 0, 1), "first contact is held for approval");
+    assert_eq!(*r.asked.borrow(), ["laptop"]);
+    assert!(replies(&link, &c).is_empty());
+    crate::qprintln!("live: first contact held for approval on the machine: ok");
+    r.dm.approve_relay_computer(&r.admin, "root", "laptop", true).unwrap();
+    // 2. session and round trip
+    let mut c = RelayClient::new(SEED, &r.machine.public_hex(), now()).unwrap();
+    link.post(&c.open(now(), 60_000).unwrap().encode().unwrap()).unwrap();
+    assert_eq!(pump(&link).replied, 1);
+    c.accept(&replies(&link, &c)[0]).unwrap();
+    let req = c.request("call", &json!({"domain": "settings", "call": "schema", "args": {}}), now(), 60_000).unwrap();
+    link.post(&req.encode().unwrap()).unwrap();
+    assert_eq!(pump(&link).replied, 1);
+    let (st, v) = c.answer(&replies(&link, &c)[0], now()).unwrap();
+    assert_eq!((st, v["ok"].as_bool()), (200, Some(true)), "{v}");
+    crate::qprintln!("live: round trip through the relay: ok");
+    // 3. replay and tampering
+    let req = c.request("hello", &json!({"contract": {"major": 0, "minor": 1}, "wants": []}), now(), 60_000).unwrap();
+    link.post(&req.encode().unwrap()).unwrap();
+    link.post(&req.encode().unwrap()).unwrap();
+    let p = pump(&link);
+    assert_eq!((p.taken, p.replied, p.dropped), (2, 1, 1), "the copy is a replay");
+    replies(&link, &c);
+    let mut forged = c.request("hello", &json!({"contract": {"major": 0, "minor": 1}, "wants": []}), now(), 60_000).unwrap();
+    let mut b = forged.body.clone().into_bytes();
+    let last = b.len() - 1;
+    b[last] = if b[last] == b'0' { b'1' } else { b'0' };
+    forged.body = String::from_utf8(b).unwrap();
+    link.post(&forged.encode().unwrap()).unwrap();
+    let p = pump(&link);
+    assert_eq!((p.taken, p.replied, p.dropped), (1, 0, 1), "a tampered envelope is dropped");
+    crate::qprintln!("live: replay and tampered envelope dropped: ok");
+    // 4. expiry at the short-lived relay: delivered in time, gone after its wait
+    let req = c.request("hello", &json!({"contract": {"major": 0, "minor": 1}, "wants": []}), now(), 60_000).unwrap();
+    short.post(&req.encode().unwrap()).unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(7));
+    let p = pump(&short);
+    assert_eq!(p.taken, 0, "the queued request expired at the relay");
+    let req = c.request("hello", &json!({"contract": {"major": 0, "minor": 1}, "wants": []}), now(), 60_000).unwrap();
+    short.post(&req.encode().unwrap()).unwrap();
+    assert_eq!(pump(&short).replied, 1, "a fresh one is delivered");
+    crate::qprintln!("live: queued request expired after the relay's wait, a fresh one was delivered: ok");
+    // 5. a wrong certificate is refused, for post and fetch
+    let wrong = link_for(&url, &"ab".repeat(32), plain).unwrap();
+    assert!(wrong.fetch("abc").unwrap_err().contains("changed"));
+    assert!(wrong.post(b"x").is_err());
+    crate::qprintln!("live: wrong certificate refused: ok");
+}

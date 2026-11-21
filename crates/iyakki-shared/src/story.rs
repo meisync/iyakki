@@ -6,7 +6,7 @@
 /// says them.
 pub const LANGUAGES: [&str; 14] = ["English", "Tamil", "Hindi", "Telugu", "Malayalam", "Kannada", "Bengali", "Marathi", "Spanish", "French", "German", "Portuguese", "Arabic", "Japanese"];
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Block {
     Heading(String),
     Para(String),
@@ -21,7 +21,7 @@ impl Block {
 }
 
 /// A story as the page shows it. While the model is still writing, `partial` holds the last, unfinished paragraph.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Story {
     pub title: String,
     pub blocks: Vec<Block>,
@@ -94,7 +94,7 @@ impl Story {
 }
 
 /// A piece of the story that a speech engine says in one go: whole sentences from one unit (title, heading or paragraph).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Chunk {
     /// Which unit of [`Story::units`] it belongs to (what the page highlights).
     pub unit: usize,
@@ -123,7 +123,7 @@ pub enum TtsStatus {
 }
 
 /// One more picture of a scene besides the main one: how it was made.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct StoredVariant {
     pub ext: String,
     pub bytes: Vec<u8>,
@@ -139,7 +139,7 @@ pub struct StoredVariant {
 }
 
 /// A saved picture: where it goes, what it shows, how it was made, and its bytes (`svg`, `png`, `jpg`, `webp`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredPic {
     /// The text of the scene it shows (what `Scene::text` held), to tell later whether the picture still fits.
     pub scene_text: String,

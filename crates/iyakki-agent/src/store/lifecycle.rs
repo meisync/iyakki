@@ -405,19 +405,7 @@ impl Store {
 
     /// Find one item by `kind:name`, a bare name, or the tile's key. A user's own item wins over a shared one of the same name.
     pub fn find_life<'a>(lives: &'a [Life], id: &str) -> Result<&'a Life, String> {
-        let id = id.trim();
-        let hits: Vec<&Life> = lives.iter().filter(|l| l.entry.key == id || l.id == id || l.entry.name == id).collect();
-        match hits.as_slice() {
-            [] => Err(format!("Nothing installed is called \"{id}\". `store list` shows what is.")),
-            [one] => Ok(one),
-            many => {
-                let mine = many.iter().filter(|l| matches!(l.entry.scope, Scope::User(_))).collect::<Vec<_>>();
-                if mine.len() == 1 {
-                    return Ok(mine[0]);
-                }
-                Err(format!("\"{id}\" is ambiguous: {}. Use kind:name.", many.iter().map(|l| l.id.clone()).collect::<Vec<_>>().join(", ")))
-            }
-        }
+        iyakki_shared::store_lifecycle::find_life(lives, id)
     }
 
     pub fn outdated(lives: &[Life]) -> Vec<&Life> {

@@ -36,7 +36,7 @@ pub fn resolve(cwd: &Path, input: &str) -> Result<PathBuf, String> {
 /// narrow folder their account is allowed to read (a scope such as `/shared`). A scope that is the whole filesystem, or a
 /// folder that holds the home folder (`/home`), is too broad to count: an administrator's `/` does not make `/etc` part of
 /// the home folder. Every root is a real path (symlinks followed), and so is every path checked against them.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRoots {
     /// Where pickers start.
     pub home: PathBuf,

@@ -30,6 +30,47 @@ fn crate_dir(root: &Path, krate: &str) -> Option<PathBuf> {
     [root.join("crates").join(krate), root.join("iyakki-boot").join("crates").join(krate)].into_iter().find(|d| d.is_dir())
 }
 
+/// The crates of the boot loader's own workspace (the `iyakki-boot` git submodule). A checkout without submodules (the public CI, a plain
+/// clone) has the folder empty or missing: then a citation of these crates and of `iyakki-boot/...` scripts cannot be checked, which is
+/// said loudly on stderr (`SKIPPED`) and never counted as a pass; where the submodule IS present every such citation is checked in full.
+const BOOT_LOADER_CRATES: [&str; 4] = ["boot-core", "boot-uefi", "test-efi", "uefi-sys"];
+
+fn boot_loader_checked_out(root: &Path) -> bool {
+    root.join("iyakki-boot/crates").is_dir()
+}
+
+/// The public tree (dist/release/export-public.sh writes the marker) leaves out the internal process documents listed in
+/// dist/release/public-exclude.txt, so a row may cite one of those and the file is missing there by design. In the private tree there is
+/// no marker and the file must exist.
+fn left_out_of_the_public_tree(root: &Path, path: &str) -> bool {
+    if !root.join("dist/release/PUBLIC-EXPORT").is_file() {
+        return false;
+    }
+    let Ok(list) = std::fs::read_to_string(root.join("dist/release/public-exclude.txt")) else { return false };
+    list.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).any(|pat| glob_matches(pat, path))
+}
+
+/// `*` matches any run of characters (enough for the exclusion list).
+fn glob_matches(pat: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pat.split('*').collect();
+    let (first, last) = (parts[0], parts[parts.len() - 1]);
+    if parts.len() == 1 {
+        return pat == text;
+    }
+    if text.len() < first.len() + last.len() || !text.starts_with(first) || !text.ends_with(last) {
+        return false;
+    }
+    let mut at = first.len();
+    let end = text.len() - last.len();
+    for mid in &parts[1..parts.len() - 1] {
+        match text[at..end].find(mid) {
+            Some(i) => at += i + mid.len(),
+            None => return false,
+        }
+    }
+    true
+}
+
 /// The names `n` for which a source text contains `fn n(`: every `fn ` followed by identifier characters and `(` (the same text match as
 /// searching for the string `fn <name>(`, done once per file instead of once per cited test).
 fn fn_names_in(text: &str, out: &mut BTreeSet<String>) {
@@ -211,13 +252,21 @@ fn check_matrix(text: &str, root: &Path) -> Vec<String> {
         for t in &r.tests {
             if let Some(path) = t.strip_prefix("script:") {
                 if !root.join(path).exists() {
-                    problems.push(format!("{}: script `{path}` does not exist", r.id));
+                    if path.starts_with("iyakki-boot/") && !boot_loader_checked_out(root) {
+                        eprintln!("SKIPPED (the iyakki-boot submodule is not checked out, this citation was NOT checked): {} cites script `{path}`", r.id);
+                    } else if left_out_of_the_public_tree(root, path) {
+                        eprintln!("SKIPPED (the public tree leaves this internal document out by design, this citation was NOT checked): {} cites `{path}`", r.id);
+                    } else {
+                        problems.push(format!("{}: script `{path}` does not exist", r.id));
+                    }
                 }
                 continue;
             }
             let parts: Vec<&str> = t.split("::").collect();
             let (Some(krate), Some(name)) = (parts.first(), parts.last()) else { continue };
-            if parts.len() < 2 || crate_dir(root, krate).is_none() {
+            if parts.len() >= 2 && BOOT_LOADER_CRATES.contains(krate) && !boot_loader_checked_out(root) {
+                eprintln!("SKIPPED (the iyakki-boot submodule is not checked out, this citation was NOT checked): {} cites test `{t}`", r.id);
+            } else if parts.len() < 2 || crate_dir(root, krate).is_none() {
                 problems.push(format!("{}: `{t}` does not name a crate and a test", r.id));
             } else if !test_exists(root, krate, name) {
                 problems.push(format!("{}: test `{t}` not found in the crate {krate}", r.id));
@@ -290,10 +339,29 @@ fn the_checker_catches_the_mistakes_it_exists_for() {
 #[test]
 fn tests_of_the_boot_loader_workspace_can_be_cited_by_crate_name() {
     let root = repo_root();
+    if !boot_loader_checked_out(&root) {
+        // not a silent pass: the submodule is the only place these names can be checked; the CI job checks it out (`submodules: true`)
+        eprintln!("SKIPPED: the iyakki-boot submodule is not checked out, so citing the boot loader's tests by crate name was NOT checked here");
+        assert!(crate_dir(&root, "no-such-crate").is_none());
+        return;
+    }
     assert!(test_exists(&root, "boot-core", "crash_loop_rolls_back_after_n_failures"));
     assert!(test_exists(&root, "boot-core", "hold_key_wins_over_oneshot"));
     assert!(!test_exists(&root, "boot-core", "no_such_boot_test"));
     assert!(crate_dir(&root, "uefi-sys").is_some() && crate_dir(&root, "no-such-crate").is_none());
+}
+
+#[test]
+fn glob_matching_follows_the_exclusion_list_and_the_marker_gates_it() {
+    assert!(glob_matches("docs/project/BETA-RETRIAGE*.md", "docs/project/BETA-RETRIAGE.md"));
+    assert!(glob_matches("docs/project/BETA-RETRIAGE*.md", "docs/project/BETA-RETRIAGE-2.md"));
+    assert!(!glob_matches("docs/project/BETA-RETRIAGE*.md", "docs/project/BETA-CHECKLIST.md"));
+    assert!(glob_matches("ALPHA-GATE.md", "ALPHA-GATE.md") && !glob_matches("ALPHA-GATE.md", "ALPHA-GATE.md.x"));
+    assert!(glob_matches("docs/development/WAVE*-*.md", "docs/development/WAVE3-A.md") && !glob_matches("docs/development/WAVE*-*.md", "docs/development/WAVE3.md"));
+    // without the marker (the private tree) nothing is ever left out
+    if !repo_root().join("dist/release/PUBLIC-EXPORT").is_file() {
+        assert!(!left_out_of_the_public_tree(&repo_root(), "ALPHA-GATE.md"));
+    }
 }
 
 #[test]

@@ -29,6 +29,7 @@ pub fn schemas() -> Map<String, Value> {
     put("LoginResponse", obj(json!({"token": s, "expires_in": i, "user": s, "role": s}), &["token", "expires_in", "user", "role"]));
     put("OpenApi", json!({"type": "object"}));
     put("Text", json!({"type": "string"}));
+    put("Html", json!({"type": "string"}));
     put("Whoami", obj(json!({"user": s, "role": s, "admin": b, "profile": s, "tools": strs}), &["user", "role", "admin", "profile", "tools"]));
     put("Models", obj(json!({"models": any_arr}), &["models"]));
     put("Tools", obj(json!({"tools": strs}), &["tools"]));
@@ -44,6 +45,8 @@ pub fn schemas() -> Map<String, Value> {
     put("FlowList", obj(json!({"flows": any_arr}), &["flows"]));
     put("Flow", json!({"type": "object"}));
     put("DataCall", obj(json!({"tool": {"type": "string", "enum": ["data_open", "data_describe", "data_query", "data_create", "data_append", "data_export"]}, "args": {"type": "object"}, "namespace": s}), &["tool", "args"]));
+    put("VoiceReturn", obj(json!({"addr": s, "offer": s}), &["addr", "offer"]));
+    put("VoiceOffer", obj(json!({"addr": s, "offer": s}), &["addr", "offer"]));
     put("TenantList", obj(json!({"tenants": any_arr, "current": s, "can_switch": b, "scope": s}), &["tenants", "current", "can_switch", "scope"]));
     put("TenantSwitch", obj(json!({"tenant": s}), &["tenant"]));
     put("TenantSwitched", obj(json!({"switched": b, "tenant": {"type": "object"}, "previous": s, "runs_stopped": i, "vault_locked": b, "url": s}), &["switched", "tenant", "previous"]));
@@ -57,6 +60,11 @@ pub fn schemas() -> Map<String, Value> {
     put("TileList", obj(json!({"tiles": any_arr}), &["tiles"]));
     put("TileInstall", obj(json!({"id": s, "title": s, "wasm_base64": s, "caps": {"type": "array", "items": s}, "width": i, "height": i}), &["id", "title", "wasm_base64"]));
     put("TileInstalled", obj(json!({"id": s, "title": s, "caps": {"type": "array", "items": s}}), &[]));
+    put("TileBundleInstall", obj(json!({"id": s, "title": s, "caps": {"type": "array", "items": s}, "files": {"type": "array", "items": obj(json!({"name": s, "base64": s}), &["name", "base64"])}}), &["id", "title", "files"]));
+    put("TileBundle", obj(json!({"id": s, "title": s, "caps": {"type": "array", "items": s}, "files": {"type": "array", "items": s}, "page": s, "frame": s, "bridge": s}), &["id", "title"]));
+    put("TileBundles", obj(json!({"bundles": any_arr}), &["bundles"]));
+    put("TileBundleCall", obj(json!({"call": s, "args": {"type": "object"}}), &["call"]));
+    put("TileBundleResult", obj(json!({"ok": b, "value": {}}), &["ok"]));
     put("TileEvents", obj(json!({"width": i, "height": i, "scale_pct": i, "dark": b, "reset": b, "events": any_arr, "clipboard_in": s}), &[]));
     put("TileFrame", obj(json!({"id": s, "redraw": b, "frame": {"type": "object"}, "stats": {"type": "object"}, "clipboard_out": s}), &["id", "redraw", "frame"]));
 
@@ -84,6 +92,12 @@ pub fn schemas() -> Map<String, Value> {
     put("ScheduleList", obj(json!({"schedules": any_arr, "limit": i}), &["schedules", "limit"]));
     put("ScheduleSave", obj(json!({"flow": s, "team": s, "environment": s, "run_as": {"type": "string", "enum": ["owner", "team-service"]}, "trigger": {"type": "object"}}), &["flow", "team", "trigger"]));
     put("ScheduleSaved", json!({"type": "object"}));
+    put("HookList", obj(json!({"hooks": any_arr}), &["hooks"]));
+    put("HookCreate", obj(json!({"flow": s, "signed": b, "methods": {"type": "array", "items": s}, "max_body": i, "content_types": {"type": "array", "items": s}, "rate_per_min": i}), &["flow"]));
+    put("HookSecret", obj(json!({"id": s, "flow": s, "path": s, "secret": {"type": ["string", "null"]}, "shown_once": b}), &["id", "path", "shown_once"]));
+    put("HookReveal", obj(json!({"waiting": b, "id": s, "flow": s, "path": s, "secret": {"type": ["string", "null"]}, "shown_once": b}), &["waiting"]));
+    put("HookState", obj(json!({"id": s, "enabled": b, "public_until": i, "open_to_public": b}), &["id"]));
+    put("HookPublic", obj(json!({"minutes": i}), &["minutes"]));
     put("FlowRun", obj(json!({"draft": b, "inputs": {"type": "object"}}), &[]));
     put("FlowImport", obj(json!({"flow": {"type": "object"}}), &["flow"]));
     put("FlowImported", obj(json!({"id": s, "name": s}), &["id", "name"]));

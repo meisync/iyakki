@@ -22,8 +22,15 @@ pub const WRITE_TOOL: &str = "quick_uninstall";
 /// approving the card is the person's acceptance (the assistant never accepts a licence, and a changed list needs a new card).
 pub const FIRMWARE_TOOL: &str = "hardware_firmware_install";
 
+/// Installs the optional kernel drivers (the rarely used ones the image leaves out) this computer's devices call for. The card shows the
+/// list and the download address; nothing is fetched before approval and every file is checked against the image's own manifest.
+pub const MODPACK_TOOL: &str = "hardware_drivers_install";
+/// Writes the recipe (a Lima machine file and a script) for a light k3s machine on an Apple Silicon Mac (route 3, F-APPLE-02). Text only:
+/// nothing is written, started or downloaded.
+pub const APPLEVM_TOOL: &str = "mac_vm_recipe";
+
 pub fn is_quick_tool(n: &str) -> bool {
-    n == READ_TOOL || n == WRITE_TOOL || n == FIRMWARE_TOOL
+    n == READ_TOOL || n == WRITE_TOOL || n == FIRMWARE_TOOL || n == MODPACK_TOOL || n == APPLEVM_TOOL
 }
 
 /// What the tools need from the machine (a fake in tests).
@@ -43,6 +50,15 @@ pub trait Backend: Send + Sync {
     /// when the list is not the one the card showed.
     fn firmware_install(&self, _include_nvidia: bool, _list: &str) -> Result<String, String> {
         Err("installing hardware firmware is not available here".into())
+    }
+    /// The card for the optional drivers this computer needs (`address` is the https address of the pack, or none to use the saved one):
+    /// its lines and the id of exactly that list; the plain reason when there is nothing to install or no address.
+    fn modpack_card(&self, _address: Option<&str>) -> Result<(Vec<String>, String), String> {
+        Err("installing optional drivers is not available here".into())
+    }
+    /// After the person approved the card with list id `list`: fetch, check and write exactly that list.
+    fn modpack_install(&self, _address: Option<&str>, _list: &str) -> Result<String, String> {
+        Err("installing optional drivers is not available here".into())
     }
 }
 
@@ -68,6 +84,12 @@ impl QuickUninstallTools {
     fn firmware_card(&self, args: &Value) -> Result<String, String> {
         let nv = args.get("include_nvidia").and_then(Value::as_bool).unwrap_or(false);
         let (lines, list) = self.backend.firmware_card(nv)?;
+        *self.shown_list.lock().unwrap_or_else(|e| e.into_inner()) = list;
+        Ok(lines.join("\n"))
+    }
+
+    fn modpack_card(&self, args: &Value) -> Result<String, String> {
+        let (lines, list) = self.backend.modpack_card(args.get("address").and_then(Value::as_str))?;
         *self.shown_list.lock().unwrap_or_else(|e| e.into_inner()) = list;
         Ok(lines.join("\n"))
     }
@@ -114,6 +136,32 @@ impl Tools for QuickUninstallTools {
             risk: Risk::Ask,
             untrusted: false,
         });
+        v.push(ToolDef {
+            spec: ToolSpec {
+                name: APPLEVM_TOOL.into(),
+                description: "Write the recipe (a Lima machine file and a short script) for a light Linux machine that runs k3s on an Apple Silicon Mac, using Apple's Virtualization framework. Text only: nothing is written, started or downloaded; the person saves and runs it on the Mac. The machine is a stock Debian 12 arm64 cloud image with k3s installed inside it; both downloads are pinned and checked and the recipe refuses when a pin is missing. (The IYAKKI aarch64 disk image is not a cloud image and is not used.)".into(),
+                schema: json!({"type": "object", "properties": {
+                    "cpus": {"type": "integer", "description": "default 4"},
+                    "memory_gib": {"type": "integer", "description": "default 8; taken from the Mac while it runs"},
+                    "disk_gib": {"type": "integer", "description": "default 60"},
+                    "name": {"type": "string", "description": "default iyakki-k3s"},
+                    "machine_file": {"type": "string", "description": "where the person will save the machine file; default /Users/Shared/iyakki-k3s.yaml"}
+                }}),
+            },
+            risk: Risk::Safe,
+            untrusted: false,
+        });
+        v.push(ToolDef {
+            spec: ToolSpec {
+                name: MODPACK_TOOL.into(),
+                description: "Install the rarely used kernel drivers the image left out that this computer's devices need, from the optional driver pack. The person approves a card with the list and the download address; nothing is fetched before that, and every file is checked against the image's own checksums. `address` is the https address of the pack (kept for next time); there is no built-in address.".into(),
+                schema: json!({"type": "object", "properties": {
+                    "address": {"type": "string", "description": "https address of the optional driver pack; omit to use the saved one."}
+                }}),
+            },
+            risk: Risk::Ask,
+            untrusted: false,
+        });
         v
     }
 
@@ -131,6 +179,26 @@ impl Tools for QuickUninstallTools {
                 }
                 self.backend.firmware_install(args.get("include_nvidia").and_then(Value::as_bool).unwrap_or(false), &list)
             }
+            APPLEVM_TOOL => {
+                let d = crate::applevm::Settings::default();
+                let n = |k: &str, dv: u32| args.get(k).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(dv);
+                let t = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+                let s = crate::applevm::Settings {
+                    name: if t("name").is_empty() { d.name } else { t("name") },
+                    cpus: n("cpus", d.cpus),
+                    memory_gib: n("memory_gib", d.memory_gib),
+                    disk_gib: n("disk_gib", d.disk_gib),
+                };
+                let file = if t("machine_file").is_empty() { "/Users/Shared/iyakki-k3s.yaml".to_string() } else { t("machine_file") };
+                crate::applevm::recipe(&s, &file)
+            }
+            MODPACK_TOOL => {
+                let list = self.shown_list.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if list.is_empty() {
+                    return Err("no card was shown for this list of drivers; ask again".into());
+                }
+                self.backend.modpack_install(args.get("address").and_then(Value::as_str), &list)
+            }
             _ => self.inner.call(name, args),
         }
     }
@@ -145,6 +213,11 @@ impl Tools for QuickUninstallTools {
                 Ok(c) => c.lines().next().unwrap_or("").to_string(),
                 Err(e) => format!("{name} (nothing to do: {e})"),
             },
+            MODPACK_TOOL => match self.modpack_card(args) {
+                Ok(c) => c.lines().next().unwrap_or("").to_string(),
+                Err(e) => format!("{name} (nothing to do: {e})"),
+            },
+            APPLEVM_TOOL => "Write the recipe for a light k3s machine on an Apple Silicon Mac".into(),
             READ_TOOL => "Show the Quick install items".into(),
             _ => self.inner.describe(name, args),
         }
@@ -154,6 +227,7 @@ impl Tools for QuickUninstallTools {
         match name {
             WRITE_TOOL => self.card(args).ok(),
             FIRMWARE_TOOL => self.firmware_card(args).ok(),
+            MODPACK_TOOL => self.modpack_card(args).ok(),
             READ_TOOL => None,
             _ => self.inner.preview(name, args),
         }
@@ -163,17 +237,18 @@ impl Tools for QuickUninstallTools {
         match name {
             WRITE_TOOL => self.card(args).err(),
             FIRMWARE_TOOL => self.firmware_card(args).err(),
+            MODPACK_TOOL => self.modpack_card(args).err(),
             READ_TOOL => None,
             _ => self.inner.refusal(name, args),
         }
     }
 
     fn pre_approved(&self, name: &str) -> bool {
-        !is_quick_tool(name) && self.inner.pre_approved(name)
+        (!is_quick_tool(name) || name == APPLEVM_TOOL) && self.inner.pre_approved(name)
     }
 
     fn approved_always(&self, name: &str) -> bool {
-        name != WRITE_TOOL && name != FIRMWARE_TOOL && self.inner.approved_always(name)
+        name != WRITE_TOOL && name != FIRMWARE_TOOL && name != MODPACK_TOOL && self.inner.approved_always(name)
     }
 
     fn grant_blocker(&self, name: &str, args: &Value) -> Option<String> {
@@ -181,6 +256,8 @@ impl Tools for QuickUninstallTools {
             Some("removing a Quick install item asks every time".into())
         } else if name == FIRMWARE_TOOL {
             Some("installing hardware firmware asks every time: each approval is the person's acceptance of that list's licences".into())
+        } else if name == MODPACK_TOOL {
+            Some("installing optional drivers asks every time: the list and the download address are shown on the card".into())
         } else {
             self.inner.grant_blocker(name, args)
         }
@@ -213,7 +290,14 @@ pub struct RealBackend {
 
 impl Backend for RealBackend {
     fn rows(&self) -> Vec<(String, String, String)> {
-        crate::quickinstall::uninstall::status_rows(&self.svc).into_iter().map(|(a, b, c)| (a.to_string(), b.to_string(), c)).collect()
+        let mut rows: Vec<(String, String, String)> = crate::quickinstall::uninstall::status_rows(&self.svc).into_iter().map(|(a, b, c)| (a.to_string(), b.to_string(), c)).collect();
+        // the Store's listing of the optional driver pack: only on an image that has one
+        if let Ok(m) = self.modpack_machine() {
+            if let Some(state) = crate::modpackcard::store_state(&m) {
+                rows.push(("optional-drivers".into(), "Optional drivers".into(), state));
+            }
+        }
+        rows
     }
 
     fn review(&self, item: Item, delete_data: bool, with_dependants: bool) -> Result<Vec<String>, String> {
@@ -259,6 +343,14 @@ impl Backend for RealBackend {
         Ok((lines, list))
     }
 
+    fn modpack_card(&self, address: Option<&str>) -> Result<(Vec<String>, String), String> {
+        crate::modpackcard::card(&self.modpack_machine()?, address)
+    }
+
+    fn modpack_install(&self, address: Option<&str>, list: &str) -> Result<String, String> {
+        crate::modpackcard::install(&self.modpack_machine()?, address, list)
+    }
+
     fn firmware_install(&self, include_nvidia: bool, list: &str) -> Result<String, String> {
         let (sel, _) = self.firmware_selection(include_nvidia)?;
         if sel.digest(crate::fwextra::manifest()) != list {
@@ -273,6 +365,10 @@ impl Backend for RealBackend {
 }
 
 impl RealBackend {
+    fn modpack_machine(&self) -> Result<crate::modpackcard::RealMachine, String> {
+        let streamer = self.svc.streamer().ok_or("the network client is not ready yet")?;
+        Ok(crate::modpackcard::RealMachine { data: self.svc.dir().to_path_buf(), streamer })
+    }
     /// The files this computer's kernel log asks for (and the separate NVIDIA group when asked), with the plan lines.
     fn firmware_selection(&self, include_nvidia: bool) -> Result<(crate::fwextra::Selection, Vec<String>), String> {
         let plan = crate::fwextra_cli::plan_here(self.svc.dir());

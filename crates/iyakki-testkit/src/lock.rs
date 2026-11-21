@@ -28,6 +28,8 @@ pub mod names {
     pub const AUDIO: &str = "audio-mixer";
     /// A system-clock override (a test that sets a process-wide time source).
     pub const CLOCK: &str = "clock-override";
+    /// The browser's active header rules (`iyakki_agent::browserheaders::activate`): one set per process, read by the transport.
+    pub const BROWSER_HEADERS: &str = "browser-header-rules";
 }
 
 /// How long a test waits for a lock before it panics with the holder's name (the longest critical section is a few seconds).
@@ -39,7 +41,15 @@ thread_local! { static HELD: RefCell<Vec<String>> = const { RefCell::new(Vec::ne
 #[derive(Debug)]
 pub struct Lock {
     name: String,
-    file: File,
+    file: Option<File>,
+    _process: Option<ProcessLock>,
+}
+
+/// Names whose state lives inside ONE process (its environment, its current folder): the lock between the threads of this process
+/// is enough, a second test binary or a parallel cargo run has its own environment and must not be made to queue behind it
+/// (hunts with four runs at once starved each other on the 120 s file lock).
+fn per_process(name: &str) -> bool {
+    name == names::ENV || name == names::CWD
 }
 
 fn dir() -> PathBuf {
@@ -70,6 +80,11 @@ pub fn lock(name: &str) -> Lock {
 pub fn lock_timeout(name: &str, timeout: Duration) -> Lock {
     let again = HELD.with(|h| h.borrow().iter().any(|n| n == name));
     assert!(!again, "testkit lock {name:?} is already held by this thread: locking it again would wait for itself forever (take it once, around the whole critical section)");
+    if per_process(name) {
+        let held = process_lock(name);
+        HELD.with(|h| h.borrow_mut().push(name.to_string()));
+        return Lock { name: name.to_string(), file: None, _process: Some(held) };
+    }
     let path = dir().join(format!("{}.lock", safe(name)));
     let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).unwrap_or_else(|e| panic!("testkit lock {name:?}: cannot open {}: {e}", path.display()));
     let start = Instant::now();
@@ -90,15 +105,17 @@ pub fn lock_timeout(name: &str, timeout: Duration) -> Lock {
     let _ = file.seek(SeekFrom::Start(0));
     let _ = write!(file, "{} since {}s after epoch {}", who(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0), name);
     HELD.with(|h| h.borrow_mut().push(name.to_string()));
-    Lock { name: name.to_string(), file }
+    Lock { name: name.to_string(), file: Some(file), _process: None }
 }
 
 impl Drop for Lock {
     fn drop(&mut self) {
         HELD.with(|h| h.borrow_mut().retain(|n| n != &self.name));
-        let _ = self.file.set_len(0);
-        // SAFETY: the descriptor is still open (closing it also drops the lock; the explicit unlock is for clarity).
-        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        if let Some(file) = &self.file {
+            let _ = file.set_len(0);
+            // SAFETY: the descriptor is still open (closing it also drops the lock; the explicit unlock is for clarity).
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        }
     }
 }
 
@@ -133,6 +150,48 @@ impl Drop for EnvGuard {
                 None => std::env::remove_var(&k),
             }
         }
+    }
+}
+
+/// How long [`process_lock`] waits: the tests of one binary queue here one after the other, so the wait is the SUM of the sections ahead.
+pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(900);
+
+static PROCESS_HELD: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+static PROCESS_FREED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// A held in-process lock; released when dropped.
+#[derive(Debug)]
+pub struct ProcessLock {
+    name: String,
+}
+
+/// A named lock between the threads of THIS test process only (no file, no other process involved). Use it for state that lives inside one
+/// process (a `static` of the code under test): a second test binary or a parallel cargo run has its own copy of that state and must not
+/// be made to wait. A test that panics while holding it does not poison it. Waits up to [`PROCESS_TIMEOUT`], then panics naming the holder.
+pub fn process_lock(name: &str) -> ProcessLock {
+    let start = Instant::now();
+    let mut held = PROCESS_HELD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    loop {
+        if !held.iter().any(|(n, _)| n == name) {
+            held.push((name.to_string(), who()));
+            return ProcessLock { name: name.to_string() };
+        }
+        let left = PROCESS_TIMEOUT.saturating_sub(start.elapsed());
+        if left.is_zero() {
+            let by = held.iter().find(|(n, _)| n == name).map(|(_, w)| w.clone()).unwrap_or_default();
+            drop(held);
+            panic!("testkit process lock {name:?} not free after {PROCESS_TIMEOUT:?}; held by: {by}");
+        }
+        held = PROCESS_FREED.wait_timeout(held, left).unwrap_or_else(std::sync::PoisonError::into_inner).0;
+    }
+}
+
+impl Drop for ProcessLock {
+    fn drop(&mut self) {
+        let mut held = PROCESS_HELD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.retain(|(n, _)| *n != self.name);
+        drop(held);
+        PROCESS_FREED.notify_all();
     }
 }
 
@@ -181,5 +240,33 @@ mod tests {
         }
         let _l = lock(names::ENV);
         assert!(std::env::var("IYAKKI_TESTKIT_SELFTEST").is_err());
+    }
+
+    #[test]
+    fn a_process_lock_excludes_other_threads_and_survives_a_panic_while_held() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        let inside = Arc::new(AtomicU32::new(0));
+        let hs: Vec<_> = (0..6)
+            .map(|_| {
+                let inside = inside.clone();
+                std::thread::spawn(move || {
+                    let _g = process_lock("testkit-process-lock-self-test");
+                    assert_eq!(inside.fetch_add(1, Ordering::SeqCst), 0, "two threads inside at once");
+                    std::thread::yield_now();
+                    inside.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+        let r = std::thread::spawn(|| {
+            let _g = process_lock("testkit-process-lock-self-test");
+            panic!("a failing test");
+        })
+        .join();
+        assert!(r.is_err());
+        let _again = process_lock("testkit-process-lock-self-test");
     }
 }

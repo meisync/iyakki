@@ -837,3 +837,59 @@ fn roaming_to_another_network_and_a_resume_from_sleep_build_the_tunnel_again() {
     r.mgr.set_enabled(&id, false, NOW + 1001).unwrap();
     assert!(r.sys.clean());
 }
+
+#[test]
+fn vpn08_name_and_url_rules_put_policy_routing_in_place_for_the_marked_sockets_of_the_core_and_it_goes_with_the_tunnel() {
+    let r = rig("policy-app-sockets");
+    let id = import_full(&r, "Office");
+    // address rules only: no account, no application sockets, so no policy
+    r.mgr.set_settings(&id, Settings::hybrid(FilterSet::parse("198.51.100.0/24").unwrap()), NOW).unwrap();
+    r.mgr.set_enabled(&id, true, NOW).unwrap();
+    assert!(r.sys.st.lock().unwrap().policy.is_none());
+    r.mgr.set_enabled(&id, false, NOW + 1).unwrap();
+    // a URL rule is judged where IYAKKI sees the URL: the sockets of those fetches carry the mark, so the rule and the table are needed
+    r.mgr.set_settings(&id, Settings::hybrid(FilterSet::parse("https://wiki.corp.example/app").unwrap()), NOW + 2).unwrap();
+    r.mgr.set_enabled(&id, true, NOW + 2).unwrap();
+    {
+        let st = r.sys.st.lock().unwrap();
+        let (_, add) = st.policy.clone().expect("the policy is in place for the marked sockets");
+        assert!(add.iter().any(|a| a.contains(&"fwmark".to_string())));
+    }
+    r.mgr.set_enabled(&id, false, NOW + 3).unwrap();
+    assert!(r.sys.st.lock().unwrap().policy.is_none() && r.sys.clean());
+}
+
+#[test]
+fn vpn08_an_openvpn_profile_with_domain_rules_gets_the_forwarder_capture_and_policy_like_wireguard_and_undoes_them() {
+    use crate::vpn_openvpn::fakes::{PUSH, UP};
+    let (r, _l) = ovpn_rig("ovpn-hybrid", &[PUSH, UP]);
+    let id = r.mgr.import("Home", OVPN_TEXT.as_bytes()).unwrap().profile.id;
+    r.mgr.set_settings(&id, Settings::hybrid(FilterSet::parse("*.corp.example.com\n10.8.0.0/24").unwrap()), NOW).unwrap();
+    r.mgr.set_enabled(&id, true, NOW).unwrap();
+    {
+        let s = r.sys.st.lock().unwrap();
+        assert!(s.capture.is_some(), "the machine's DNS goes to the forwarder for the names of the rules");
+        assert!(s.policy.is_some(), "the marked sockets of the core have their rule and table");
+        assert_eq!(s.resolv.as_deref(), Some("nameserver 192.168.1.1\n"), "the system DNS is untouched in HYBRID");
+        assert!(s.routes.contains(&format!("10.8.0.0/24 dev {IFNAME}")), "{:?}", s.routes);
+        assert!(!s.routes.iter().any(|x| x.starts_with("0.0.0.0/1")), "the pushed default route is not taken in HYBRID: {:?}", s.routes);
+    }
+    let st = r.mgr.status(&id);
+    assert!(!st.warnings.iter().any(|w| w.contains("not used for OpenVPN")), "{st:?}");
+    r.mgr.set_enabled(&id, false, NOW + 10).unwrap();
+    assert!(r.sys.st.lock().unwrap().capture.is_none() && r.sys.st.lock().unwrap().policy.is_none());
+    assert!(r.sys.clean(), "{:?}", r.sys.calls());
+}
+
+#[test]
+fn vpn08_an_openvpn_profile_with_domain_rules_fails_closed_when_the_capture_cannot_be_installed() {
+    use crate::vpn_openvpn::fakes::{PUSH, UP};
+    let (r, l) = ovpn_rig("ovpn-hybrid-fc", &[PUSH, UP]);
+    let id = r.mgr.import("Home", OVPN_TEXT.as_bytes()).unwrap().profile.id;
+    r.mgr.set_settings(&id, Settings::hybrid(FilterSet::parse("*.corp.example.com").unwrap()), NOW).unwrap();
+    r.sys.fail("capture install");
+    r.mgr.set_enabled(&id, true, NOW).unwrap();
+    let st = r.mgr.status(&id);
+    assert!(st.error.as_deref().unwrap().contains("capture"), "{st:?}");
+    assert!(*l.stopped.lock().unwrap(), "the program is stopped");
+}

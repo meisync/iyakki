@@ -286,6 +286,26 @@ impl KnownStore {
         KnownStore { path: path.into() }
     }
 
+    /// The adapter the person chose when the computer has two or more, kept beside the saved networks (`wifi-adapter.txt`).
+    pub fn chosen_adapter(&self) -> Option<String> {
+        let t = std::fs::read_to_string(self.path.with_file_name("wifi-adapter.txt")).ok()?;
+        let n = t.lines().next()?.trim();
+        (!n.is_empty() && n.len() <= 15 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))).then(|| n.to_string())
+    }
+
+    /// Remembers the chosen adapter (`None` forgets it).
+    pub fn set_chosen_adapter(&self, name: Option<&str>) -> Result<(), String> {
+        let f = self.path.with_file_name("wifi-adapter.txt");
+        match name {
+            Some(n) => std::fs::write(&f, format!("{n}\n")).map_err(|e| e.to_string()),
+            None => match std::fs::remove_file(&f) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.to_string()),
+            },
+        }
+    }
+
     pub fn list(&self) -> Vec<Known> {
         std::fs::read_to_string(&self.path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
     }
@@ -683,4 +703,9 @@ BSS aa:bb:cc:00:00:08(on wlan0)
         assert!(log.contains("udhcpc -b -R -i wlan0 -p") && !log.contains(" -x") && !log.contains(" -F") && !log.contains(" -H"), "{log}");
         let _ = std::fs::remove_dir_all(&d);
     }
+}
+
+/// The adapter to use among those that can join networks: the remembered choice while it is still there, else the first.
+pub fn pick_adapter(all: &[String], chosen: Option<String>) -> Option<String> {
+    chosen.filter(|c| all.contains(c)).or_else(|| all.first().cloned())
 }

@@ -4,17 +4,28 @@
 //! `usercustomize`, `*.data/scripts`), run the self-test, and only then put the folder in place. No pip, no setup.py, no hook runs.
 //!
 //! FAILS CLOSED: with the shipped table (addresses and hashes not filled in, see `iyakki_shared::datasci`) [`install`] returns the plain
-//! sentence before the first byte is fetched. The self-test needs the Linux sandbox's runner; the real one is not wired yet (`no_runner`),
-//! so even a filled table cannot mark the item installed by accident.
+//! sentence before the first byte is fetched. The self-test runs in the Linux sandbox with no network (`datasci_run`); a machine with no
+//! runner (`no_runner`) cannot mark the item installed by accident.
 
 use iyakki_shared::datasci::{self, Kind, Pin};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-/// The self-test of the real machine: not wired to the sandbox runner yet, so it says so and the install stops before it is marked.
+/// The install's self-test runs in the person's Linux apps sandbox with no network (`datasci_run`). The pins are filled, so without this check a
+/// missing sandbox would only show after about 190 MB were downloaded: the install refuses here, before the first byte is fetched.
+pub fn runner_ready(sandbox_root: &Path) -> Result<(), String> {
+    if sandbox_root.is_dir() {
+        Ok(())
+    } else {
+        Err("The data science toolkit cannot be installed yet: its self-test runs in the Linux apps sandbox with no network, and that is not installed. Install Linux apps first. Nothing was downloaded.".into())
+    }
+}
+
+/// A self-test for a machine with no sandbox runner (tests, non-Linux builds): it says so and the install stops before it is marked.
+/// The real one is `datasci_run::selftest`, which `quickinstall` passes.
 pub fn no_runner(_data: &Path) -> Result<String, String> {
-    Err("the toolkit self-test needs the Linux sandbox runner with no network, which is not wired to this install yet; the folder was not put in place".into())
+    Err("the toolkit self-test needs the Linux sandbox runner with no network, which is not available here; the folder was not put in place".into())
 }
 
 fn file_name_of(url: &str) -> String {

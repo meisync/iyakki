@@ -1,6 +1,6 @@
 
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeyInfo {
     pub label: String,
     pub public: String,

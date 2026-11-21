@@ -1,0 +1,10 @@
+# autotest pilot, batch A (2026-11-21). Written against the Feature text with sha 904ec6785fe7dfc5; honest subset only: everything not checked is under not-covered.
+row: F-SDK-214
+targets: qemu
+profile: ram
+feature-sha: 904ec6785fe7dfc5
+doc: the SAMPLE pane shows the last permission change after Settings took a permission away
+clause: 1 the SAMPLE pane shows the last permission change after Settings took a permission away
+not-covered: EventRouter::on_permissions, PermissionChange, AppEvent::permissions(), EventsPort::capabilities()
+not-covered: the recipe, the guide section and the app-check rule events-permissions
+session-check: app_events_permissions

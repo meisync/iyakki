@@ -132,6 +132,7 @@ impl sdk::CameraPort for CoreCameraPort {
         let id = self.id()?.to_string();
         let c = match cmd {
             sdk::Ptz::Move { pan, tilt, zoom } => api::PtzCommand::Move { pan, tilt, zoom },
+            sdk::Ptz::Absolute { pan, tilt, zoom } => api::PtzCommand::Absolute { pan, tilt, zoom },
             sdk::Ptz::Stop => api::PtzCommand::Stop,
         };
         self.core.cameras().ptz(&self.user, &id, camera, c).map_err(refused)

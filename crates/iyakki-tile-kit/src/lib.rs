@@ -119,13 +119,17 @@ pub mod guest {
         fn host_call(dom_p: i32, dom_l: i32, meth_p: i32, meth_l: i32, json_p: i32, json_l: i32, out_p: i32, out_cap: i32) -> i32;
     }
 
-    /// The host's `call` as a [`Source`] (answers up to 24 KiB, 384 KiB for `cameras`).
+    /// The host's `call` as a [`Source`] (answers up to 24 KiB, 384 KiB for `cameras`, 128 KiB for `terminal`: a whole session's screen).
     pub struct HostSource;
 
     impl Source for HostSource {
         fn call(&mut self, domain: &str, method: &str, json: &str) -> Result<String, String> {
             // a picture of a camera view comes as base64 text, which does not fit the usual 24 KiB (the host refuses what would not fit this)
-            let mut out = vec![0u8; if domain == "cameras" { 384 * 1024 } else { 24 * 1024 }];
+            let mut out = vec![0u8; match domain {
+                "cameras" => 384 * 1024,
+                "terminal" => 128 * 1024,
+                _ => 24 * 1024,
+            }];
             let n = unsafe { host_call(domain.as_ptr() as i32, domain.len() as i32, method.as_ptr() as i32, method.len() as i32, json.as_ptr() as i32, json.len() as i32, out.as_mut_ptr() as i32, out.len() as i32) };
             if n < 0 {
                 return Err(match n {

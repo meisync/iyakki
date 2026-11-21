@@ -151,6 +151,19 @@ impl Gate for NoApiGate {
     }
 }
 
+/// A gate with the Web Push pages of one folder (the shell's gate gives the tenant's own).
+struct PushGate {
+    pages: Arc<iyakki_agent::webpush_page::PushPages>,
+}
+impl Gate for PushGate {
+    fn login(&self, _: &str, _: &str) -> Result<Box<dyn Screen>, LoginError> {
+        Err(LoginError::Invalid)
+    }
+    fn push_pages(&self) -> Option<Arc<iyakki_agent::webpush_page::PushPages>> {
+        Some(self.pages.clone())
+    }
+}
+
 struct Reply {
     status: u16,
     head: String,
@@ -291,4 +304,67 @@ fn the_page_can_also_sign_in_with_the_api_login_and_use_its_bearer_token() {
     assert_eq!(r.req("GET", "/api/v1/admin/status", &[("Authorization", &bearer)], "").status, 200);
     // this path made no desktop session: no cookie was set
     assert!(ok.header("Set-Cookie").is_none());
+}
+
+fn push_rig(tag: &str, tls: bool) -> (Rig, std::path::PathBuf) {
+    let mut r = rig(tag, false);
+    let dir = std::env::temp_dir().join(format!("iyakki-webpush-route-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let pages = iyakki_agent::webpush_page::PushPages::shared(&dir);
+    let id = iyakki_remote::tls::identity(&r.dir, &["localhost".into()]).expect("a certificate");
+    let gate: Arc<dyn Gate> = Arc::new(PushGate { pages });
+    r.server = Server::start(Config { addr: "127.0.0.1:0".into(), tls: tls.then_some(id.config) }, gate).unwrap();
+    (r, dir)
+}
+
+#[test]
+fn the_web_push_pages_are_a_real_https_route_dark_until_the_administrator_sets_a_public_name() {
+    let (r, dir) = push_rig("route", true);
+    // no name set: the route answers, in words, and serves nothing
+    let a = r.req("GET", "/push/sw.js", &[], "");
+    assert_eq!(a.status, 503, "{}", a.body);
+    assert!(a.body.contains("public HTTPS name") && !a.body.contains("showNotification"));
+    assert_eq!(r.req("POST", "/push/subscribe", &[("Origin", "https://localhost")], "{}").status, 503);
+    // the administrator's name (the settings tool writes this file) lights it up: the worker, with its strict headers
+    iyakki_agent::webpush_page::set_public_name(&dir, "notify.example.org").unwrap();
+    let sw = r.req("GET", "/push/sw.js", &[], "");
+    assert_eq!(sw.status, 200);
+    assert!(sw.body.contains("showNotification"));
+    assert_eq!(sw.header("Content-Type").as_deref(), Some("text/javascript; charset=utf-8"));
+    assert_eq!(sw.header("Service-Worker-Allowed").as_deref(), Some("/push/"));
+    assert_eq!(sw.header("Cache-Control").as_deref(), Some("no-store"));
+    assert_eq!(sw.header("Referrer-Policy").as_deref(), Some("no-referrer"));
+    assert!(sw.header("Strict-Transport-Security").is_some());
+    // a link nobody made is gone; a hostile one never reaches the page; nothing else under /push is answered
+    assert_eq!(r.req("GET", "/push/subscribe?t=nope", &[], "").status, 410);
+    assert_eq!(r.req("GET", "/push/subscribe", &[], "").status, 410);
+    assert_eq!(r.req("GET", "/push/other", &[], "").status, 404);
+    assert_eq!(r.req("GET", "/push/", &[], "").status, 404);
+    // an answer must come from the page's own origin
+    let body = r#"{"token":"nope","label":"phone","endpoint":"https://p.example/x","p256dh":"x","auth":"y"}"#;
+    assert_eq!(r.req("POST", "/push/subscribe", &[], body).status, 403, "no Origin header");
+    assert_eq!(r.req("POST", "/push/subscribe", &[("Origin", "https://evil.example")], body).status, 403);
+    assert_eq!(r.req("POST", "/push/subscribe", &[("Origin", "https://localhost")], body).status, 410);
+    assert_eq!(r.req("DELETE", "/push/subscribe", &[], "").status, 405);
+    // taking the name away darkens it again
+    iyakki_agent::webpush_page::set_public_name(&dir, "").unwrap();
+    assert_eq!(r.req("GET", "/push/sw.js", &[], "").status, 503);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_web_push_pages_are_not_on_a_plain_http_server_nor_on_a_gate_without_them() {
+    let (r, dir) = push_rig("plain", false);
+    iyakki_agent::webpush_page::set_public_name(&dir, "notify.example.org").unwrap();
+    let a: SocketAddr = r.server.local_addr();
+    let mut tcp = TcpStream::connect(a).unwrap();
+    tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    tcp.write_all(b"GET /push/sw.js HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+    let mut out = Vec::new();
+    let _ = tcp.read_to_end(&mut out);
+    assert!(String::from_utf8_lossy(&out).starts_with("HTTP/1.1 404"), "a service worker needs a secure origin: {}", String::from_utf8_lossy(&out));
+    let n = rig("push-nogate", false);
+    assert_eq!(n.req("GET", "/push/sw.js", &[], "").status, 404);
+    let _ = std::fs::remove_dir_all(&dir);
 }

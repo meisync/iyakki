@@ -32,7 +32,7 @@ impl Shell {
         let raw = Raw {
             app,
             page,
-            size: (g.pm.width(), g.pm.height()),
+            size: (g.pm_mut().width(), g.pm_mut().height()),
             texts,
             hits: self.hits.iter().map(|h| (h.label.clone(), r(&h.rect))).collect(),
             fields: self.fields.iter().map(|f| RawField { rect: r(&f.rect), focused: f.focused, secret: f.secret }).collect(),
@@ -59,12 +59,12 @@ impl Shell {
     pub(super) fn dev_locked_answer(&mut self, g: &mut Gfx, want: bool) {
         if want {
             let texts = g.text_cap.take().unwrap_or_default();
-            let raw = Raw { app: "Locked screen".to_string(), page: String::new(), size: (g.pm.width(), g.pm.height()), texts, hits: Vec::new(), fields: Vec::new() };
+            let raw = Raw { app: "Locked screen".to_string(), page: String::new(), size: (g.pm_mut().width(), g.pm_mut().height()), texts, hits: Vec::new(), fields: Vec::new() };
             state::publish(self.env.data_dir(), &raw);
         }
         let svc = &self.env.services;
         if svc.screen().wanted(iyakki_shared::devmode::SCREEN_ANY) {
-            svc.screen().serve(iyakki_shared::devmode::SCREEN_ANY, || Some(iyakki_shared::screencap::Frame { w: g.pm.width(), h: g.pm.height(), rgba: g.pm.data().to_vec() }));
+            svc.screen().serve_frame(iyakki_shared::devmode::SCREEN_ANY, Some(iyakki_shared::screencap::Frame { w: g.pm_mut().width(), h: g.pm_mut().height(), rgba: g.pm_mut().data().to_vec() }));
         }
     }
 

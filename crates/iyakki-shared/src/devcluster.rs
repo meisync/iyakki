@@ -239,7 +239,7 @@ impl Source {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClusterProfile {
     /// What the chip shows first: `k3s`, or the cluster's own name.
     pub name: String,

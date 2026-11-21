@@ -426,6 +426,9 @@ pub struct BrowserApp {
     site_list: Vec<(String, String)>,
     /// What the page said about itself (manifest address and text, icon address), for the next install of the page as a site app.
     site_meta: Option<(String, String, String)>,
+    /// What the engine's page lists for the screen reader (`browser_full_access.rs`) and where each was drawn last frame.
+    full_access: Vec<full_access::FullNode>,
+    full_access_rects: Vec<(usize, R)>,
     /// The window size the page in view differs from, and since when (the page is built again once it has stayed that way a moment).
     reflow_due: Option<std::time::Instant>,
     /// Where the loader that is running now leaves the session it made.
@@ -437,6 +440,9 @@ pub struct BrowserApp {
     view_h: f32,
     status: Option<(String, bool)>,
     hovered_link: Option<usize>,
+    /// The page element (node) under the pointer in the frame drawn last, and the one the page's scripts were last told the pointer is over.
+    hover_node: Option<usize>,
+    live_hover: Option<(u64, usize)>,
     /// The user's choices (scripts, pictures, style sheets, cookies); read again before every page.
     cfg: BrowserConfig,
     /// Storage and cookies of the sites visited in this session.
@@ -514,6 +520,8 @@ pub struct BrowserApp {
     pending_scroll: Option<f32>,
     /// The address whose `#fragment` was already scrolled to (a new load clears it; relayouts do not jump again).
     frag_done: Option<String>,
+    /// The last address a licence was taken from (F-APPSTORE-13), so one page is handed over once.
+    licence_seen: Option<String>,
     /// Find in page, when the bar is open.
     find: Option<Find>,
     /// Accessibility of the page: browse mode, the cursor, lists, reading aloud, forced colours (`browser_a11y.rs`).
@@ -524,6 +532,8 @@ pub struct BrowserApp {
     show_net: bool,
     /// The list of requests the filter lists blocked on this page (B opens it).
     show_blocked: bool,
+    /// The certificate panel the lock in the address bar (or K) opens: `browser_certview.rs`.
+    cert: Option<super::browser_certview::CertPanel>,
     net_log: browser_devtools::Log,
     /// The Developer tools panel (F12, Ctrl+Shift+I): `browser_devpanel.rs`.
     dev: browser_devpanel::Panel,
@@ -651,6 +661,8 @@ impl BrowserApp {
             site: None,
             site_list: super::site_apps::load(cx).apps.iter().map(|a| (a.id.clone(), a.name.clone())).collect(),
             site_meta: None,
+            full_access: Vec::new(),
+            full_access_rects: Vec::new(),
             reflow_due: None,
             loading_live: browser_live::new_slot(),
             preload: None,
@@ -658,8 +670,10 @@ impl BrowserApp {
             view_h: 400.0,
             status: None,
             hovered_link: None,
+            hover_node: None,
+            live_hover: None,
             cfg: browser_config::load(cx),
-            sites: iyakki_js::Sites::default(),
+            sites: super::browser_passkeys::sites_for(cx),
             css_win: (0.0, 0.0),
             dppx: 1.0,
             show_notes: false,
@@ -699,11 +713,13 @@ impl BrowserApp {
             closed: Vec::new(),
             pending_scroll: None,
             frag_done: None,
+            licence_seen: None,
             find: None,
             a11y: a11y::A11y::new(),
             assist: None,
             show_net: false,
             show_blocked: false,
+            cert: None,
             net_log: Default::default(),
             dev: Default::default(),
             dev_dirty: false,
@@ -1062,6 +1078,23 @@ impl BrowserApp {
         self.status.as_ref().map(|s| s.0.as_str())
     }
 
+    /// Ctrl+U or a click on the lock: show the certificate the open page's site presents, or close the panel.
+    fn toggle_cert(&mut self, cx: &AppCx) {
+        use super::browser_certview::CertPanel;
+        if self.cert.take().is_some() {
+            return;
+        }
+        let Some(u) = self.page().map(|p| p.url.clone()).filter(|u| !u.host.is_empty()) else { return };
+        self.cert = Some(if !u.https {
+            CertPanel::said(&u.host, "This page is not secure: it came over a plain connection, so there is no certificate to look at.")
+        } else if !cx.session.policy.allows_host(&u.host) {
+            CertPanel::said(&u.host, &format!("Your account may not open pages from {}.", u.host))
+        } else {
+            cx.audit.record(&cx.session.user, "browser.certificate_view", &u.host);
+            CertPanel::ask(&u.host, u.port.unwrap_or(443))
+        });
+    }
+
     fn page(&self) -> Option<&Arc<Page>> {
         self.history.get(self.pos).and_then(|e| e.page.as_ref())
     }
@@ -1106,7 +1139,31 @@ impl BrowserApp {
         self.go_request(req, how, cx);
     }
 
+    /// The navigation hook of the store's payments (F-APPSTORE-13): an address the tile reaches that carries a licence from the seller's
+    /// return page leaves the token for the STORE tile (the person's own app data) and says so. Nothing is added here: the STORE tile
+    /// checks the token offline and the person presses the key.
+    fn watch_licence(&mut self, url: &str, cx: &AppCx) {
+        if !(url.starts_with("https://") || url.starts_with("iyakki-licence:")) || self.licence_seen.as_deref() == Some(url) {
+            return;
+        }
+        let Some(token) = iyakki_shared::store_licencelink::token_in_address(url) else { return };
+        self.licence_seen = Some(url.to_string());
+        let user = cx.session.user.clone();
+        if user.is_empty() {
+            return;
+        }
+        let host = url.split("://").nth(1).unwrap_or("").split(['/', '?', '#']).next().unwrap_or("").to_string();
+        match cx.core.app_data().set(&user, iyakki_shared::store_licencelink::PENDING_APP, iyakki_shared::store_licencelink::PENDING_KEY, &token) {
+            Ok(()) => {
+                cx.audit.record(&user, "store.licence.arrived", &host);
+                self.status = Some(("The seller's page handed over a licence. Open the STORE and press L to add it (it is checked first).".into(), true));
+            }
+            Err(e) => self.status = Some((format!("A licence arrived but could not be kept: {e}"), false)),
+        }
+    }
+
     fn go_request(&mut self, req: Request, how: How, cx: &AppCx) {
+        self.watch_licence(&req.url.to_string(), cx);
         let req = Request { priority: iyakki_web::net::DOCUMENT, ..req };
         self.frag_done = None;
         self.pdf_offer = None;
@@ -1234,7 +1291,9 @@ impl BrowserApp {
                     if let Some(live) = live.filter(|_| scripted) {
                         let (b, u2) = (built.clone(), u.clone());
                         let rebuild: browser_live::Rebuild = Box::new(move |t, v| (*b)(&u2, t, v));
-                        session = browser_live::LiveSession::start(live, rebuild, vp);
+                        let (s, note) = browser_live::LiveSession::start_with_note(live, rebuild, vp);
+                        session = s;
+                        notes.extend(note);
                     }
                     leave_kit(scripted, session);
                     if doc.blocks.is_empty() {
@@ -1281,7 +1340,8 @@ impl BrowserApp {
         if self.embedded {
             return;
         }
-        let (dt, user) = (&cx.devtools(), cx.session.user.as_str());
+        let dt_arc = cx.devtools();
+        let (dt, user) = (&*dt_arc, cx.session.user.as_str());
         if self.dev.open {
             self.dev.close(dt, user);
             self.inspect = Default::default();
@@ -1305,7 +1365,8 @@ impl BrowserApp {
     /// New lines or counts since the last heartbeat: draw again. Cheap: one counter is compared, the buffers are copied only
     /// when it moved.
     fn dev_tick(&mut self, cx: &AppCx) {
-        let (dt, user) = (&cx.devtools(), cx.session.user.as_str());
+        let dt_arc = cx.devtools();
+        let (dt, user) = (&*dt_arc, cx.session.user.as_str());
         let reader_len = self.net_log.lock().map_or(0, |l| l.len());
         let mut dirty = self.dev.refresh(dt, user, reader_len);
         let sum = if dt.collecting(user) { dt.summary(user) } else { Default::default() };
@@ -1354,6 +1415,7 @@ impl BrowserApp {
         self.poll_download(cx);
         self.poll_live(cx);
         self.live_tick();
+        self.live_hover_sync();
         self.poll_reflow(cx);
         let Nav::Loading { rx, how, .. } = &self.nav else { return };
         let how = *how;
@@ -1966,7 +2028,7 @@ impl BrowserApp {
         if !browser_thumbs::eligible(page.url.https, visits, sensitive, !self.data.thumbs_off) {
             return;
         }
-        if let Some(pm) = browser_thumbs::capture(&g.pm, (view.x, view.y, view.w, view.h)) {
+        if let Some(pm) = browser_thumbs::capture(&g.pm_ref(), (view.x, view.y, view.w, view.h)) {
             if self.thumbs.save(&host, &pm).is_ok() {
                 cx.audit.record(&cx.session.user, "browser.thumbnail", &host);
             }
@@ -2684,6 +2746,7 @@ impl BrowserApp {
         let node = match &what {
             Interaction::Click(n) | Interaction::Input(n, _) | Interaction::Check(n, _) => *n,
             Interaction::Submit { form, .. } => *form,
+            Interaction::Pointer { node, .. } => *node,
             Interaction::Key { .. } | Interaction::Tick(_) => 0,
         };
         if node == usize::MAX {
@@ -2837,6 +2900,35 @@ impl BrowserApp {
                 sess.send(Interaction::Key { node: None, key, code, mods, up: true });
             }
         }
+    }
+
+    /// The pointer moved from one element of the drawn page to another (or off all of them): the page's scripts hear `pointerout` and
+    /// `mouseout` on the one left, then `pointerover` and `mouseover` on the new one (what drives hover menus and tooltips). Nothing is
+    /// sent while the page is still busy (it is tried again on the next tick, so a fast pointer does not pile work up), and a page without
+    /// a live engine is told nothing.
+    fn live_hover_sync(&mut self) {
+        let now = self.hover_node;
+        let (x, y) = ((self.mouse.0 as f32 - self.col_off) as i32, (self.mouse.1 as f32 + self.scroll) as i32);
+        if self.live_submit.is_some() || self.full.is_some() {
+            return;
+        }
+        let Some(serial) = self.history.get(self.pos).map(|e| e.serial) else { return };
+        // what was last announced belongs to the visit it was announced for; a new visit has a new tree
+        let old = self.live_hover.filter(|(s, _)| *s == serial).map(|(_, n)| n);
+        let Some(sess) = self.live_active() else {
+            self.live_hover = None;
+            return;
+        };
+        if now == old || sess.pending() > 0 {
+            return;
+        }
+        if let Some(o) = old {
+            sess.send(Interaction::Pointer { node: o, kind: iyakki_js::PointerKind::Out, x, y });
+        }
+        if let Some(n) = now {
+            sess.send(Interaction::Pointer { node: n, kind: iyakki_js::PointerKind::Over, x, y });
+        }
+        self.live_hover = now.map(|n| (serial, n));
     }
 
     /// Time passes for the page that is looked at: its timers run.
@@ -3459,6 +3551,7 @@ impl BrowserApp {
             Key::Char('j') => self.toggle_js(cx),
             Key::Char('a') => self.toggle_block_allow(cx),
             Key::Char('B') => self.show_blocked = !self.show_blocked,
+            Key::Ctrl('u') => self.toggle_cert(cx),
             Key::Char('p') if self.page().is_some_and(|p| p.media) => self.play_media(cx),
             Key::Char('c') => {
                 // closed → notes → network → closed
@@ -3575,7 +3668,7 @@ impl BrowserApp {
     }
 
     /// What the engine is started with: the person's profile folder, the engine's environment, the page area's size and the account's hosts.
-    fn embedded_start(&self, helper: std::path::PathBuf, cx: &AppCx) -> Result<Start, String> {
+    fn embedded_start(&self, helper: std::path::PathBuf, host: &str, cx: &AppCx) -> Result<Start, String> {
         // a site app has a profile of its own (cookies and storage never shared with the Browser tile's)
         let who = match &self.site {
             Some(a) => super::site_apps::profile_user(&cx.session.user, &a.id),
@@ -3585,6 +3678,10 @@ impl BrowserApp {
         Ok(Start {
             env: cx.agent.webengine_helper_env(&profile).map(|mut e| {
                 e.extend(browser_block::prepare_full_engine(cx, &profile));
+                // the person's per-site switch for graphics acceleration (iyakki_shared::webaccel): a site she turned off draws on the processor
+                let (pol, _) = iyakki_shared::webaccel::load(&cx.data_dir().join("web-profile"));
+                let verdict = pol.verdict(&iyakki_shared::webengine::safe_name(&who), host);
+                iyakki_shared::webaccel::apply_site_off(&mut e, &verdict);
                 // the engine's share of memory and its cache model: the person's Speed and memory choice on this machine
                 e.extend(browser_speed::engine_env(browser_config::load(cx).cache, &browser_speed::machine_os(&*cx.os, cx.data_dir())));
                 e
@@ -3601,7 +3698,7 @@ impl BrowserApp {
     }
 
     fn start_embedded(&mut self, helper: std::path::PathBuf, url: String, host: String, cx: &AppCx) {
-        let start = match self.embedded_start(helper, cx) {
+        let start = match self.embedded_start(helper, &host, cx) {
             Ok(s) => s,
             Err(e) => {
                 self.status = Some((format!("The full web engine's profile folder could not be made: {e}"), false));
@@ -3789,12 +3886,15 @@ impl BrowserApp {
         let Some(f) = self.full.as_mut() else { return };
         f.set_smooth(browser_config::smooth_now());
         f.pump(&allow);
+        let here = f.url.clone();
         for n in f.take_notes() {
             self.apply_full_note(n, cx);
             if self.full.is_none() {
                 break;
             }
         }
+        let now_url = self.full.as_ref().map(|f| f.url.clone()).unwrap_or(here);
+        self.watch_licence(&now_url, cx);
         self.av_poll(cx);
         self.sound_ask_poll(cx);
     }
@@ -3936,7 +4036,8 @@ impl BrowserApp {
     fn restart_full_on(&mut self, url: &str, cx: &AppCx) {
         let Some(helper) = cx.agent.webengine_embedded_helper() else { return };
         self.share_devices("", 0, cx);
-        match self.embedded_start(helper, cx).map(Full::start) {
+        let host = browser_data::host_of(url).to_string();
+        match self.embedded_start(helper, &host, cx).map(Full::start) {
             Ok(Ok(mut f)) => {
                 browser_headers::sync_full(cx, &mut f);
                 f.navigate(url);
@@ -3957,7 +4058,8 @@ impl BrowserApp {
         drop(f);
         let Some(helper) = cx.agent.webengine_embedded_helper() else { return };
         self.share_devices("", 0, cx);
-        match self.embedded_start(helper, cx).map(Full::start) {
+        let host = browser_data::host_of(&url).to_string();
+        match self.embedded_start(helper, &host, cx).map(Full::start) {
             Ok(Ok(mut f)) => {
                 browser_headers::sync_full(cx, &mut f);
                 f.navigate(&url);
@@ -4035,6 +4137,7 @@ impl BrowserApp {
                     self.open_url(&u, cx);
                 }
             }
+            Note::PageAccess(json) => self.full_access = full_access::parse(&json),
             Note::PageMeta { manifest_url, manifest, icon } => {
                 self.site_meta = Some((manifest_url.chars().take(2000).collect(), manifest.chars().take(100_000).collect(), icon.chars().take(2000).collect()));
             }
@@ -4454,6 +4557,8 @@ impl BrowserApp {
         let keys_ok = self.full_has_keys();
         let Some(f) = self.full.as_mut() else { return };
         f.draw(g, view, s);
+        self.full_access_register(g, view);
+        let Some(f) = self.full.as_mut() else { return };
         // a text box in the page has the focus: tell the shell the way a text field does, so the on-screen keyboard opens for a
         // finger (a password box too; it is a secret field for the developer state). A zero-size rect: a right click on the page
         // stays the page's, and the keyboard does not need a place (a low box was scrolled up by the probe).
@@ -4792,7 +4897,7 @@ fn draw_image(g: &mut Gfx, alt: &str, st: Option<&ImgState>, r: R, s: f32, tick:
             let (sx, sy) = (r.w / pm.width() as f32, r.h / pm.height() as f32);
             let paint = PixmapPaint { opacity: 1.0, quality: if sx < 0.6 { FilterQuality::Bicubic } else { FilterQuality::Bilinear }, ..PixmapPaint::default() };
             let pixmap: &tiny_skia::Pixmap = pm;
-            g.pm.draw_pixmap(0, 0, pixmap.as_ref(), &paint, Transform::from_translate(r.x, r.y).pre_scale(sx, sy), None);
+            g.pm_mut().draw_pixmap(0, 0, pixmap.as_ref(), &paint, Transform::from_translate(r.x, r.y).pre_scale(sx, sy), None);
         }
         Some(ImgState::Failed(why)) => {
             // neutral greys that read on a dark page and on a light one
@@ -4821,7 +4926,7 @@ fn draw_fitted(g: &mut Gfx, pm: &tiny_skia::Pixmap, r: R, fit: iyakki_web::style
     let mut paint = tiny_skia::Paint::default();
     paint.shader = pattern;
     if let Some(rect) = tiny_skia::Rect::from_xywh(clip.x, clip.y, clip.w.max(0.5), clip.h.max(0.5)) {
-        g.pm.fill_rect(rect, &paint, Transform::identity(), None);
+        g.pm_mut().fill_rect(rect, &paint, Transform::identity(), None);
     }
 }
 
@@ -5067,6 +5172,7 @@ impl BrowserApp {
         }
         let top = view.y + 12.0 * s;
         self.hovered_link = None;
+        self.hover_node = None;
         let (ring_color, ring_factor) = self.a11y_ring();
         let anim_tick = if self.a11y.eff.freeze_animation { 0 } else { tick };
         // the page's own background fills the whole view
@@ -5121,6 +5227,7 @@ impl BrowserApp {
                             let r = R::new(dx, dy, p.w, p.h);
                             if g.hovered(r) {
                                 self.hovered_link = Some(*li);
+                                self.hover_node = doc.link_nodes.get(*li).copied().filter(|n| *n != usize::MAX);
                             }
                             g.hit(r, Event::Row(*li), "link");
                         }
@@ -5131,12 +5238,16 @@ impl BrowserApp {
                         if let Some(li) = link {
                             if g.hovered(r) {
                                 self.hovered_link = Some(*li);
+                                self.hover_node = doc.link_nodes.get(*li).copied().filter(|n| *n != usize::MAX);
                             }
                             g.hit(r, Event::Row(*li), "link");
                         }
                     }
                     Kind::Control { idx } => {
                         if let (Some(c), Some(st)) = (doc.controls.get(*idx), ctl.get(*idx)) {
+                            if g.hovered(R::new(dx, dy, p.w, p.h)) && c.node != usize::MAX {
+                                self.hover_node = Some(c.node);
+                            }
                             draw_control(g, c, st, R::new(dx, dy, p.w, p.h), ps, self.focus_ctl == Some(*idx), &self.edit, tick, *idx, self.layout.as_ref().and_then(|l| l.canvas).is_some_and(|c| browser_dark::is_light_color(c)));
                         }
                     }
@@ -5201,6 +5312,24 @@ impl BrowserApp {
                 g.text(px + 12.0 * s, py + 10.0 * s + (i + 1) as f32 * lh, size, MUTED, &l, Face::Mono);
             }
         }
+        // the certificate of this site (the lock, or K)
+        if let Some(c) = self.cert.as_ref().filter(|c| self.page().is_some_and(|p| p.url.host == c.host)) {
+            let lines = c.lines();
+            let ph = (view.h * 0.5).min(300.0 * s);
+            let (px, py) = (view.x + 20.0 * s, view.y + view.h - ph - 8.0 * s);
+            g.rrect(px, py, view.w - 40.0 * s, ph, 10.0 * s, crate::fx::panel_alpha(238));
+            g.rrect_outline(px, py, view.w - 40.0 * s, ph, 10.0 * s, 1.5 * s, [ACCENT[0], ACCENT[1], ACCENT[2], 110]);
+            let size = 13.0 * s;
+            let lh = g.line_height(size, Face::Mono) + 3.0 * s;
+            let rows = (((ph - 20.0 * s) / lh) as usize).max(1);
+            let head = g.fit(size, "Certificate of this site (Ctrl+U closes)", Face::Bold, view.w - 70.0 * s);
+            g.text(px + 12.0 * s, py + 6.0 * s, size, ACCENT, &head, Face::Bold);
+            for (i, l) in lines.iter().take(rows.saturating_sub(1)).enumerate() {
+                let l = g.fit(size, l, Face::Mono, view.w - 70.0 * s);
+                let col = if l.contains(": NO") || l.starts_with("Warning") { ERR } else { MUTED };
+                g.text(px + 12.0 * s, py + 10.0 * s + (i + 1) as f32 * lh, size, col, &l, Face::Mono);
+            }
+        }
         // the developer panel: script errors and what was skipped
         if self.show_net {
             let lines: Vec<String> = self.net_log.lock().map(|l| l.iter().map(|n| n.text()).collect()).unwrap_or_default();
@@ -5248,6 +5377,8 @@ mod inspecthost;
 
 #[path = "browser_a11y.rs"]
 mod a11y;
+#[path = "browser_full_access.rs"]
+mod full_access;
 
 impl App for BrowserApp {
     fn on_lock(&mut self, cx: &AppCx) {
@@ -5353,7 +5484,7 @@ impl App for BrowserApp {
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
         if matches!(ev, Event::Tick) {
-            super::web_agent::tick(cx.browser(), cx.data_dir(), &cx.audit, &cx.session);
+            super::web_agent::tick(&*cx.browser(), &*cx.browser_jobs(), cx.data_dir(), &cx.audit, &cx.session);
             self.data_check += 1;
             if self.data_check >= 60 {
                 self.data_check = 0;
@@ -5377,7 +5508,7 @@ impl App for BrowserApp {
                 self.agent_view = false;
                 return Flow::Stay;
             }
-            if super::web_agent::handle(ev, cx.browser(), &cx.session.user) {
+            if super::web_agent::handle(ev, &*cx.browser(), &cx.session.user) {
                 return Flow::Stay;
             }
         }
@@ -5554,6 +5685,7 @@ impl App for BrowserApp {
                     8 => self.toggle_bookmark(cx),
                     9 => self.open_full_browser(cx),
                     10 => self.show_engine_help(),
+                    &super::browser_certview::TAB_CERT => self.toggle_cert(cx),
                     n @ (browser_av::TAB_INSTALL..=browser_av::TAB_NEVER) => self.av_choice(*n, cx),
                     &browser_media::TAB_MIC if self.media_ask.is_some() => self.open_mic_pick(),
                     &browser_media::TAB_CAM if self.media_ask.is_some() => self.open_cam_pick(),
@@ -5617,6 +5749,7 @@ impl App for BrowserApp {
                         }
                     }
                     999 => self.popup = None,
+                    n if self.full_access_press(*n) => {}
                     n if self.a11y_event(*n) => {
                         let _ = n;
                     }
@@ -5809,7 +5942,7 @@ impl App for BrowserApp {
 
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
         if self.agent_view {
-            super::web_agent::render(g, area, s, cx.browser(), &cx.session.user);
+            super::web_agent::render(g, area, s, &*cx.browser(), &cx.session.user);
             return;
         }
         self.a11y_refresh(cx);
@@ -5925,6 +6058,7 @@ impl App for BrowserApp {
         self.field.render_inset(g, geo.field, self.addr_focus, s, blink(tick), Face::Sans, 0, geo.inset);
         if let (Some(r), Some((t, c))) = (geo.lock, badge) {
             chrome::draw_lock(g, r, t, c, s);
+            g.hit(r, Event::Tab(super::browser_certview::TAB_CERT), "Certificate of this site");
         }
         if let (Some(r), Some(p)) = (geo.star, self.page()) {
             let starred = self.data.is_bookmarked(&p.url.to_string());
@@ -7086,7 +7220,7 @@ mod tests {
         // a script that points at the page itself (only another fragment) or at something that is not a web address stays put
         a.open_url("a.org/self", &cx);
         settle(&mut a, &cx);
-        assert_eq!(a.current_url().unwrap().to_string(), "https://a.org/self");
+        assert_eq!(a.current_url().unwrap().to_string(), "https://a.org/self", "hops {} notes {:?}", a.script_hops, a.page().map(|p| p.notes.clone()));
         assert_eq!(first_text(&a), "sent on");
         a.open_url("a.org/text", &cx);
         settle(&mut a, &cx);
@@ -7379,7 +7513,7 @@ mod tests {
         }
         assert_eq!(std::fs::read_to_string(&record).unwrap().trim(), "--fullscreen https://v.org/clip.mp4");
         assert!(a.status_text().unwrap().contains("Opened"));
-        assert!(std::fs::read_to_string(cx.audit.path()).unwrap().contains("browser.play"));
+        assert!(std::fs::read_to_string(cx.audit.path_buf()).unwrap().contains("browser.play"));
         // an account that may not reach the host cannot start it
         std::fs::remove_file(&record).unwrap();
         cx.session.role = Role::User;
@@ -8260,7 +8394,7 @@ mod tests {
     }
 
     fn count_colour(g: &Gfx, rgb: [u8; 3]) -> usize {
-        g.pm.data().chunks_exact(4).filter(|p| p[0] == rgb[0] && p[1] == rgb[1] && p[2] == rgb[2] && p[3] == 255).count()
+        g.pm_ref().data().chunks_exact(4).filter(|p| p[0] == rgb[0] && p[1] == rgb[1] && p[2] == rgb[2] && p[3] == 255).count()
     }
 
     #[test]
@@ -9054,10 +9188,10 @@ mod tests {
         settle(&mut a, &cx);
         key(&mut a, &cx, Key::Char('M'));
         assert!(a.status_text().unwrap().contains("Kept"), "{:?}", a.status_text());
-        let kb = cx.kb().lock().unwrap();
+        let kb = cx.kb();
         let mine = format!("user/{}", cx.session.user);
-        assert!(!kb.search(&[mine.as_str()], "quokkas marsupials", 3).is_empty());
-        assert!(kb.search(&["user/someone-else"], "quokkas marsupials", 3).is_empty());
+        assert!(!kb.search_in(&[mine.clone()], "quokkas marsupials", 3).is_empty());
+        assert!(kb.search_in(&["user/someone-else".to_string()], "quokkas marsupials", 3).is_empty());
     }
     #[test]
     fn u_shows_what_the_server_sent_and_a_second_press_shows_the_page() {
@@ -9486,7 +9620,7 @@ mod tests {
 
     #[test]
     fn a_secure_page_does_not_load_unprotected_style_sheets_or_scripts() {
-        let page = "<link rel=stylesheet href=\"http://cdn.org/a.css\"><link rel=stylesheet href=\"https://cdn.org/b.css\"><script src=\"http://cdn.org/a.js\"></script><script src=\"https://cdn.org/b.js\"></script><p id=t>plain</p>";
+        let page = "<link rel=stylesheet href=\"http://cdn.org/a.css\"><link rel=stylesheet href=\"https://cdn.org/b.css\"><p id=t>plain</p><script src=\"http://cdn.org/a.js\"></script><script src=\"https://cdn.org/b.js\"></script>";
         let css = |c: &str| Response { status: 200, content_type: "text/css".into(), body: c.as_bytes().to_vec(), ..Response::default() };
         let js = |c: &str| Response { status: 200, content_type: "text/javascript".into(), body: c.as_bytes().to_vec(), ..Response::default() };
         let srv = server(vec![
@@ -9672,15 +9806,7 @@ mod tests {
 
     /// The pure-Rust fake helper of `iyakki-webview` (built on demand: `cargo test -p iyakki-shell` does not build other crates' programs).
     fn fake_helper() -> PathBuf {
-        let exe = std::env::current_exe().unwrap();
-        let dir = exe.ancestors().find(|d| d.file_name().is_some_and(|n| n == "debug" || n == "release")).expect("the profile folder (target/debug) above the test program").to_path_buf();
-        let p = dir.join("iyakki-fake-webview");
-        if !p.is_file() {
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-            let ok = std::process::Command::new(cargo).args(["build", "-q", "-p", "iyakki-webview", "--bin", "iyakki-fake-webview"]).status().map(|s| s.success()).unwrap_or(false);
-            assert!(ok && p.is_file(), "could not build the fake helper");
-        }
-        p
+        crate::apps::tests::fake_webview_binary()
     }
 
     /// While alive, `IYAKKI_WEBVIEW_HELPER` names a script that starts the fake helper with the given options.
@@ -9707,6 +9833,7 @@ mod tests {
     include!("browser_speedreport_tests.rs");
     include!("browser_live_tests.rs");
     include!("browser_badsites_tests.rs");
+    include!("browser_certview_tests.rs");
     include!("browser_devpanel_tests.rs");
     include!("browser_devfeed_tests.rs");
     include!("browser_media_tests.rs");
@@ -9734,7 +9861,7 @@ mod tests {
     /// The pixel of the picture drawn at a position inside the page area.
     fn px(g: &Gfx, x: f32, y: f32) -> [u8; 4] {
         let o = ((y as u32 * g.width() + x as u32) * 4) as usize;
-        g.pm.data()[o..o + 4].try_into().unwrap()
+        g.pm_ref().data()[o..o + 4].try_into().unwrap()
     }
 
     /// A browser on `a.org` in the full engine (the fake helper, no animation), the first picture already drawn.
@@ -9909,7 +10036,7 @@ mod tests {
             let stride = w as usize * 4;
             // the page's first row is the tool bar's (it draws a faint line over it) and is left to the next whole redraw
             for row in vy + 1..vy + vh {
-                let (a_row, b_row) = (&g.pm.data()[row * stride + vx * 4..row * stride + (vx + vw) * 4], &whole.pm.data()[row * stride + vx * 4..row * stride + (vx + vw) * 4]);
+                let (a_row, b_row) = (&g.pm_ref().data()[row * stride + vx * 4..row * stride + (vx + vw) * 4], &whole.pm_ref().data()[row * stride + vx * 4..row * stride + (vx + vw) * 4]);
                 if a_row != b_row {
                     let first = a_row.iter().zip(b_row).position(|(x, y)| x != y).unwrap_or(0);
                     let n = a_row.iter().zip(b_row).filter(|(x, y)| x != y).count();
@@ -10392,5 +10519,41 @@ mod tests {
             }
         }
         eprintln!("status at the end: {:?}", a.status_text());
+    }
+
+    #[test]
+    fn an_address_with_a_licence_from_the_sellers_return_page_leaves_it_for_the_store_once_and_only_over_https() {
+        use iyakki_shared::store_licencelink::{PENDING_APP, PENDING_KEY};
+        let cx = crate::apps::tests::cx_with_admin_store("br-licence");
+        let mut a = BrowserApp::new(&cx);
+        let user = cx.session.user.clone();
+        let json = r#"{"app":"pro-editor","serial":7}"#;
+        let code = {
+            const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            let mut o = String::new();
+            for c in json.as_bytes().chunks(3) {
+                let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+                o.push(T[(n >> 18) as usize & 63] as char);
+                o.push(T[(n >> 12) as usize & 63] as char);
+                if c.len() > 1 {
+                    o.push(T[(n >> 6) as usize & 63] as char);
+                }
+                if c.len() > 2 {
+                    o.push(T[n as usize & 63] as char);
+                }
+            }
+            o
+        };
+        a.watch_licence("https://pay.example.org/buy", &cx);
+        assert!(cx.core.app_data().get(&user, PENDING_APP, PENDING_KEY).is_none(), "an ordinary page leaves nothing");
+        a.watch_licence(&format!("http://pay.example.org/thanks#iyakki-licence={code}"), &cx);
+        assert!(cx.core.app_data().get(&user, PENDING_APP, PENDING_KEY).is_none(), "plain http is ignored");
+        a.watch_licence(&format!("https://pay.example.org/thanks#iyakki-licence={code}"), &cx);
+        assert_eq!(cx.core.app_data().get(&user, PENDING_APP, PENDING_KEY).as_deref(), Some(json));
+        assert!(a.status_text().unwrap().contains("press L"), "{:?}", a.status_text());
+        // taken away by the STORE, the same page address does not leave it again
+        cx.core.app_data().remove(&user, PENDING_APP, PENDING_KEY).unwrap();
+        a.watch_licence(&format!("https://pay.example.org/thanks#iyakki-licence={code}"), &cx);
+        assert!(cx.core.app_data().get(&user, PENDING_APP, PENDING_KEY).is_none());
     }
 }

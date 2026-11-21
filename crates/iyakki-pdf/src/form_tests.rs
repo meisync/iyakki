@@ -336,3 +336,101 @@ fn a_comb_field_in_a_file_is_filled_and_gets_the_comb_appearance() {
     let n = open(out);
     assert_eq!(n.editable_fields()[0].value, "AB12");
 }
+
+// ---------------------------------------------------------------------- signatures and push buttons (KI-715, what is read and what is reset)
+
+fn buttons_pdf(range_end: u32) -> Vec<u8> {
+    let r = format!("{range_end:08}");
+    assemble(
+        &[
+            (1, b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R] /DA (/Helv 0 Tf 0 g) /SigFlags 3 >> >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 200] >>".to_vec()),
+            (3, b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Annots [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R] >>".to_vec()),
+            (4, stream("", b"")),
+            (5, b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /V (Ada) /DV (Anon) /Rect [10 170 110 190] >>".to_vec()),
+            (6, b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (city) /V (Paris) /Rect [120 170 220 190] >>".to_vec()),
+            (7, b"<< /Type /Annot /Subtype /Widget /FT /Btn /T (agree) /V /Yes /AS /Yes /DV /Off /Rect [10 140 25 155] /AP << /N << /Yes 14 0 R /Off 14 0 R >> >> >>".to_vec()),
+            (8, b"<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 65536 /T (reset all) /Rect [10 100 80 120] /MK << /CA (Clear) >> /A << /S /ResetForm >> >>".to_vec()),
+            (9, b"<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 65536 /T (reset some) /Rect [90 100 160 120] /MK << /CA (Clear name) >> /A << /S /ResetForm /Fields [(name)] >> >>".to_vec()),
+            (10, b"<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 65536 /T (send) /Rect [170 100 240 120] /MK << /CA (Send) >> /A << /S /SubmitForm /F (https://example.org/post) >> >>".to_vec()),
+            (11, b"<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 65536 /T (calc) /Rect [10 60 80 80] /MK << /CA (Calc) >> /A << /S /JavaScript /JS (app.alert(1)) >> >>".to_vec()),
+            (12, b"<< /Type /Annot /Subtype /Widget /FT /Sig /T (empty signature) /Rect [10 10 100 40] >>".to_vec()),
+            (13, format!("<< /Type /Annot /Subtype /Widget /FT /Sig /T (signed) /Rect [120 10 210 40] /V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /Name (Grace Hopper) /Reason (I approve) /Location (Paris) /ContactInfo (grace@example.org) /M (D:20260102030405Z) /ByteRange [0 10 20 {r}] /Contents <00> >> >>").into_bytes()),
+            (14, stream("/Type /XObject /Subtype /Form /BBox [0 0 15 15]", b"0 g 0 0 15 15 re f")),
+        ],
+        1,
+        "",
+    )
+}
+
+/// The file with a byte range that ends exactly where the file ends (so nothing was added after signing).
+fn signed_file() -> Vec<u8> {
+    let probe = buttons_pdf(0);
+    let end = probe.len() as u32 - 20;
+    let f = buttons_pdf(end);
+    assert_eq!(f.len(), probe.len());
+    f
+}
+
+#[test]
+fn signature_fields_are_read_for_what_they_say_and_nothing_is_claimed_about_them() {
+    let d = Document::open(signed_file()).unwrap();
+    let sigs = d.form_signatures();
+    assert_eq!(sigs.len(), 2);
+    let empty = sigs.iter().find(|s| s.name == "empty signature").unwrap();
+    assert!(!empty.signed && empty.signer.is_none() && empty.changed_after_signing.is_none());
+    let s = sigs.iter().find(|s| s.name == "signed").unwrap();
+    assert!(s.signed);
+    assert_eq!(s.signer.as_deref(), Some("Grace Hopper"));
+    assert_eq!(s.reason.as_deref(), Some("I approve"));
+    assert_eq!(s.location.as_deref(), Some("Paris"));
+    assert_eq!(s.contact.as_deref(), Some("grace@example.org"));
+    assert_eq!(s.date.as_deref(), Some("D:20260102030405Z"));
+    assert_eq!(s.sub_filter.as_deref(), Some("adbe.pkcs7.detached"));
+    assert_eq!(s.changed_after_signing, Some(false));
+    // a signature is never filled or signed here
+    assert!(d.fill_form(&[("signed".into(), "x".into())]).unwrap_err().contains("signature"));
+    // what a fill appends after the signed bytes shows as a change after signing
+    let filled = d.fill_form(&[("city".into(), "Rome".into())]).unwrap();
+    let again = Document::open(filled).unwrap();
+    assert_eq!(again.form_signatures().iter().find(|s| s.name == "signed").unwrap().changed_after_signing, Some(true));
+}
+
+#[test]
+fn push_buttons_are_read_with_their_captions_and_actions() {
+    let d = Document::open(buttons_pdf(0)).unwrap();
+    let b = d.form_buttons();
+    let by = |n: &str| b.iter().find(|x| x.name == n).unwrap().clone();
+    assert_eq!(by("reset all").caption, "Clear");
+    assert_eq!(by("reset all").action, crate::ButtonAction::Reset { fields: vec![], exclude: false });
+    assert_eq!(by("reset some").action, crate::ButtonAction::Reset { fields: vec!["name".into()], exclude: false });
+    assert_eq!(by("send").action, crate::ButtonAction::Submit { url: "https://example.org/post".into() });
+    assert_eq!(by("calc").action, crate::ButtonAction::Script);
+    assert_eq!(b.len(), 4);
+}
+
+#[test]
+fn a_reset_button_puts_fields_back_to_their_defaults_and_the_others_are_refused_with_the_reason() {
+    let d = Document::open(buttons_pdf(0)).unwrap();
+    let all = d.reset_plan("reset all").unwrap();
+    // name goes back to its DV, city (no DV) to empty, the checked box to Off
+    assert!(all.changes.contains(&("name".into(), "Anon".into())), "{all:?}");
+    assert!(all.changes.contains(&("city".into(), String::new())), "{all:?}");
+    assert!(all.changes.contains(&("agree".into(), "off".into())), "{all:?}");
+    let some = d.reset_plan("reset some").unwrap();
+    assert_eq!(some.changes, vec![("name".to_string(), "Anon".to_string())]);
+    // applying the plan with the same writer as any fill gives a file that reads back as reset
+    let bytes = d.fill_form(&all.changes).unwrap();
+    let out = Document::open(bytes.clone()).unwrap();
+    let v = |n: &str| out.editable_fields().into_iter().find(|f| f.name == n).unwrap().value;
+    assert_eq!(v("name"), "Anon");
+    assert_eq!(v("city"), "");
+    assert_eq!(v("agree"), "Off");
+    // a second reset has nothing left to change
+    assert!(Document::open(bytes).unwrap().reset_plan("reset all").unwrap().changes.is_empty());
+    assert!(d.reset_plan("send").unwrap_err().contains("https://example.org/post"));
+    assert!(d.reset_plan("calc").unwrap_err().contains("script"));
+    assert!(d.reset_plan("nothing").unwrap_err().contains("no push button"));
+    // buttons are not filled in as fields
+    assert!(d.fill_form(&[("send".into(), "x".into())]).unwrap_err().contains("push button"));
+}

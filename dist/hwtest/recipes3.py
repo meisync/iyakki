@@ -65,7 +65,7 @@ def flow09_live(c):
     c.expect(st, r"^draft · not published$")
     for b in ("Run (r)", "Publish (p)", "History (h)", "Arrange", "Fit"):
         if b not in c.buttons(st): fail("designer button %r missing" % b)
-    created_inbox = len(json.loads(dev("inbox", "--json")[1])["items"])
+    ids_before = {i["id"] for i in json.loads(dev("inbox", "--json")[1])["items"]}
     try:
         st = c.click("Run (r)", wait=3); c.shot("run-view")
         c.expect(st, r"^succeeded$"); c.expect(st, r"4 of 4 steps ran"); c.expect(st, r"^timing · \d+ ms$")
@@ -78,12 +78,17 @@ def flow09_live(c):
             dev("input", "key", "d"); time.sleep(1.5); c.click("Yes", must=False)
         c.touched_log("flows: health-check deleted")
     st = c.state(); c.expect(st, r"No workflows yet")
-    items = json.loads(dev("inbox", "--json")[1])["items"]
-    mine = [i for i in items if i["source"] == "flows"]
-    for i in mine:
+    # clean up after myself: delete exactly the notes this run's flow made (source "flows" that were not there before), one at a time, and
+    # check by id after each that the note is gone and no other note went with it
+    made = [i for i in json.loads(dev("inbox", "--json")[1])["items"] if i["source"] == "flows" and i["id"] not in ids_before]
+    for i in made:
+        before = {x["id"] for x in json.loads(dev("inbox", "--json")[1])["items"]}
         c.click("inbox"); c.click(i["id"]); c.click("Delete (d)"); c.click("Yes", must=False)
         c.touched_log("inbox: deleted the note my test flow made (%s)" % i["title"])
-    left = [i for i in json.loads(dev("inbox", "--json")[1])["items"] if i["source"] == "flows"]
+        after = {x["id"] for x in json.loads(dev("inbox", "--json")[1])["items"]}
+        if i["id"] in after: fail("the flow's inbox note %s is still there after Delete" % i["id"])
+        if before - after - {i["id"]}: fail("deleting the flow's note also removed other notes: %s" % sorted(before - after - {i["id"]}))
+    left = [i for i in json.loads(dev("inbox", "--json")[1])["items"] if i["source"] == "flows" and i["id"] not in ids_before]
     if left: fail("an inbox note from the test flow is still there")
     c.notcovered("wiring by dragging from a port, Approval step and the approvals card, Publish, History/diff, schedule firing, Webhook, minimap use; the template's address is example.com (the step failed with HTTP 404, the Tell me branch ran, which is the template's own design)")
 

@@ -3,6 +3,11 @@
 
 use std::process::Command;
 
+/// The number on the summary line `# <word> N` (TAP) or `ℹ <word> N` (spec reporter) of `node --test`.
+fn node_count(text: &str, word: &str) -> Option<u32> {
+    text.lines().find_map(|l| l.strip_prefix("# ").or_else(|| l.strip_prefix("ℹ ")).and_then(|r| r.strip_prefix(word)).and_then(|n| n.trim().parse().ok()))
+}
+
 #[test]
 fn the_glue_and_the_committed_wasm_module_pass_the_node_tests() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -21,5 +26,7 @@ fn the_glue_and_the_committed_wasm_module_pass_the_node_tests() {
     let out = Command::new("node").arg("--test").arg(dir.join("js/test/glue.test.mjs")).output().expect("node ran");
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{text}");
-    assert!(text.contains("# pass 7"), "{text}");
+    // node 20 and 22 print TAP when output is not a terminal (`# pass 7`); node 23 and newer print the spec reporter (`ℹ pass 7`)
+    assert_eq!(node_count(&text, "pass"), Some(8), "{text}");
+    assert_eq!(node_count(&text, "fail"), Some(0), "{text}");
 }

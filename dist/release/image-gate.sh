@@ -1,8 +1,9 @@
 #!/bin/sh
 # Image content gate (F-QA-05): scan every finished image file against legal/image-rules.txt, the package licences and the asset list.
 #   dist/release/image-gate.sh [FILE...]        default: the images of target/buildroot-*/images (rootfs.cpio, *.cpio.zst, *.iso, *.vfat)
-# A .zst file is unpacked by the build host's own `zstd -dc` into the scanner's standard input (nothing is written to disk); ISO 9660
-# (Joliet names), FAT12/16/32 volume images and newc cpio files are read by iyakki-relcheck itself. Exit 1 when any image fails;
+# A .zst file is decoded by iyakki-relcheck itself (the pure-Rust ruzstd decoder; no zstd program is needed and nothing is written to disk); ISO 9660
+# (Joliet names), FAT12/16/32 and ext2/3/4 volume images, whole disks (MBR with extended partitions, GPT) and newc cpio files are read by
+# iyakki-relcheck itself. Exit 1 when any image fails;
 # exit 0 with a loud line when there is nothing to scan (so a CI job on a machine without images does not fail, and does not pass silently).
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -23,9 +24,6 @@ for f in "$@"; do
   # file of a rootfs read from standard input would be "unattributed" (the default only knows target/buildroot-mac and target/buildroot-web)
   BASE="$(cd "$(dirname "$f")/.." 2>/dev/null && pwd)"; BASEARG=""; [ -f "$BASE/build/packages-file-list.txt" ] && BASEARG="--base $BASE"
   case "$f" in
-    *.zst)
-      command -v zstd >/dev/null 2>&1 || { echo "image-gate: FAIL $f needs zstd on this machine"; bad=1; continue; }
-      zstd -dc -- "$f" | "$CHK" image-scan "$ROOT" --cpio - $BASEARG || bad=1 ;;
     *) "$CHK" image-scan "$ROOT" --file "$f" $BASEARG || bad=1 ;;
   esac
 done
@@ -35,7 +33,7 @@ HOMEPAT="${HOME:-}"
 if [ "${#HOMEPAT}" -ge 5 ]; then
   for f in "$@"; do
     case "$f" in
-      *.zst) n="$(zstd -dc -- "$f" 2>/dev/null | LC_ALL=C grep -a -c -F -- "$HOMEPAT")" ;;
+      *.zst) n="$("$CHK" unzstd "$f" 2>/dev/null | LC_ALL=C grep -a -c -F -- "$HOMEPAT")" ;;
       *rootfs.cpio) n="$(LC_ALL=C grep -a -c -F -- "$HOMEPAT" "$f")" ;;
       *) continue ;;
     esac

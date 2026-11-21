@@ -2,14 +2,15 @@
 //! checked with the archive signing key the owner pins in `legal/debian-archive-pgp.asc`, read for the SHA-256 table of the archive's
 //! files and for its validity window. The registry route of `linuxapps_dist` keeps the image digest as its pin; this is the second,
 //! independent list: a file of the archive (a `Packages` index, a package) is accepted only when its hash is in a list whose signature
-//! was good and which has not expired. Until the key is pinned [`pinned_key`] is `None` and nothing here is used.
+//! was good and which has not expired. The key is pinned since 2026-11-19 (Debian 12 and 13).
 // SPDX-License-Identifier: Apache-2.0
 
 use sha2::{Digest, Sha256};
 
-/// The pinned Debian archive signing key (the owner's trust decision, see docs/project/PIN-DECISIONS.md). `None` until the file exists.
+/// The pinned Debian archive signing keys of Debian 12 and 13 (`legal/debian-archive-pgp.asc`: provenance and fingerprints are in its header,
+/// read from ftp-master.debian.org and the debian-archive-keyring package on 2026-11-19; see docs/project/PIN-DECISIONS.md).
 pub fn pinned_key() -> Option<&'static [u8]> {
-    None
+    Some(include_bytes!("../../../legal/debian-archive-pgp.asc"))
 }
 
 /// A checked Release file.
@@ -212,7 +213,23 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_pinned_yet() {
-        assert!(pinned_key().is_none());
+    fn the_pinned_file_holds_the_two_debian_archive_keys() {
+        let keys = iyakki_openpgp::rsa_keys(pinned_key().unwrap()).unwrap();
+        // two RSA-4096 primary keys and their two signing subkeys
+        assert_eq!(keys.len(), 4, "bookworm and trixie, primary and signing subkey each");
+        assert!(keys.iter().all(|(n, _)| n.len() == 512));
+    }
+
+    /// The real clear-signed list of the Debian stable suite as served on 2026-09-12 (Debian 13.7), checked with the pinned key.
+    #[test]
+    fn the_real_trixie_list_verifies_with_the_pinned_key_and_a_changed_byte_does_not() {
+        let real: &[u8] = include_bytes!("../tests/fixtures/debian-release/trixie-InRelease-2026-09-12");
+        let now = parse_date("Sat, 12 Sep 2026 09:00:00 UTC").unwrap();
+        let r = verify_inrelease(pinned_key().unwrap(), real, now).unwrap();
+        assert_eq!((r.suite.as_str(), r.codename.as_str()), ("stable", "trixie"));
+        let mut bad = real.to_vec();
+        let at = bad.windows(9).position(|w| w == b"Debian 13").unwrap_or(200);
+        bad[at + 7] ^= 1;
+        assert!(verify_inrelease(pinned_key().unwrap(), &bad, now).is_err());
     }
 }

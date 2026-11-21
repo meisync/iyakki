@@ -15,13 +15,49 @@ pub const EXCLUSIVE_NAMESPACES: [&str; 4] = ["iyakki-monitoring", "iyakki-matrix
 /// The kinds a plan may delete, by name.
 pub const KINDS: [&str; 10] = ["deployment", "service", "configmap", "secret", "persistentvolumeclaim", "serviceaccount", "daemonset", "clusterrole", "clusterrolebinding", "namespace"];
 
+/// What an [`Op`] looks like on the wire (its `&'static str` words arrive as text).
+#[derive(serde::Deserialize)]
+enum OpWire {
+    Kube { ns: Option<String>, kind: String, name: String },
+    Claim { ns: String, name: String },
+    Path { path: PathBuf, root: PathBuf },
+    Vault(String),
+    Source(String),
+    Hook(Hook),
+}
+
+impl From<OpWire> for Op {
+    fn from(w: OpWire) -> Op {
+        use crate::serde_static::intern;
+        match w {
+            OpWire::Kube { ns, kind, name } => Op::Kube { ns: ns.as_deref().map(intern), kind: intern(&kind), name },
+            OpWire::Claim { ns, name } => Op::Claim { ns: intern(&ns), name },
+            OpWire::Path { path, root } => Op::Path { path, root },
+            OpWire::Vault(s) => Op::Vault(s),
+            OpWire::Source(s) => Op::Source(s),
+            OpWire::Hook(h) => Op::Hook(h),
+        }
+    }
+}
+
 /// What one step does.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "OpWire")]
 pub enum Op {
     /// Delete one object: `ns` is `None` for a cluster-scoped kind.
-    Kube { ns: Option<&'static str>, kind: &'static str, name: String },
+    Kube {
+        #[serde(skip_deserializing)]
+        ns: Option<&'static str>,
+        #[serde(skip_deserializing)]
+        kind: &'static str,
+        name: String,
+    },
     /// Delete one volume claim, then the retained volume it was bound to and that volume's folder (read before the claim goes).
-    Claim { ns: &'static str, name: String },
+    Claim {
+        #[serde(skip_deserializing)]
+        ns: &'static str,
+        name: String,
+    },
     /// Delete one folder or file; it must lie under `root`, which must lie under the data folder.
     Path { path: PathBuf, root: PathBuf },
     /// Delete one vault entry of the person.
@@ -31,11 +67,64 @@ pub enum Op {
     Hook(Hook),
 }
 
+/// What a [`Hook`] looks like on the wire (its `&'static str` words arrive as text).
+#[derive(serde::Deserialize)]
+enum HookWire {
+    Cli(String),
+    K3sKeepData,
+    K3sAll,
+    OllamaServer,
+    LemonadeProvider,
+    VoicePack,
+    KokoroModel,
+    FwPack(Item),
+    FwHardware,
+    DataScience,
+    YtDlp,
+    DriverPack(String),
+    Sandbox(String),
+    ModelHosts(Vec<String>),
+    GiteaRecord,
+    GiteaConnection,
+    NvidiaCdi,
+    LemonadeUnpatch,
+    OllamaUnpatch,
+    OllamaProvider,
+}
+
+impl From<HookWire> for Hook {
+    fn from(w: HookWire) -> Hook {
+        match w {
+            HookWire::Cli(s) => Hook::Cli(crate::serde_static::intern(&s)),
+            HookWire::K3sKeepData => Hook::K3sKeepData,
+            HookWire::K3sAll => Hook::K3sAll,
+            HookWire::OllamaServer => Hook::OllamaServer,
+            HookWire::LemonadeProvider => Hook::LemonadeProvider,
+            HookWire::VoicePack => Hook::VoicePack,
+            HookWire::KokoroModel => Hook::KokoroModel,
+            HookWire::FwPack(x) => Hook::FwPack(x),
+            HookWire::FwHardware => Hook::FwHardware,
+            HookWire::DataScience => Hook::DataScience,
+            HookWire::YtDlp => Hook::YtDlp,
+            HookWire::DriverPack(s) => Hook::DriverPack(crate::serde_static::intern(&s)),
+            HookWire::Sandbox(s) => Hook::Sandbox(crate::serde_static::intern(&s)),
+            HookWire::ModelHosts(x) => Hook::ModelHosts(x),
+            HookWire::GiteaRecord => Hook::GiteaRecord,
+            HookWire::GiteaConnection => Hook::GiteaConnection,
+            HookWire::NvidiaCdi => Hook::NvidiaCdi,
+            HookWire::LemonadeUnpatch => Hook::LemonadeUnpatch,
+            HookWire::OllamaUnpatch => Hook::OllamaUnpatch,
+            HookWire::OllamaProvider => Hook::OllamaProvider,
+        }
+    }
+}
+
 /// The named things that are not a Kubernetes object, a folder or a vault entry.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "HookWire")]
 pub enum Hook {
     /// A program of the CLI catalogue (`clis.rs`).
-    Cli(&'static str),
+    Cli(#[serde(skip_deserializing)] &'static str),
     /// Stop the cluster, take the program away, keep its `data` folder.
     K3sKeepData,
     /// Stop the cluster and delete the whole `k3s-dev` folder.
@@ -54,10 +143,12 @@ pub enum Hook {
     FwHardware,
     /// The toolkit folder `<data>/datasci` (Python, packages, state; never the sandbox or your data).
     DataScience,
+    /// The program `<data>/tools/yt-dlp` (never the videos it saved).
+    YtDlp,
     /// A driver pack by id (`mac-wifi-brcmfmac`, `mac-bt-broadcom`, `mac-facetimehd`).
-    DriverPack(&'static str),
+    DriverPack(#[serde(skip_deserializing)] &'static str),
     /// A Linux apps sandbox by name (`debian`, `gui`).
-    Sandbox(&'static str),
+    Sandbox(#[serde(skip_deserializing)] &'static str),
     /// The model hosts of the Mac guide (Models entries and the host list), by id.
     ModelHosts(Vec<String>),
     /// The Gitea record of "installed services" (not the Secrets, not the data).
@@ -74,7 +165,7 @@ pub enum Hook {
     OllamaProvider,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Step {
     pub op: Op,
     /// Runs only when the person ticked "also delete the data".
@@ -85,7 +176,7 @@ pub struct Step {
     pub text: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Plan {
     pub item: Item,
     pub steps: Vec<Step>,
@@ -242,7 +333,7 @@ pub fn not_ours(p: &Presence) -> Option<String> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Opts {
     pub delete_data: bool,
     pub with_dependants: bool,

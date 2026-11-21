@@ -243,11 +243,8 @@ pub fn run_kubectl(kubeconfig: Option<&str>, context: Option<&str>) -> impl FnMu
         base.push(format!("--context={c}"));
     }
     move |args: &[String]| {
-        let o = std::process::Command::new("kubectl")
-            .args(&base)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
+        let all: Vec<String> = base.iter().chain(args.iter()).cloned().collect();
+        let o = iyakki_core_local::starters::kubectl_run(&all, None)
             .map_err(|e| format!("kubectl could not be started ({e}): install kubectl"))?;
         if o.status.success() {
             Ok(String::from_utf8_lossy(&o.stdout).into_owned())

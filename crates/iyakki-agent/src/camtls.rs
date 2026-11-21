@@ -140,6 +140,18 @@ impl TrustStore {
         std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
     }
 
+    /// Read, change and write the store as one step. Every writer (the recorder and the live view saving a waiting certificate, the person's
+    /// approval) goes through here: with a separate load and save a camera retrying at the same moment saved its older copy over the
+    /// approval and the yes was lost.
+    pub fn change<T>(data: &std::path::Path, f: impl FnOnce(&mut TrustStore) -> Result<T, String>) -> Result<T, String> {
+        static WRITERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one = WRITERS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = TrustStore::load(data);
+        let out = f(&mut st)?;
+        st.save(data)?;
+        Ok(out)
+    }
+
     pub fn trust_for(&self, id: &str) -> Trust {
         self.pinned.get(id).map(|p| Trust::Pin(p.clone())).unwrap_or(Trust::System)
     }
@@ -159,12 +171,18 @@ impl TrustStore {
 
 /// Connect for the camera `id` and keep what has to be kept: a certificate to ask about becomes `pending`.
 pub fn connect_for(data: &std::path::Path, id: &str, host: &str, port: u16) -> Result<Secure, String> {
-    let mut st = TrustStore::load(data);
+    let st = TrustStore::load(data);
     match connect(host, port, &st.trust_for(id), iyakki_schema::now_secs() as i64) {
         Ok(s) => Ok(s),
         Err(Refusal::Ask { fingerprint }) => {
-            st.pending.insert(id.to_string(), trust::normalize(&fingerprint));
-            let _ = st.save(data);
+            let fp = trust::normalize(&fingerprint);
+            // the approval may have come in since the store was read above: do not put a waiting card over a yes
+            let _ = TrustStore::change(data, |st| {
+                if st.pinned.get(id) != Some(&fp) {
+                    st.pending.insert(id.to_string(), fp.clone());
+                }
+                Ok(())
+            });
             Err(format!("This camera's certificate is not signed by a known authority (most cameras sign their own). Its fingerprint is {fingerprint}. If this is your camera, approve it (camera_trust_set) and it is remembered."))
         }
         Err(Refusal::Refused(m)) | Err(Refusal::Failed(m)) => Err(m),
@@ -253,5 +271,39 @@ mod tests {
         let mut st = TrustStore::load(&d);
         assert!(st.forget("cam1") && !st.forget("cam1"));
         assert_eq!(st.trust_for("cam1"), Trust::System);
+    }
+
+    #[test]
+    fn writers_that_change_the_store_at_the_same_time_lose_nothing_and_a_waiting_card_never_covers_a_yes() {
+        let d = std::env::temp_dir().join(format!("iyakki-camtls-change-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        TrustStore::change(&d, |st| {
+            st.pending.insert("yes".into(), "AA".into());
+            Ok(())
+        })
+        .unwrap();
+        // many cameras saving a waiting certificate while the person approves one: every write is kept
+        std::thread::scope(|sc| {
+            for n in 0..16 {
+                let d = &d;
+                sc.spawn(move || {
+                    TrustStore::change(d, |st| {
+                        st.pending.insert(format!("cam{n}"), format!("{n:02X}"));
+                        Ok(())
+                    })
+                    .unwrap();
+                });
+            }
+            let d = &d;
+            sc.spawn(move || {
+                TrustStore::change(d, |st| st.approve("yes")).unwrap();
+            });
+        });
+        let st = TrustStore::load(&d);
+        assert_eq!(st.pending.len(), 16, "no waiting certificate was lost");
+        assert_eq!(st.pinned.get("yes").map(String::as_str), Some("AA"), "the approval was kept");
+        assert!(!st.pending.contains_key("yes"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

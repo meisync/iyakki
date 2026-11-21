@@ -17,7 +17,7 @@
 
 use std::fs::File;
 use std::io::Cursor;
-use std::os::unix::fs::FileExt;
+use crate::posix::{DiskHandle, FileExt};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -40,6 +40,9 @@ pub struct ApplyEnv {
     pub proc_mounts: String,
     /// The firmware variable store (`/sys/firmware/efi/efivars`) when a boot entry should be added.
     pub efivars: Option<PathBuf>,
+    /// Add the boot entry through the Windows firmware-variable calls (Windows only; where it is set but not available the install says so
+    /// in a note and the person picks the disk in the firmware's boot menu).
+    pub firmware: bool,
     /// Testing: stop after the checks, write nothing.
     pub dry_run: bool,
 }
@@ -63,7 +66,7 @@ pub fn source_spec(src: &SourceInfo) -> Result<SourceSpec, String> {
     let mut f = File::open(&src.path).map_err(|e| format!("{}: {e}", src.path.display()))?;
     let mut payload = 0u64;
     if let Ok(mut fat) = Fat32::open(&mut f, src.p1_start * 512) {
-        for it in fat.walk()? {
+        for it in fat.walk_long()? {
             if !it.dir && crate::imagearch::is_payload(&it.path) {
                 payload += it.size as u64;
             }
@@ -87,11 +90,11 @@ pub fn kernel_args(grub_cfg: &str) -> String {
     DEFAULT_ARGS.to_string()
 }
 
-fn put(f: &File, what: &str, off: u64, data: &[u8]) -> Result<(), String> {
+fn put(f: &DiskHandle, what: &str, off: u64, data: &[u8]) -> Result<(), String> {
     f.write_all_at(data, off).map_err(|e| format!("writing {what}: {e}"))
 }
 
-fn sha_range(f: &File, off: u64, len: u64) -> Result<String, String> {
+fn sha_range(f: &DiskHandle, off: u64, len: u64) -> Result<String, String> {
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     let mut done = 0u64;
@@ -105,7 +108,7 @@ fn sha_range(f: &File, off: u64, len: u64) -> Result<String, String> {
 }
 
 /// Hash of a partition's first and last MiB: the cheap proof that a kept partition was not written.
-fn sentinel(f: &File, off: u64, len: u64) -> Result<String, String> {
+fn sentinel(f: &DiskHandle, off: u64, len: u64) -> Result<String, String> {
     let head = len.min(MIB);
     let mut h = sha_range(f, off, head)?;
     if len > 2 * MIB {
@@ -272,12 +275,12 @@ fn apply_partial(path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, 
     let t0 = Instant::now();
     let ss = model.sector as u64;
     let disp = path.display().to_string();
-    let f = std::fs::OpenOptions::new().read(true).write(true).open(path).map_err(|e| format!("{disp}: {e}"))?;
+    let f = crate::posix::open_disk(path, &crate::posix::DiskOpen { sector: model.sector, size_bytes: model.size_bytes, mounts: model.parts.iter().flat_map(|p| p.mounts.clone()).collect() })?;
     // before: sector 0 and every kept partition
     let mut s0 = vec![0u8; 512.max(ss as usize)];
     f.read_exact_at(&mut s0, 0).map_err(|e| format!("reading {disp}: {e}"))?;
     let gpt_now = if model.table == Some(TableKind::Gpt) {
-        let mut h = File::open(path).map_err(|e| e.to_string())?;
+        let mut h = crate::posix::reopen(&f, path)?;
         Some(gpt::read_gpt(&mut h, model.sector, model.total_sectors()).map_err(|e| format!("the GPT cannot be read: {e}"))?.table)
     } else {
         None
@@ -302,6 +305,8 @@ fn apply_partial(path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, 
         u32::from_le_bytes([g[0], g[1], g[2], g[3]]) ^ 0x4959_414B
     };
     let mut lean_note: Option<String> = None;
+    // a shared legacy-BIOS install that replaces another system's boot code gives GRUB's menu an entry for that system
+    let extra_menu = chainload_menu(&f, model, plan)?;
     for st in plan.steps.iter().filter(|s| matches!(s.action, Action::Create | Action::Format)) {
         let off = st.first_lba * ss;
         match st.role {
@@ -345,12 +350,17 @@ fn apply_partial(path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, 
                 let inner: &mut dyn fatclone::Editor = if crate::leanstrip::needs_cleaning(&paths, cfg.as_deref()) { &mut lean } else { &mut plain };
                 // a disk installed from a running stick (a block device) is not install media; a stick written from an image FILE keeps the marker that
                 // makes the boot loader show "Install to a disk" (EFI/iyakki-boot/install-media)
-                let from_device = {
-                    use std::os::unix::fs::FileTypeExt;
-                    std::fs::metadata(&src.path).is_ok_and(|m| m.file_type().is_block_device())
-                };
+                let from_device = crate::posix::is_block_device(&src.path);
                 let mut without_marker = fatclone::WithoutInstallMarker(inner);
-                let editor: &mut dyn fatclone::Editor = if from_device { &mut without_marker } else { without_marker.0 };
+                let base: &mut dyn fatclone::Editor = if from_device { &mut without_marker } else { without_marker.0 };
+                let mut with_menu;
+                let editor: &mut dyn fatclone::Editor = match &extra_menu {
+                    Some(m) => {
+                        with_menu = fatclone::AppendMenu(base, m.clone());
+                        &mut with_menu
+                    }
+                    None => base,
+                };
                 fatclone::clone_to_with(&mut vol, model.sector, st.bytes, NAME_BOOT, volume_id, editor, &mut |b| {
                     buf.extend_from_slice(b);
                     if buf.len() >= 4 * MIB as usize {
@@ -379,16 +389,16 @@ fn apply_partial(path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, 
         let st = plan.steps.iter().find(|s| s.action == Action::AddFiles).ok_or("internal error: no ESP step")?;
         let esp_off = st.first_lba * ss;
         {
-            let mut h = File::open(path).map_err(|e| e.to_string())?;
+            let mut h = crate::posix::reopen(&f, path)?;
             esp_before = Fat32::open(&mut h, esp_off)?.walk()?;
         }
         let mut input = File::open(&src.path).map_err(|e| e.to_string())?;
         let mut vol = Fat32::open(&mut input, src.p1_start * 512)?;
-        let items = vol.walk()?;
+        let items = vol.walk_long()?;
         let find = |p: &str| items.iter().find(|i| !i.dir && i.path.eq_ignore_ascii_case(p)).cloned().ok_or_else(|| format!("the image has no {p}"));
         let files = crate::imagearch::boot_files(items.iter().filter(|i| !i.dir).map(|i| i.path.as_str()))?;
         let (k, r) = (find(files.kernel)?, find(files.initrd)?);
-        keep_args = items.iter().find(|i| i.path.eq_ignore_ascii_case("/boot/grub/grub.cfg")).map(|i| vol.read_file(i)).transpose()?.map_or_else(|| DEFAULT_ARGS.to_string(), |b| kernel_args(&crate::leanstrip::strip_lean_block(&String::from_utf8_lossy(&b))));
+        keep_args = items.iter().find(|i| i.path.eq_ignore_ascii_case(files.grub_cfg)).map(|i| vol.read_file(i)).transpose()?.map_or_else(|| DEFAULT_ARGS.to_string(), |b| kernel_args(&crate::leanstrip::strip_lean_block(&String::from_utf8_lossy(&b))));
         let kernel = vol.read_file(&k)?;
         let initrd = vol.read_file(&r)?;
         let mut rw = Fat32Rw::open(&f, esp_off, st.bytes)?;
@@ -452,7 +462,7 @@ fn apply_partial(path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, 
         progress(Progress { phase: Phase::Verifying, done: verified, total: total_verify, elapsed: t0.elapsed() });
     }
     if let Some(t) = &parsed_expect {
-        let mut h = File::open(path).map_err(|e| e.to_string())?;
+        let mut h = crate::posix::reopen(&f, path)?;
         let p = gpt::read_gpt(&mut h, model.sector, model.total_sectors()).map_err(|e| format!("verification FAILED: the partition table on the disk is not valid ({e})"))?;
         if !p.primary_ok || !p.backup_ok || !p.problems.is_empty() || p.table != *t {
             return Err(format!("verification FAILED: the two copies of the partition table are not as written ({}).", p.problems.join("; ")));
@@ -480,7 +490,7 @@ fn apply_partial(path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, 
     }
     if plan.keep_esp {
         let st = plan.steps.iter().find(|s| s.action == Action::AddFiles).unwrap();
-        let mut h = File::open(path).map_err(|e| e.to_string())?;
+        let mut h = crate::posix::reopen(&f, path)?;
         let after = Fat32::open(&mut h, st.first_lba * ss)?.walk()?;
         for it in &esp_before {
             if !after.iter().any(|a| a == it) {
@@ -506,14 +516,19 @@ fn apply_partial(path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, 
     notes.extend(lean_note);
     notes.extend(bios_note);
     let mut boot_entry = None;
-    if let Some(dir) = &env.efivars {
+    if env.efivars.is_some() || env.firmware {
         let st = plan.steps.iter().find(|s| s.role == Some(Role::Boot) && s.action != Action::Keep).ok_or("internal error: no boot step")?;
         let signature = match &table {
             NewTable::Gpt(t) => efi::Signature::Gpt(t.entries.iter().find(|e| e.index == st.index).map(|e| e.guid).ok_or("internal error: boot entry missing")?),
             NewTable::Mbr(s) => efi::Signature::Mbr(s[440..444].try_into().unwrap()),
         };
-        let (file, args) = if plan.keep_esp { (efi::backslashed("/EFI/IYAKKI/KERNEL.EFI"), format!("initrd={} {keep_args}", efi::backslashed("/EFI/IYAKKI/INITRD"))) } else { (efi::backslashed("/EFI/BOOT/BOOTX64.EFI"), String::new()) };
-        match efi::add_boot_entry(dir, &efi::BootEntry { number: st.index, start_lba: st.first_lba, sectors: st.sectors, signature, file, args }) {
+        let (file, args) = if plan.keep_esp { (efi::backslashed("/EFI/IYAKKI/KERNEL.EFI"), format!("initrd={} {keep_args}", efi::backslashed("/EFI/IYAKKI/INITRD"))) } else { (efi::backslashed(crate::imagearch::of_boot_volume(&src.path, src.p1_start)?.loader), String::new()) };
+        let entry = efi::BootEntry { number: st.index, start_lba: st.first_lba, sectors: st.sectors, signature, file, args };
+        let added = match &env.efivars {
+            Some(dir) => efi::add_boot_entry(dir, &entry),
+            None => add_entry_through_windows(&entry),
+        };
+        match added {
             Ok(n) => {
                 notes.push(format!("UEFI boot entry {n} \"IYAKKI\" added at the end of the boot order; pick it in the firmware's boot menu"));
                 boot_entry = Some(n);
@@ -526,17 +541,97 @@ fn apply_partial(path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, 
     Ok(ApplyReport { written: done, verified: true, boot_entry, notes })
 }
 
+/// The boot entry through the Windows firmware-variable calls (the privilege is asked for, the variables are read and written one by one).
+#[cfg(windows)]
+fn add_entry_through_windows(e: &efi::BootEntry) -> Result<String, String> {
+    efi::add_boot_entry_with(&mut crate::windows_real::WinFirmware::new()?, e)
+}
+
+#[cfg(not(windows))]
+fn add_entry_through_windows(_: &efi::BootEntry) -> Result<String, String> {
+    Err("the Windows firmware calls exist only in the Windows build".into())
+}
+
 /// Legacy BIOS boot on a shared disk (F-INST-13). The disk is read again and checked again (it may have changed since the plan), the
 /// sectors that will change are saved to the file the person named (written, flushed and read back before anything else is touched),
 /// the core image goes in first and the boot code in sector 0 last, then everything is read back; if anything is not as written the
 /// saved sectors are put back at once and the install reports the failure.
-fn write_bios(f: &File, path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, planned: crate::biosshared::Method) -> Result<String, String> {
+/// The menu entry for the other system when `--bios-replace-boot-code` replaces its boot code (Windows by the volume serial of its NTFS
+/// partition); an error when the replacement would leave that system unreachable.
+fn chainload_menu(f: &DiskHandle, model: &DiskModel, plan: &Plan) -> Result<Option<String>, String> {
+    if plan.bios.is_none() || !plan.request.bios_replace {
+        return Ok(None);
+    }
+    let Some(facts) = model.bios.0.as_ref() else { return Ok(None) };
+    let old = crate::biosshared::BootCode::classify(&facts.sector0);
+    // only Windows boot code is handed over to by a menu entry; other code is saved first (the restore brings it back) and the plan
+    // already warns that GRUB must start that system
+    if old != crate::biosshared::BootCode::Windows {
+        return Ok(None);
+    }
+    let mut firsts = Vec::new();
+    for p in model.parts.iter().filter(|p| p.fs == "ntfs" && !plan.request.delete_parts.contains(&p.index)) {
+        let mut b = vec![0u8; 512];
+        crate::posix::FileExt::read_exact_at(f, &mut b, p.first_lba * u64::from(model.sector)).map_err(|e| format!("{}: {e}", p.name))?;
+        firsts.push(b);
+    }
+    crate::biosgpt::menu_for_install(true, &old, &firsts)
+}
+
+/// The save file: created new, flushed, read back and compared, before anything on the disk changes.
+fn save_to_file(save: &crate::biosshared::Backup, save_path: &Path) -> Result<(), String> {
+    use std::io::Write;
+    let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(save_path).map_err(|e| format!("the save file {}: {e}; legacy BIOS boot was not set up", save_path.display()))?;
+    out.write_all(&save.encode()).and_then(|_| out.sync_all()).map_err(|e| format!("the save file {}: {e}; legacy BIOS boot was not set up", save_path.display()))?;
+    let back = std::fs::read(save_path).ok().and_then(|b| crate::biosshared::Backup::decode(&b).ok());
+    if back.as_ref() != Some(save) {
+        return Err(format!("the save file {} does not read back; legacy BIOS boot was not set up", save_path.display()));
+    }
+    Ok(())
+}
+
+/// Legacy BIOS boot on a disk of 4096-byte sectors (F-INST-29): the same order as the 512-byte path (check again, save, write, read back,
+/// undo on a failed read-back) with the byte handling of `bios4kn`.
+fn write_bios_4k(f: &DiskHandle, path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, planned: crate::biosshared::Method) -> Result<String, String> {
     use crate::biosshared as bs;
+    let crate::biosshared::Method::BiosBootPartition { start_lba, sectors } = planned else { return Err("legacy BIOS boot on 4096-byte sectors needs a BIOS boot partition".into()) };
+    let code = crate::bios4kn::load_code(&plan.request.bios_4k_code)?;
+    let core512 = crate::gpt_install::grub_bits_used(src, 1)?.core;
+    let mut r = crate::posix::reopen(f, path)?;
+    let facts = bs::read_facts(&mut r, model.sector, model.size_bytes)?;
+    if facts.bios_boot != Some((start_lba, sectors)) || facts.bios_boot_content.iter().any(|b| *b != 0) {
+        return Err("legacy BIOS boot was not set up: the BIOS boot partition is not as it was planned. The rest of the install is done and IYAKKI starts through UEFI.".into());
+    }
+    let mut old0 = vec![0u8; crate::bios4kn::SECTOR];
+    {
+        use std::io::{Read, Seek, SeekFrom};
+        r.seek(SeekFrom::Start(0)).and_then(|_| r.read_exact(&mut old0)).map_err(|e| format!("reading sector 0: {e}"))?;
+    }
+    let layout = crate::bios4kn::build(&old0, &code, &core512, start_lba, sectors)?;
+    let n = (layout.core.len() / crate::bios4kn::SECTOR) as u64;
+    let save = bs::Backup::take(&mut r, model.sector, model.size_bytes, &crate::bios4kn::regions_to_save(start_lba, n))?;
+    let save_path = Path::new(&plan.request.bios_save);
+    save_to_file(&save, save_path)?;
+    let mut w = f.try_clone().map_err(|e| e.to_string())?;
+    let problems = crate::bios4kn::write(&mut w, &layout)?;
+    f.sync_data().map_err(|e| format!("flushing {}: {e}", path.display()))?;
+    if !problems.is_empty() {
+        let undone = crate::bios4kn::undo(&mut w, &save, model.size_bytes).is_ok();
+        return Err(format!("legacy BIOS boot: verification FAILED ({}); {}", problems.join("; "), if undone { "the saved sectors were put back" } else { "putting the saved sectors back ALSO failed: restore them from the save file" }));
+    }
+    Ok(format!("legacy BIOS boot set up on 4096-byte sectors: GRUB at sector {start_lba}; the old sector 0 and that area are saved in {}", save_path.display()))
+}
+
+fn write_bios(f: &DiskHandle, path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, planned: crate::biosshared::Method) -> Result<String, String> {
+    use crate::biosshared as bs;
+    if model.sector == 4096 {
+        return write_bios_4k(f, path, model, plan, src, planned);
+    }
     if model.sector != 512 {
         return Err("legacy BIOS boot needs 512-byte sectors".into());
     }
     let bits = crate::gpt_install::grub_bits_used(src, planned.core_lba())?;
-    let mut r = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut r = crate::posix::reopen(f, path)?;
     let facts = bs::read_facts(&mut r, model.sector, model.size_bytes)?;
     let check = bs::evaluate(&facts, bits.core.len() as u64, plan.request.bios_replace);
     if check.method != Some(planned) {
@@ -544,24 +639,16 @@ fn write_bios(f: &File, path: &Path, model: &DiskModel, plan: &Plan, src: &Sourc
     }
     let save = bs::Backup::take(&mut r, model.sector, model.size_bytes, &bs::regions_to_save(planned, bits.core.len() as u64))?;
     let save_path = Path::new(&plan.request.bios_save);
-    {
-        use std::io::Write;
-        let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(save_path).map_err(|e| format!("the save file {}: {e}; legacy BIOS boot was not set up", save_path.display()))?;
-        out.write_all(&save.encode()).and_then(|_| out.sync_all()).map_err(|e| format!("the save file {}: {e}; legacy BIOS boot was not set up", save_path.display()))?;
-    }
-    let back = std::fs::read(save_path).ok().and_then(|b| bs::Backup::decode(&b).ok());
-    if back.as_ref() != Some(&save) {
-        return Err(format!("the save file {} does not read back; legacy BIOS boot was not set up", save_path.display()));
-    }
+    save_to_file(&save, save_path)?;
     let s0 = bs::merged_sector0(&facts.sector0, &bits.boot_code, planned.core_lba())?;
     put(f, "the GRUB core image", planned.core_lba() * 512, &bits.core)?;
     f.sync_data().map_err(|e| format!("flushing {}: {e}", path.display()))?;
     put(f, "sector 0", 0, &s0)?;
     f.sync_data().map_err(|e| format!("flushing {}: {e}", path.display()))?;
-    let mut again = File::open(path).map_err(|e| e.to_string())?;
+    let mut again = crate::posix::reopen(f, path)?;
     let problems = bs::verify_after(&mut again, &facts.sector0, planned, &bits.boot_code, &bits.core);
     if !problems.is_empty() {
-        let mut w: &File = f;
+        let mut w: &DiskHandle = f;
         let undone = save.restore(&mut w, model.sector, model.size_bytes).is_ok();
         return Err(format!("legacy BIOS boot: verification FAILED ({}); {}", problems.join("; "), if undone { "the saved sectors were put back" } else { "putting the saved sectors back ALSO failed: restore them from the save file" }));
     }

@@ -511,3 +511,100 @@ fn a_share_is_edited_in_place_deleted_only_after_the_typed_word_and_stopped_from
     assert_eq!(a.shares_submit(&cx, &ShareForm::Delete(id.clone()), &mut right).unwrap(), "The share is removed.");
     assert_eq!(SettingsApp::shares_len(&cx), 0);
 }
+
+/// A network of the casting desk that answers from memory: one TV, one song, and a record of what the page asked.
+struct CastFake(Arc<std::sync::Mutex<Vec<String>>>);
+struct CastWire(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl iyakki_agent::upnp_cast::Wire for CastWire {
+    fn get(&self, _: std::net::SocketAddr, _: &str) -> Result<(u16, String), String> {
+        Ok((200, String::new()))
+    }
+    fn soap(&self, _: std::net::SocketAddr, _: &str, action: &str, body: &str) -> Result<(u16, String), String> {
+        let name = action.rsplit('#').next().unwrap_or("").trim_matches('"').to_string();
+        self.0.lock().unwrap().push(format!("{name} {}", body.split("<Target>").nth(1).and_then(|t| t.split("</Target>").next()).unwrap_or("")));
+        Ok((200, match name.as_str() {
+            "GetPositionInfo" => "<RelTime>0:01:40</RelTime><TrackDuration>0:10:00</TrackDuration>".into(),
+            "GetTransportInfo" => "<CurrentTransportState>PLAYING</CurrentTransportState>".into(),
+            _ => String::new(),
+        }))
+    }
+}
+
+impl iyakki_agent::upnp_cast_desk::CastNet for CastFake {
+    fn find(&self) -> Result<Vec<iyakki_agent::upnp_cast::Renderer>, String> {
+        Ok(vec![iyakki_agent::upnp_cast::Renderer { name: "Living Room TV".into(), udn: "uuid:1".into(), control: "192.168.1.20:49152".parse().unwrap(), control_path: "/avt".into() }])
+    }
+    fn wire(&self) -> Box<dyn iyakki_agent::upnp_cast::Wire> {
+        Box::new(CastWire(self.0.clone()))
+    }
+    fn source(&self, _: &str, id: &str, _: std::net::IpAddr) -> Option<(String, String, bool, String)> {
+        (id == "a0").then(|| ("Song".to_string(), "audio/mpeg".to_string(), false, "http://192.168.1.5:8200/upnp/media/a0".to_string()))
+    }
+    fn items(&self, _: &str) -> Vec<(String, String, bool)> {
+        vec![("a0".into(), "Song".into(), false)]
+    }
+}
+
+fn settle(a: &mut SettingsApp, cx: &AppCx) {
+    let wall = std::time::Instant::now();
+    while wall.elapsed() < std::time::Duration::from_secs(30) {
+        a.handle(&Event::Tick, cx);
+        if !a.is_busy() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("the job did not finish");
+}
+
+#[test]
+fn the_page_has_casting_buttons_that_find_players_play_seek_ask_progress_and_stop_through_the_desk() {
+    let _g = serial();
+    let cx = admin("shr-cast");
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    iyakki_agent::upnp_cast_desk::use_net(Some(Arc::new(CastFake(log.clone()))));
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Shares);
+    let g = draw(&mut a, &cx, 1920, 1080);
+    for k in ['p', 'l', 'g', 'u', ',', '.', 'i', 'o'] {
+        assert!(g.hits.iter().any(|h| h.ev == Event::Key(Key::Char(k))), "a button for {k}");
+    }
+    // nothing before a search
+    key(&mut a, &cx, Key::Char('i'));
+    assert!(status(&a).contains("Look for players first"), "{}", status(&a));
+    key(&mut a, &cx, Key::Char('p'));
+    settle(&mut a, &cx);
+    assert!(status(&a).contains("Found 1 player: Living Room TV"), "{}", status(&a));
+    // the player list is drawn
+    let g = draw(&mut a, &cx, 1920, 1080);
+    assert!(g.hits.len() > 5);
+    // progress says it in one line
+    key(&mut a, &cx, Key::Char('i'));
+    settle(&mut a, &cx);
+    assert_eq!(status(&a), "Living Room TV: playing 0:01:40 of 0:10:00 (16 %)");
+    // seeking moves from where the player is
+    key(&mut a, &cx, Key::Char('.'));
+    settle(&mut a, &cx);
+    key(&mut a, &cx, Key::Char(','));
+    settle(&mut a, &cx);
+    key(&mut a, &cx, Key::Char('u'));
+    settle(&mut a, &cx);
+    key(&mut a, &cx, Key::Char('o'));
+    settle(&mut a, &cx);
+    let seen = log.lock().unwrap().clone();
+    assert!(seen.contains(&"Seek 0:02:10".to_string()) && seen.contains(&"Seek 0:01:10".to_string()), "{seen:?}");
+    assert!(seen.iter().any(|l| l.starts_with("Pause")) && seen.iter().any(|l| l.starts_with("Stop")), "{seen:?}");
+    // Play opens a form naming the player and the item; submitting sends it
+    key(&mut a, &cx, Key::Char('g'));
+    let Some(Modal::Form(FormKind::Share(ShareForm::Cast(players, ids)), form)) = &mut a.modal else { panic!("the play form") };
+    assert_eq!((players.as_slice(), ids.as_slice()), (&["Living Room TV".to_string()][..], &["a0".to_string()][..]));
+    let (kind, mut form) = (ShareForm::Cast(players.clone(), ids.clone()), form.clone());
+    a.shares_submit(&cx, &kind, &mut form).unwrap();
+    settle(&mut a, &cx);
+    assert_eq!(status(&a), "Living Room TV is playing Song.");
+    assert!(log.lock().unwrap().iter().any(|l| l.starts_with("SetAVTransportURI")));
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
+    assert!(audit.contains("media.cast"));
+    iyakki_agent::upnp_cast_desk::use_net(None);
+}

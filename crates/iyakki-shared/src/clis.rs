@@ -3,7 +3,7 @@
 
 
 /// What was found for a tool that comes with the system.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SystemStatus {
     pub found: bool,
     /// `OpenSSH 9.6p1`, `Dropbear 2026.91`, or why nothing was found.
@@ -738,7 +738,7 @@ pub struct Installed {
     pub previous: Option<Previous>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Job {
     pub id: String,
     pub phase: String,

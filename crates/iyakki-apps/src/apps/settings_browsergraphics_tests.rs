@@ -205,3 +205,37 @@ fn a_big_window_needs_no_scrolling() {
     let g = draw(&mut a, &cx, 2560, 1600, 2.0);
     assert!(g.hits.iter().any(|h| h.ev == Event::Key(Key::Char('g'))), "the Graphics row is drawn at 2560x1600, with the Smooth pages switch beside the rest");
 }
+
+#[test]
+fn g_upper_turns_acceleration_off_and_on_for_the_person_and_c_for_the_computer_with_audit() {
+    let cx = admin("bgfx5");
+    let mut a = SettingsApp::new(&cx);
+    a.go_to(Tab::Browser);
+    let me = iyakki_shared::webengine::safe_name(&cx.session.user);
+    let pol = |cx: &AppCx| iyakki_shared::webaccel::load(&cx.data_dir().join("web-profile")).0;
+    assert!(pol(&cx).verdict(&me, "a.org").allowed);
+    key(&mut a, &cx, Key::Char('G'));
+    assert!(!pol(&cx).verdict(&me, "a.org").allowed);
+    assert!(status(&a).contains("off for the person"), "{}", status(&a));
+    key(&mut a, &cx, Key::Char('G'));
+    assert!(pol(&cx).verdict(&me, "a.org").allowed);
+    key(&mut a, &cx, Key::Char('C'));
+    assert!(pol(&cx).admin_off);
+    assert!(cx.audit.recent(20).iter().any(|l| l.contains("settings.browser") && l.contains("for the computer")));
+    key(&mut a, &cx, Key::Char('C'));
+    assert!(!pol(&cx).admin_off);
+}
+
+#[test]
+fn a_person_without_settings_rights_cannot_use_the_computer_switch_but_has_her_own() {
+    let mut cx = admin("bgfx6");
+    cx.session.policy.manage_settings = false;
+    let mut a = SettingsApp::new(&cx);
+    a.go_to(Tab::Browser);
+    key(&mut a, &cx, Key::Char('C'));
+    assert!(!iyakki_shared::webaccel::load(&cx.data_dir().join("web-profile")).0.admin_off);
+    assert!(status(&a).contains("administrator"), "{}", status(&a));
+    key(&mut a, &cx, Key::Char('G'));
+    let me = iyakki_shared::webengine::safe_name(&cx.session.user);
+    assert!(!iyakki_shared::webaccel::load(&cx.data_dir().join("web-profile")).0.verdict(&me, "").allowed);
+}

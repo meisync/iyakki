@@ -21,6 +21,15 @@ impl LocalHardware {
     }
 }
 
+/// What answers a first-use request for a hardware class: the core installs the lazy device broker here at start (the broker lives in
+/// `iyakki-core`, which depends on this crate). Without it every driver was loaded at boot and nothing is asked.
+static BROKER_HOOK: std::sync::OnceLock<fn(&str, &str) -> String> = std::sync::OnceLock::new();
+
+/// Install the device broker's entry point (once; a second call is ignored).
+pub fn set_device_broker(f: fn(&str, &str) -> String) {
+    let _ = BROKER_HOOK.set(f);
+}
+
 impl Hardware for LocalHardware {
     fn links(&self) -> Vec<Link> {
         iyakki_devctl::links(&self.roots)
@@ -63,6 +72,27 @@ impl Hardware for LocalHardware {
     }
     fn hardware_report(&self) -> Vec<String> {
         hardware_report_at(&self.roots.sys, &self.roots.proc_)
+    }
+    fn volume(&self, card: u32) -> Option<Volume> {
+        self.ctl.volume(card)
+    }
+    fn set_volume(&self, card: u32, percent: u32) -> Result<Volume, String> {
+        self.ctl.set_volume(card, percent)
+    }
+    fn change_volume(&self, card: u32, delta: Option<i32>) -> Result<Volume, String> {
+        self.ctl.change_volume(card, delta)
+    }
+    fn set_link(&self, name: &str, up: bool) -> Result<(), String> {
+        self.ctl.set_link(name, up)
+    }
+    fn dhcp(&self, name: &str) -> Result<(), String> {
+        self.ctl.dhcp(name)
+    }
+    fn request_class(&self, class: &str, who: &str) -> String {
+        match BROKER_HOOK.get() {
+            Some(f) => f(class, who),
+            None => "nothing to load: the drivers are loaded already".into(),
+        }
     }
 }
 

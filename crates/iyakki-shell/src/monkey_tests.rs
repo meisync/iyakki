@@ -758,26 +758,8 @@ const KNOWN_OVERFLOWS: &[(&str, &str)] = &[
 
 /// Known findings at the other window and text sizes (KNOWN-ISSUES.md KI-015): (case name, "WxH@N%").
 #[rustfmt::skip]
-/// What the ignored full matrix (every size at every text size) still finds, from the 2026-11-14 run; each is a real overflow still to fix (KI-015).
+/// What the ignored full matrix (every size at every text size) still finds, re-checked case by case on 2026-11-19; each is a real overflow still to fix (KI-015).
 const KNOWN_OVERFLOWS_MATRIX: &[(&str, &str)] = &[
-    ("skills", "360x740@85%"),
-    ("media", "360x740@85%"),
-    ("dash", "360x740@85%"),
-    ("skills", "360x740@100%"),
-    ("media", "360x740@100%"),
-    ("dash", "360x740@100%"),
-    ("radio", "360x740@125%"),
-    ("scan", "360x740@125%"),
-    ("ide", "1280x720@125%"),
-    ("camera", "800x480@125%"),
-    ("scan", "360x740@150%"),
-    ("usage", "360x740@150%"),
-    ("calendar", "360x740@150%"),
-    ("media", "360x740@150%"),
-    ("tales", "800x480@150%"),
-    ("camera", "360x740@150%"),
-    ("tales", "1280x720"),
-    ("media", "360x740@125%"),
     ];
 
 /// The name a window size and text size are listed under: "WxH" at the largest text size (the original list), "WxH@100%" otherwise.

@@ -185,7 +185,7 @@ fn the_page_switches_the_kept_arrangement_and_the_one_window_rule_and_audits_bot
     assert!(views(&cx).is_single("calendar") && views(&cx).is_single("anything"), "{}", status(&a));
     key(&mut a, &cx, Key::Char('i'));
     assert!(views(&cx).single_apps.is_empty());
-    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
     assert!(audit.contains("view.layout") && audit.contains("view.single"), "{audit}");
     let g = {
         let mut g = Gfx::new(1280, 720);
@@ -193,4 +193,59 @@ fn the_page_switches_the_kept_arrangement_and_the_one_window_rule_and_audits_bot
         g
     };
     assert!(g.text_log.iter().any(|(_, _, t)| t == "Window arrangement") && g.text_log.iter().any(|(_, _, t)| t == "One window per app"));
+}
+
+#[test]
+fn the_page_has_a_row_and_a_form_for_the_own_step_keys_and_a_bad_pair_changes_nothing() {
+    let cx = user("vw-own-keys");
+    let mut a = SettingsApp::new(&cx);
+    a.go_to(Tab::Views);
+    assert_eq!(SettingsApp::vw_rows(&cx).last(), Some(&VwRow::OwnKeys));
+    key(&mut a, &cx, Key::Char('j'));
+    assert!(a.has_modal());
+    typ(&mut a, &cx, "q");
+    key(&mut a, &cx, Key::Tab);
+    typ(&mut a, &cx, "k");
+    key(&mut a, &cx, Key::Enter);
+    assert!(a.has_modal() && views(&cx).custom_keys.is_none(), "a key the shell uses is refused and the form stays");
+    key(&mut a, &cx, Key::Esc);
+    assert!(!a.has_modal());
+    key(&mut a, &cx, Key::Char('j'));
+    typ(&mut a, &cx, "j");
+    key(&mut a, &cx, Key::Tab);
+    typ(&mut a, &cx, "k");
+    key(&mut a, &cx, Key::Enter);
+    assert!(!a.has_modal() && views(&cx).custom_keys.is_some(), "{}", status(&a));
+    assert_eq!(views(&cx).custom_keys.map(|c| (c.prev, c.next)), Some(("KeyJ".into(), "KeyK".into())));
+    let mut g = Gfx::new(1280, 720);
+    a.render(&mut g, R::new(0.0, 0.0, 1280.0, 720.0), 1.0, &cx, 0);
+    assert!(g.text_log.iter().any(|(_, _, t)| t == "Your own step keys"));
+    let audit = std::fs::read_to_string(cx.audit.path_buf()).unwrap_or_default();
+    assert!(audit.contains("view.keys"), "{audit}");
+}
+
+#[test]
+fn a_template_an_installed_bundle_brought_is_in_the_list_after_the_others_and_makes_a_view_and_a_bad_one_is_not_offered() {
+    let cx = user("vw-bundle");
+    // what the store keeps when a bundle's template member is installed (the bad one is refused by the store at install and would never be there; a damaged file is still left out)
+    let put = |id: &str, v: serde_json::Value| iyakki_shared::bundle_members::put_data_member(cx.data_dir(), "template", Some(cx.session.user.as_str()), id, &v);
+    put("study", serde_json::json!({"name": "Study room", "tiles": ["radio", "edit"]})).unwrap();
+    assert!(put("bad", serde_json::json!({"name": "Bad", "tiles": []})).is_err());
+    std::fs::write(cx.data_dir().join("bundle-members/template").join(&cx.session.user).join("torn.json"), "{ cut").unwrap();
+    let mut a = SettingsApp::new(&cx);
+    a.go_to(Tab::Views);
+    key(&mut a, &cx, Key::Char('t'));
+    for _ in 0..iyakki_shared::views::TEMPLATES.len() {
+        key(&mut a, &cx, Key::Down);
+    }
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(names(&cx), ["Main", "Study room"], "{}", status(&a));
+    assert_eq!(views(&cx).views[1].tiles, ["radio", "edit"]);
+    // the bad member is the last row that is not there: one more Down from the bundle row stays on it
+    key(&mut a, &cx, Key::Char('t'));
+    for _ in 0..iyakki_shared::views::TEMPLATES.len() + 3 {
+        key(&mut a, &cx, Key::Down);
+    }
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(names(&cx), ["Main", "Study room", "Study room 2"], "only the one good template is offered, so the last row is it");
 }

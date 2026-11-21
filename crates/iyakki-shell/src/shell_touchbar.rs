@@ -80,8 +80,8 @@ impl Shell {
         if cfg!(test) || !cfg!(target_os = "linux") {
             return false;
         }
-        let product = std::fs::read_to_string("/sys/class/dmi/id/product_name").unwrap_or_default();
-        matches!(self.tbar.cfg.touchbar.as_str(), "" | "strip") && iyakki_drivers::macboard::is_t2(&product)
+        let product = iyakki_core_local::machinefacts::product_name();
+        matches!(self.tbar.cfg.touchbar.as_str(), "" | "strip") && iyakki_core_local::driver_packs::macboard::is_t2(&product)
     }
 
     /// The firmware's keys are the Touch Bar's: give them back in the chosen mode (or the kernel's default).

@@ -84,7 +84,7 @@ pub fn arch() -> &'static str {
 }
 
 /// Hosts a download may be redirected to.
-const HOSTS: &[&str] = &["ubuntu.com", "docker.io", "docker.com", "cloudflarestorage.com", "cloudflare.docker.com"];
+const HOSTS: &[&str] = &["ubuntu.com", "docker.io", "docker.com", "cloudflarestorage.com", "cloudflare.docker.com", "deb.debian.org"];
 /// Never more than this many bytes of compressed download.
 pub const MAX_DOWNLOAD: u64 = 2 << 30;
 
@@ -291,7 +291,33 @@ pub fn oci_layers(doc: &Value) -> Result<Vec<(String, u64)>, String> {
         .collect()
 }
 
+/// The Debian archive's signed list for `r` (F-LINAPP-19): the clear-signed `InRelease` of the release's suite, checked with the pinned
+/// archive key. `key` is [`crate::linuxapps_debrelease::pinned_key`] in production; tests give their own.
+/// * `Ok(None)`: no key is pinned yet (the owner's step, D-LINAPP-19), so the list was NOT consulted, and the caller says so.
+/// * `Ok(Some(words))`: the list was fetched and its signature, window and suite were good.
+/// * `Err`: a key is pinned and the list is missing, badly signed, expired or for another suite: nothing is downloaded (fails closed).
+pub fn debian_signed_list(st: &dyn Streamer, r: &Release, key: Option<&[u8]>, now: i64) -> Result<Option<String>, String> {
+    let Some(key) = key else { return Ok(None) };
+    let suite = r.tag.strip_suffix("-slim").unwrap_or(r.tag);
+    if suite.is_empty() || !suite.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') {
+        return Err("the Debian suite name is not plain".into());
+    }
+    let url = format!("https://deb.debian.org/debian/dists/{suite}/InRelease");
+    let bytes = small(st, &url, &[], 1 << 20).map_err(|e| format!("the archive's signed list could not be fetched ({e}): nothing was downloaded"))?;
+    let list = crate::linuxapps_debrelease::verify_inrelease(key, &bytes, now).map_err(|e| format!("the archive's signed list is not good ({e}): nothing was downloaded"))?;
+    if list.codename != suite {
+        return Err(format!("the archive's signed list is for {}, not {suite}: nothing was downloaded", list.codename));
+    }
+    Ok(Some(format!("the archive's signed list ({url}, dated {}) has a good signature from the pinned Debian archive key and is in its validity window", list.date)))
+}
+
 fn fetch_debian(st: &dyn Streamer, r: &Release, dir: &Path, free: &dyn Fn(u64) -> Result<(), String>, progress: &mut dyn FnMut(u64, u64)) -> Result<(Vec<std::path::PathBuf>, Fetched), String> {
+    fetch_debian_with(st, r, dir, free, progress, crate::linuxapps_debrelease::pinned_key(), iyakki_clock::now_unix())
+}
+
+#[doc(hidden)]
+pub fn fetch_debian_with(st: &dyn Streamer, r: &Release, dir: &Path, free: &dyn Fn(u64) -> Result<(), String>, progress: &mut dyn FnMut(u64, u64), key: Option<&[u8]>, now: i64) -> Result<(Vec<std::path::PathBuf>, Fetched), String> {
+    let signed = debian_signed_list(st, r, key, now)?;
     let repo = "library/debian";
     let token_url = format!("https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull");
     let tok: Value = serde_json::from_slice(&small(st, &token_url, &[], 64 * 1024)?).map_err(|_| "the registry's token answer was not understood")?;
@@ -340,7 +366,7 @@ fn fetch_debian(st: &dyn Streamer, r: &Release, dir: &Path, free: &dyn Fn(u64) -
         }
         files.push(file);
     }
-    Ok((files, Fetched { verified: format!("manifest {manifest_digest} (tag {}, resolved by IYAKKI from registry-1.docker.io); each of the {} layer(s) hashes to the SHA-256 the manifest names; image signatures are not checked", r.tag, layers.len()), source: format!("docker.io/library/debian:{} @ {manifest_digest}", r.tag) }))
+    Ok((files, Fetched { verified: format!("manifest {manifest_digest} (tag {}, resolved by IYAKKI from registry-1.docker.io); each of the {} layer(s) hashes to the SHA-256 the manifest names; image signatures are not checked; {}", r.tag, layers.len(), signed.as_deref().unwrap_or("the Debian archive's signed list was not consulted: the archive key is not pinned yet")), source: format!("docker.io/library/debian:{} @ {manifest_digest}", r.tag) }))
 }
 
 /// Download the base of `r` into `dir` and check it. The files come back in the order they must be unpacked (Ubuntu: one tarball;

@@ -177,7 +177,6 @@ pub struct WriteReport {
 /// Write `image` to `target` (a block device, or a regular file for testing). `device_size` is the capacity of
 /// the drive when known: an image that does not fit is refused before anything is written.
 pub fn write_image(image: &Path, target: &Path, device_size: Option<u64>, patch: Option<Patch>, progress: &mut dyn FnMut(Progress)) -> Result<WriteReport, String> {
-    use std::os::unix::fs::FileTypeExt;
     let mut src = std::fs::File::open(image).map_err(|e| format!("{}: {e}", image.display()))?;
     let total = src.metadata().map_err(|e| e.to_string())?.len();
     if let Some(cap) = device_size {
@@ -186,7 +185,7 @@ pub fn write_image(image: &Path, target: &Path, device_size: Option<u64>, patch:
         }
     }
     let existing = std::fs::metadata(target).ok();
-    let is_block = existing.as_ref().is_some_and(|m| m.file_type().is_block_device());
+    let is_block = existing.is_some() && crate::posix::is_block_device(target);
     let mut dst = std::fs::OpenOptions::new().write(true).create(!is_block).truncate(!is_block && existing.is_none()).open(target).map_err(|e| format!("{}: {e}", target.display()))?;
     let (mut h, mut buf, mut done, mut since_flush, t0) = (Sha256::new(), vec![0u8; BLOCK], 0u64, 0u64, Instant::now());
     loop {

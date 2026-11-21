@@ -181,7 +181,7 @@ pub struct Catalog {
     pub sig: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CatalogSigner {
     Builtin,
     Official(String),
@@ -204,7 +204,7 @@ impl CatalogSigner {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CatalogCheck {
     pub signer: CatalogSigner,
     pub warnings: Vec<String>,
@@ -418,7 +418,7 @@ pub fn sha256_hex(b: &[u8]) -> String {
 }
 
 /// Where a catalog's files come from.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Origin {
     Builtin,
     Folder(PathBuf),
@@ -470,7 +470,7 @@ impl Origin {
 }
 
 /// One catalog as loaded, with where it came from.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Loaded {
     pub source: String,
     pub name: String,

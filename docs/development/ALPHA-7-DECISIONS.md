@@ -27,7 +27,7 @@ Each entry: id, question, options, the default that was implemented (so Impl doe
 
 * Question: the client family (EXPERIMENTAL, off by default) has two ideas beyond the picture: display-list mode (the machine sends drawing commands, not pixels) and file exchange through the page.
 * Options: (a) picture mode only; files travel through the connector's own `serve --share DIR` folder (one shared folder, read-only unless `--write`); (b) write both into the page and the engine now.
-* Default implemented: (a). The tile decoder and the picture are the only mode; the client family stays experimental. Display-list mode and a page file transfer are NOT written and stay listed as missing in F-CLIENT-01's Notes (Impl stays under 100). Phone-sized pictures are handled by the page's "Fill height" mode instead of a smaller machine screen. Rows: F-CLIENT-01.
+* Default implemented: (a) first; on 2026-11-19 the owner approved the additive display-list pair (D-CLIENT-PROTO-DISPLAYLIST) and page file transfer, both written now (CLIENT-SPLIT-DESIGN 7c and 7d). The picture stays the default mode. Older text follows: The tile decoder and the picture are the only mode; the client family stays experimental. Display-list mode and a page file transfer are NOT written and stay listed as missing in F-CLIENT-01's Notes (Impl stays under 100). Phone-sized pictures are handled by the page's "Fill height" mode instead of a smaller machine screen. Rows: F-CLIENT-01.
 
 ## D-CLIENT-02: which systems the connector targets
 
@@ -39,13 +39,19 @@ Each entry: id, question, options, the default that was implemented (so Impl doe
 
 * Question: should the client's sound be per person (needs the own mixer, docs plan T2) and compressed (Opus)?
 * Options: (a) one sound per machine that belongs to the person signed in last, 16-bit PCM about 190 KB/s; (b) per-person mixer and Opus.
-* Default implemented: (a). Lip-sync is written (the page holds each picture back by the sound's queue plus the browser's output delay, at most 150 ms). The per-person mixer waits for the own-mixer work; Opus is not written (the repository carries no encoder, and an in-house one is out of scope). Rows: F-CLIENT-03.
+* Default implemented: (a) stays the default; the per-person mixer (option b without Opus) is written since 2026-11-19 and switched on by the person (chat tool `client_sound_mode`), see CLIENT-SPLIT-DESIGN 7e. Opus is not written: an in-house encoder is several thousand lines and the repository has no encoder to check it against. Lip-sync is written (the page holds each picture back by the sound's queue plus the browser's output delay, at most 150 ms). The per-person mixer waits for the own-mixer work; Opus is not written (the repository carries no encoder, and an in-house one is out of scope). Rows: F-CLIENT-03.
 
 ## D-CLIENT-04: the client clipboard carries text only
 
 * Question: should images and rich text cross the client clipboard as the older browser-as-hardware path does?
 * Options: (a) text only, at most 64 KB, one press per use; (b) add PNG and HTML.
 * Default implemented: (a): a smaller surface for a feature that moves the person's data across a trust boundary. The older path keeps its images and HTML. Rows: F-CLIENT-04.
+
+## D-CLIENT-TENANT: client sessions in a cloud tenant
+
+* Question (CLIENT-SPLIT-DESIGN section 8, question 4): in a cloud instance, who makes the link for a device?
+* Options: (a) each person makes links for their own devices, a device belongs to that person; (b) the tenant administrator makes them for the tenant.
+* Default implemented: (a), one pod per tenant. `ClientEndpoint::with_tenant` (the shell gate sets it from `IYAKKI_TENANT`) names the tenant in every audit line and refuses another person's sign-in on a device (`role_denied`); links and devices live in the tenant's own data folder, so another tenant never knows them. A machine that is not a tenant keeps the old rule. Rows: F-CORE-30.
 
 ## D-ROUTER-13: how a router strategy plugin reaches the store
 
@@ -256,6 +262,7 @@ Default implemented: namespace `app-<id>` on the managed k3s, ResourceQuota 10 p
 - Why: the profile of 2026-11-16 showed the cost was repeated painting, fixed by F-SHELL-66 (28.7 ms to 7.4 ms on the AMD host); a recording layer for `Gfx` would touch every draw call.
 - Options: (a) not built; look again only if the Mac mini, measured with the same harness, is still over 16.7 ms after F-SHELL-66 (default); (b) build the recording layer now.
 - Default: (a). The row stays at Impl 0 and says why; nothing is deprecated.
+- 2026-11-18 (lane d1): the lane brief asked for (b), so it is built, default OFF (Look key `parallel_draw`). Row F-SHELL-64 is Impl 100; the Mac mini measurement stays open. Owner can still pick (a) in effect by leaving the key off.
 
 ## D-A11Y-LINT-STRICT (F-A11Y-06): when the store refuses a tile with unnamed parts
 
@@ -388,3 +395,554 @@ Default implemented: namespace `app-<id>` on the managed k3s, ResourceQuota 10 p
 - Why: the route to the VPN server and the server's idea of this computer's address go stale when the Wi-Fi changes or the computer sleeps.
 - Options: (a) rebuild the tunnel at once (all pieces taken away, the guard of a kill-switch or fail-closed profile kept, then the normal connect) when the default interface or gateway differs from the one the tunnel was built on, or when two looks at the tunnel are more than 120 seconds apart (written: `Manager::roamed_or_resumed`); (b) only wait for the handshake to go stale (180 seconds).
 - Default: (a). The cost of a needless rebuild is a second of reconnecting; the cost of waiting is minutes without the tunnel.
+
+## D-BROTLI-DATA (F-BROX-19): where the Brotli static dictionary and its transform tables come from
+
+- Why: the decoder for WOFF2 web fonts needs the 122,784-byte static dictionary, the 121 word transforms and the context look-up table of RFC 7932. They are data of the standard that cannot be derived from a formula and are not worth typing from memory (one wrong byte breaks the dictionary words of real fonts).
+- Options: (a) read them out of the system's Brotli library (MIT licence, Copyright the Brotli Authors) with a script that is in the repository, keep the data files with a licence row and the MIT text; (b) wait for a person to enter them from the RFC's appendices; (c) leave WOFF2 out and keep the common WOFF 1.0.
+- Default: (a). MIT is permissive, no code of the library is copied (the decoder is written here), the dictionary file is checked in the tests against the hash of the standard's, and `legal/assets.txt`, the notices and `legal/extra-licences/brotli-reference/LICENSE` carry the notice.
+## D-DRIVERS-15 (F-DRIVERS-15): keep or deprecate the optional `macweb` image variant
+
+- Why: the variant is written (`build.sh macweb`, fragment, kernel gate) but never built or booted; the web image may already serve the Intel Macs. Rows are never deprecated by an agent.
+- Options: (a) keep it as an optional variant, built only on request, never part of the default release, Haswell on software rendering (llvmpipe, said in words), Mesa's crocus only by the explicit `WEB_CROCUS=1`; (b) deprecate it in favour of the web image; (c) make it a default release image.
+- Default: (a). Nothing changes for the default images; the row counts the code that exists and the first build and boot stay Test/Manual. The owner may choose (b) later; the code is then removed in one commit.
+
+## D-MODPACK-URL (F-PKG-11): where the optional kernel-module pack is downloaded from
+
+- Why: the optional modules leave the image and come back by the person's click; the address is the owner's to publish.
+- Options: (a) no address in the code; the person (or the owner's channel setting) names it and the manifest in the image checks every file by size and SHA-256 (`iyakki_drivers::modpack::install`); (b) a fixed official address.
+- Default: (a). Nothing is fetched until an address is set; a file that does not match the manifest is never written.
+## D-RAG-17: refreshing kept web pages by itself (lane w5)
+
+* Question: may the device read the web again on a timer, while nobody is typing, to refresh the pages a person kept?
+* Options: (a) never by itself: only the person's or the assistant's call (today); (b) a switch per collection, off by default, runs only while the person is signed in, at most once a day, never more than the 20 pages and the account's request budget of one manual refresh, one audit line, a card that says so when the switch is turned on; (c) always on.
+* Default chosen: (a) stays in force. (b) is the design to build when the owner agrees; it needs a facet call for the refresh and a shell tick like the backup schedule. Not built in alpha.7. Rows: F-RAG-17.
+
+## D-BACKUP-SCHED: the schedule may write to a share and run incremental chains (lane w5)
+
+* Question: how does the scheduled backup use a network share and incremental files?
+* Options: (a) the schedule names the share address and a credentials FILE the person made (the password is never in the settings or the mount line), and `full_every` N: a full file, then links until the chain holds N files, then a new full file; old chains are removed whole beyond `keep`; (b) a vault entry for the credentials (D-BACKUP-04's first default).
+* Default implemented: (a). Rows: F-BACKUP-04, F-BACKUP-06.
+
+## D-LAUNCH-25-MENU (F-LAUNCH-25, lane d4): how a Look's menu list applies to the IYAKKI menu
+
+* Question: the Look's menu list names Home, Apps, Files, Chat, Settings, Lock, Sign out, Power; the shell's menu has other entries (About, Quick install, Media, Linux apps, Mac drivers, Developer mode, Cloud).
+* Options: (a) a Look with a menu of its own adds the seven actions beside the machine's entries, ordered by the Look, Settings in the Look's place; the default list changes nothing; (b) replace the machine's entries by the Look's; (c) never apply.
+* Default implemented: (a). The machine's own entries are never hidden by a Look; the essentials stay in every list.
+
+## D-SDK-204-CAPTIVE (F-SDK-204): captive portal events
+
+* Question: may the event tick probe the network for a sign-in page?
+* Options: (a) no traffic of its own: tell it only from the check the person chose to run (a check address in Settings -> Network); (b) probe on a timer.
+* Default implemented: (a). `connectivity.changed state=captive_portal` is told only on machines where that check runs.
+
+## D-SDK-205-PLACE (F-SDK-205): what "a new place" is for a vault unlock
+
+* Question: the vault has no client address at unlock.
+* Options: (a) the place is the network the machine is on (default route interface and gateway), kept hashed per person; (b) the paired device that asked; (c) a GPS or Wi-Fi name.
+* Default implemented: (a): counts only, 32 newest places kept, first unlock only records.
+
+## D-GEMVOICE-40-NAMING (F-GEMVOICE-40, lane d4): how a spoken request names an open tile
+
+* Question: a voice session has no open project, flow, dashboard or task list; how does a spoken request name the thing it means?
+* Options: (a) the project opened last in the IDE and the flow open last in FLOWS (the rule the CHAT tile already follows for a flow), only for accounts that may run commands; the dashboard and task tools stay out; (b) the person says the name and a tool binds it for the session; (c) none by voice.
+* Default implemented: (a). Same grants and approval cards as the chat; every change still asks.
+
+## D-GEMVOICE-08-HOLD (F-GEMVOICE-08, lane d4): press-to-talk release
+
+* Question: what does letting go of the start key mean?
+* Options: (a) a key kept down about half a second after it started the session is press-to-talk: the release hands the turn over; a tap starts a session that stays open; (b) every release hands over; (c) no release event.
+* Default implemented: (a).
+
+## D-VOICE-43-CLIENT-ID (F-VOICE-43, lane d4): where the Alexa client id lives
+
+* Question: the AVS client id and product id belong to the owner's registered product (Amazon no longer opens AVS to new products).
+* Options: (a) a file `alexa-avs.json` in the data folder, written by the owner on the machine; no file, no Alexa; (b) built into the image; (c) a vault entry.
+* Default implemented: (a), failing closed with a sentence (`avs_h2::NO_CLIENT_ID`). No id is in the code and nothing is dialled without one.
+
+## D-VOICE-61-SEAM (F-VOICE-61, lane d4): the shared crate between the agent and the connector
+
+* Question: the connector crate must not depend on the agent, yet both run the device end of the cloud sound stream.
+* Options: (a) a small crate `iyakki-audiolink` (frames, pinned TLS link, consent gate, uplink, device loop, certificate offer, `Mic` trait) that both use; (b) copy the code into the connector; (c) make the connector depend on the agent.
+* Default implemented: (a). `iyakki-shared::wakelisten::Mic` is a re-export of the crate's trait.
+## D-4KN-BIOS update (lane d3, 2026-11-18)
+
+* The default (a) stays: without the 4096-byte-sector boot code file the planner refuses `--bios` on 4Kn disks in plain words. The byte handling for the day the file exists is written (`iyakki_usb::bios4kn`); the contract for the boot code is its end marker `IYAKKI-4K-BOOT\x01\0`. Rows: F-INST-29.
+## D-AAC-ADDON: AAC through the person's ffmpeg add-on (F-RADIO-12, F-RADIO-16, F-NET-29)
+
+* Question: owner direction 2026-11-19 on D-RADIO-AAC.
+* Chosen: option (a). AAC (radio and Bluetooth) is decoded and encoded by the ffmpeg of the audio and video add-on, which the person installs at their click (LICENSING.md items 10 and 11). No in-house AAC decoder or encoder, no codebook tables typed in, no aptX (patents and the licence rule).
+* In-house only what needs no tables: stream detection (ADTS, LATM), the choice between in-house decoders and the add-on, the plain message when neither can decode, the A2DP AAC capability bytes, LATM and ADTS framing.
+* Bluetooth: the sink offers an AAC endpoint only when the add-on is installed; the source picks AAC only when the add-on is installed and the headphones offer it, else SBC. Without the add-on the Settings line says so. The ffmpeg process starts with fixed arguments and no shell, only when a stream is started (every start asks as before, nothing starts by itself).
+* Rows: F-RADIO-12, F-RADIO-16, F-NET-29 re-scoped (ids kept, history in Notes).
+
+## D-BROW-PLUGIN-CAP (F-BROW-90): when the person is asked about a browser plug-in
+
+- Why: the extensions plan marks `web.content.script` as a hard ask (a card at every use). A person's own script on a site they named has no use at which a card could appear: it runs while the page loads.
+- Options: (a) the card is shown when the plug-in is added and again when it is switched on (both are chat tools that ask), and the catalogue entry is an ordinary one held by the signed built-in `browser-plugins` through the table; (b) a card at every page load that matches.
+- Default: (a). Plug-ins are off when added, none exist by default, and every change is audited. A store-installed plug-in package from another author is a different case and would be a hard ask when that path is built.
+
+## D-GPU-02: the ROCm images are the owner's to pin (lane d5)
+
+* Question: which images does the `gpu-rocm` Quick install entry pull (AMD's device plugin, a ROCm test image, optionally the ROCm build of Ollama)?
+* Options: (a) none in the code: the entry stops with a plain message and changes nothing until the owner puts digests in `iyakki_shared::gpu_rocm` after a test on a real AMD card; (b) float on tags (refused: a tag can be moved).
+* Default implemented: (a). The step, the patches, the uninstall and the page are written; only the three constants are empty. Rows: F-GPU-02.
+
+## D-LINAPP-15: the builder image of the on-device image builder is the owner's to pin (lane d5)
+
+* Question: which builder image (buildah or similar) does `image_build` run, and which Linux capabilities does its job get?
+* Options: (a) none shipped: `BUILDER_IMAGE` stays empty and an administrator sets one by digest with `image_builder_set` (asks every time); builds refuse in plain words until then; (b) ship a default pin chosen by the owner after a test on a real cluster.
+* Default implemented: (a). The capability list in the job (drop ALL, add CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SETFCAP, KILL) is still a guess that a real cluster has to confirm (KI-851). Rows: F-LINAPP-15.
+
+## D-TCFG-10: the cloud profile offers k8s_apply_yaml through the team's deploy rules (lane d5)
+
+* Question: may a cloud caller change a cluster with `k8s_apply_yaml`, and under whose rules?
+* Options: (a) not at all in the cloud profile (the tool stays on the desktop); (b) offered, asks on a card every time, a cluster bound to a team environment goes through `PerTeamGate` (approval request, one-apply spend, audit) judged by the caller's own role in that team, and a cluster with no binding is left to the card.
+* Default implemented: (b). The reviewed tool list of the cloud profile gains exactly this one name. Rows: F-TCFG-10.
+
+## D-VPN-1b (F-VPN-06): where the setting `vpn.openvpn_download` lives (x6, 2026-11-19)
+Question: Settings has no key-value store; where does the address and checksum of D-VPN-1 (a) go? Options: (a) a new field in `settings.json`; (b) a small file `cli/sources.json` next to the programs it names, changed by an administrator-only chat tool that asks each time. Default: (b): `<https address> <sha256>`, https only, the download stays on that host, a mismatch deletes the file, empty or damaged means no download. Implemented; the owner may still supply the real address and checksum.
+
+## D-NET-07-ADAPTER (F-NET-07): where the chosen WiFi adapter is kept (x6, 2026-11-19)
+Question: with two WiFi adapters, who chooses and where is it kept? Options: (a) always the first; (b) a setting in `settings.json`; (c) a line in `wifi-adapter.txt` beside the saved networks, read by the page and the chat tools alike. Default: (c): the Network page key `v` and the tool `wifi_adapter_set` (asks) write it; a name that is gone falls back to the first adapter; the hotspot's own interface is never offered. The sign-in page opens only on key `o` (or the person's own request) and only for an http(s) address the sign-in check found; the check address itself stays the person's choice (`wifi-probe.txt`, no default, nothing sent without it).
+## D-SPLIT-03-X1: member stores reach the shell as trait objects one at a time; the zone travels as data (lane x1)
+
+* Question: how does the shell stop holding concrete stores so it can run over the socket, and how do zone-taking store methods cross it?
+* Options: (a) one store per commit, `ServicesHandle::<store>()` returns `Arc<dyn XApi>`, the generator keeps the zone-taking methods and `iyakki_clock::Zone` derives serde; (b) leave the zone-taking methods inherent (the shell then keeps the concrete store); (c) change `CalendarStore` parameters of the study functions at once.
+* Default implemented: (a) for usage, secret requests, device watch (with the inbox). Calendar and study wait for (c): the study functions take `&CalendarStore`, so they move together. Rows: F-SPLIT-03.
+## D-4KN-BIOS update 2 (lane x5, 2026-11-19)
+
+* The default (a) stays fail-closed: `--bios` on a 4096-byte-sector disk is refused unless the person passes `--bios-4k-boot-code`. The boot code now exists in the repository (`dist/boot4k/boot4k.S`, built by LLVM's assembler, permissive licence) and `--bios-4k-boot-code builtin` selects it; no default picks it. Whether it starts a real machine is unproven until a BIOS (CSM) boots it on a 4096-byte-sector disk. Rows: F-INST-29.
+## D-CLIENT-05-A (lane l2, 2026-11-19)
+
+* Question: the row asks the Cameras tile to take an EXCLUSIVE hold when it records. The recorder reads network cameras only, and its one capture is shared with every viewer.
+* Options: (a) exclusive hold (shuts remote clients out of a recorded camera); (b) shared local hold named Recorder (shows who looks, keeps viewing).
+* Default implemented: (b), in `camrec::run_worker`. Exclusive stays for programs that need the device alone (`Hub::hold_local`). Rows: F-CLIENT-05.
+## D-VOICE-38-A (lane l2, 2026-11-19)
+
+* Question: how does the cloud machine tell a connector where its audio listener is?
+* Options: (a) a settings field; (b) the environment variable `IYAKKI_VOICE_AUDIO_ADDR` (`host:port`), read when the first offer is asked; (c) derive it from the web address.
+* Default implemented: (b). With no address, or with the switch off, there is no offer and nothing listens (fail closed). The certificate is made for this link alone and offered only inside the signed-in call. Rows: F-VOICE-38, F-VOICE-61.
+
+## D-BROXY-AUTH: where a browser proxy's name and password live (lane 4)
+
+* Question: the browser proxy setting (F-BROX-22) can reach an HTTP proxy; a proxy may want a sign-in. Where is that secret kept?
+* Options: (a) not stored: the setting is `host:port` only and a text with a sign-in is refused in words; (b) in the person's vault, read by the shell when the browser starts; (c) in a 0600 file next to the setting.
+* Default implemented: (a). A secret is never typed into the chat and never kept in a plain file; the proxy client code (`iyakki-proxy`) already sends a Basic sign-in when given one, so (b) is a settings-screen and vault change only. Rows: F-BROX-22.
+
+## D-BPKG-SOURCE: where the optional browser package is fetched from (lane 4)
+
+* Question: from which address does `browser_package_install` download the engine, now that the official store address is empty?
+* Options: (a) only from a store source the person configured with a pinned key (https), at `<store>/browser/<arch>/manifest.json` and `webview-helper`; (b) a built-in address; (c) any address the person types.
+* Default implemented: (a). With no pinned store the tool says so in words and installs nothing; the signed description, size and checksum are checked as before. Rows: F-BROW-40.
+
+## D-BADSITES-SOURCE: where the known-bad site list comes from (lane 4)
+
+* Question: which malware list does the browser check, and who updates it?
+* Options: (a) none shipped; the person's own list, with `browser_badsites_download` fetching the suggested URLhaus host list or any https address only when the person asks (already written); (b) ship a list in the image; (c) the project hosts a list and the browser fetches it on a schedule.
+* Default implemented: (a). Nothing is shipped or fetched in the background. Rows: F-BROW-98.
+
+## D-QA-05-ZSTD (F-QA-05, lane l5, 2026-11-19): the image scan opens a `.zst` by itself
+
+- Why: the gate depended on the build machine's `zstd` program, and `iyakki-relcheck` had no dependency at all. The owner's rule is in-house code or permissive licences.
+- Options: (a) add the pure-Rust `ruzstd` (MIT, already a dependency of the archive, update and delta code) to `iyakki-relcheck`; (b) write a zstd decoder in this crate (about 1,500 lines of Huffman and FSE code that would repeat what ruzstd already does and is tested for); (c) keep the build host's `zstd`.
+- Default: (a). `iyakki-relcheck` now has exactly one dependency; the lock file records it; the gate script uses `iyakki-relcheck unzstd` for its home-folder check, so no zstd program is needed. Nothing is written to disk while scanning.
+
+## D-WIN-WRITER-SWITCH (F-PKG-07, F-PKG-08, F-INST-12, lane l5, 2026-11-19): the Windows writer program is wired, fail closed
+
+- Why: D-WIN-WRITER-UNRUN (default a) left the Windows calls unjoined because the crate did not build for Windows. The owner's lane brief asks for the portability pass; the standard `x86_64-pc-windows-gnu` Rust target is installed on the development PC only (official toolchain, `rustup target add`).
+- Options: (a) cfg-gate the Unix-only parts (`cfg(unix)` with small portable stand-ins) so the planner and writer crates compile for Windows, and join the existing Win32 steps to the program and the window; (b) leave the crate Unix-only.
+- Default: (a), with these fail-closed rules: Windows writes only a ready image (ISO or disk image) to a drive named with `--erase`; the install layout (partitions) and applying a plan file are refused on Windows until the planner's Windows writer exists (F-INST-12); "am I root" is false there, the Win32 steps check elevation themselves and the program starts itself again through the UAC prompt once. Nothing ran on a Windows machine; Manual stays `needed`.
+
+## D-MACOS-PLANNER-WRITE (F-INST-12, lane l5, 2026-11-19): how the planner writes on a Mac
+
+- Why: a Mac's raw device `/dev/rdiskN` accepts only whole-sector transfers; the planner writes smaller pieces. A Mac also keeps APFS volumes in synthesized containers that stay mounted when only the physical disk is unmounted.
+- Options: (a) write through the buffered block device `/dev/diskN` and unmount the APFS containers of the target first (never forced); (b) a sector-aligned adapter over the raw device; (c) keep the planner Linux-only.
+- Default: (a). Only external physical disks are listed (the internal drive and virtual disks are never targets); a busy volume stops the install before anything is written. Not run on a Mac with a spare external disk.
+
+## D-UKI-STUB (F-BOOT-02, lane l5, 2026-11-19): the stub of the unified kernel image
+
+- Why: a unified kernel image needs a stub (the program that starts the kernel from its own sections). Choosing and building it is a boot-path decision and nothing here may boot a real machine.
+- Options: (a) write the section writer and the signing step in-house and take the stub as an input (`IYAKKI_UKI_STUB`), building a unified image only when one is named; (b) pick systemd-stub (LGPL) as the default; (c) make our own loader the stub now.
+- Default: (a). GRUB stays the default way in; without `IYAKKI_UKI_STUB` the images are built exactly as before. The stub choice and a QEMU/OVMF boot of the result are open.
+
+## D-LUKS2-EXPORT-PASSWORD (F-STORE-05, lane l5, 2026-11-19): who types what for a LUKS2 export
+
+- Why: the volume key lives only inside `iyakki-enchome` and must never reach the model, a log or an argument; the export also needs a password for the new LUKS2 header.
+- Options: (a) the new LUKS2 passphrase is the person's own home password, typed into the existing masked form on the person's screen (the chat tool only asks for the form); the recovery key and the administrator slot are not carried over; (b) a separate export password typed twice; (c) a chat argument (refused: secrets never pass through the model).
+- Default: (a). The export is only made from a LOCKED home (an open home's blocks are changing), never overwrites a file, is mode 0600, and is read back (the header must give the same key, every payload byte must match) before it counts; a failed export deletes its partial file.
+
+## D-BIOS-CHAT (F-INST-13, F-INST-29, lane l5, 2026-11-19): the chat tools for a legacy BIOS install
+
+- Why: the installer chat tools only shrank partitions; `--bios` with `--bios-4k-boot-code builtin` had no chat route.
+- Options: (a) `install_bios_plan` (free, administrators, writes nothing) and `install_bios` (a hard ask: the plan on the card every time, the drive's name typed again as `confirm`, no standing allow, never Auto), both through the installer's own planner and writer, free-space mode only, the old boot code saved first; (b) a tool that picks the disk itself.
+- Default: (a). The disk is always named by the person; the 4096-byte-sector boot code is passed only as `builtin` and is used only when the disk's sectors are 4096 bytes (the planner refuses otherwise or without a BIOS boot partition).
+
+## D-UPD-OFFICIAL-KEY (F-UPD-01, lane l5, 2026-11-19): the official update key and channel address
+
+- Why: the official release key and channel address are the owner's (key ceremony, hosting).
+- Options: (a) no official address and no key compiled in: the update centre uses the release key the build has (the same one that signs the downloads manifest); with none, an update file or address is refused; the address is typed by the administrator (Settings -> System update -> Download update, or `updates_bundle_fetch`) and asks every time; (b) a fixed official address.
+- Default: (a) (this is how the code behaves today). Nothing is fetched until the owner publishes a key and an address.
+
+## D-SIDE-VS-LEAN (F-BOOT-25, lane l5, 2026-11-19): the side image and the fast start both shorten the wait at the logo
+
+- Why: the plan of a side image (big parts on the boot volume read by Linux's own USB driver) and the existing fast start (`boot/initrd-lean`, `boot/root.sfs`, docs/BOOT-SPEED.md) attack the same 20-second wait. Having both doubles the image steps (two cpios).
+- Options: (a) keep the fast start as the way and the early side-image mount as an opt-in device side (`iyakki.side=1`, nothing sets it), build nothing more until a Mac measurement shows the fast start is not enough; (b) finish the side image (image split, GRUB switch, kernel squashfs/zstd, installer size) and retire the fast start; (c) delete the side-image code.
+- Default: (a). The code is behind a command-line option no entry sets, so no image changes. The owner decides between (b) and (c) after the first measured Mac boot with the fast start.
+
+## D-HOTSPOT-15: Bluetooth sharing is served in user space; no kernel BNEP, and pairing is a short visible window (lane l6)
+
+* Question: does letting phones connect over Bluetooth need the kernel's BNEP (`CONFIG_BT_BNEP`, bridge) and a pairing screen on the sharing page?
+* Options: (a) no kernel option: the server is our own code (L2CAP listener on PSM 15, the BNEP set-up and a learning bridge in `iyakki-devctl::nap_server`, a TAP interface `iyaknap0` handed to the sharing manager as one downstream port), and pairing is phone-initiated: when sharing starts the controller is made connectable with the "no input, no output" capability and visible for 180 seconds, then it is hidden again; (b) the kernel's BNEP with a bridge and `BNEPCONNADD`.
+* Default implemented: (a). It needs no kernel change (TUN is already there for the client side), keeps phones isolated from each other in our own bridge (and by the firewall table), and the visible window closes by itself. Rows: F-HOTSPOT-15.
+
+## D-HOTSPOT-22 default (a) taken: plain SAE, no hash-to-element (lane l6)
+
+* Question: does the computer's SAE exchange offer the hash-to-element variant (status 126, a different password-element derivation)?
+* Options: (a) plain SAE only (the hunting-and-pecking element, 40 fixed rounds, group 19): the beacon announces SAE without the H2E selector, a station that insists on H2E is refused by the exchange itself; (b) add hash-to-element beside it.
+* Default implemented: (a). Every phone and laptop that does WPA3 also does plain SAE. Rows: F-HOTSPOT-22, F-HOTSPOT-18.
+
+## D-MEDIA-YTDLP update (lane l6): the Setup card is data until the owner adds the pin row
+
+* Question: how does the Store -> Setup card for the video-site downloader exist before the owner's pin row does? A Quick install item with no row in `legal/downloads.txt` fails `tests/licence_gate.rs`.
+* Options: (a) the card is built by `ytdlp::card` (licence, licence text, vendor address, pinned version, short checksum, state) and shown wherever the person is asked (the approval card of `ytdlp_install`, `ytdlp_status`), with no button and a plain "not available yet" while there is no pin; the Setup list entry is added by the human step together with the row; (b) a Setup entry now, with a licence row without a checksum (refused: the gate and the rule that nothing floats).
+* Default implemented: (a). Finished downloads go to the person's video folder and into the media index (`ytdlp::Library`). Rows: F-MEDIA-12.
+
+## D-DATASCI-RUN-ARGV: the toolkit's Python runs isolated and finds its packages by a start-up line (lane l6)
+
+* Question: the plan's run line uses `python3 -I` with `PYTHONPATH`, but isolated mode ignores `PYTHONPATH`. Which wins?
+* Options: (a) keep `-I -B` and put the packages folder on the path with a fixed `-c` start-up (`sys.path.insert(0, '/opt/datasci/site')`, then `runpy.run_path` of the script in the work folder); (b) drop `-I` for `-s -B` and use `PYTHONPATH`.
+* Default implemented: (a), so a stray environment variable or a user site folder can never change what the toolkit imports. No network (`--net off`), the toolkit read-only, one writable scratch folder, 1024 MB, 200 % of a processor, 64 processes, 512 MB of temporary space, the system-call filter on. Rows: F-FLOW-31.
+
+## Pins filled by the owner's directive (2026-11-19, lane r2)
+
+The owner said "address them"; each value below was read from the vendor's official HTTPS source on 2026-11-19 and nothing was invented.
+
+* D-GPU-02: three ROCm digests pinned in `iyakki_shared::gpu_rocm` (Docker Hub registry v2 manifests API; the body hash was recomputed). Tags: `rocm/k8s-device-plugin:1.31.0.12`, `rocm/rocm-terminal:6.4`, `ollama/ollama:0.40.16-rocm`.
+* D-MEDIA-YTDLP: row `yt-dlp` added (release 2026.10.26, SHA-256 from the GPG-signed SHA2-256SUMS, signature verified).
+* D-LINAPP-19: Debian 12 and 13 archive keys pinned in `legal/debian-archive-pgp.asc` (two official sources, byte-identical). Release image digests are still not pinned.
+* D-DATASCI-PINS: table filled for x86_64 glibc (python-build-standalone SHA256SUMS; PyPI JSON digests). aarch64 still empty.
+* D-VPN-1: NOT filled. The five projects publish source tarballs only; the downloader needs a runnable program, so the setting stays the pin.
+* Signed downloads manifest items (aws-cli, gcloud, esptool, ...): NOT filled; editing the manifest needs the owner's signing key (`dlmanifest sign`).
+
+## D-SPLIT-03-SECRETS: the plain value of a secret never crosses the core socket (lane 1, 2026-11-19)
+
+* Question: the `Secrets` store has `resolve(reference, user_vault)` that returns the plain value. May that be part of the trait object (`SecretsApi`) that the shell holds and that a remote UI would call over the core socket?
+* Options: (a) put `resolve` in the trait (a remote UI could then read every key the core can; with the socket's `rpc` switch on that is a plain-text secret on a socket); (b) the trait carries only what does not hand out a value (`has_ref`, `test_provider`, `set_providers`, the unlocked flags); the screens that need the value (a key sent in a request header, a token for a mesh client) run in the core's process, not in a remote UI; (c) never move the secrets store.
+* Default implemented: (b). `Secrets::has_ref` is new; `ServicesHandle::secrets_api()` returns `Arc<dyn SecretsApi>` and the key-present checks, the provider test and the provider list use it; `ServicesHandle::secrets()` (the concrete store with `resolve`) stays for the in-process value callers (Gemini calls, story, agents, mesh, model host) until they become core-side jobs, and a test keeps `resolve`, `Zeroizing` and any `String` return out of `SecretsApi`. Rows: F-SPLIT-03.
+
+## D-SHARE-07-PUBLISH (F-SHARE-07): publishing a share under a name
+
+* Question: what does the one-step "publish this share under a name" do, and for whom?
+* Options: (a) administrators only: one card adds a domain route `NAME.local -> share port` (plain http, route access public because the share asks for its own link or password); a share for this computer only is refused; (b) any person, through their own routes; (c) also allow this-computer-only shares behind the route's member sign-in.
+* Default implemented: (a), as the chat tool `share_publish`. HTTPS and the certificate stay with the domain listener (Settings -> Domains). Rows: F-SHARE-07.
+
+## D-SDK-217-LIMIT (F-SDK-217): who may give an app grant a time limit
+
+* Question: who sets a time limit on an app's grant and how long may it be?
+* Options: (a) administrators, 1 hour to 366 days, only shortening what was approved (never granting), written into the approval's `ends` map; (b) any person for their own apps.
+* Default implemented: (a): `apps_access_limit` (asks) and Settings -> Apps access `e`. Rows: F-SDK-217.
+
+## D-SDK-34-02 (F-SDK-34): how the shell sends a pinch
+
+* Question: does the pinch replace the Ctrl+plus/minus keys of the two-finger gesture?
+* Options: (a) beside them: the keys stay for apps (PDF viewer), the pinch event goes to a WASM tile of ABI 3 only; (b) replace the keys for every app.
+* Default implemented: (a); older tiles hear nothing. Rows: F-SDK-34.
+
+## D-WEB-56-SECRETS (F-WEB-56): secrets in the Web Settings tile
+
+* Question: may a person type a password, key or passphrase into a form of the Settings tile in the browser?
+* Options: (a) yes, over the tile's service call, never audited; (b) no: forms take the NAME of a vault entry (made with `vault_request`), as the tools themselves do; changing the account password and unlocking the vault stay on the Settings page and the chat tools.
+* Default implemented: (b). The Wi-Fi form has a "vault entry" field, never a password field; the tile says so on every form. Rows: F-WEB-56.
+
+## D-WEB-53-PICTURE (F-WEB-53): what a picture attached in the Web Chat tile becomes
+
+* Question: the run API has no image channel. What does the model get when a person attaches a picture?
+* Options: (a) the text the in-house recogniser reads in it, as marked data (the model never sees pixels); (b) the pixels, to models that accept images, through a new image channel in the run API and the model providers.
+* Default implemented: (a), for PNG files in the person's own folders (2 MiB, 4 megapixels). (b) needs the run API and every provider changed and is not started. Rows: F-WEB-53.
+## D-SDK-167-02 (F-SDK-167): absolute camera moves and when the move buttons appear
+
+* Question: how is "go to a place" expressed across cameras, and does a camera list wait for the camera to be asked?
+* Options: (a) `PtzCommand::Absolute` in the camera's own normalised range (pan and tilt -1 to 1, zoom 0 to 1; values outside are brought into it), asks like every move; the list asks each unasked network camera in a background thread, once per run, so the buttons are there at the next look; (b) a physical unit (degrees); (c) the list waits for the answer.
+* Default implemented: (a). A camera that does not answer is asked again by the next command, not by every list. Rows: F-SDK-167.
+
+## D-SDK-30-02 (F-SDK-30): the dock of a display other than the primary one
+
+* Question: what does a second display show of the dock?
+* Options: (a) the person's own choice for that display through the core (bottom, left, right), none until chosen (decision 2026-11-15), the same pinned apps, no magnify and no autohide there; an icon press makes the display the working one and opens the app in its pane; (b) mirror the primary dock.
+* Default implemented: (a). Rows: F-SDK-30.
+
+## D-SDK-14-02 (F-SDK-14): the box of an element by id
+
+* Question: where does a viewer go that an app mounted on an element of its page by id?
+* Options: (a) the page is built with the asked ids marked (start and end marks, no change for a page that asks nothing); the layout reports each box and keeps the pixel height the page gave an element (an empty placeholder keeps its room); (b) every element with an id is recorded always.
+* Default implemented: (a). Rows: F-SDK-14.
+
+## D-HOTSPOT-SW-RUNNER: how the SAE and software-handshake path joins the hotspot manager (lane l6)
+
+* Question: `wifi_ap::start` refused a card that leaves authentication, association, SAE and the four-way handshake to the computer (`ApMode::Software`), so the SAE path (`SaeAp`, `hotspot_sae`) had no shipped caller. The radio test loop `hotspot_radio` owns its own interface address and DHCP. How does the manager start the path, and who owns the address and DHCP?
+* Options: (a) a runner like `wifi_ap_host` (`wifi_ap_sw`: a thread started after the access point is up, ended with it) that owns only the radio side; the frame handling is one shared module (`softap`) that the test loop uses too; the interface address, DHCP, DNS and the firewall stay the sharing manager's, exactly as for the other two card kinds; (b) the manager calls `hotspot_radio::run`, which brings its own address and DHCP (two DHCP servers and two owners of the address on one interface, no firewall zone); (c) a new combined runner with its own address handling beside the manager's.
+* Default implemented: (a). One owner for the address and DHCP (the manager); one copy of the frame code (`softap`: open authentication, SAE, association, four-way handshake, the checks of the SAE station's RSN element); the test loop keeps its own address and DHCP only because it runs without a manager. Security follows the person's setting as is (`software_security`: WPA2, WPA2/WPA3, WPA3 only); a station that insists on hash-to-element is refused (D-HOTSPOT-22 default (a)). A card with several wanted settings or a restart on another channel ends the runner first and begins it again (the keys are dropped by the restart). Known and left for the card run: the access point start does not yet name the SAE key management or protected management frames to the kernel, and the integrity group key is not installed into the kernel (the handshake delivers it to the station; frame protection in the kernel is hardware proof work). No hardware proof is claimed. Rows: F-HOTSPOT-22, F-HOTSPOT-18.
+
+## D-SPLIT-07-PUSH (F-SPLIT-07, lane impl-S1, 2026-11-19): pushed settings changes and the pairing step on the UI socket
+
+* Question: what are "pushed events" and "the pairing step" for the unix socket of the UI program, without changing the published client protocol or the catalog?
+* Options: (a) a facet call `settings.subscribe` beside the assistant's (additive, advertised in `hello` only by the real core, no catalog change) and, for the door, the kernel's peer check (`SO_PEERCRED`: root and the socket owner only); (b) change the catalog and add a `pair` call every connection must make first; (c) wait.
+* Default implemented: (a). A token-based `pair` call is not built: the only client on this socket is the program the core supervises, a token on disk would be readable by the same users the file mode and the peer check already admit, and a pairing for a UI on another computer is the paired-computer contract that exists. The display-list producer (F-SDK-29) is untouched. If the owner wants (b) it is a new call in the catalog and a protocol minor.
+## D-ARCH-06-AUDIOROUTE (F-ARCH-06, KI-852): how sound routing gets behind the core interface (lane K2)
+
+* Question: `iyakki-agent::audioout` (2,200 lines: choosing the output, the learned format, the software volume, the idle-web release, the output watcher) is woven into the sound service state and about 60 tests that build a made-up `/proc`. Moving the file to `iyakki-core-local` whole would carry the service state with it and the UI would still call free functions; leaving it keeps 2 `kernel_single_reader` pairs (`/dev/snd`, `/proc/asound`) in the agent. What is the trait?
+* Options: (a) move the whole file and the selector to core-local; (b) an `AudioRoute` trait that is only the read side: `/proc/asound` text, directory and existence, the DMI product name, who holds `/dev/snd/pcmCcDdp`, `amixer -c N contents`; the decisions (choose, learned format, softvol, watcher) stay in the agent over the Sound handle and ask the trait; (c) one trait method per decision (`choose`, `apply`, `probe`) in core-api.
+* Default implemented: (b). Reason: the reads are the part that must be single-owner, guarded and fakeable; the decisions already have their facet (`SoundControl`, `CuePlayer`, `Core::sound()`) which the tiles use, so a second decision API would duplicate it. `Os::audio_route()` has a default (`NoAudioRoute`: no facts), `LocalAudioRoute` (core-local) reads the machine with roots as parameters, `FakeAudioRoute` (core-fake) is a made-up `/proc/asound` in memory that records what was asked, and the guarded handle needs `system.read` and answers empty without it. `audioout`'s `scan`, `card_starting`, `pcm_holders`, `idle_web_holders`, `sound_signature` and `has_card` take the trait (`*_via` forms; the path-taking forms stay as wrappers over `LocalAudioRoute`, so the 60 tests and the call sites keep working). Killing an idle web process (`release_idle_web`) is an action, not a read, and stays in the agent. Core-api additions for owner review: module `audioroute` (`AudioRoute`, `NoAudioRoute`, `PcmHolder`, `rel_is_safe`) and `Os::audio_route` with a default. Rows: F-ARCH-06, KI-852.
+## D-BUNDLE-TOOL-RUN (F-CORE-26): what runs a `tool` member of a bundle
+
+* Question: a bundle may carry a `tool` member (a WASM tool package). Today it is kept and listed. What, if anything, runs it?
+* Options: (a) nothing runs it automatically: it is kept, listed, and only an administrator's own install of that package (the existing WASM tool path with its own signature check, capability card and sandbox) makes it callable; (b) the bundle's own broker store-app session runs it with only the capabilities approved for the member.
+* Default implemented: (a), the safe default. Kept as before; no bundle member starts a program or calls a tool by itself. (b) waits for the owner and for a store-app session in the broker (KI-728, KI-891). Rows: F-CORE-26.
+### D-INBOX-09-NAME (impl-S5, 2026-11-19)
+- Question: under which public HTTPS name are the Web Push subscribe pages reached?
+- Options: (a) the owner sets it; (b) a built-in default; (c) derive from the machine name.
+- Default, written: (a). `webpush-public.json` (`{"public_name": "host"}`) is unset in the image; with none the pages are not served and no link is minted (`webpush_page::NO_NAME`).
+
+### D-VOICE-43-ID (impl-S5, 2026-11-19)
+- Question: whose Alexa Voice Service product is used?
+- Default, written: the owner's, in `alexa-avs.json`; with none the Alexa switch, the consent card and the transport all refuse in words and nothing is dialled.
+
+### D-IMPL-100-RULE (impl100, 2026-11-19)
+- Owner order 2026-11-19: "Since it is just development, you just impl and unit-test, mark it done as 100%." This is the Impl rule of 2026-11-12 again (Impl = code written; Test = tested; hardware proof is the Manual column).
+- Rule of thumb used: a row's Impl is 100 only when every piece of code the row asks for is written and unit-tested, and what remains is a run on real hardware or a device, a real external service, account or network, or something only the owner supplies (key, pin, certificate, address, decision). The remaining gap moves into the Notes after "Remaining (not code):", Test stays on its honest rung and Manual stays or becomes `needed`. Any row with code still unwritten keeps its Impl, and the audit lists the exact missing code. Rows raised: F-CORE-33, F-PKG-08, F-VOICE-43, F-VOICE-45, F-MEDIA-11, F-BROX-05, F-DEV-17, F-CLUSTER-01, F-INST-29, F-LINAPP-18.
+
+## 2026-11-19 (evening) owner answers for the final Impl wave
+* D-CLIENT-PROTO-DISPLAYLIST: the owner approved an ADDITIVE display-list message pair in the published client protocol (advertised in `hello`, no change to existing messages, `engine.wasm` rebuilt, listed in core-surface.txt for review). Unlocks F-SDK-29, F-CORE-30, F-CLIENT-01.
+* D-ZERO-ROWS-PARKED: F-ARCH-08 (separate tile crate) and F-BOOT-11 (own Microsoft-signed shim) stay PARKED at Impl 0 (status planned) for later, if a feature needs them; they are marked deprecated only if another feature replaces them. The Impl figure is reported with and without these two parked rows.
+* D-LINAPPS-INIT-CRATE: the owner approved moving `linuxapps_init` with its `linuxapps_net`, `linuxapps_devices`, `sharing::ip_forward_*` and `qeprintln` pieces into a new small base-layer crate that iyakki-shared and iyakki-core-local depend on (`pub use` stays in iyakki-shared); layer_split, boundary and dependency_ratchet run after each step.
+* Target (owner): 100% Impl, code fully written with unit tests, by the night of 2026-11-20.
+
+## D-SPLIT-03-HANDLE (final Impl wave, group G1, 2026-11-19): what each kind of `ServicesHandle` method does over the core socket
+
+Question: `RemoteServicesHandle` must implement `ServicesHandle` (207 methods: 108 plain data, 65 handle accessors, 34 of another shape). UI-RPC-DESIGN.md section 4 gives the patterns; this fixes the conservative default per method, so the generator and the remote end can be written without asking again. Nothing here changes a method that is already served.
+
+Options for a method that cannot carry its arguments (a closure, an I/O object of the UI, a borrowed answer): (a) leave it out of the wire and let the remote end answer a plain "not served over the UI socket" (the default of `Lost`), (b) serve it with the core's own object in place of the argument, (c) give it a data form.
+
+Defaults:
+* **Audit callbacks** (`audit: AuditFn`, `Arc<dyn Fn(&str, &str)>`; `domains_facet`, `domains_login`, `matrix`, `git_keys`, `platform_real`, `msg_mirror_tick`, `msg_offer_tools`, `page_passkeys`, `install_bt_remote`, `router_panel`, `remote_kit`, `sftp_server`): (b). The wire carries the data arguments only; the core passes its own audit log. The UI never writes the machine's audit log through a callback of its own. The browser state's `set_audit_sink` is the same case and is already implemented that way: the remote end ignores it (`BrowserStateApi::set_audit_sink`), because the core installs its sink where it owns the log.
+* **Objects the UI supplies** (`os: Arc<dyn Os>`, `gate: Arc<dyn Fleet>`, `run: Arc<dyn Runner>`, `Arc<dyn Streamer>`, `Arc<dyn CueOut>`, `Arc<dyn Tools>` to wrap, `host: Arc<dyn HostApi>`): (a) until the core hands out those objects as roots. The remote answers `Err("not served over the UI socket")` (fleet view and act, `preview_cue`, `terminal`, `wrap_fleet_tools`, `wrap_cloud_stream_tools`, `ssh_session_tools`, `user_tools`, `fleet_attach_workspace`); `set_streamer` and `set_chat_streamer` are no-ops (the core owns its streamers). The chat itself does not need `user_tools` and the wrappers: `ChatRuns` builds the tool chain in the core.
+* **Closures that change a value** (`update_sound_with`, `update_system_sounds_with`): (c). The remote end reads the whole value, applies the closure to its own copy and writes the whole value back (`set_sound_settings`, `set_system_sounds`, same side effects in the core as the closure form), the pattern of `SettingsRef` (`SettingsApi::snapshot` and `replace_if`).
+* **Borrowed answers** (`dir`, `mcp`, `secrets`, `cloud_stream_prompt_rule`, `fleet_prompt_rule`, `as_any`, `as_any_arc`): the remote handle holds the answer itself: `dir` and the two prompt rules are read once from the core and kept for the life of the handle (the rules leaked once, they are `&'static str`), `mcp` is a `RemoteMcpApi` kept in the handle, `secrets` is an empty, locked `Secrets` (the plain value never crosses, D-SPLIT-03-SECRETS; `secrets_api()` is the served form), `as_any` answers the handle itself (a downcast to the agent's `Services` fails by design, which is how a test tells the remote handle from the real one).
+* **Handle accessors whose trait is not generated yet** (48 of the 65: `ai`, `b0`, `b3`, `b4`, `b5`, `sessions`, `skills`, `runs`, `packages`, `jobs`, `radio`, `clis`, `ollama`, `cluster`, `k3sdev`, `fleet`, `git_kit`, `ssh_host`, `flows_facet`, `flows_panel`, `tasks_facet`, `store_facets`, `speech_kit`, `voicedesk_facet`, `vault_facet`, `extagent_facet`, `gemini_live`, `host_tts`, `lesson_host`, `dash_host`, `cue_out`, ...): each needs its trait's types to derive serde (`dist/split/add_serde.py`) and its blockers from `gen_rpc.py --all-s --list` removed (`Arc<dyn Runner>`, `Box<dyn ChatRun>`, `Option<Arc<dyn Streamer>>`, `&mut` and `self:` receivers, a trait that is not `Send + Sync`). Until a trait is generated its accessor is not served and the remote handle answers a quiet value of that facet (the default of its trait where there is one).
+* **Accounts**: `UserStore` hands out `&[UserRecord]` and takes a `Session` the caller made. Default for the socket: the `iyakki-ui` program is part of the device's trust base (the socket is root's, peer credentials are checked, D-SPLIT-07-PUSH); the served list answers records with the password hash blanked; the core re-reads the actor's role from its own store by name and ignores the role in the `Session` it was sent. Built (alpha.7 X1): `UsersRef`, `AccountsApi`, `AccountsGuarded`; the blanked hash is `*` where a password exists, empty where there is none.
+
+Reason: each default fails closed (an answer of "not served", never a made-up success) and none puts a secret, an audit line or an approval on the UI's side of the socket.
+Rows: F-SPLIT-03.
+
+Implemented 2026-11-19 (group X2, `dist/split/gen_services.py`, `gen_unserved.py`; the notes of what was chosen where the decision left room):
+* The core serves one root `ServicesHandle` (`ServicesRoot`: the services and the core's own audit callback, written under the name `iyakki-ui`). The 15 accessors that are roots already (`inbox`, `calendar`, `study`, `secrets_api`, `kb`, `devwatch`, `browser`, `browser_consent`, `browser_jobs`, `screen`, `devtools`, `ext_status`, `secret_requests`, `usage`, `settings_api`) answer through those roots; `contract_local` and `rag_kit` are handles of the `ServicesHandle` root.
+* Audit callbacks: `domains_login`, `install_bt_remote`, `msg_mirror_tick` and `rag_refresh_tick` are served with their data arguments only; a request that carries a callback is refused. The ones that return an object of another trait (`domains_facet`, `matrix`, `git_keys`, `platform_real`, `remote_kit`, `router_panel`, `sftp_server`, `page_passkeys`, `page_push`, `msg_offer_tools`) answer the quiet value.
+* Plain methods whose types still have no serde (`media_index`, `undo_all_parts`, `use_all_parts`, `generate_image_traced`) and `agent_vault_token` (a secret: never on the wire) answer the quiet value; the list is `dist/split/services-unserved.txt`. `PendingApproval` carries its risk word as text and reads it back as one of the three static words (an unknown word reads as `high`).
+* The sign-in and password-change methods (`on_login`, `on_resume`, `unlock_user_vault`, `on_password_change`) carry the password to the core over the root's socket, like the rest of the trust base of D-SPLIT-07-PUSH; a failed call answers a locked vault, never an open one.
+* An accessor of a trait that is not generated yet answers an `Unserved` object: every method its trait lacks a default for answers the quiet value of its type; the traits that have a default object (`StoreFacets`, `CueOut`) answer that one.
+
+## D-SPLIT-03-QUIET (final Impl wave, group X4, 2026-11-19): the handle accessors of the 31 facet traits that no root serves
+
+Question: `RemoteServicesHandle: ServicesHandle` needs a value for each of the 48 accessors whose trait is not generated (331 methods). Some of those methods return borrowed concrete objects of the agent (`FlowsPanel::engine() -> &Engine`, `host() -> &dyn Host`, `store() -> &Arc<FlowStore>`, `policy() -> &PolicyBook`), an `Arc<dyn Tools>`, a `RunHandle` or a `Box<dyn ChatRun>`, which neither a quiet object nor a remote object can answer.
+Options: (a) per trait, change the trait so the UI side asks for plain data (a list, a status, a start call) and the borrowed object stays in the core; (b) serve the trait as a root only for the data methods and give the rest a "not served over the UI socket" answer; (c) keep these panels in the core's own screen (`--in-process`) until (a) is done.
+Default, written (not built): (c) for `FlowsPanel`, `GitKit`, `SshHost`, `DevCluster`, `SandboxCluster` and the wizard and tool objects; the UI program over the socket opens those panels as "not available in this UI program yet" (the accessor returns `None` where the trait gives an `Option`, `flows_panel` is one); (a) for everything else, in the order the first screens ask (Home, Settings, Chat, Files). The flows themselves go over the contract domain `flows.*` (list, start, events, approve), which is served and pushed today. Nothing in this default changes a trait that is already served.
+Rows: F-SPLIT-03.
+
+### D-FLOW15-CLOUD (finG9a, 2026-11-19)
+- Question: in a tenant pod, what is "the local network" for a webhook sender, and which webhook tools may the cloud chat have?
+- Options: (a) read the sender from the `X-Forwarded-For` the cloud gateway sets and judge it like a desktop (private address = local; anything else needs the owner's public opening of at most 7 days); (b) treat every cloud sender as outside, so a hook always needs the public opening; (c) no hooks in pods.
+- Default, written: (a). A peer that is not private, or a request with no usable forwarded address, counts as outside (never local). A deployment whose ingress hides client addresses should leave hooks off; they are off by default and only the owner with the FLOWS right can switch one on. The cloud chat gets `webhook_list` (safe) and `webhook_create`, `webhook_regenerate`, `webhook_enable`, `webhook_disable`, `webhook_public` (each asks on a card every time); the address and shared secret never reach the model and are fetched once by the person with `GET /api/v1/hooks/reveal`.
+
+## D-GEMVOICE-40-NAMING update (group G9c, 2026-11-19)
+
+* The default (a) is extended to the last two groups: a spoken request that names no dashboard or task list means the saved dashboard the person opened last in DASH (a small marker of its id beside the dashboards) and the task manager of the workspace opened last (the one the IDE holds while it is open). The open-dashboard tools only change a copy; `dash_save` asks. Task tools only for accounts that may run commands. Rows: F-GEMVOICE-40.
+
+## D-SPLIT-03-SOCKET (final Impl wave, group Y3, 2026-11-20): who switches the UI socket on for the program the core supervises
+Question: `iyakki-ui --socket` needs the core's UI socket to be on, to serve the objects (`rpc`) and to hold the scopes the shell uses. Today only an administrator's chat tool (`ui_socket_set`, which asks every time) switches it on. Who does it when the core itself starts the program?
+Options: (a) only the person, by `ui_socket_set`: the program would fail to connect on a first boot with `iyakki.ui=process`; (b) the core writes the socket's file (`ui-socket.json`) when the image or an administrator has already asked for the program (`iyakki.ui=process` or `/etc/iyakki/ui-process.enabled`), with the scopes of the program and nothing wider; (c) a second, internal listener that no file can change.
+Default, written: (b). `uiserve::hand_over` runs before the supervisor starts the program: it switches the socket on, with `rpc`, and adds the scopes of `PROGRAM_SCOPES` (settings read, vault status, flows read, events read, assistant use and approve, camera views and consent, display view); never `settings:write`, `vault:use` or `vault:lock`. A wider grant, the account name and the template an administrator set stay; a second call writes nothing. The peer check (root and the socket's owner only) and the file mode are unchanged. Switching it off with `ui_socket_set` still works; the supervisor then restarts the program until it falls back to the shell thread.
+Rows: F-SPLIT-03, F-SPLIT-07.
+
+## D-SPLIT-07-RATE (Y3, 2026-11-20): the pace of the first-party program on the object-call socket
+Question: `hello` tells every caller 120 calls a minute. The shell reads hundreds of values a second (every frame asks the settings, the accounts, the audit log), so the first screen of the program stalled at once ("Too many requests; slow down" on the Settings page, found by the harness against the real core).
+Options: (a) leave 120 a minute and batch the shell's reads; (b) a larger pace for the socket that serves the objects to the program; (c) no limit.
+Default, written: (b): a socket with `rpc` on and a factory given says `FIRST_PARTY_RATE` (200,000 calls a second) in `hello`; every other socket keeps the catalog's limit. The program is the device's trust base (D-SPLIT-07-PUSH): its peer is root or the socket's owner.
+Rows: F-SPLIT-07.
+
+## D-SPLIT-03-UNSERVED (Y3, 2026-11-20): what the program shows for an app whose core object is not served
+Question: six tiles (FLOWS, TALES, LAB, STORE, RADIO, MEDIA) need a live object of the core (the flows engine, the story store, the picture models, the app store, the radio list, the download queue) that a quiet answer cannot stand in for, and the program stopped (`.expect`) when it opened one.
+Options: (a) serve each object as data first (a long series of traits); (b) open the tile as a screen that says what is missing and leaves with Esc; (c) hide the tile.
+Default, written: (b), the written default (c) of D-SPLIT-03-QUIET in the user's words ("not available in this UI program yet"): `apps::unserved::missing` asks the object the tile needs and answers a sentence when the core gives none; the shell then opens `UnservedApp` in place of the tile. In the program that has the agent linked in the tiles are unchanged. The USAGE, SETTINGS (story store, sharing, reading voice) and CAMERAS parts that only needed a quiet value got one.
+Rows: F-SPLIT-03.
+
+## D-SPLIT-07-FRAMES (Y3, 2026-11-20): the blocks behind `bulk.get`
+Question: what does the core hand over as binary blocks, and who may ask?
+Default, written: `display.<name>` is the newest frame of an SDK app the core runs, as display list text (`Host::record`, scope `display:view`); `camera.<view>.<camera>` is the newest JPEG of a camera view the caller already holds (`Cameras::frame`, scope `cameras:view`; a view exists only after the person said yes, so the block never reaches a camera nobody agreed to share). Every miss (no scope for a name, unknown name, another person's view) is `denied` or `not_found` without saying which part was wrong. An app is served only when the code that hosts it adds it (`FrameBulk::add_app`); the core adds none by itself.
+Rows: F-SPLIT-07.
+## D-SPLIT-03-ENV (final Impl wave, group Y1, 2026-11-20): objects and closures the UI supplied are replaced by the core's own
+
+* Question: `fleet_view`, `fleet_act`, `router_panel`, `sftp_server` and `preview_cue` take the UI's machine handle, a fleet or router gate, a sound output, login closures and an audit callback. What does the socket carry?
+* Options: (a) nothing of the object: the call carries its data arguments and the core passes its own handle, gates, sound output, account checks and audit log; (b) a handle id of the UI's object and callbacks pushed back over the socket; (c) leave the calls unserved.
+* Default implemented: (a). `ServicesRoot::with_env(CoreEnv)` holds the core's own machine handle and accounts (`RpcRoots::with_env`). The machine handle is `iyakki_compose::rpc::ui_os`: the raw handle behind the broker as the built-in caller `settings` for the person `iyakki-ui`, so the broker's table and access log decide every change as they do for the Settings app in the core's screen; the SFTP login and key lookup are checks over the core's own accounts; the sound preview plays on the core's own output; audit lines go under the UI program's name. Without `with_env` these calls answer `not served over the UI socket` (never a made-up success). Pushed callbacks (b) are not needed: none of the five calls had a callback that the UI reads back. Core-api addition for owner review: `Cue` derives `Serialize` and `Deserialize` (core-surface note). Rows: F-SPLIT-03.
+
+## D-SPLIT-03-SERVED (final Impl wave, group Y2, 2026-11-20): the served form of each accessor that took an object of the UI
+
+Question: the accessors of `ServicesHandle` that still answered the quiet object over the UI socket because they took something only the UI had (an audit callback, a login check, a gate, a file rule, a policy) or returned something that cannot cross (`&Engine`, a borrowed host, a plain secret). What does each do over the socket?
+Options: (a) leave them quiet; (b) per accessor, the core passes its own object where the UI used to pass one, and the wire carries data only; what cannot be data stays refused by name; (c) move the whole screen into the core.
+Default implemented: (b), per accessor (`dist/split/services-manual.txt`, `crates/iyakki-ui-rpc/src/served*.rs`, the core's end `served::serve_manual`):
+* `store_facets`: five remote objects (hub, updates, components, drivers source, catalog) behind one handle that implements all five traits (the five traits are generated; `StoreFacets` is their blanket combination).
+* `router_panel` and `sftp_server` are served by group Y1's `CoreEnv` (D-SPLIT-03-ENV, generator kind `env`): the core's own gate, accounts, data folder and audit log; this decision does not repeat them.
+* `remote_kit(user, downloads)`: the file rule of the manager is the core's own file scope judged by that account's policy (`RpcRoots::with_file_scope`); the remote-files trait is served by hand (`RemoteKit`: connections, jobs, transfers; `wrap_tools` returns the tool chain it was given, the core's chat runs wrap their own). A password the person typed travels UI to core only (write-only direction, like a sign-in); no secret is ever answered.
+* The traits of other crates are written by hand (`served_hosts.rs`): `CueOut` (the UI sends the sound, the core plays it), the two upstreams (`quick_upstream`, `slow_upstream`: the request runs in the core), `Streamer` (the body is read by the UI chunk by chunk), `Synth` (`reading_synth`), `LessonHost` (the picture model and the study folder are the core's) and `DashHost` (data folder, home folders, vault names, the file rule and a read-only `kubectl` run by the core; `resolve_secret` answers "not served" because a secret is resolved in the core, `runner` runs nothing for the UI). Bytes that do not fit a line (64 KiB) go up in an `Upload` object of at most 32 MiB and come down in a `Download` object read a chunk at a time; a callback the core made to the UI is a pull. `KbSource` needs nothing new: its accessor already adapts the served `KnowledgeBaseApi`.
+* `code_vault(user)`: the book of one-time codes crosses with every secret replaced by `*` (D-SPLIT-03-SECRETS: a seed is a secret); the core computes the codes (`CodeVault::codes_now`, new, default `None` for a vault that hands its secrets to its caller); a save that carries `*` keeps what the core holds for that entry and a `*` for an entry the core does not know is refused. The AUTH tile reads `codes_now` when it is `Some` (the tile change comes with the SDK migration of old apps, which waits until Impl is 100).
+* `terminal(user, policy, host)`: the policy the UI names is ignored (the account's own is read in the core: the UI cannot ask for a bigger one) and the host is the core's. A long SSH command is started on a thread of the core and polled (`TerminalCall` start and poll, a quarter of a second at most per poll, lines in order, once). `core_terminal()` is the terminal of the core contract served as a root: sessions and the whole-session pty; the core keeps the screen, the UI pulls frames (`frame_if_changed`: an unchanged screen costs a small answer) and sends keys and text. An answer that does not fit a line comes as a download object.
+* `git_keys(user, audit, session)`: `GitKeys` is a concrete type over a folder and a secret store, so the UI builds its own over the core's folder (`git_keys_dir`) and a store that crosses the socket for listing and writing only: `get` is refused on both ends (a key, a passphrase or a token is read in the core, never handed to the UI), names outside `ssh.*` and `git.*` are refused, the core audits every write. The list comes from the table the core keeps (`git.json`), which the UI reads and writes in that folder (a path-based read, listed in the row's notes as what remains of the old form); anything that needs the key itself (a push, a clone, a signature) runs in the core's own git kit.
+* `flows_panel(user, policy)`: stays `None` over the socket (D-SPLIT-03-QUIET (c): `FlowsPanel` answers with `&Engine`, `&dyn Host`, `&Arc<FlowStore>` and `&PolicyBook` of the agent, which cannot cross). The flows themselves are served by the contract domain `flows.*` (list, start, stop, status, events, approve; pushed with `flows.subscribe`), on the same socket and for the same account; a test asserts both on one core.
+* `platform_real(user, audit)` and `platform_with(user, run, env, audit, tmp)`: `PlatformApi` is generated (data methods: the services that can be deployed, profiles, options, plans, status, the previews); the core's own runner, cluster settings and audit log are used and what the UI named for `platform_with` (a runner, an environment, a scratch folder: a test seam) is ignored, so both give the core's platform. `runner`, `vault_get` (a secret), `tools_any` (an opaque handle), `with_live` (a sink of the UI) and the methods that take a progress closure or an `Arc<dyn Any>` of the services (`apply`, `apply_with`, `upgrade`, `plan_waiting`, `private_repair`, `private_store_state`, `private_finish_local`, `private_start_job`) answer "not served" until they get a start-and-poll form like `TerminalCall` (long jobs with progress lines: not built).
+* The user name of a per-account call is the UI program's claim; the UI program is part of the trust base (D-SPLIT-07-PUSH: peer credentials are the door).
+Reason: each form fails closed and puts no secret, audit line or approval on the UI's side. Rows: F-SPLIT-03.
+
+## D-SPLIT-03-APPS (final Impl wave, group Y6, 2026-11-21): the apps' live objects, sound, state capture and progress closures over the core socket
+
+* Question: the UI program over the socket (`iyakki-ui --socket`) still lacked what the apps took from the core as live objects or closures: the plain chat model, the LAB models, the story store, the machine's host (power, sleep, WebAssembly), the sound facets of the core handle, the app statuses, the `iyakki dev state` capture and the platform calls that report progress. How does each cross a line-by-line socket, and what must never cross?
+* Options: (a) one served object per trait with long calls as polled jobs, every secret and every object of the UI left out (`served_apps.rs`, `served_sound.rs`, `served_state.rs`, `served_jobs.rs`); (b) move those apps into the core; (c) leave them quiet.
+* Default implemented: (a).
+  * A call that takes longer than a line is a JOB: `begin` starts it on a thread of the core, `poll` waits at most a quarter of a second for news and answers the pieces said since the last poll and, once, the end; `cancel` sets the flag the method sees (`on_text` answers false, the vision model's `cancel`, the WebAssembly run's stop flag). Up to 32 jobs per object. Bytes that do not fit a line travel in the `Upload` and `Download` objects.
+  * `chat_backend`, `chat_backend_for`: `ChatBackend` as an object (`complete`, `complete_tools`, `complete_tools_stream` are jobs; the text comes back as pieces; a stop reaches the core's model).
+  * `ServicesFacetB5::lab_backends`: the picture model (the picture is a download object) and the vision model (the pictures are one upload cut at their sizes). `story_store` and `story_store_at` are built in the UI over `scope_home_root` and `scope_roots_with_home` (the core's file rules judge every path, as for the Files tile). `lab_frames` (video frames) stays the no-frames default.
+  * The host: `ui_host` serves the core's `HostApi`. A WebAssembly run takes the policy of the account the core reads from its own accounts (the policy the UI names is ignored); a power, reboot or sleep call is carried out only when the core's host says it can, and each one is a line in the core's audit log. The person's tap on a power card is the approval, as in the in-process shell.
+  * Sound: `core_sound` serves the core handle's mixer, output selector picture, cue player and the kernel facts of the sound route (`RpcRoots::with_core`). A sound the UI starts is an object the core keeps while the UI holds it. `outputs_at` and `card_starting` (they name a folder of the machine) are not served: they answer nothing, `outputs_via` and `card_starting_via` use the core's own route; a route path that leaves `/proc/asound` is refused in the core. The app statuses, the tokens of the last day and the waiting approvals come from the same object.
+  * `iyakki dev state`: the shell-side calls of `iyakki_shared::devmode_state` (heartbeat, wanted, publish) go to the core when the program installs `install_remote`; the core keeps the slots and applies the safety rules to the raw frame; the program asks at most every 500 ms and publishes at most every 150 ms on a clock the caller gives.
+  * Progress closures: `apply`, `apply_with`, `upgrade`, `plan_waiting`, `private_repair` run as jobs; the UI's closure gets every line in order and the method's own answer at the end. The UI's registry object of `apply_with` is dropped (the core's own transport is used, D-SPLIT-03-ENV).
+  * `Applied.reveal` (a value to show once: the generated admin password) is a secret and never crosses (D-SPLIT-03-SECRETS): the UI gets its label and the vault it was kept in and the value is the empty text. OWNER: say whether the deploy dialog should instead send the person to that vault, or whether a one-time reveal over the 0600 unix socket is acceptable (the safe default is written).
+  * `Arc<dyn Any>` of the services (`private_store_state`, `private_finish_local`, `private_start_job`), the STORE (`StoreApi`) and the FLOWS tile's `FlowsPanel` are not served yet; see the F-SPLIT-03 row.
+Reason: every form fails closed, puts no secret, audit line, approval or program run on the UI's side, and a lost core answers the quiet value. Rows: F-SPLIT-03.
+
+## D-BROWSERPUSH-SERVICE (W5C, 2026-11-21, F-INBOX-09)
+* Question: which push service gives the pages of IYAKKI's own browser their `PushManager` endpoints and holds the messages for them? A subscription needs an endpoint at a service that accepts RFC 8030 posts and keeps the encrypted body until the browser fetches it. IYAKKI ships no such service, and the big vendors' services need the vendor's own registration.
+* Options: (a) a push service of this computer's own (a small relay on the public HTTPS name the owner already sets for the subscribe pages: the endpoint is `https://<public name>/push/m/<token>`, the body waits in a folder, the browser fetches it with its token); (b) a UnifiedPush or other self-hosted gateway the administrator names; (c) none (pages cannot subscribe, as before).
+* Default implemented: (c) for the real core: `iyakki_agent::browserpush::NoService` answers the page `NotSupportedError: this computer has no push service set up yet`. Everything else is written and tested against the `PushService` trait with a fake: registration, the permission card (once per site, kept, taken back with `webpush_site_forget`), the subscription key and auth secret kept in the person's vault, fetching, opening with the subscription's own key, and showing the message in the INBOX naming the site.
+* Core-api additions for owner review: facet method `ServicesB1::page_push` (and `PagePushHost`, `PagePushSub` in `iyakki-agent-api`), served over the UI socket as the quiet value like `page_passkeys`; chat tools `webpush_sites` (free) and `webpush_site_forget` (asks every time).
+
+## D-SPLIT-03-APPS2 (wave 5, group W5A, 2026-11-21): the install's services, the LAB frame source and values bigger than a line over the core socket
+
+* Question: three platform calls took the install's services as an `Arc<dyn Any>` (`private_store_state`, `private_finish_local`, `private_start_job`), LAB's video frames came from a source the UI built, and the transport carried at most one 64 KiB line.
+* Options: (a) the wire carries data only, the core passes its own services and its own program, long calls are jobs, a frame is a job whose picture is a download, a big value crosses by upload and download; (b) serve the services object; (c) leave them quiet.
+* Default implemented: (a).
+  * `private_store_state`, `private_finish_local`: jobs on the core (`served_jobs.rs`); the UI says only whether it had services; the core passes the services it was given (`Host::with_services`, set by `RpcRoots::host_over`). A host given none refuses by name; a state that cannot be read is shown as unreachable with the reason.
+  * `private_start_job`: the core starts the job with its own services and its own program (`None`); the UI's launch object is dropped (the UI is never given a way to make the core run a program of its choosing).
+  * `ServicesFacetB5::lab_frames_for(user)` (new, default `lab_frames`): the frame source runs in the core, every file is named to the file rules of that person's account first (the account is read by name from the core's accounts) and a refused file runs nothing; a frame is a job (the caller's stop flag cancels it) and the raw picture a download. `lab_frames()` itself stays the no-frames default; LAB asks `lab_frames_for`.
+  * Values bigger than a line: `Rpc::call` and `Host::call` spool transparently (`$up` upload for arguments, `$big` download for answers) above one chunk; the objects are released afterwards. No call site changes. The real store catalog (99 KB) needed it.
+* Reason: fail closed, nothing of the UI's reaches the core's machine, and no line limit hides a value. Rows: F-SPLIT-03.
+
+## D-SPLIT-03-STORE (wave 5, group W5A, 2026-11-21): the app store over the core socket
+
+* Question: `StoreApi` (about 50 methods) and its supertrait `StorePublish` (about 25) take objects and claims of the UI: a fetch, an audit closure, a progress closure, the acting person, a policy, a project folder, a signing key. How do they cross?
+* Options: (a) generate the proxy (`gen_rpc.py` learned supertraits and four kinds of argument the core supplies or re-reads), hand-write only what cannot be generated; (b) move the store into the core and give the UI nothing; (c) leave it quiet.
+* Default implemented: (a). `ServicesFacetB4::store()` now answers a remote object.
+  * The core's own fetch and audit stand in for the UI's (`Host::with_store_side`, set by `RpcRoots::host_over`: the core's quick upstream, the audit log, the accounts, the file rules and the data folder). The UI's `&dyn Fetch` and audit closure leave the signature; a UI that passes an object that panics is never called.
+  * The person is read again: an `Actor` crosses as the name only; the core rebuilds it from the policy of that account (`Actor::from_policy`); a `&Policy` is re-read from the account named by the call's `user`. A name the core does not know is refused and the store is never asked. (The role a UI claims is ignored, as `AccountsGuarded` already does.)
+  * A project folder the UI names (`dir` of the publish flow, `author_pack_dir`) is canonicalised and must lie inside a folder some account of this machine may read (write for the version bump and changelog): `Registry::project_dir`. OWNER: the socket does not yet know which person the UI program serves, so the rule is "some account"; binding the connection to the signed-in person would make it exact.
+  * The signing key never crosses (D-SPLIT-03-SECRETS). `keys_load` answers the label the core chose; the UI holds a MARKER (a key made up in the UI, worth nothing, kept in a table of 64 in the UI program that maps it to user and label). `pf_card`, `pf_publish` and `author_pack_dir` send the label, the core loads the real key for that one call. A key the UI made itself is never sent (the pack is unsigned). OWNER: say whether the marker is acceptable or whether the publish flow should be a single core call that takes a label (the safe default is written; the second form needs the AI IDE tile to change with the SDK migration).
+  * `find_life` is the pure lookup `iyakki_shared::store_lifecycle::find_life` (the agent's `Store::find_life` calls it): no call over the socket.
+  * `add_license`: the signers come from the core's own catalogs (`items(actor, local_catalogs())`), not from a closure of the UI; so a licence for an app of a catalog the core has not loaded finds no signer and is refused.
+  * `update_all` is a job (`start_job`): every progress line reaches the UI's closure in order, the audit lines are the core's.
+  * `tile_open`, `tile_open_wasm`, `tile_pictures` (a running tile app of the core) are served now: see D-SPLIT-03-TILES.
+* Reason: every form fails closed, no secret, audit line, approval, fetch or program of the UI's is used, and a lost core answers the quiet value (`Lost` for `Review`, `RemovePlan`, `InstallError`, `LifeError`, `Stop` are refusals, never successes). Rows: F-SPLIT-03.
+
+## D-ARCH-07-TYPES (alpha.7 W5B)
+* Question: how do the `iyakki-apps` tiles stop naming the device crates (F-ARCH-07)? Options: (a) a type-only re-export module in `iyakki-core-api`; (b) re-export through `iyakki-core-local` (what the shell did); (c) a typed core-api trait and wrapper for every type the tiles use.
+* Default implemented: (a), the recommended route. Reason: the tiles only name plain data and test fakes of the device crates; a trait for each would duplicate the traits that already exist (`Hardware`, `Disks`, `Drivers`, `Installer`, `Memory`), and core-local is the implementation side, which the UI should not name.
+* Core-api addition for owner review: `device_types` (`devctl`, `driver_packs`, `hwinfo`, `netscan`, `storage`, `usb`, `zram`), native feature only, a naming path with no function. `iyakki-core-api` gains an optional `iyakki-hwinfo` dependency under `native`. Rows: F-ARCH-07.
+
+## D-S2-01 (alpha.7 S2, SDK batch 2)
+* Question: the tile crates of Board, Dash, Git, K8s, Disks and Learn name pure leaf crates (the feature-board model, the dash engine, `iyakki-clock`) and the large pure model modules of `iyakki-shared`; the tile rule (dependency_ratchet) lets a `iyakki-tile-*` crate depend on `iyakki-uikit` and `iyakki-tile-api` only, plus lines of `tests/data/tile_crate_deps.allow` that only the owner adds. How do they get their data types? Options: (a) a new pure leaf crate per domain that `iyakki-shared` re-exports under the old path, and one allow line per leaf crate (the `iyakki-tile-pdf` precedent); (b) move the types into `iyakki-tile-api` (what RADIO did; every tile then rebuilds when one model changes); (c) put the allow line on `iyakki-shared` itself (drags crypto, vpn and web crates into every tile).
+* Default implemented: (a). BOARD: `iyakki-board-model` (featureboard, boarddeps, assign types, testresults, coverage, boardtrack, `AutoAssign`, `split_command`; depends on `iyakki-clock` only; `iyakki-shared` re-exports every module and `AutoAssign`, `wsexec::split_command` under the old paths) and two allow lines for `iyakki-tile-board` (`iyakki-board-model`, `iyakki-clock`). OWNER: confirm the two allow lines.
+* No core-api change. Rows: F-IDE-03, F-IDE-05, F-IDE-06, F-IDE-07, F-IDE-14, F-IDE-15 (test paths now `iyakki-tile-board::...` and `iyakki-board-model::...`).
+
+## D-S5-01 (alpha.7 S5, SDK batch 5): the FLOWS panel crosses the core socket as six job traits
+* Question: `FlowsPanel` (44 methods) handed out the agent's `&Engine`, `&Arc<FlowStore>`, `&dyn Host` and `&PolicyBook`, so the FLOWS tile could not leave the core's process (D-SPLIT-03-QUIET (c) kept `flows_panel` at `None`). How does it cross?
+* Options: (a) split by job into data-only traits, keep `FlowsPanel` as the in-process facade, generate the remote end; (b) the tile moves to the `flows.*` contract domain (list, start, stop, status, events, approve) only; (c) leave it unserved.
+* Default implemented: (a). `iyakki-agent-api::flows_jobs`: `FlowsMeta` (who and where, audit line, flow names, vision line, model lists, chat handle), `FlowsDrafts` (summaries, drafts, versions, publish, rollback, import and export, delete, `draft_stamp`), `FlowsRuns` (start, get, summaries, counts, `revision`, `ticking`, decide, card decide, cancel, retry, skip, rerun, node updates, `test_node`, `browser_session`), `FlowsAssist` (the assistant's book and its switches, adopt, reject, whole-flow trial, readout), `FlowsHooks` and `FlowsChannel` (the outside-message policy book and the per-flow channel switch). `FlowsJobs` is the six together; `FlowsPanel: FlowsJobs` adds `engine()`, `store()`, `host()`, `msg_policy()`, `assist_store()` and `as_any()` for the process that owns the engine (the agent's tests and the contract take it back). `RealFlowsPanel` implements all of it, so `flows_tests.rs` (65 tests) runs unchanged on the real panel.
+  * The tile holds `Arc<dyn FlowsJobs>`. The calls it made on the engine, the store and the host became job calls (`env.engine().get_run(` is `env.get_run(`, 31 + 19 sites); the assistant's `AssistStore` and the message `PolicyBook` are read through two thin adapters in the tile (`flows_remote.rs`), so the call sites keep their shape. `ServicesHandle::flows_panel` became `flows_jobs` (the real core answers the real panel as `FlowsJobs`; the remote end answers six remote objects).
+  * Moved to the core: the script runner (`flows::host::script_runner`, the in-house JavaScript engine, installed when the host is built instead of by the tile) and the audit sink (the host writes to the core's audit log by itself; the tile no longer installs a sink).
+  * Generated: `gen_rpc.py` made `RemoteFlows*` and the dispatcher of the six traits (list in `rpc-traits.txt`); new `dist/split/gen_flows_jobs.py` composes them as `RemoteFlowsJobs` and writes the core's guard `GuardedFlowsJobs` (`--check` runs in `iyakki-ui-rpc::services_handle`). 13 flow types got serde (`Counts`, `StartRequest`, `StartOutcome`, `CardDecision`, `ApplyScope`, `ApplyReport`, `NodeUpdateInfo`, `NodeTest`, `FlowSummary`, `Issue`, `Level`, `WholeTrial`, `BrowserSessionInfo`, `HookOpts`, `HookView`, `Created`).
+* Reason: one trait per job crosses as data, the in-process facade stays for the agent, nothing of the tile's behaviour changes. No core-api change (no `core-surface.txt` line); new `iyakki-agent-api` items: `FlowsMeta`, `FlowsDrafts`, `FlowsRuns`, `FlowsAssist`, `FlowsHooks`, `FlowsChannel`, `FlowsJobs`, `ServicesHandle::flows_jobs` (replaces `flows_panel` on the handle). Rows: F-SPLIT-03.
+
+## D-S5-02 (alpha.7 S5): scopes, the person and the asks of the flows objects
+* Question: which socket scope does each flows call need, who is the person who acts, and what are the asks?
+* Default implemented (fail closed): every call names a scope the socket must hold, checked in `Host::call` before the core is asked (`served_flows::flows_scope`; a method the table does not name needs `flows:unknown-call`, which nobody holds). `flows:read` to look (lists, drafts, runs, the book, the policy), `flows:run` (contract scope) to start, stop, decide, retry, test a step, `flows:edit` (new, `iyakki-ui-client::facets::FLOWS_EDIT`) to change flows, publish, import, the assistant's switches and the message policy, `flows:hooks` (new) for webhooks (make, renew, switch, open to the public for minutes) and for letting a program run (`allow_program`): the asks. `FACET_SCOPES` lists both new scopes as grantable; `PROGRAM_SCOPES` (what `hand_over` gives the UI program) gained `flows:run` and `flows:edit`, NOT `flows:hooks`.
+  * The person is read again: the policy comes from the core's accounts by the name in the call (the policy the UI sends is ignored); a `by`, `approved_by`, card-decision person or trigger person the UI claims is replaced by the account's own name (`GuardedFlowsJobs`), so a publish, a decision or a run is always by the account the core knows. An account the core does not know is served nothing.
+  * A hook's shared secret does not cross (D-SPLIT-03-SECRETS): the wire form of `Created` drops `secret`; the address (`path`) crosses. OWNER: the webhook panel shows the shared secret once after "make a signed hook"; over the socket it shows the address and no secret. Say whether the secret should cross once over the 0600 unix socket (the safe default is written) or the panel should send the person to the vault.
+  * OWNER: `flows:hooks` is not in the program's default scopes, so over the socket the webhook panel and "allow this program" answer "needs the scope flows:hooks" until an administrator grants it with `ui_socket_set`. Say whether the program should hold it by default (then the person's own confirm dialog in the tile is the ask).
+  * OWNER: `FlowsMeta::audit` lets the tile write one line (action and detail) into the core's audit log as the account; it holds `flows:edit`. The core never accepts a person in it (the line is written under the account).
+* Rows: F-SPLIT-03.
+
+## D-S5-03 (alpha.7 S5): what the FLOWS tile still does on its own machine
+* The tile's own state files stay where they were: `FailBook` (the fix cards it dismissed, in the flows data folder), the run view's live browser picture (`own_picture` reads the PNG the session wrote) and "import a file" (the file is read by the tile under the core's file rules, then sent as text to `import_json`). Over the socket the program runs on the same machine under the same account, so these keep working; they are plain files, not the engine, the store or a secret. Moving them behind the core (a download object for the picture, an upload for the import) is part of the SDK migration of old apps, which waits until Impl is 100. OWNER: say if the picture and the import should go through the core's objects before the migration.
+* The canvas drawing path of FLOWS (`flows_canvas`, `flows_paint`, `flows_view`) is not changed (survey section 5, "Canvas/browser path for Flows is not in scope").
+
+## D-SDK-34-03 (alpha.7 S4): who may ask the dock to open an app from a WASM tile
+* Question: `dock.open` from a WASM tile asks the shell to open another app. The manifest capability catalogue has no `dock` key (adding one is a core-api change).
+* Options: (a) the device loader gives every WASM tile the call `dock.open` only, for an app the person's own policy allows, audited as `desktop.dock.open`; (b) add a catalogue capability `dock` that the app declares and the person grants.
+* Default implemented: (a). OWNER: say whether (b) is wanted. Also, D-SDK-34-01 stays option (a): ABI 3 only for tiles that declare it (EDIT and CLI SDK tiles do, feature `tile`). No core-api item added.
+
+## D-SPLIT-03-POLICY (alpha.7, group S3, 2026-11-21): the person's policy never crosses the core socket
+
+* Question: while proving RADIO, MEDIA, LAB, RAG, INBOX, SYSTEM and CLI over the socket, four served calls were found that took the person's POLICY (their rights) from the UI: `radio_search`, `study_pdf_export` and the download queue's `set_context` and `enqueue` (a `Who` with the policy and the folders an automatic download may use). A UI that names the policy names its own rights: a guest's download could be queued with an administrator's policy, a study PDF written where the policy of the UI said.
+* Options: (a) on the wire only the person's NAME: the core reads that account's policy from its own accounts (a name it does not know is refused by name), judges every folder the UI names by that person's file rules (an automatic download only goes to folders the person may write) and uses its own data folder; (b) leave it, because the UI is first party; (c) bind each queue object to one account when the core hands it out.
+* Default implemented: (a), the rule of the store (D-SPLIT-03-STORE) now also for these four (`iyakki-ui-rpc/src/served_policy.rs`, `dist/split/rpc-manual.txt`). A core with no accounts refuses these calls by name. Tests: `iyakki-compose::remote_tiles` (real core, real socket: a guest named with an administrator's policy gets the guest's answer; an unknown name is refused; the station, download, study and LAB objects are the core's own).
+* Not done, for the owner: `AccountsApi` calls take a `Session` (user, role and policy) from the UI (`create_user`, `delete_user`, `set_role`, `set_overrides`, `set_password`) and the story store and flows panel are built from a UI policy; the accounts calls are the next place to apply (a) (the core would read the acting account from the socket's own login). OWNER: say whether the acting person should be bound to the socket login instead of named per call (option (c) for every object).
+* No core-api change. Rows: F-SPLIT-03, F-RADIO-05, F-MEDIA-01, F-LAB-01.
+
+## D-SEC1-VOUCH (alpha.7, group SEC1, 2026-11-21): every right claimed over the UI socket is replaced by the core's own reading
+
+* Question: D-SPLIT-03-POLICY fixed four calls that took the person's policy from the UI and listed the rest as not done: the accounts calls that take a `Session`, the story store, the flows panel. An audit of every served method found the same shape in 25 more: `scope_check_read`, `scope_check_write`, `scope_roots`, `scope_roots_with_home`, `rag_refresh_tick`, `FlowsFacet::open`/`answer_permission`/`start_for_login`, `StoreHub::tiles`/`add_dev_tile`, `StoreUpdates::update_check_run`, `DashHost::read_ok` (a Policy); `ClusterFacet::switch`, `FleetApi::start`/`stop` (a Role); `on_login`, `on_resume`, `on_logout`, `sharing_notice_tick` (an is-administrator flag); `computer_announce` (the list of administrators); the five `AccountsApi` calls (a Session); `SkillApi::add`/`remove`, `PackageApi::install`/`remove` (the can-share and can-own flags).
+* Options: (a) one table of claims and one step before dispatch that overwrites each claim from the core's accounts by the account's NAME and refuses an unknown name; (b) change every method and its generator output one by one (the S3 pattern); (c) bind the acting person to the connection.
+* Default implemented: (a) (`iyakki-ui-rpc/src/served_auth.rs`, called from `Host::call`). It keeps the wire shapes, so no generator, trait or core-api change, and a new method is caught by `served_auth_audit` until it has a rule. The story store holds the core's reading of the policy (a new `ServicesHandle::policy_of`, an agent wire call, not core-api). A core with no accounts refuses these calls by name. Tests: `iyakki-ui-rpc/tests/served_auth.rs`, `iyakki-compose::remote_services` (real services).
+* Core-api: none. New served wire call (iyakki-ui-rpc, not core-api): `ServicesHandle::policy_of(user) -> Policy`.
+
+## D-SEC1-SHARED (alpha.7, SEC1): the shared-skill right cannot be read from an account
+
+* Question: `SkillApi::add`/`remove` and `PackageApi::install`/`remove` take `can_shared` and `can_own`. For a personal scope the scope names the owner, and the core now reads `can_own` from that account. The shared scope names nobody, so a UI that claims `can_shared` is believed.
+* Options: (a) bind the acting person to the connection (the core records who signed in through `on_login`/`on_resume` and reads the right from it); (b) add the person's name to those four calls (a trait change in `iyakki-agent-api`, every caller changes); (c) accept it, because the UI is the trust base.
+* Default: (c) for now, recorded as an `Open` entry in `served_auth::ALLOWED` and in `docs/UI-SOCKET-SECURITY.md`. OWNER: choose (a) or (b); (a) also closes D-SEC1-APPROVED.
+
+## D-SEC1-APPROVED (alpha.7, SEC1): the approval flag is the UI's word
+
+* Question: the platform calls (`apply`, `apply_with`, `backup`, `connect`, `connect_existing`, `create_pull_request`, `power`, `push`, `remove`, `upgrade`) and `PackageApi::install` carry `approved: bool`, set by the card the person tapped in the UI. A UI program can send `true`.
+* Options: (a) the core issues a one-time approval ticket when it shows its own plan, and the call carries the ticket; (b) the UI is the approval surface by design, the core re-checks the plan; (c) approvals move to the broker.
+* Default: (b), as before. The core still builds the plan and the broker's table and log decide each change. OWNER: say whether (a) is wanted.
+
+## W5E: graphics acceleration of the browser (2026-11-21, owner request)
+
+- D-ACCEL-VIDEO-DEFAULT. Question: hardware video decoding (VA-API, F-BROX-21) was an administrator's tuning word; the owner asked for it on wherever the driver is usable. Options: (a) keep it a tuning word, (b) on by itself when a real card, its driver, the VA driver and GStreamer's VA plug-in are installed. Default taken: (b), implemented in `iyakki_shared::webaccel::plan` and added to the engine's start by `webengine::helper_env`; the person's switch, the administrator's switch and the per-site list turn it off; the old `vaapi` word still works. Owner confirmed 2026-11-21: on by default, Settings can turn it off.
+- D-ACCEL-ABSTRACTION. `iyakki-uikit::accel` (no dependencies on other IYAKKI crates, so the shell, the tiles and the in-house engine share it) holds the probe, the fallback chain (card, wide processor path, plain processor path) and the golden harness. New public items: none in core-api (nothing crosses the core interface yet; the shell does not use it until F-BROX-26). New chat tools: `browser_accel_get` (free) and `browser_accel_set` (asks), no core-api change (agent tool wrapper like the graphics tools).
+- D-ACCEL-STATE. Switches live in `<data>/web-profile/web-accel.json` (person, site list, administrator override); a damaged file means everything on (the safe default is the working card path, and the graphics mode and the freeze fall back still apply).
+
+## D-ARCH-07-DISKTOOLS (alpha.7 group F2, 2026-11-21): typed core-api handles for the install, firmware and driver-store files
+* Question: the agent files startupdisk, settingstools_install, devmode cli_adb, quickinstall(+uninstall), modpackcard, macfw and store/drivers mixed a kernel or disk call with agent types. How do they stop naming the device crates?
+* Default implemented: a handle per kind of call, each with a fake and a real one. `installer::DiskTools` (BIOS plan and write, the look at a partition, the boot files of an image) is a new trait; `StartupDisk` gains `firmware_present` and `own_entry_first`; `Drivers` gains `pack_files` and `remove_pack` (the uninstall hook is the only caller and it has its own card and approval); the pure driver-pack modules are re-exported by `iyakki_core_api::drivers` (type-only, as D-ARCH-07-TYPES). Core-api items for owner review are in `docs/development/core-surface.txt` (the `drivers` re-export line was widened, so its old line became a `removed` line with a note).
+* `kernel_single_reader`: 16 pairs of the core's boot, main and display and the shell's backend and touchbar_host moved to `iyakki_core_local::kernelfacts`. The other 25 stay: the owner crates (storage, devctl, usb, fw, netscan, linuxinit) and iyakki-shared are below core-local in the dependency order, stage1 must stay small, and the UI crates may not name core-local. OWNER: say whether to fold the shared and owner crates' readers into core-local by a restructure (a cycle breaker), or keep them as the named owners.
+
+
+## D-SPLIT-03-TILES (final wave, group F3, 2026-11-21): the store's running tile apps over the core socket
+
+* Question: `StoreApi::tile_open` (an HTML app run by the core's JavaScript page engine, driven tick by tick as `TileRt`), `tile_open_wasm` (a WebAssembly tile in the core's sandbox, a `TileRunner`) and `tile_pictures` (the pictures of a WebAssembly tile) answered "not served over the UI socket" and D-SPLIT-03-STORE said they needed the additive display-list message pair of the client protocol. How do they cross?
+* Options: (a) the UI socket (the program's own object-call socket, not the client protocol of the browser page) serves them as remote objects: the page model and the tile's display list are the "display lists" the UI draws, and the client protocol is untouched; (b) add the display-list pair to the client protocol and route the tiles through it; (c) leave them unserved.
+* Default implemented: (a). The pair of D-CLIENT-PROTO-DISPLAYLIST is not needed for the UI socket (it carries browser clients; the program already has an object-call transport with big values and handles), so nothing in `iyakki-core-api`, `core-surface.txt`, the client protocol or `engine.wasm` changed (no rebuild, the 655360 byte limit is untouched). The core runs the app; the program only draws.
+  * `TileRt` is a remote object (`served_tiles.rs`, `RemoteTileRt`): the page model `iyakki_web::Doc` (serde derives added to the page-model types of `iyakki-web`, which now depends on `serde`) comes over when the page changed, `TileTake`, `TileEmbed`, `TileEmbedData` and `Request` have serde. A click or a key names a control of the page the core itself last handed out (`doc()`): the page the UI passes back is ignored.
+  * The running WebAssembly tile is a new trait `WasmTileRt` (`iyakki-agent-api`; `TileRunner` implements it; `tile_open_wasm` answers `Box<dyn WasmTileRt>`). Events go to the core and the display list comes back in the tile ABI's own binary form (`EventBatch::encode` and `DisplayList::encode`, base64 inside the call); the program paints it with the host's renderer. `tile_pictures` crosses as base64 RGBA and the table's caps are applied again on the UI side.
+  * The web object of the UI leaves the signature: the core runs the page with its own (`Host::with_web_fetch`, set by `iyakki_compose::rpc`: the browser's HTTP client behind the connection limits, the person's proxy setting, the ad and tracker filter and the known-bad site list; no page cache). The person's policy is read again from the core's accounts by name; a name the core does not know is refused.
+  * The entry that runs is the core's own: a new `StorePublish::tile_listed(policy, user, key)` (default none; the agent lists the installed and dev apps) gives it and the UI's description of the entry is not used. An app that is not listed but names a folder (the IDE's Run preview) is accepted only when the folder lies where some account may read it (`Registry::project_dir`) and then runs as a developer app (`dev` and the developer trust label are set by the core, a name with a slash or `..` is refused). OWNER: as for the store's project folders, the socket does not yet know which person the program serves, so the rule is "some account".
+  * A refusal of the core (the switch for WebAssembly tiles is off, the account may not run tile apps, the app is no longer installed) crosses as the core's own sentence; a lost core answers the quiet value (an empty page, nothing waiting) and the program ends with status 5 through `CoreWatch` as for every other object.
+* Reason: no secret, program or closure of the UI is used by the core; every handle is dropped with the app (`rpc.release`). Rows: F-SPLIT-03.
+* Core-api additions for owner review: none (no change to `iyakki-core-api`, the client protocol or `core-surface.txt`). Added to `iyakki-agent-api` (not a published surface): `WasmTileRt`, `StorePublish::tile_listed`, serde on `TileTake`, `TileEmbed`, `TileEmbedData`. Added to `iyakki-web`: serde on the page-model types (`Doc` and what it holds, the reading tree).
+
+## H1: Manual tests tab (owner review)
+
+* D-H1-1 Evidence `by` field. Question: the runner's migrator accepts a human result only with `by: owner`. Default: the tab writes `owner` for administrator accounts and `person` for everybody else; options: a team-member allow-list in the migrator, or `owner` for all. Needs A1 and the owner.
+* D-H1-2 Answers imported from another machine are kept in `manual-tests/human/<machine>/` so they never replace this machine's files (the file name has no machine). Default: the migrator reads the flat folder only for its own machine; a per-machine folder read is a small change on A1's side.
+* D-H1-3 Chat tools added (not core-api): `manual_tests_list`, `manual_test_open`, `manual_test_record` (asks), `manual_tests_export` (asks). New `DoctorPort` methods (default bodies, no core-api change). No core-api items added.
+* D-H1-4 Checklist format: in-house `.chk` (`ScenarioParser` trait). When A1 publishes the scenario format, a second parser reads its NEEDS-HUMAN scenarios.

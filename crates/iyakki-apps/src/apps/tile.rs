@@ -71,8 +71,12 @@ pub struct TileApp {
     layout: Option<(Layout, (i32, i32))>,
     /// The viewers the app mounted inside its page, as placed on the screen at the last frame (`tile_embed.rs`), the one the pointer is over and how far each text is scrolled.
     embeds: Vec<super::tile_embed::Placed>,
+    /// The element ids the page was last built to mark for the viewers mounted on them (a new one makes the page build again).
+    marked: Vec<String>,
     embed_hover: Option<u32>,
     embed_scroll: HashMap<u32, usize>,
+    /// The real page viewers of the `browser` embeds (`tile_embed_page.rs`), by viewer id; one is dropped when its viewer is unmounted.
+    embed_pages: HashMap<u32, super::tile_embed_page::PageEmbed>,
     scroll: f32,
     content_h: f32,
     view_h: f32,
@@ -99,7 +103,7 @@ pub struct TileApp {
 
 impl TileApp {
     pub fn new(entry: TileEntry, cx: &AppCx) -> TileApp {
-        let mut a = TileApp { title: entry.title.clone(), user: cx.session.user.clone(), entry, rt: None, err: None, doc: None, layout: None, embeds: Vec::new(), embed_hover: None, embed_scroll: HashMap::new(), scroll: 0.0, content_h: 0.0, view_h: 0.0, focus: None, edit: TextField::new("", false), sel: HashMap::new(), dialog: Dialog::None, toast: None, dirty: true, ticks: 0, stamp: 0, leave: false, host_save: None, pending_ai: None, redraw: false, bar: vec![], dev_build: 0, console_seen: 0 };
+        let mut a = TileApp { title: entry.title.clone(), user: cx.session.user.clone(), entry, rt: None, err: None, doc: None, layout: None, embeds: Vec::new(), marked: Vec::new(), embed_hover: None, embed_scroll: HashMap::new(), embed_pages: HashMap::new(), scroll: 0.0, content_h: 0.0, view_h: 0.0, focus: None, edit: TextField::new("", false), sel: HashMap::new(), dialog: Dialog::None, toast: None, dirty: true, ticks: 0, stamp: 0, leave: false, host_save: None, pending_ai: None, redraw: false, bar: vec![], dev_build: 0, console_seen: 0 };
         a.start(cx);
         a
     }
@@ -224,27 +228,9 @@ impl TileApp {
                 let card = Card::new("An app asks the assistant", AMBER).line(&format!("{who} would like to ask the assistant this question. The assistant sees only the question, not your files or other apps."), Tone::Normal).line("", Tone::Normal).line(&q, Tone::Bold).action(Action::new("Allow and ask", Key::Char('y'), OK)).action(Action::new("Don't ask", Key::Esc, MUTED));
                 Dialog::Ask(r, card)
             }
-            "sdk.approve" => {
-                let a = &r.args;
-                let card = if a["ns"] == "speech" {
-                    Card::new("An app wants to read aloud", AMBER).line(&format!("{who} would like to read text aloud with your voice settings. You are asked once; you can take this back later."), Tone::Normal).line(a["where"].as_str().unwrap_or(""), Tone::Bold)
-                } else {
-                    let place = a["where"].as_str().unwrap_or("this computer");
-                    let leaves = if a["leaves"] == true { format!("The text it sends goes to {} on {place}, so it leaves this computer.", a["provider"].as_str().unwrap_or("your provider")) } else { "The model runs on this computer: nothing leaves it.".to_string() };
-                    let cap = a["cap"].as_u64().map_or("There is no daily limit for a model on this computer.".to_string(), |c| format!("It may use up to {c} tokens a day; you are told at 80 percent."));
-                    Card::new("An app wants to use your AI model", AMBER).line(&format!("{who} would like to ask {} its own questions. It gets plain answers: no tools, no files, no memory of your chats.", a["model"].as_str().unwrap_or("the model")), Tone::Normal).line(&leaves, Tone::Bold).line(&cap, Tone::Normal).line("You are asked once; you can take this back later.", Tone::Dim)
-                };
-                Dialog::Sdk(r, card.action(Action::new("Allow", Key::Char('y'), OK)).action(Action::new("Don't allow", Key::Esc, MUTED)))
-            }
-            // SDK 1.2 (docs/development/SDK-BRIDGE-V2.md): the host wrote the words of the card; this only draws them. It asks every time or once, as the host decided,
-            // and only a person's key answers it.
-            "sdk.card" => {
-                let mut card = Card::new(r.args["title"].as_str().unwrap_or("An app asks"), AMBER);
-                for l in r.args["lines"].as_array().into_iter().flatten().filter_map(|l| l.as_str()) {
-                    card = card.line(l, Tone::Normal);
-                }
-                card = card.line(if r.args["everyTime"] == true { "You are asked every time." } else { "You are asked once; you can take this back later." }, Tone::Dim);
-                Dialog::Sdk(r, card.action(Action::new("Allow", Key::Char('y'), OK)).action(Action::new("Don't allow", Key::Esc, MUTED)))
+            "sdk.approve" | "sdk.card" => {
+                let card = sdk_card(&who, &r.kind, &r.args);
+                Dialog::Sdk(r, card)
             }
             "host.saveFile" => {
                 let name = r.args["name"].as_str().unwrap_or("file.txt").to_string();
@@ -724,6 +710,11 @@ impl App for TileApp {
                 self.edit.click(*x);
             }
             // a wheel over a text viewer the app mounted scrolls that viewer, not the page
+            Event::Scroll(d) if self.embed_hover.is_some_and(|id| self.embed_pages.contains_key(&id)) => {
+                if let Some(p) = self.embed_hover.and_then(|id| self.embed_pages.get_mut(&id)) {
+                    p.scroll_by(*d as i32);
+                }
+            }
             Event::Scroll(d) if self.embed_hover.is_some() => {
                 let id = self.embed_hover.unwrap_or(0);
                 let at = self.embed_scroll.entry(id).or_insert(0);
@@ -731,6 +722,15 @@ impl App for TileApp {
             }
             // a press on a viewer is the viewer's: the page does not see it
             Event::Area(n) if *n >= EMBED_BASE && *n < EMBED_BASE + 1_000_000 => {}
+            // a press on a page viewer follows a link of the page when it is on one, and only when its host is one the viewer may show
+            Event::AreaAt(n, x, y) if *n >= EMBED_BASE && *n < EMBED_BASE + 1_000_000 => {
+                // the press comes relative to the visible part of the viewer; the page viewer's links are in screen pixels
+                let id = (*n - EMBED_BASE) as u32;
+                let at = self.embeds.iter().find(|e| e.id == id).map(|e| (e.visible.x + *x, e.visible.y + *y));
+                if let (Some((sx, sy)), Some(p)) = (at, self.embed_pages.get_mut(&id)) {
+                    p.click(sx, sy, cx);
+                }
+            }
             Event::Scroll(d) => self.scroll = (self.scroll - *d as f32 * 48.0).clamp_safe(0.0, (self.content_h - self.view_h).max(0.0)),
             Event::Key(Key::Ctrl('r')) | Event::Key(Key::F(5)) => {
                 self.start(cx);
@@ -895,15 +895,50 @@ impl App for TileApp {
             }
             // the viewers the app mounted inside its page: placed from the page's own box, cut to what is on screen, drawn over it
             let mounted = self.rt.as_ref().map(|rt| rt.sdk_embeds()).unwrap_or_default();
-            self.embeds = super::tile_embed::place(&mounted, (col_x, top - scroll), s, view, &|_| None);
+            // a viewer mounted on an element by id: the page is built again with that element marked, then its box comes from the layout
+            let wanted = super::tile_embed::element_ids(&mounted);
+            if wanted != self.marked {
+                self.marked = wanted;
+                self.dirty = true;
+                self.redraw = true;
+            }
+            let lay_el = self.layout.as_ref().map(|(l, _)| l);
+            self.embeds = super::tile_embed::place(&mounted, (col_x, top - scroll), s, view, &|id| lay_el.and_then(|l| l.element(id, s)));
             self.embed_hover = super::tile_embed::route(&self.embeds, g.mouse.0 as f32, g.mouse.1 as f32, s).map(|r| r.0);
+            // a page viewer whose viewer is gone is dropped (its cookies stay with its app's profile, in memory)
+            self.embed_pages.retain(|id, _| mounted.iter().any(|m| m.id == *id && m.kind == "browser"));
+            let mut loading = false;
             for p in self.embeds.clone() {
                 if let Some(m) = mounted.iter().find(|m| m.id == p.id) {
                     let from = self.embed_scroll.get(&p.id).copied().unwrap_or(0);
-                    g.clipped(p.visible, |g| paint_embed(g, &p, m, from, s));
+                    // what the app asked of the viewer since the last frame (`embed.call`): the page viewer goes back, forward, reloads or stops
+                    let calls = self.rt.as_mut().map(|rt| rt.sdk_embed_calls(p.id)).unwrap_or_default();
+                    if m.kind == "browser" {
+                        let page = self.embed_pages.entry(p.id).or_insert_with(|| {
+                            let mut pe = super::tile_embed_page::PageEmbed::new(m.hosts.clone(), &m.profile);
+                            if let Some(u) = serde_json::from_str::<serde_json::Value>(&m.options_json).ok().and_then(|v| v.get("url").and_then(|u| u.as_str().map(str::to_string))) {
+                                pe.open(&u, cx);
+                            }
+                            pe
+                        });
+                        for (method, _) in &calls {
+                            page.apply_call(method, cx);
+                        }
+                        page.poll();
+                        loading |= page.loading();
+                        g.clipped(p.visible, |g| page.paint(g, p.rect, s));
+                    } else {
+                        // a player or a dashboard shows what the app's playback or the person's dashboard says now
+                        let data = if matches!(m.kind.as_str(), "media" | "dash") { self.rt.as_mut().and_then(|rt| rt.sdk_embed_data(p.id)) } else { None };
+                        // a player that is going keeps asking for the next frame so its time moves
+                        self.redraw |= data.as_ref().is_some_and(|d| d.heading.starts_with("Playing"));
+                        g.clipped(p.visible, |g| paint_embed(g, &p, m, from, s, data.as_ref()));
+                    }
                     g.hit(p.visible, Event::Area(EMBED_BASE + p.id as usize), "embedded viewer");
                 }
             }
+            // a page being read asks for the next frame, so its answer shows without a key press
+            self.redraw |= loading;
             // a slim scroll bar
             if self.content_h > view.h {
                 let tr = R::new(view.x + view.w - 8.0 * s, view.y, 4.0 * s, view.h);
@@ -939,6 +974,26 @@ impl App for TileApp {
         }
         let _ = cx;
     }
+}
+
+/// The first-use card of the SDK bridge for a request of kind `sdk.approve` (the model and reading aloud) or `sdk.card` (the host wrote the words;
+/// this only draws them): a tile page and a WebAssembly tile both show it, and only a person's key answers it.
+pub(super) fn sdk_card(who: &str, kind: &str, a: &serde_json::Value) -> Card {
+    let card = if kind == "sdk.card" {
+        let mut card = Card::new(a["title"].as_str().unwrap_or("An app asks"), AMBER);
+        for l in a["lines"].as_array().into_iter().flatten().filter_map(|l| l.as_str()) {
+            card = card.line(l, Tone::Normal);
+        }
+        card.line(if a["everyTime"] == true { "You are asked every time." } else { "You are asked once; you can take this back later." }, Tone::Dim)
+    } else if a["ns"] == "speech" {
+        Card::new("An app wants to read aloud", AMBER).line(&format!("{who} would like to read text aloud with your voice settings. You are asked once; you can take this back later."), Tone::Normal).line(a["where"].as_str().unwrap_or(""), Tone::Bold)
+    } else {
+        let place = a["where"].as_str().unwrap_or("this computer");
+        let leaves = if a["leaves"] == true { format!("The text it sends goes to {} on {place}, so it leaves this computer.", a["provider"].as_str().unwrap_or("your provider")) } else { "The model runs on this computer: nothing leaves it.".to_string() };
+        let cap = a["cap"].as_u64().map_or("There is no daily limit for a model on this computer.".to_string(), |c| format!("It may use up to {c} tokens a day; you are told at 80 percent."));
+        Card::new("An app wants to use your AI model", AMBER).line(&format!("{who} would like to ask {} its own questions. It gets plain answers: no tools, no files, no memory of your chats.", a["model"].as_str().unwrap_or("the model")), Tone::Normal).line(&leaves, Tone::Bold).line(&cap, Tone::Normal).line("You are asked once; you can take this back later.", Tone::Dim)
+    };
+    card.action(Action::new("Allow", Key::Char('y'), OK)).action(Action::new("Don't allow", Key::Esc, MUTED))
 }
 
 fn tick_since(now: u64, until: u64) -> bool {
@@ -1032,12 +1087,30 @@ pub fn open_entry(entry: TileEntry, cx: &AppCx) -> Box<dyn App> {
 
 /// Draw one viewer inside its rectangle (already clipped). Markdown shows its text from line `from`; the others show what they hold in words
 /// until their engines are drawn here, so the person always sees where an app's embedded part is and what it may do.
-fn paint_embed(g: &mut Gfx, p: &super::tile_embed::Placed, m: &iyakki_agent_api::TileEmbed, from: usize, s: f32) {
+fn paint_embed(g: &mut Gfx, p: &super::tile_embed::Placed, m: &iyakki_agent_api::TileEmbed, from: usize, s: f32, data: Option<&iyakki_agent_api::TileEmbedData>) {
     let r = p.rect;
     g.rrect(r.x, r.y, r.w, r.h, 6.0 * s, rgb(20, 26, 48));
     g.rrect_outline(r.x, r.y, r.w, r.h, 6.0 * s, 1.0, [255, 255, 255, 40]);
     let (pad, size) = (8.0 * s, 13.0 * s);
     let lh = g.line_height(size, Face::Sans);
+    // a player and a dashboard: the heading in bold, the lines under it (a table in the mono face), a thin bar for how far a player has played
+    if let Some(d) = data {
+        g.text(r.x + pad, r.y + pad, size, TEXT, &d.heading, Face::Bold);
+        let face = if m.kind == "dash" { Face::Mono } else { Face::Sans };
+        for (i, l) in d.lines.iter().enumerate() {
+            let y = r.y + pad + (i as f32 + 1.5) * lh;
+            if y > r.y + r.h {
+                break;
+            }
+            g.text(r.x + pad, y, size, TEXT, l, face);
+        }
+        if let Some((pos, len)) = d.progress.filter(|(_, len)| *len > 0) {
+            let w = (r.w - 2.0 * pad) * (pos.min(len) as f32 / len as f32);
+            g.rrect(r.x + pad, r.y + r.h - pad - 3.0 * s, r.w - 2.0 * pad, 3.0 * s, 1.5 * s, [255, 255, 255, 40]);
+            g.rrect(r.x + pad, r.y + r.h - pad - 3.0 * s, w, 3.0 * s, 1.5 * s, rgb(120, 170, 255));
+        }
+        return;
+    }
     let lines: Vec<String> = match m.kind.as_str() {
         "markdown" => m.text.lines().flat_map(|l| g.wrap(size, l, Face::Sans, r.w - 2.0 * pad)).collect(),
         "browser" => vec![format!("Web page · may visit {}", m.hosts.join(", ")), "Its cookies are kept apart from every other app and from your browser.".into()],
@@ -1049,5 +1122,41 @@ fn paint_embed(g: &mut Gfx, p: &super::tile_embed::Placed, m: &iyakki_agent_api:
             break;
         }
         g.text(r.x + pad, y, size, TEXT, l, Face::Sans);
+    }
+}
+
+#[cfg(test)]
+mod embed_paint_tests {
+    use super::*;
+    use iyakki_agent_api::{TileEmbed, TileEmbedData};
+
+    fn viewer(kind: &str) -> TileEmbed {
+        TileEmbed { id: 1, kind: kind.into(), target_json: "{}".into(), text: String::new(), hosts: vec![], profile: String::new(), options_json: "{}".into() }
+    }
+
+    fn placed(kind: &str) -> super::super::tile_embed::Placed {
+        let r = R::new(10.0, 10.0, 400.0, 200.0);
+        super::super::tile_embed::Placed { id: 1, kind: kind.into(), rect: r, visible: r }
+    }
+
+    fn painted(kind: &str, data: Option<&TileEmbedData>) -> Vec<String> {
+        let mut g = Gfx::new(600, 300);
+        paint_embed(&mut g, &placed(kind), &viewer(kind), 0, 1.0, data);
+        g.text_log.iter().map(|(_, _, t)| t.clone()).collect()
+    }
+
+    #[test]
+    fn a_player_viewer_draws_the_apps_playback_state_and_a_dashboard_viewer_its_rows_and_the_others_say_what_they_are() {
+        let play = TileEmbedData { heading: "Playing · song.mp3".into(), lines: vec!["0:42".into()], progress: Some((42, 100)) };
+        let t = painted("media", Some(&play));
+        assert_eq!(t, ["Playing · song.mp3", "0:42"]);
+        let dash = TileEmbedData { heading: "ops · CPU".into(), lines: vec!["host   n".into(), "h0   0".into()], progress: None };
+        assert_eq!(painted("dash", Some(&dash)), ["ops · CPU", "host   n", "h0   0"]);
+        // no data (no player installed, or the app has not started one): the old line in words, nothing invented
+        assert_eq!(painted("media", None), ["media viewer"]);
+        // rows that do not fit are cut by the viewer's rectangle, never drawn outside it
+        let many = TileEmbedData { heading: "h".into(), lines: (0..100).map(|i| format!("row {i}")).collect(), progress: None };
+        let t = painted("dash", Some(&many));
+        assert!(t.len() > 3 && t.len() < 40, "{}", t.len());
     }
 }

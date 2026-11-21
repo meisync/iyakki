@@ -235,7 +235,7 @@ impl IdeBrowser {
         }
         self.full_url = url.to_string();
         cx.audit.record(&self.user, "ide.browser.open", &iyakki_sec::url_host(url).unwrap_or_default());
-        cx.browser().jobs.submit_detached(&self.user, Op::Navigate(url.to_string()));
+        cx.browser_jobs().submit_detached(&self.user, Op::Navigate(url.to_string()));
     }
 
     /// The assistant opened `url` in the shared tab: show the engine, whatever the mode was.
@@ -300,7 +300,7 @@ impl IdeBrowser {
         if cx.browser().control_view(&self.user).active {
             cx.browser().take_over(&self.user);
         }
-        cx.browser().jobs.submit_detached(&self.user, op);
+        cx.browser_jobs().submit_detached(&self.user, op);
     }
 
     fn can_back_forward(&self) -> (bool, bool) {
@@ -398,7 +398,7 @@ impl IdeBrowser {
         }
         self.take_page(cx);
         match self.mode {
-            EmbedMode::Full => web_agent::handle(&Event::Key(k.clone()), cx.browser(), &self.user),
+            EmbedMode::Full => web_agent::handle(&Event::Key(k.clone()), &*cx.browser(), &self.user),
             EmbedMode::Reader => {
                 self.reader.embed_take_keyboard();
                 !matches!(self.reader.handle(&Event::Key(k.clone()), cx), Flow::Back)
@@ -409,7 +409,7 @@ impl IdeBrowser {
     /// The person's mouse moved or let go over the page (these are not click regions, so the host passes them on).
     pub fn pointer(&mut self, ev: &Event, cx: &AppCx) {
         if self.mode == EmbedMode::Full && self.page_event_allowed() {
-            web_agent::handle(ev, cx.browser(), &self.user);
+            web_agent::handle(ev, &*cx.browser(), &self.user);
         }
     }
 
@@ -422,7 +422,7 @@ impl IdeBrowser {
             return true;
         }
         match self.mode {
-            EmbedMode::Full => web_agent::handle(&Event::Paste(text.to_string()), cx.browser(), &self.user),
+            EmbedMode::Full => web_agent::handle(&Event::Paste(text.to_string()), &*cx.browser(), &self.user),
             EmbedMode::Reader => {
                 self.reader.embed_take_keyboard();
                 self.reader.handle(&Event::Paste(text.to_string()), cx);
@@ -434,7 +434,7 @@ impl IdeBrowser {
     pub fn scroll(&mut self, d: i32, cx: &AppCx) {
         match self.mode {
             EmbedMode::Full => {
-                web_agent::handle(&Event::Scroll(d), cx.browser(), &self.user);
+                web_agent::handle(&Event::Scroll(d), &*cx.browser(), &self.user);
             }
             EmbedMode::Reader => {
                 self.reader.handle(&Event::Scroll(d), cx);
@@ -559,7 +559,7 @@ impl Component for IdeBrowser {
                 if let Some(why) = self.crashed() {
                     self.crash_notice(g, body, s, &why);
                 } else {
-                    web_agent::render_with(g, body, s, cx.browser(), &self.user, None);
+                    web_agent::render_with(g, body, s, &*cx.browser(), &self.user, None);
                     if let Some((n, ok)) = &self.note {
                         note_bar(g, body, s, n, *ok);
                     }
@@ -614,11 +614,11 @@ impl Component for IdeBrowser {
                     return true;
                 }
                 self.take_page(cx);
-                web_agent::handle(ev, cx.browser(), &self.user);
+                web_agent::handle(ev, &*cx.browser(), &self.user);
             }
             // the engine's banner buttons: Stop, Take over, Resume
             Event::Tab(web_agent::TAB_STOP | web_agent::TAB_TAKE_OVER | web_agent::TAB_RESUME) => {
-                web_agent::handle(ev, cx.browser(), &self.user);
+                web_agent::handle(ev, &*cx.browser(), &self.user);
             }
             Event::AreaAt(AREA_READER, ..) | Event::Row(_) | Event::FocusAt(..) | Event::Tab(_) if self.mode == EmbedMode::Reader => {
                 if !self.page_event_allowed() {

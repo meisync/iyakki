@@ -1591,6 +1591,8 @@ pub enum Action {
     Cordon { node: String },
     Uncordon { node: String },
     Delete { kind: Kind, ns: String, name: String },
+    /// A YAML manifest read from the person's files, applied after a server-side dry run (F-K8S-26). `ns` is for objects that name none.
+    Apply { yaml: String, ns: String },
 }
 
 pub const MAX_REPLICAS: u32 = 1000;
@@ -1629,6 +1631,12 @@ impl Action {
                 ns_ok(ns)?;
                 name_ok(name)
             }
+            Action::Apply { yaml, ns } => {
+                if !ns.is_empty() {
+                    ns_ok(ns)?;
+                }
+                crate::k8sexptools::scan_manifest(yaml).map(|_| ())
+            }
         }
     }
 
@@ -1651,6 +1659,7 @@ impl Action {
             Action::Cordon { node } => vec![with(&["cordon", node])],
             Action::Uncordon { node } => vec![with(&["uncordon", node])],
             Action::Delete { kind, ns, name } => vec![with(&["-n", ns, "delete", kind.resource(), name, "--wait=false"])],
+            Action::Apply { .. } => return Err("a manifest is applied with its own dry run first (`apply_checked`)".into()),
         })
     }
 
@@ -1669,6 +1678,10 @@ impl Action {
             Action::Cordon { node } => format!("Cordon node {node}"),
             Action::Uncordon { node } => format!("Uncordon node {node}"),
             Action::Delete { kind, name, .. } => format!("Delete {} {name}", kind.api_kind().to_lowercase()),
+            Action::Apply { yaml, .. } => {
+                let n = crate::k8sexptools::scan_manifest(yaml).map_or(0, |o| o.len());
+                format!("Apply a manifest ({n} object{})", if n == 1 { "" } else { "s" })
+            }
         }
     }
 
@@ -1683,6 +1696,18 @@ impl Action {
             Action::Cordon { .. } => "No new pods are placed on this node. Pods already on it keep running.".into(),
             Action::Uncordon { .. } => "The node accepts new pods again.".into(),
             Action::Delete { .. } => "It is removed from the cluster. This cannot be undone, and anything that depends on it stops working.".into(),
+            Action::Apply { yaml, ns } => {
+                let objs = crate::k8sexptools::scan_manifest(yaml).unwrap_or_default();
+                let mut s = String::from("The cluster checks it with a dry run first and nothing is changed if that fails. Existing objects with these names are changed to match; nothing is deleted.\n");
+                for o in objs.iter().take(12) {
+                    let at = if o.cluster_wide() { "  (CLUSTER-WIDE)".to_string() } else if !o.namespace.is_empty() { format!(" in {}", o.namespace) } else if !ns.is_empty() { format!(" in {ns}") } else { String::new() };
+                    s.push_str(&format!("\u{2022} {} {}{}\n", o.kind, o.name, at));
+                }
+                if objs.len() > 12 {
+                    s.push_str(&format!("and {} more\n", objs.len() - 12));
+                }
+                s
+            }
         }
     }
 
@@ -1694,6 +1719,7 @@ impl Action {
             Action::Cordon { .. } => "k8s.cordon",
             Action::Uncordon { .. } => "k8s.uncordon",
             Action::Delete { .. } => "k8s.delete",
+            Action::Apply { .. } => "k8s.apply_yaml",
         }
     }
 
@@ -1705,12 +1731,22 @@ impl Action {
             Action::DeletePod { ns, name } => format!("cluster={cluster} ns={ns} Pod/{name}"),
             Action::Cordon { node } | Action::Uncordon { node } => format!("cluster={cluster} Node/{node}"),
             Action::Delete { kind, ns, name } => format!("cluster={cluster} ns={ns} {}/{name}", kind.api_kind()),
+            // never the text of the manifest: the kinds and names only
+            Action::Apply { yaml, ns } => format!("cluster={cluster} ns={ns} {}", crate::k8sexptools::scan_manifest(yaml).map(|o| o.iter().map(|x| format!("{}/{}", x.kind, x.name)).collect::<Vec<_>>().join(",")).unwrap_or_default()),
         }
     }
 }
 
 /// Run the steps of an action; `emit` gets each output line as it is known. Ok: a one-line result for the toast.
 pub fn run_action(kube: &dyn Kube, tg: &Target, a: &Action, emit: &mut dyn FnMut(&str)) -> Result<String, String> {
+    if let Action::Apply { yaml, ns } = a {
+        emit("$ kubectl apply --dry-run=server");
+        let r = crate::k8sexptools::apply_checked(kube, tg, yaml, Some(ns.as_str()).filter(|n| !n.is_empty()))?;
+        for l in r.lines().take(40) {
+            emit(l);
+        }
+        return Ok(format!("{} done.", a.title()));
+    }
     let steps = a.steps(tg)?;
     let mut result = String::new();
     for (i, args) in steps.iter().enumerate() {

@@ -619,7 +619,7 @@ impl BrowserView {
             let label = format!("{}: {}", p.origin, p.text);
             let t = fit(c, size, &label, TextStyle::Regular, text_w);
             c.text(bar.x + pad, bar.y + ((bar.h - size) / 2.0).max(0.0), size, th.text, &t, TextStyle::Regular);
-            c.hit(Rect::new(bar.x, bar.y, text_w + pad, bar.h), Hit { action: self.base + OWN_ACTIONS + 9, name: label, role: Role::Text });
+            c.hit(Rect::new(bar.x, bar.y, text_w + pad, bar.h), Hit { action: self.base + OWN_ACTIONS + 9, name: label, role: Role::Text, ..Default::default() });
             widgets::button(c, th, &m, Rect::new(bar.right() - 2.0 * btn_w - m.gap(Space::Xl) + m.gap(Space::Xxs), bar.y + xs, btn_w, bar.h - 2.0 * xs), "Allow", self.base + A_ALLOW, true);
             widgets::button(c, th, &m, Rect::new(bar.right() - btn_w - m.gap(Space::Sm), bar.y + xs, btn_w, bar.h - 2.0 * xs), "Deny", self.base + A_DENY, false);
         }
@@ -776,7 +776,7 @@ impl BrowserPort for MemBrowser {
             }
             for (i, (label, _)) in p.links.iter().enumerate() {
                 let w = c.text(8.0, y, 14.0, pal.link, label, TextStyle::Regular);
-                c.hit(Rect::new(8.0, y, w.max(8.0), 18.0), Hit { action: i as u32 + 1, name: label.clone(), role: Role::Link });
+                c.hit(Rect::new(8.0, y, w.max(8.0), 18.0), Hit { action: i as u32 + 1, name: label.clone(), role: Role::Link, ..Default::default() });
                 y += 22.0;
             }
         }

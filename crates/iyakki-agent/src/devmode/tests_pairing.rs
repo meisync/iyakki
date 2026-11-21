@@ -3,7 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use iyakki_netscan::mdns::net::Found;
+use iyakki_core_local::netscan::mdns::net::Found;
 use iyakki_sec::policy::Role;
 
 use super::client::{self, Device, Home};

@@ -1,0 +1,19 @@
+# autotest pilot, batch A (2026-11-21). Written against the Feature text with sha 1c532086057eca09; honest subset only: everything not checked is under not-covered.
+row: F-SDK-189
+targets: qemu
+profile: ram
+feature-sha: 1c532086057eca09
+doc: the person's Settings page for app events is served by the running core's AppEvents facet
+clause: 1 the person's Settings page for app events is served by the running core's AppEvents facet
+not-covered: register, unregister, start, stop, poll, replay, requeue, publish, emit, wanted, audit as facet methods
+not-covered: NoAppEvents refusing in a sentence
+not-covered: the fake with a test clock and restart
+key s
+wait app=Settings
+skip-unless-button App events
+click-sidebar App events
+wait app=Settings page=App events
+shot page
+expect-not-blank
+expect-text App events
+expect-page App events

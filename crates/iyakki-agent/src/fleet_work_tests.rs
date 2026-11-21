@@ -76,7 +76,7 @@ fn runner() -> Runner {
 }
 
 fn hb(n: u64) -> Heartbeat {
-    Heartbeat { disk_free_mb: 1000 * n, disk_total_mb: 9000, cpu_load_pct: 10 * n as u32, cpus: 4, mem_used_pct: 20 + n as u32, mem_total_mb: 8000, tasks_running: n as u32, models: vec![format!("model-{n}")] }
+    Heartbeat { disk_free_mb: 1000 * n, disk_total_mb: 9000, cpu_load_pct: 10 * n as u32, cpus: 4, mem_used_pct: 20 + n as u32, mem_total_mb: 8000, tasks_running: n as u32, models: vec![format!("model-{n}")], battery_pct: None }
 }
 
 fn up(h: &Arc<Hub>, n: u64) -> String {
@@ -614,7 +614,7 @@ fn a_task_with_a_model_class_runs_on_the_model_of_this_computer_that_has_the_abi
 
 #[test]
 fn a_member_with_little_free_memory_takes_fewer_tasks_than_it_has_processors() {
-    let h = |cpus: u32, total: u64, used: u32, running: u32| Heartbeat { disk_free_mb: 9000, disk_total_mb: 9000, cpu_load_pct: 10, cpus, mem_used_pct: used, mem_total_mb: total, tasks_running: running, models: vec!["m".into()] };
+    let h = |cpus: u32, total: u64, used: u32, running: u32| Heartbeat { disk_free_mb: 9000, disk_total_mb: 9000, cpu_load_pct: 10, cpus, mem_used_pct: used, mem_total_mb: total, tasks_running: running, models: vec!["m".into()], battery_pct: None };
     // 16 processors but 8 GB with 50% used: 4 GB free, 2 GB kept back, one 1.5 GB task fits
     assert_eq!(crate::fleet_work::member_cap(&h(16, 8000, 50, 0)), 1);
     // plenty of memory: the processors are the limit
@@ -856,6 +856,63 @@ fn the_door_switches_the_relay_on_and_off_asks_first_and_says_plainly_when_there
     assert_eq!(gate.calls().iter().filter(|c| c.starts_with("manage(")).count(), 3, "every switch asked the core: {:?}", gate.calls());
 }
 
+/// The relay's HTTP wire over a `FakeRelay` in memory, for the fleet's own outgoing connection.
+struct WireRelay(std::sync::Mutex<crate::devmode::relay::FakeRelay>);
+
+impl iyakki_proxy::Upstream for WireRelay {
+    fn request(&self, method: &str, url: &str, _h: &[(String, String)], body: &[u8]) -> Result<iyakki_proxy::UpstreamResponse, String> {
+        let now = crate::clock::now_unix() as u64 * 1000;
+        let mut r = self.0.lock().unwrap();
+        if method == "POST" && url.ends_with("/v1/relay/post") {
+            return Ok(match r.post(body, now) {
+                Ok(()) => iyakki_proxy::UpstreamResponse { status: 204, body: vec![] },
+                Err(d) => iyakki_proxy::UpstreamResponse { status: 422, body: d.word().as_bytes().to_vec() },
+            });
+        }
+        let mailbox = url.rsplit('/').next().unwrap_or("");
+        let list: Vec<String> = r.fetch(mailbox, now).iter().map(|e| crate::devmode::relay_link::to_hex(&e.encode().unwrap())).collect();
+        Ok(iyakki_proxy::UpstreamResponse { status: 200, body: serde_json::to_vec(&list).unwrap() })
+    }
+}
+
+#[test]
+fn the_fleet_connects_out_to_the_relay_address_the_person_set_and_not_before_and_an_https_relay_needs_its_pin() {
+    use crate::fleettools::{relay_from_settings, FleetApi};
+    let dir = std::env::temp_dir().join(format!("iyakki-fleet-relay-wire-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let wire = Arc::new(WireRelay(std::sync::Mutex::new(crate::devmode::relay::FakeRelay::new())));
+    // no address yet: nothing is built, nothing is connected to
+    assert!(relay_from_settings(&dir, wire.clone()).err().unwrap().contains("no relay to connect to"));
+    let dm = crate::devmode::DevMode::open(&dir);
+    let admin = iyakki_sec::policy::Role::Admin.template();
+    dm.set_relay_url(&admin, "root", "https://relay.example").unwrap();
+    assert!(relay_from_settings(&dir, wire.clone()).err().unwrap().contains("fingerprint"), "an https relay with no pin is refused");
+    dm.set_relay_url(&admin, "root", "http://relay.test").unwrap();
+    // the door takes the address when the relay is switched on, so one set after the door was made is used
+    let (a, b) = (hub("relay-wire-a"), hub("relay-wire-b"));
+    let a_addr = up(&a, 1);
+    up(&b, 2);
+    let fid = pair(&a, &b, &a_addr, "bravo");
+    let gate = iyakki_core_fake::FakeOs::new().fleet_fake();
+    let (w1, d1) = (wire.clone(), dir.clone());
+    let source: crate::fleettools::RelaySource = Arc::new(move || relay_from_settings(&d1, w1.clone()));
+    let api_a = FleetApi::new(a.clone(), gate.clone(), Arc::new(FixedSource(hb(1))), Arc::new(|_, _| {})).with_relay_source(source.clone());
+    let api_b = FleetApi::new(b.clone(), gate, Arc::new(FixedSource(hb(2))), Arc::new(|_, _| {})).with_relay_source(source);
+    let m = crate::router_registry::Profile { id: "local/wire-model".into(), provider: "local".into(), model: "wire-model".into(), role: crate::router_registry::Role::Executor, caps: crate::router_registry::Caps { tools: true, vision: false, audio: false, context: 8192 }, cost: crate::router_registry::Cost::Free, zone: crate::router_registry::Zone::Computer, local: true, enabled: true };
+    b.set_models_handler(Arc::new(move || vec![m.clone()]));
+    let (said_a, said_b) = (api_a.use_relay(true).unwrap(), api_b.use_relay(true).unwrap());
+    assert!(said_a.contains("relay://") && said_b.contains("relay://"));
+    let box_b = crate::fleet_hub::relay_mailbox_of(&b.my_id());
+    a.set_member_address(&fid, &b.my_id(), &format!("relay://{box_b}")).unwrap();
+    let got = a.query_models(&fid, "bravo");
+    api_a.use_relay(false).unwrap();
+    api_b.use_relay(false).unwrap();
+    assert_eq!(got.unwrap()[0].model, "wire-model", "the question and its answer went through the relay's wire");
+    assert!(wire.0.lock().unwrap().seen.len() >= 2, "a request and its answer were posted");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_dispatcher_with_no_fleet_named_looks_across_two_fleets_and_a_named_one_stays_inside_its_fleet() {
     use crate::router::FleetRunner;
@@ -955,4 +1012,45 @@ fn a_follow_up_starts_on_the_worker_from_the_integration_branch_the_planner_send
     // a worker that takes no work refuses a base
     w2.hub.set_accept(Accept::Never);
     assert!(p.hub.send_base(&fid, "charlie", &head, &bundle).is_err());
+}
+
+#[test]
+fn a_base_cut_in_half_by_a_restart_is_finished_from_where_it_stopped_and_a_base_the_worker_holds_is_not_sent_again() {
+    use crate::fleet_hub::CHUNK;
+    let (p, w1, _w2, fid) = fleet3("baseresume");
+    w1.hub.set_accept(Accept::Members);
+    w1.hub.trust(&fid, "alpha", true).unwrap();
+    let lines = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    {
+        let l = lines.clone();
+        p.hub.set_audit(Arc::new(move |w, d| l.lock().unwrap().push(format!("{w} {d}"))));
+    }
+    // a file of three whole chunks and a bit stands for the bundle (the worker keeps the bytes; git reads them only when a task starts)
+    let bytes: Vec<u8> = (0..(3 * CHUNK + 99)).map(|n| (n % 241) as u8).collect();
+    let file = tmp("baseresume-bundle").join("base.bundle");
+    std::fs::write(&file, &bytes).unwrap();
+    let sha = {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+    let commit = "ab".repeat(20);
+    let total = bytes.chunks(CHUNK).count() as u32;
+    let hex = |c: &[u8]| c.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    // the first two chunks arrive, then the worker restarts (its count in memory is gone)
+    for (n, c) in bytes.chunks(CHUNK).take(2).enumerate() {
+        let m = serde_json::json!({"commit": commit, "sha256": sha, "size": bytes.len(), "index": n, "total": total, "data": hex(c)});
+        p.hub.send_member(&fid, "bravo", "base_chunk", &m).unwrap();
+    }
+    w1.hub.forget_assemblies();
+    assert!(w1.hub.base_path(&commit).is_none(), "not whole yet");
+    p.hub.send_base(&fid, "bravo", &commit, &file).unwrap();
+    assert_eq!(std::fs::read(w1.hub.base_path(&commit).expect("whole now")).unwrap(), bytes, "the base is whole and equal");
+    assert!(lines.lock().unwrap().iter().any(|l| l.starts_with("fleet.base.out") && l.contains("resumed_at=2")), "{:?}", lines.lock().unwrap());
+    // sending it again finds it there and sends nothing
+    p.hub.send_base(&fid, "bravo", &commit, &file).unwrap();
+    assert!(lines.lock().unwrap().iter().any(|l| l.contains("already_there=yes")));
+    // a worker that takes no work answers the question with a refusal, never with how far it got
+    w1.hub.set_accept(Accept::Never);
+    let again = "cd".repeat(20);
+    assert!(p.hub.send_base(&fid, "bravo", &again, &file).is_err());
 }

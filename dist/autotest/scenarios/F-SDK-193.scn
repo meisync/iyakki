@@ -1,0 +1,8 @@
+# autotest pilot, batch A (2026-11-21). Written against the Feature text with sha 2381e4035d18bee5; honest subset only: everything not checked is under not-covered.
+row: F-SDK-193
+targets: qemu
+profile: ram
+feature-sha: 2381e4035d18bee5
+doc: the app_events_* chat tools run through the core with approvals
+human: chat-tools | Ask the assistant to list which events each app listens to, then to register one (approve the card), then to switch it off. Expect: The list names apps and events and no payload; each change asks first.
+not-covered: the app_events_* chat tools run through the core with approvals

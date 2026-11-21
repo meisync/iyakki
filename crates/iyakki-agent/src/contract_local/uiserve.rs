@@ -10,6 +10,9 @@
 //! * `hello` comes from the real catalog (`hello_for`), so a UI negotiates against what this machine really serves.
 //! * Every call goes through the same adapters as the developer-mode channel (`Core::settings`, `vault`, flows of the account), so the
 //!   guards, the idempotency keys and the audit lines ("who via uisocket: call [risk] outcome", never a value) are the same ones.
+//! * The door has two locks: the file mode, and the peer the kernel reports for every connection (`SO_PEERCRED`): only root and the owner
+//!   of the socket file are let in. Binary blocks (`bulk.get`, [`CoreBulk`]) and pushed settings changes (`settings.subscribe`) are served on
+//!   the same connection; the caller of both is the listener's context, never the request's.
 //! * The switch is read again every two seconds by [`watch`]: switching it off closes the socket and removes the file.
 
 use std::path::{Path, PathBuf};
@@ -20,7 +23,7 @@ use iyakki_core_api::contract::catalog::hello_for;
 use iyakki_core_api::contract::*;
 use iyakki_core_api::Capabilities;
 use iyakki_sec::policy::{Policy, Role};
-use iyakki_ui_client::server::{serve_unix, RpcServe, Served};
+use iyakki_ui_client::server::{serve_unix_bulk, BulkSource, RpcServe, Served};
 use serde::{Deserialize, Serialize};
 
 use super::{Core, CoreFlows};
@@ -38,7 +41,7 @@ pub fn grantable() -> Vec<&'static str> {
 
 /// The scopes of the assistant and camera facets on this socket (F-SDK-85, F-SDK-166): use, and the person's yes to a card. They are not scopes
 /// of the paired-computer contract (`GRANTABLE`), which does not serve these domains.
-pub const FACET_SCOPES: [&str; 4] = [iyakki_ui_client::facets::ASSISTANT_USE, iyakki_ui_client::facets::ASSISTANT_APPROVE, iyakki_ui_client::facets::CAMERAS_VIEW, iyakki_ui_client::facets::CAMERAS_CONSENT];
+pub const FACET_SCOPES: [&str; 7] = [iyakki_ui_client::facets::ASSISTANT_USE, iyakki_ui_client::facets::ASSISTANT_APPROVE, iyakki_ui_client::facets::CAMERAS_VIEW, iyakki_ui_client::facets::CAMERAS_CONSENT, iyakki_ui_client::facets::DISPLAY_VIEW, iyakki_ui_client::facets::FLOWS_EDIT, iyakki_ui_client::facets::FLOWS_HOOKS];
 
 /// The facets of the core this socket may carry besides settings, the vault and the flows: the embedded assistant and the camera views, which
 /// the daemon builds over its own services. Without them the domains are not served.
@@ -48,7 +51,56 @@ pub struct Facets {
     pub cameras: Option<Arc<dyn iyakki_core_api::Cameras>>,
     /// The root objects of the shell's services (F-SPLIT-03), served only when the config's `rpc` switch is on.
     pub rpc: Option<RpcFactory>,
+    /// More blocks for `bulk.get` (a display list or a camera frame producer, F-SDK-29 and F-SPLIT-07): asked after the core's own blocks.
+    pub bulk: Option<Arc<dyn BulkSource>>,
 }
+
+/// The blocks the real core hands over beside an answer (`bulk.get`, F-SPLIT-07). Who may ask is the listener's context, as for every call:
+/// * `settings.all`: every setting the listener's scopes may read, as one JSON object `{key: value}`. It goes through the same adapter
+///   as `settings.get` (guards, scopes), so a key the caller may not read is simply not in the block.
+///
+/// Any other name goes to the extra source of [`Facets::bulk`], and without one is `not_found`. A display-list or frame producer is not
+/// here: that needs the display-list protocol of F-SDK-29, which waits for an owner decision.
+pub struct CoreBulk {
+    core: Arc<Core>,
+    extra: Option<Arc<dyn BulkSource>>,
+}
+
+impl CoreBulk {
+    pub fn new(core: Arc<Core>, extra: Option<Arc<dyn BulkSource>>) -> CoreBulk {
+        CoreBulk { core, extra }
+    }
+}
+
+impl BulkSource for CoreBulk {
+    fn get(&self, ctx: &CallContext, name: &str) -> CallResult<Vec<u8>> {
+        match name {
+            "settings.all" => {
+                let mut all = serde_json::Map::new();
+                for spec in self.core.settings.schema(ctx)? {
+                    // a key this caller may not read is left out; any other refusal is the caller's to see
+                    match self.core.settings.get(ctx, &spec.key) {
+                        Ok(v) => {
+                            all.insert(spec.key, serde_json::to_value(&v).unwrap_or(serde_json::Value::Null));
+                        }
+                        Err(e) if e.code == ErrorCode::Denied => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                serde_json::to_vec(&all).map_err(|e| CallError::new(ErrorCode::Internal, "uisocket.bulk_encode", &e.to_string()))
+            }
+            other => match &self.extra {
+                Some(x) => x.get(ctx, other),
+                None => Err(CallError::new(ErrorCode::NotFound, "uisocket.no_such_block", "This core has no block of that name.")),
+            },
+        }
+    }
+}
+
+/// The pace of the first-party UI program on the object-call socket. The catalog's 120 calls a minute is for a program somebody else wrote; the shell
+/// of this device asks for several hundred values a second (every frame reads the settings, the accounts, the audit log), so a socket that serves it the
+/// objects (`rpc`) is told this much instead (D-SPLIT-07-RATE). The peer is still checked on every connection (root and the socket's owner only).
+pub const FIRST_PARTY_RATE: RateLimit = RateLimit { calls: 200_000, per_ms: 1000 };
 
 /// How the composition root gives the core its root objects: one host for the core's own services (`iyakki-compose::rpc::RpcRoots`).
 pub type RpcFactory = Arc<dyn Fn(&Arc<Core>) -> Arc<dyn RpcServe> + Send + Sync>;
@@ -77,6 +129,43 @@ impl Default for UiSocketConfig {
 
 pub fn load(dir: &Path) -> UiSocketConfig {
     std::fs::read(dir.join(CONFIG_FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// What the first-party UI program (`iyakki-ui --socket`, supervised by the core) holds on the socket: read the settings, see the vault's state, read the
+/// flows and the app events, use the assistant and the camera views and say yes to their cards. It does not hold `settings:write`, `vault:use`,
+/// `vault:lock` or the flow rights: those changes go through the objects, where the core does its own checks and its own audit.
+pub const PROGRAM_SCOPES: [&str; 11] = [
+    Scope::SETTINGS_READ,
+    Scope::VAULT_STATUS,
+    Scope::FLOWS_READ,
+    Scope::FLOWS_RUN,
+    iyakki_ui_client::facets::FLOWS_EDIT,
+    Scope::EVENTS_READ,
+    iyakki_ui_client::facets::ASSISTANT_USE,
+    iyakki_ui_client::facets::ASSISTANT_APPROVE,
+    iyakki_ui_client::facets::CAMERAS_VIEW,
+    iyakki_ui_client::facets::CAMERAS_CONSENT,
+    iyakki_ui_client::facets::DISPLAY_VIEW,
+];
+
+/// The core is about to start the UI program (the image or an administrator asked for `iyakki.ui=process`, `uiprocess::mode`): make sure the socket the
+/// program connects to is on, serves the objects (`rpc`) and holds the scopes of [`PROGRAM_SCOPES`] (D-SPLIT-03-SOCKET). What an administrator set
+/// already stays: a wider set of scopes is kept, the account name and the template are kept, a socket that was off or without `rpc` is turned on.
+/// `Ok(true)` when the file was written, `Ok(false)` when it already said enough. The watcher of [`watch_with`] opens the socket within two seconds, and
+/// the program waits for it.
+pub fn hand_over(dir: &Path) -> Result<bool, String> {
+    let mut c = load(dir);
+    let missing: Vec<&str> = PROGRAM_SCOPES.iter().copied().filter(|s| !c.scopes.iter().any(|h| h == s)).collect();
+    if c.enabled && c.rpc && missing.is_empty() {
+        return Ok(false);
+    }
+    c.enabled = true;
+    c.rpc = true;
+    c.scopes.extend(missing.into_iter().map(String::from));
+    c.scopes.sort();
+    c.scopes.dedup();
+    save(dir, &c)?;
+    Ok(true)
 }
 
 /// Keep the config (administrators: the caller checked). Refuses a scope that cannot be granted.
@@ -202,7 +291,17 @@ pub fn served_with(core: &Arc<Core>, cfg: &UiSocketConfig, hostname: &str, facet
     let scopes: Vec<&str> = cfg.scopes.iter().map(String::as_str).collect();
     let policy = if cfg.admin { Role::Admin.template() } else { Role::User.template() };
     let mut hello = hello_for(hostname, env!("CARGO_PKG_VERSION"), caps);
+    if cfg.rpc && facets.rpc.is_some() {
+        hello.rate_limit = FIRST_PARTY_RATE;
+    }
     let domain = |name: &str, calls: &[&str], events: &[&str]| DomainSupport { domain: name.into(), since_minor: 0, calls: calls.iter().map(|c| c.to_string()).collect(), events: events.iter().map(|c| c.to_string()).collect() };
+    // pushed settings changes (`settings.subscribe`, a facet of the transport, not of the catalog): advertised where it is served
+    // the same for the events of flow runs and of app events (D-SPLIT-07-PUSH, additive: the catalog does not change)
+    for name in ["settings", "flows", "appevents"] {
+        if let Some(d) = hello.domains.iter_mut().find(|d| d.domain == name) {
+            d.calls.push("subscribe".into());
+        }
+    }
     if facets.assistant.is_some() {
         hello.domains.push(domain("assistant", &["models", "roles", "open", "set_context", "choose", "send", "poll", "subscribe", "decide", "answer", "cancel", "history", "close"], &["assistant"]));
     }
@@ -270,8 +369,15 @@ pub fn start_with(core: &Arc<Core>, cfg: &UiSocketConfig, hostname: &str, path: 
     let s = Arc::new(served_with(core, cfg, hostname, facets));
     let stop = Arc::new(AtomicBool::new(false));
     let st = stop.clone();
+    // the second lock after the file mode: the kernel names the peer of every connection (`SO_PEERCRED`) and only root and the owner of the socket
+    // (the core's own user, who made it) are let in; a connection of any other user is closed before a byte is read
+    let owner = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).map_err(|e| format!("the socket owner: {e}"))?.uid()
+    };
+    let bulk: Arc<dyn BulkSource> = Arc::new(CoreBulk::new(core.clone(), facets.bulk.clone()));
     let thread = std::thread::spawn(move || {
-        if let Err(e) = serve_unix(listener, s, st) {
+        if let Err(e) = serve_unix_bulk(listener, s, st, Some(owner), Some(bulk)) {
             log::error!("ui socket: {e}");
         }
     });
@@ -330,6 +436,57 @@ mod tests {
         let p = std::path::PathBuf::from("/tmp").join(format!("iyk-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         p
+    }
+
+    /// The core starts the UI program: the socket is switched on with the program's scopes and the objects, once; an administrator's wider grant and
+    /// account stay; a second call writes nothing.
+    #[test]
+    fn handing_the_socket_over_turns_it_on_with_the_programs_scopes_and_keeps_what_an_administrator_set() {
+        let d = crate::testdir::unique("iyakki-uisock", "handover");
+        assert!(!load(&d).enabled, "off by default");
+        assert_eq!(hand_over(&d), Ok(true));
+        let c = load(&d);
+        assert!(c.enabled && c.rpc, "on, and serving the objects");
+        for s in PROGRAM_SCOPES {
+            assert!(c.scopes.iter().any(|h| h == s), "{s} is held");
+        }
+        assert!(!c.scopes.iter().any(|s| s == Scope::SETTINGS_WRITE || s == Scope::VAULT_USE), "the program holds no write or secret scope");
+        assert_eq!(hand_over(&d), Ok(false), "already enough: nothing is written");
+        // an administrator's choices stay
+        let mut wide = load(&d);
+        wide.scopes.push(Scope::FLOWS_RUN.into());
+        wide.account = "kiosk".into();
+        wide.rpc = false;
+        save(&d, &wide).unwrap();
+        assert_eq!(hand_over(&d), Ok(true), "a socket without the objects is switched back on");
+        let c = load(&d);
+        assert!(c.rpc && c.scopes.iter().any(|s| s == Scope::FLOWS_RUN) && c.account == "kiosk");
+        // every scope of the program can really be granted (`save` refuses the others)
+        assert!(PROGRAM_SCOPES.iter().all(|s| grantable().contains(s)));
+    }
+
+    struct NoObjects;
+    impl RpcServe for NoObjects {
+        fn call(&self, _: &CallContext, _: u64, _: u64, _: &str, _: &str, _: serde_json::Value) -> CallResult<serde_json::Value> {
+            Err(CallError::new(ErrorCode::NotFound, "test.none", "none"))
+        }
+        fn release(&self, _: u64, _: Option<u64>) {}
+    }
+
+    /// The pace of the socket: an outside client keeps the catalog's limit; the first-party program that is served the objects (`rpc` on and a factory
+    /// given) is told the larger one, because the shell reads hundreds of values a second.
+    #[test]
+    fn the_socket_that_serves_the_objects_is_not_paced_like_an_outside_client() {
+        let core = core("rate");
+        let factory: RpcFactory = Arc::new(|_| Arc::new(NoObjects) as Arc<dyn RpcServe>);
+        let with = Facets { rpc: Some(factory), ..Facets::default() };
+        let catalog = hello_for("m", env!("CARGO_PKG_VERSION"), Capabilities::none()).rate_limit;
+        assert_eq!(served(&core, &cfg(&["settings:read"]), "m").hello.rate_limit, catalog, "no objects: the catalog's limit");
+        let mut on = cfg(&["settings:read"]);
+        on.rpc = true;
+        assert_eq!(served_with(&core, &on, "m", &Facets::default()).hello.rate_limit, catalog, "rpc on but no factory: nothing is served, nothing is raised");
+        assert_eq!(served_with(&core, &cfg(&["settings:read"]), "m", &with).hello.rate_limit, catalog, "a factory but the switch off: the catalog's limit");
+        assert_eq!(served_with(&core, &on, "m", &with).hello.rate_limit, FIRST_PARTY_RATE);
     }
 
     fn cfg(scopes: &[&str]) -> UiSocketConfig {
@@ -395,6 +552,163 @@ mod tests {
         drop(c);
         drop(server);
         assert!(!path.exists(), "the socket file is removed when the server stops");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_real_core_hands_a_block_of_settings_over_as_a_memory_file_only_for_what_the_listener_may_read() {
+        let core = core("bulk");
+        let dir = short("k");
+        let path = dir.join("ui.sock");
+        let server = start(&core, &cfg(&["settings:read"]), "iyakki-test", &path).unwrap();
+        let mut c = Connection::unix(&path, Duration::from_secs(5)).unwrap();
+        let block = c.bulk_get("settings.all").unwrap();
+        let all: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&block).unwrap();
+        let schema = c.call("settings.schema", json!({})).unwrap();
+        let key = schema[0]["key"].as_str().unwrap().to_string();
+        assert!(all.contains_key(&key), "a key the listener may read is in the block");
+        assert_eq!(all[&key], c.call("settings.get", json!({"key": key})).unwrap(), "the block says what settings.get says");
+        assert_eq!(c.bulk_get("no.such.block").unwrap_err().code, ErrorCode::NotFound);
+        // ordinary calls go on after a block
+        let after = c.call("settings.get", json!({"key": key}));
+        assert!(after.is_ok(), "{after:?}");
+        drop(c);
+        drop(server);
+        // a listener without the read scope gets no keys at all
+        let server = start(&core, &cfg(&[]), "iyakki-test", &path).unwrap();
+        let mut c = Connection::unix(&path, Duration::from_secs(5)).unwrap();
+        match c.bulk_get("settings.all") {
+            Ok(b) => assert_eq!(serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&b).unwrap().len(), 0),
+            Err(e) => assert_eq!(e.code, ErrorCode::Denied),
+        }
+        drop(c);
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_settings_change_is_pushed_to_a_subscribed_connection_and_a_listener_without_the_scope_cannot_subscribe() {
+        let core = core("push");
+        let dir = short("p");
+        let path = dir.join("ui.sock");
+        let server = start(&core, &cfg(&["settings:read", "settings:write"]), "h", &path).unwrap();
+        let mut watcher = Connection::unix(&path, Duration::from_secs(10)).unwrap();
+        let (hello, _) = watcher.negotiate(&["settings"]).unwrap();
+        assert!(hello.domains.iter().any(|d| d.domain == "settings" && d.calls.contains(&"subscribe".to_string())));
+        // the pushed flow and app events are advertised the same way (D-SPLIT-07-PUSH: additive, only where this core serves them)
+        for d in ["flows", "appevents"] {
+            assert!(hello.domains.iter().any(|x| x.domain == d && x.calls.contains(&"subscribe".to_string())), "{d}");
+        }
+        watcher.call("settings.subscribe", json!({})).unwrap();
+        let mut writer = Connection::unix(&path, Duration::from_secs(5)).unwrap();
+        let schema = writer.call("settings.schema", json!({})).unwrap();
+        let spec = schema.as_array().unwrap().iter().find(|s| s["default"]["type"] == "bool" && s["write_scope"] == "settings:write" && s["write_risk"] == "change").expect("a plain boolean setting");
+        let key = spec["key"].as_str().unwrap().to_string();
+        let before = writer.call("settings.get", json!({"key": key})).unwrap();
+        let flipped = json!({"type": "bool", "value": !before["value"].as_bool().unwrap_or(false)});
+        writer.call("settings.set", json!({"key": key, "value": flipped})).unwrap();
+        // the push arrives on its own (the read waits for it; no sleep, no poll by the client)
+        let mut seen = None;
+        while seen.is_none() {
+            watcher.read_push().unwrap();
+            for line in watcher.take_pushed() {
+                if line["push"] == "settings" {
+                    seen = line["events"].as_array().and_then(|e| e.iter().find(|e| e["body"]["key"] == key.as_str() || e["key"] == key.as_str()).cloned());
+                }
+            }
+        }
+        assert!(seen.is_some());
+        drop(watcher);
+        drop(writer);
+        drop(server);
+        let server = start(&core, &cfg(&[]), "h", &path).unwrap();
+        let mut c = Connection::unix(&path, Duration::from_secs(5)).unwrap();
+        assert_eq!(c.call("settings.subscribe", json!({})).unwrap_err().code, ErrorCode::Denied);
+        drop(c);
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_app_event_of_the_real_core_is_pushed_to_the_ui_program_which_holds_its_own_event_scopes_and_a_listener_without_the_scope_is_refused() {
+        use iyakki_core_api::appevents::{payload, Val};
+        use iyakki_core_api::AppEvents;
+        let core = core("appev");
+        let dir = short("e");
+        let path = dir.join("ui.sock");
+        let server = start(&core, &cfg(&["events:read"]), "h", &path).unwrap();
+        let mut watcher = Connection::unix(&path, Duration::from_secs(10)).unwrap();
+        // the app of this connection is `client.ui`: the table of built-in apps gives it the `events.*` scopes the shell needs, so the register is
+        // accepted by the real hub (it is refused for an app the table does not know) and a core event reaches the program without polling
+        watcher.call("appevents.register", json!({"event": "session.changed", "filter": ""})).unwrap();
+        let refused = watcher.call("appevents.register", json!({"event": "no.such.event", "filter": ""})).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Denied, "{refused:?}");
+        watcher.call("appevents.subscribe", json!({})).unwrap();
+        core.svc.app_events.emit("session.changed", Some("ui"), payload(&[("state", Val::Text("signed_out".into()))])).unwrap();
+        let mut seen = None;
+        while seen.is_none() {
+            watcher.read_push().unwrap();
+            for line in watcher.take_pushed() {
+                if line["push"] == "appevents" {
+                    seen = line["events"].as_array().and_then(|e| e.iter().find(|e| e["body"]["name"] == "session.changed").cloned());
+                }
+            }
+        }
+        assert_eq!(seen.unwrap()["body"]["payload"]["state"], "signed_out", "the payload carries the state word");
+        drop(watcher);
+        drop(server);
+        // a listener without `events:read` cannot register or subscribe
+        let server = start(&core, &cfg(&["settings:read"]), "h", &path).unwrap();
+        let mut c = Connection::unix(&path, Duration::from_secs(5)).unwrap();
+        assert_eq!(c.call("appevents.subscribe", json!({})).unwrap_err().code, ErrorCode::Denied);
+        assert_eq!(c.call("appevents.register", json!({"event": "session.changed", "filter": ""})).unwrap_err().code, ErrorCode::Denied);
+        drop(c);
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_flow_run_of_the_real_engine_is_pushed_to_the_ui_program_without_polling_and_the_scopes_decide() {
+        let core = core("flowpush");
+        let dir = short("f");
+        let path = dir.join("ui.sock");
+        let server = start(&core, &cfg(&["flows:read", "flows:run"]), "h", &path).unwrap();
+        let mut starter = Connection::unix(&path, Duration::from_secs(20)).unwrap();
+        // the first call opens the account's engine; then a flow can be put into its store
+        assert!(starter.call("flows.list", json!({})).unwrap().as_array().unwrap().is_empty());
+        let env = crate::flows::FlowEnv::existing(&core.svc, "ui").unwrap();
+        env.create_draft(crate::flows::build_flow(&json!({"name": "Backup", "nodes": [{"id": "n", "kind": "notify", "config": {"title": "x"}}]})).unwrap(), "user:ui").unwrap();
+        let mut watcher = Connection::unix(&path, Duration::from_secs(20)).unwrap();
+        watcher.call("flows.subscribe", json!({})).unwrap();
+        let list = starter.call("flows.list", json!({})).unwrap();
+        let id = list[0]["id"].as_str().expect("the draft is listed").to_string();
+        env.store.publish(&id, &iyakki_flow::store::PublishReq { by: "user:ui", label: "", changelog: "x", approved_by: None }).unwrap();
+        let run = starter.call("flows.start", json!({"flow": id, "idempotency_key": "push-key-real-1"})).unwrap();
+        assert!(run.is_string() || run.is_object(), "{run:?}");
+        // the events of this run arrive on the watcher's own connection: the read waits for the push, the client never asks again
+        let mut kinds: Vec<String> = Vec::new();
+        while !kinds.iter().any(|k| k == "finished") {
+            watcher.read_push().unwrap();
+            for line in watcher.take_pushed() {
+                if line["push"] == "flows" {
+                    kinds.extend(line["events"].as_array().unwrap().iter().filter_map(|e| e["body"]["type"].as_str().or_else(|| e["type"].as_str()).map(String::from)));
+                }
+            }
+        }
+        drop(watcher);
+        drop(starter);
+        drop(server);
+        // without `flows:read` nothing can subscribe; a listener with read but not run cannot start
+        let server = start(&core, &cfg(&["flows:read"]), "h", &path).unwrap();
+        let mut c = Connection::unix(&path, Duration::from_secs(5)).unwrap();
+        assert_eq!(c.call("flows.start", json!({"flow": id, "idempotency_key": "push-key-real-2"})).unwrap_err().code, ErrorCode::Denied);
+        drop(c);
+        drop(server);
+        let server = start(&core, &cfg(&[]), "h", &path).unwrap();
+        let mut c = Connection::unix(&path, Duration::from_secs(5)).unwrap();
+        assert_eq!(c.call("flows.subscribe", json!({})).unwrap_err().code, ErrorCode::Denied);
+        drop(c);
+        drop(server);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -512,10 +826,10 @@ mod tests {
         let core = core("facets");
         let agent = crate::corehandle::AgentCore::new(core.svc.clone());
         let fake = Arc::new(iyakki_core_fake::FakeAssistant::new());
-        let dir = short("f");
+        let dir = short("g");
         let path = dir.join("ui.sock");
         // the agent's own core has no assistant configured here: the domain is served and says so in the core's words
-        let facets = Facets { assistant: Some(agent.shared_assistant()), cameras: Some(agent.shared_cameras()), rpc: None };
+        let facets = Facets { assistant: Some(agent.shared_assistant()), cameras: Some(agent.shared_cameras()), rpc: None, bulk: None };
         let server = start_with(&core, &cfg(&["assistant:use", "cameras:view"]), "iyakki-test", &path, &facets).unwrap();
         let mut c = Connection::unix(&path, Duration::from_secs(5)).unwrap();
         let hello = c.hello().unwrap();
@@ -527,7 +841,7 @@ mod tests {
         drop(remote);
         drop(server);
         // the same socket with a working assistant: a session opens and a message goes in; without the scope it is refused
-        let facets = Facets { assistant: Some(fake), cameras: None, rpc: None };
+        let facets = Facets { assistant: Some(fake), cameras: None, rpc: None, bulk: None };
         let server = start_with(&core, &cfg(&["assistant:use"]), "iyakki-test", &path, &facets).unwrap();
         let remote = iyakki_ui_client::socketcore::SocketCore::new(Connection::unix(&path, Duration::from_secs(5)).unwrap());
         let sid = remote.assistant().open("u", "sample", &spec).unwrap().id;

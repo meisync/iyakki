@@ -4,8 +4,8 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use super::resample::Resampler;
 
@@ -137,8 +137,7 @@ const FADE_FRAMES: usize = 240;
 
 /// Microseconds since the first call (a clock all mixer parts share).
 pub(crate) fn now_us() -> u64 {
-    static BASE: OnceLock<Instant> = OnceLock::new();
-    BASE.get_or_init(Instant::now).elapsed().as_micros() as u64
+    super::clock::MixClock::real().now_us()
 }
 
 pub(crate) struct Wake {
@@ -147,13 +146,20 @@ pub(crate) struct Wake {
     pub sleeping: AtomicBool,
     pub m: Mutex<()>,
     pub cv: Condvar,
+    /// The time source of the mixer this wake belongs to (the heard position of a source is read on it).
+    pub clock: super::clock::MixClock,
 }
 
 impl Wake {
+    #[cfg(test)]
     pub fn new() -> Arc<Wake> {
-        Arc::new(Wake { end_us: AtomicU64::new(0), sleeping: AtomicBool::new(false), m: Mutex::new(()), cv: Condvar::new() })
+        Self::with_clock(super::clock::MixClock::real())
+    }
+    pub fn with_clock(clock: super::clock::MixClock) -> Arc<Wake> {
+        Arc::new(Wake { end_us: AtomicU64::new(0), sleeping: AtomicBool::new(false), m: Mutex::new(()), cv: Condvar::new(), clock })
     }
     pub fn notify(&self) {
+        self.clock.poke();
         if self.sleeping.load(Ordering::SeqCst) {
             self.cv.notify_all();
         }
@@ -195,6 +201,8 @@ pub(crate) struct SourceShared {
     heard_end_us: AtomicU64,
     pub frames_in: AtomicU64,
     pub wake: Arc<Wake>,
+    /// The person whose sound this is (empty: the machine's, a system sound). Read only to build the per-person buses (F-CLIENT-03).
+    owner: Mutex<String>,
 }
 
 impl SourceShared {
@@ -229,6 +237,7 @@ impl SourceShared {
             heard_end_us: AtomicU64::new(0),
             frames_in: AtomicU64::new(0),
             wake,
+            owner: Mutex::new(String::new()),
         })
     }
 
@@ -243,7 +252,7 @@ impl SourceShared {
     /// How much of this source has been heard, ms: what was mixed minus what is still on its way to the speaker (the mixer's lead
     /// and the pipe). It stops when the source runs dry, and is 0 until the first sound is audible.
     pub(crate) fn played_ms(&self) -> u64 {
-        let in_flight = self.heard_end_us.load(Ordering::SeqCst).saturating_sub(now_us());
+        let in_flight = self.heard_end_us.load(Ordering::SeqCst).saturating_sub(self.wake.clock.now_us());
         self.supplied_us.load(Ordering::SeqCst).saturating_sub(in_flight) / 1000
     }
 
@@ -272,6 +281,10 @@ impl SourceShared {
 
     pub(crate) fn is_gone(&self) -> bool {
         self.gone.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
     }
 
     pub(crate) fn is_closed(&self) -> bool {
@@ -307,6 +320,11 @@ impl SourceWriter {
     pub fn kind(&self) -> SourceKind {
         self.s.kind
     }
+    /// Say whose sound this is. A client that hears only its own person's sound (the per-person buses of [`Engine`]) gets it; a source with
+    /// no owner is the machine's and goes to the person the machine's sound belongs to.
+    pub fn set_owner(&self, person: &str) {
+        *self.s.owner.lock().unwrap_or_else(|e| e.into_inner()) = person.chars().filter(|c| !c.is_control()).take(80).collect();
+    }
 
     /// Queue as many samples as fit without waiting; returns how many were taken (0 when the source ended or was evicted).
     pub fn write_f32(&self, pcm: &[f32]) -> usize {
@@ -341,7 +359,9 @@ impl SourceWriter {
     /// time ran out.
     pub fn write_i16_wait(&self, pcm: &[i16], max: Duration) -> Result<(), String> {
         let f: Vec<f32> = pcm.iter().map(|&x| x as f32 / 32768.0).collect();
-        let end = std::time::Instant::now() + max;
+        // the time to wait is the mixer's: on a manual clock a writer waits for the mixer to take audio, not for a wall-clock timeout
+        let clock = &self.s.wake.clock;
+        let end_us = clock.now_us() + max.as_micros() as u64;
         let mut done = 0;
         while done < f.len() {
             if self.s.is_gone() {
@@ -351,7 +371,7 @@ impl SourceWriter {
             if done >= f.len() {
                 break;
             }
-            let left = end.saturating_duration_since(std::time::Instant::now());
+            let left = Duration::from_micros(end_us.saturating_sub(clock.now_us()));
             if left.is_zero() {
                 return Err("the mixer did not take the audio in time".into());
             }
@@ -399,9 +419,10 @@ impl SourceWriter {
     /// Finish and wait until the last sample was mixed (at most `max`). True: done.
     pub fn finish_and_wait(&self, max: Duration) -> bool {
         self.finish();
-        let end = std::time::Instant::now() + max;
+        let clock = &self.s.wake.clock;
+        let end_us = clock.now_us() + max.as_micros() as u64;
         while !self.s.is_gone() {
-            if std::time::Instant::now() >= end {
+            if clock.now_us() >= end_us {
                 return false;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -482,6 +503,9 @@ struct Slot {
     scratch: Vec<f32>,
     started: bool,
     gain_prev: f32,
+    /// The source has been heard at least once: until then its first sound starts at its level and does not ramp from a level it had
+    /// when it was added (a player sets its volume right after it opens, and the mixer may have added it before that).
+    sounded: bool,
     duck: f32,
     duck_prev: f32,
     hang_ms: f32,
@@ -517,17 +541,31 @@ pub struct Engine {
     pub starved: [u64; 5],
     pub clipped: u64,
     pub periods: u64,
+    /// Build the per-person buses with each period (off by default: nobody pays for them unless a client asks).
+    buses: bool,
+    bus_acc: std::collections::BTreeMap<String, Vec<f32>>,
+    /// What the last period gave each owner (`""` is the machine's own sounds), at the master level, saturated like the main output.
+    pub bus_out: Vec<(String, Vec<i16>)>,
 }
 
 impl Engine {
     pub fn new(cfg: EngineCfg) -> Engine {
-        Engine { cfg, slots: Vec::new(), master_prev: 1.0, acc: Vec::new(), underruns: 0, starved: [0; 5], clipped: 0, periods: 0 }
+        Engine { cfg, slots: Vec::new(), master_prev: 1.0, acc: Vec::new(), underruns: 0, starved: [0; 5], clipped: 0, periods: 0, buses: false, bus_acc: Default::default(), bus_out: Vec::new() }
+    }
+
+    /// Build a bus per owner with every period (`bus_out`), or stop doing so.
+    pub fn set_buses(&mut self, on: bool) {
+        self.buses = on;
+        if !on {
+            self.bus_acc.clear();
+            self.bus_out.clear();
+        }
     }
 
     pub(crate) fn add(&mut self, s: Arc<SourceShared>) {
         let rs = (s.rate != self.cfg.rate).then(|| Resampler::new(s.rate, self.cfg.rate, s.channels));
         let epoch = s.epoch.load(Ordering::SeqCst);
-        self.slots.push(Slot { s, rs, ready: Vec::new(), scratch: Vec::new(), started: false, gain_prev: 1.0, duck: 1.0, duck_prev: 1.0, hang_ms: 0.0, epoch, underruns: 0, resuming: false, fade_in: false });
+        self.slots.push(Slot { s, rs, ready: Vec::new(), scratch: Vec::new(), started: false, gain_prev: 1.0, sounded: false, duck: 1.0, duck_prev: 1.0, hang_ms: 0.0, epoch, underruns: 0, resuming: false, fade_in: false });
         if let Some(sl) = self.slots.last_mut() {
             sl.gain_prev = sl.s.mix_gain();
         }
@@ -647,6 +685,13 @@ impl Engine {
         }
         let sounding: Vec<(u8, f32)> = self.slots.iter().filter(|s| s.hang_ms > 0.0 && !s.s.paused.load(Ordering::SeqCst)).map(|s| (s.s.kind.priority(), s.s.kind.duck_to())).collect();
         // 3. gain, ducking, add
+        self.bus_out.clear();
+        if self.buses {
+            self.bus_acc.values_mut().for_each(|b| {
+                b.clear();
+                b.resize(n * ch, 0.0);
+            });
+        }
         let step_down = ms / cfg.attack_ms.max(1) as f32;
         let step_up = ms / cfg.release_ms.max(1) as f32;
         for (i, sl) in self.slots.iter_mut().enumerate() {
@@ -658,6 +703,10 @@ impl Engine {
                 info.ducking = true;
             }
             let g_now = sl.s.mix_gain();
+            if !sl.sounded && supplied[i] > 0 {
+                sl.sounded = true;
+                sl.gain_prev = g_now;
+            }
             let (g0, g1) = (sl.gain_prev * sl.duck_prev, g_now * sl.duck);
             sl.gain_prev = g_now;
             let got = supplied[i];
@@ -665,6 +714,18 @@ impl Engine {
                 let g = if g0 == g1 { g1 } else { g0 + (g1 - g0) * (f as f32 + 1.0) / n as f32 };
                 for c in 0..ch {
                     self.acc[f * ch + c] += sl.ready[f * ch + c] * g;
+                }
+            }
+            if self.buses && got > 0 {
+                // the same samples, gain and ducking, into the bus of the person the sound belongs to
+                let owner = sl.s.owner.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let bus = self.bus_acc.entry(owner).or_insert_with(|| vec![0.0; n * ch]);
+                bus.resize(n * ch, 0.0);
+                for f in 0..got {
+                    let g = if g0 == g1 { g1 } else { g0 + (g1 - g0) * (f as f32 + 1.0) / n as f32 };
+                    for c in 0..ch {
+                        bus[f * ch + c] += sl.ready[f * ch + c] * g;
+                    }
                 }
             }
             sl.ready.drain(..got * ch);
@@ -686,6 +747,23 @@ impl Engine {
                 peak = peak.max(v.abs());
                 out.push((v * 32768.0).round().clamp(-32768.0, 32767.0) as i16);
             }
+        }
+        if self.buses {
+            let mut done: Vec<(String, Vec<i16>)> = Vec::new();
+            for (owner, bus) in &self.bus_acc {
+                if bus.iter().all(|v| *v == 0.0) {
+                    continue;
+                }
+                let mut pcm = Vec::with_capacity(n * ch);
+                for f in 0..n {
+                    let m = if m0 == m1 { m1 } else { m0 + (m1 - m0) * (f as f32 + 1.0) / n as f32 };
+                    for c in 0..ch {
+                        pcm.push(((bus[f * ch + c] * m).clamp(-1.0, 1.0) * 32768.0).round().clamp(-32768.0, 32767.0) as i16);
+                    }
+                }
+                done.push((owner.clone(), pcm));
+            }
+            self.bus_out = done;
         }
         info.peak = peak;
         self.clipped += info.clipped;

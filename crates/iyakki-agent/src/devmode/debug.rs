@@ -27,16 +27,12 @@ pub struct Paths {
 
 impl Paths {
     pub fn real() -> Paths {
-        Paths { sys: SysRoots::real(), kmsg: "/dev/kmsg".into(), boot_log: "/var/log/iyakki-boot.log".into(), release: crate::relinfo::RELEASE_FILE.into(), addrs: Arc::new(iyakki_devctl::ipv4_addresses) }
+        Paths { sys: SysRoots::real(), kmsg: iyakki_core_local::kernelfacts::kmsg_in(Path::new(iyakki_core_local::kernelfacts::DEV)), boot_log: "/var/log/iyakki-boot.log".into(), release: crate::relinfo::RELEASE_FILE.into(), addrs: Arc::new(iyakki_core_local::devctl::ipv4_addresses) }
     }
 }
 
 fn read(p: &Path) -> String {
     std::fs::read_to_string(p).unwrap_or_default()
-}
-
-fn one(p: &Path) -> String {
-    read(p).trim().to_string()
 }
 
 /// Hide lines that look like a credential.
@@ -70,34 +66,8 @@ pub fn parse_kmsg(rec: &str) -> Option<Kmsg> {
 /// The kernel log records after `since` (0: from the start), with `grep` (a case-insensitive substring) applied. When there are
 /// more than `max`, the NEWEST are kept.
 pub fn kmsg(p: &Paths, since: u64, grep: &str, max: usize) -> Vec<Kmsg> {
-    use std::io::Read;
-    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
     let max = max.clamp(1, MAX_RECORDS);
-    let mut raw: Vec<String> = Vec::new();
-    if let Ok(meta) = std::fs::metadata(&p.kmsg) {
-        if meta.file_type().is_char_device() {
-            if let Ok(mut f) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&p.kmsg) {
-                let mut buf = vec![0u8; 16 * 1024];
-                // one record per read; EAGAIN when caught up; EPIPE when records were overwritten under us (carry on)
-                for _ in 0..200_000 {
-                    match f.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => raw.push(String::from_utf8_lossy(&buf[..n]).into_owned()),
-                        Err(e) if e.raw_os_error() == Some(libc::EPIPE) => continue,
-                        Err(_) => break,
-                    }
-                }
-            }
-        } else {
-            // a file in the same format (tests, saved logs): continuation lines start with a space
-            for l in read(&p.kmsg).lines() {
-                if l.starts_with(' ') {
-                    continue;
-                }
-                raw.push(l.to_string());
-            }
-        }
-    }
+    let raw = iyakki_core_local::debugfacts::kmsg_records(&p.kmsg);
     let needle = grep.to_lowercase();
     let mut v: Vec<Kmsg> = raw.iter().filter_map(|r| parse_kmsg(r)).filter(|k| k.seq > since).filter(|k| needle.is_empty() || k.msg.to_lowercase().contains(&needle)).collect();
     if v.len() > max {
@@ -181,31 +151,19 @@ pub fn taint_flags(v: u64) -> Vec<&'static str> {
 }
 
 fn dmi(p: &Paths, f: &str) -> String {
-    one(&p.sys.sys.join("class/dmi/id").join(f))
+    iyakki_core_local::debugfacts::dmi_in(&p.sys.sys, f)
 }
 
 fn disks(p: &Paths) -> Vec<Value> {
-    let mut v = Vec::new();
-    let mut names: Vec<String> = std::fs::read_dir(p.sys.sys.join("block")).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-    names.sort();
-    for n in names.into_iter().filter(|n| !n.starts_with("loop") && !n.starts_with("ram") && !n.starts_with("zram")) {
-        let d = p.sys.sys.join("block").join(&n);
-        let sectors: u64 = one(&d.join("size")).parse().unwrap_or(0);
-        v.push(json!({ "name": n, "bytes": sectors * 512, "model": one(&d.join("device/model")), "removable": one(&d.join("removable")) == "1" }));
-    }
-    v
+    iyakki_core_local::debugfacts::block_devices_in(&p.sys.sys).into_iter().map(|d| json!({ "name": d.name, "bytes": d.bytes, "model": d.model, "removable": d.removable })).collect()
 }
 
 fn mounts(p: &Paths) -> Vec<Value> {
-    const REAL: [&str; 10] = ["ext4", "ext2", "ext3", "vfat", "btrfs", "xfs", "f2fs", "exfat", "ntfs3", "iso9660"];
-    read(&p.sys.proc.join("mounts"))
-        .lines()
-        .filter_map(|l| {
-            let f: Vec<&str> = l.split_whitespace().collect();
-            (f.len() >= 4 && REAL.contains(&f[2])).then(|| {
-                let (total, free) = statvfs(Path::new(f[1]));
-                json!({ "dev": f[0], "mount": f[1], "fs": f[2], "ro": f[3].split(',').any(|o| o == "ro"), "total": total, "free": free })
-            })
+    iyakki_core_local::debugfacts::real_mounts_in(&p.sys.proc)
+        .into_iter()
+        .map(|m| {
+            let (total, free) = statvfs(Path::new(&m.dir));
+            json!({ "dev": m.dev, "mount": m.dir, "fs": m.fs, "ro": m.read_only, "total": total, "free": free })
         })
         .collect()
 }
@@ -221,20 +179,11 @@ pub(super) fn statvfs(p: &Path) -> (u64, u64) {
 }
 
 fn gpus(p: &Paths) -> Vec<Value> {
-    let mut v = Vec::new();
-    let mut names: Vec<String> = std::fs::read_dir(p.sys.sys.join("class/drm")).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("card") && !n.contains('-')).collect();
-    names.sort();
-    for n in names {
-        let d = p.sys.sys.join("class/drm").join(&n).join("device");
-        let driver = std::fs::read_link(d.join("driver")).ok().and_then(|l| l.file_name().map(|s| s.to_string_lossy().into_owned())).unwrap_or_default();
-        let outputs: Vec<String> = std::fs::read_dir(p.sys.sys.join("class/drm")).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|c| c.starts_with(&format!("{n}-"))).filter(|c| one(&p.sys.sys.join("class/drm").join(c).join("status")) == "connected").collect();
-        v.push(json!({ "card": n, "driver": driver, "vendor": one(&d.join("vendor")), "device": one(&d.join("device")), "connected": outputs }));
-    }
-    v
+    iyakki_core_local::debugfacts::gpu_cards_in(&p.sys.sys).into_iter().map(|g| json!({ "card": g.card, "driver": g.driver, "vendor": g.vendor, "device": g.device, "connected": g.connected })).collect()
 }
 
 fn sound(p: &Paths) -> Vec<String> {
-    read(&p.sys.proc.join("asound/cards")).lines().filter(|l| l.contains(" [")).map(|l| l.trim().to_string()).collect()
+    iyakki_core_local::debugfacts::sound_card_lines_in(&p.sys.proc)
 }
 
 /// Firmware files the kernel could not load (named in `Direct firmware load for X failed` lines), without duplicates.
@@ -256,20 +205,19 @@ pub fn missing_firmware(recs: &[Kmsg]) -> Vec<String> {
 pub fn info(p: &Paths, hostname: &str) -> Value {
     let rel = ReleaseInfo::load(&p.release);
     let mem = sysinfo::memory(&p.sys);
-    let tainted: u64 = one(&p.sys.proc.join("sys/kernel/tainted")).parse().unwrap_or(0);
-    let modules = read(&p.sys.proc.join("modules")).lines().filter(|l| !l.trim().is_empty()).count();
+    let kid = iyakki_core_local::debugfacts::kernel_identity_in(&p.sys.proc);
     let recs = kmsg(p, 0, "firmware", 1500);
     let (l1, l5, l15) = sysinfo::load_average(&p.sys);
     json!({
         "hostname": hostname,
         "device": { "vendor": dmi(p, "sys_vendor"), "product": dmi(p, "product_name"), "version": dmi(p, "product_version"), "board": dmi(p, "board_name"), "bios": dmi(p, "bios_version") },
         "image": { "version": rel.as_ref().map(|r| r.version.clone()).filter(|v| !v.is_empty()).unwrap_or_else(|| VERSION.to_string()), "variant": rel.as_ref().map(|r| r.variant.clone()).unwrap_or_default(), "built": rel.as_ref().map(|r| r.build_date.clone()).unwrap_or_default(), "source": rel.as_ref().map(|r| r.git_describe.clone()).unwrap_or_default(), "from_image": rel.is_some() },
-        "kernel": { "release": one(&p.sys.proc.join("sys/kernel/osrelease")), "version": read(&p.sys.proc.join("version")).lines().next().unwrap_or("").to_string(), "cmdline": scrub(&one(&p.sys.proc.join("cmdline"))), "tainted": tainted, "taint": taint_flags(tainted), "modules": modules },
+        "kernel": { "release": kid.release.clone(), "version": kid.version.clone(), "cmdline": scrub(&kid.cmdline), "tainted": kid.tainted, "taint": taint_flags(kid.tainted), "modules": kid.modules },
         "uptime_secs": sysinfo::uptime_secs(&p.sys),
         "load": [l1, l5, l15],
         "cpus": sysinfo::cpu_count(&p.sys),
         "memory": { "total": mem.total, "available": mem.available, "swap_total": mem.swap_total, "swap_free": mem.swap_free },
-        "firmware": { "uefi": p.sys.sys.join("firmware/efi").is_dir(), "missing_files": missing_firmware(&recs) },
+        "firmware": { "uefi": iyakki_core_local::debugfacts::uefi_in(&p.sys.sys), "missing_files": missing_firmware(&recs) },
         "disks": disks(p),
         "mounts": mounts(p),
         "network": (p.addrs)().into_iter().map(|(i, a)| json!({ "iface": i, "address": a })).collect::<Vec<_>>(),

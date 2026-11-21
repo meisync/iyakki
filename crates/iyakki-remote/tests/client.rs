@@ -699,6 +699,18 @@ fn wrong_passwords_are_limited_and_end_the_connection() {
 }
 
 #[test]
+fn a_message_type_a_newer_client_added_is_reported_as_unsupported_and_the_connection_goes_on() {
+    let r = rig("unknown-type", true, 50);
+    let (mut c, _, _) = enrolled(&r, "Phone", 72);
+    sign_in(&mut c);
+    c.send_raw(r#"{"t":"hologram","id":1}"#);
+    assert_eq!(c.err(), ErrorCode::Unsupported);
+    // nothing was closed: the next message is answered as usual
+    c.send(&ClientMsg::Ping { ts: 7 });
+    assert!(matches!(c.msg(), ServerMsg::Pong { ts: 7 }));
+}
+
+#[test]
 fn a_client_cannot_use_the_screens_microphone_or_send_binary() {
     let r = rig("input", true, 50);
     let (mut c, _, _) = enrolled(&r, "Phone", 71);

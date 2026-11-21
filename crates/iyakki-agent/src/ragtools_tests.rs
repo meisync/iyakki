@@ -666,3 +666,66 @@ fn a_crawl_keeps_the_linked_pages_of_the_same_site_only_within_the_depth_and_ask
     assert_eq!(r.kb.lock().unwrap().docs("user/alice/web").len(), 4);
     assert!(r.audit.lock().unwrap().iter().any(|l| l.starts_with("rag.crawl")));
 }
+
+/// A page that changes only when the test says so (its own counter, so no other test can move it).
+struct TickingPage(std::sync::atomic::AtomicUsize);
+
+impl PageSource for TickingPage {
+    fn page(&self, url: &str) -> Result<String, String> {
+        match url {
+            "https://example.org/ticker" => Ok(format!("Ticker\n\nEdition number {} of the harbour ticker, with the tides and the ferries of the day.", self.0.load(std::sync::atomic::Ordering::SeqCst))),
+            _ => Err("the page did not load".into()),
+        }
+    }
+}
+
+#[test]
+fn a_timer_is_never_on_by_default_is_chosen_per_collection_with_a_card_and_then_refreshes_only_when_due() {
+    let r = rig("refreshtimer", None, false);
+    let dir = r.base.clone();
+    let d = |n: &str| r.tools.defs().into_iter().find(|d| d.spec.name == n).unwrap();
+    assert_eq!((d(REFRESH_STATUS).risk, d(REFRESH_SET).risk), (Risk::Safe, Risk::Ask));
+    assert!(hard_ask(REFRESH_SET, &json!({"every_hours": 6})).is_some(), "a session grant never covers it");
+    assert!(r.tools.call(REFRESH_STATUS, &json!({})).unwrap().contains("No collection"));
+    assert!(crate::ragrefresh::due(&dir, u64::MAX / 2).is_empty(), "default: never");
+    // bad values and shared collections for an ordinary account are refused before anything is kept
+    assert!(r.tools.call(REFRESH_SET, &json!({"every_hours": 100000})).is_err());
+    assert!(r.tools.call(REFRESH_SET, &json!({})).is_err());
+    assert!(r.tools.call(REFRESH_SET, &json!({"every_hours": 6, "collection": "shared/web"})).unwrap_err().contains("administrator"));
+    assert!(r.tools.preview(REFRESH_SET, &json!({"every_hours": 6})).unwrap().contains("every 6 hour"));
+    assert!(r.tools.preview(REFRESH_SET, &json!({"every_hours": 6})).unwrap().contains("Nothing is crawled"));
+    // choose six hours for mine/web: the first run is one interval later
+    let page = Arc::new(TickingPage(Default::default()));
+    let env = RagToolsEnv { access: r.tools.env().access.clone(), model: None, policy: r.tools.env().policy.clone(), home: r.base.clone(), audit: { let a = r.audit.clone(); Arc::new(move |k, d| a.lock().unwrap().push(format!("{k} {d}"))) }, ledgers: r.tools.env().ledgers.clone(), manage_shared: false, pages: Some(page.clone()) };
+    env.keep_page_for_test("https://example.org/ticker", "user/alice/web", "mine/web");
+    let said = r.tools.call(REFRESH_SET, &json!({"every_hours": 6})).unwrap();
+    assert!(said.contains("about every 6 hour"), "{said}");
+    assert!(r.tools.call(REFRESH_STATUS, &json!({})).unwrap().contains("mine/web: every 6 hour"));
+    assert!(r.audit.lock().unwrap().iter().any(|l| l.starts_with("rag.refresh_schedule") && l.contains("every 6 h")));
+    let start = crate::ragrefresh::all(&dir)[0].1.last;
+    // not due yet: nothing is read
+    page.0.store(1, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(crate::ragrefresh::run_due(&env, &dir, start + 6 * 3600 - 1), 0);
+    assert!(search(&r, json!({"query": "edition number harbour ticker", "collections": ["mine/web"], "k": 3})).unwrap().contains("Edition number 0"));
+    // due: the changed page replaces the old copy, one audit line, the next run is one interval later
+    assert_eq!(crate::ragrefresh::run_due(&env, &dir, start + 6 * 3600), 1);
+    let found = search(&r, json!({"query": "edition number harbour ticker", "collections": ["mine/web"], "k": 5})).unwrap();
+    assert!(found.contains("Edition number 1") && !found.contains("Edition number 0"), "{found}");
+    assert!(r.audit.lock().unwrap().iter().any(|l| l.starts_with("rag.refresh_timer") && l.contains("1 changed") && !l.contains("example.org")));
+    assert_eq!(crate::ragrefresh::run_due(&env, &dir, start + 6 * 3600 + 10), 0);
+    // zero removes the timer
+    r.tools.call(REFRESH_SET, &json!({"every_hours": 0})).unwrap();
+    assert!(crate::ragrefresh::due(&dir, u64::MAX / 2).is_empty());
+}
+
+#[test]
+fn a_shared_collections_timer_runs_only_for_an_administrator_and_other_peoples_collections_never() {
+    let r = rig("refreshshared", None, true);
+    let dir = r.base.clone();
+    let page = Arc::new(TickingPage(Default::default()));
+    let mk = |admin: bool| RagToolsEnv { access: r.tools.env().access.clone(), model: None, policy: r.tools.env().policy.clone(), home: r.base.clone(), audit: Arc::new(|_, _| {}), ledgers: r.tools.env().ledgers.clone(), manage_shared: admin, pages: Some(page.clone()) };
+    crate::ragrefresh::set(&dir, "shared/web", 1, 0).unwrap();
+    crate::ragrefresh::set(&dir, "user/bob/web", 1, 0).unwrap();
+    assert_eq!(crate::ragrefresh::run_due(&mk(false), &dir, 10_000), 0, "an ordinary account does not refresh the shared collection, and never bob's");
+    assert_eq!(crate::ragrefresh::run_due(&mk(true), &dir, 10_000), 1, "an administrator's tick runs the shared one only");
+}

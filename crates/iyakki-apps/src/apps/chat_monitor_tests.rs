@@ -34,7 +34,7 @@ fn rig(tag: &str) -> (Arc<FakeCore>, SettingsTools, Arc<Mutex<Vec<String>>>) {
     let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&dir.join("settings.json")).unwrap()));
     let log = Arc::new(Mutex::new(Vec::new()));
     let l2 = log.clone();
-    let env = Env { dir, user: "root".into(), admin: true, settings, audit: Arc::new(move |a, d| l2.lock().unwrap().push(format!("{a} {d}"))) };
+    let env = Env { dir, user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| l2.lock().unwrap().push(format!("{a} {d}"))) };
     let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
     (core, t, log)
 }
@@ -85,7 +85,7 @@ fn a_machine_without_screens_says_so() {
     cx.core = Arc::new(FakeCore::new());
     let dir = temp_dir("mon4-mon");
     let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&dir.join("settings.json")).unwrap()));
-    let env = Env { dir, user: "root".into(), admin: true, settings, audit: Arc::new(|_, _| {}) };
+    let env = Env { dir, user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(|_, _| {}) };
     let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
     assert!(t.call("monitor_brightness", &json!({})).unwrap().contains("No screen"));
     assert!(t.call("monitor_choose", &json!({"id": "x"})).is_err());

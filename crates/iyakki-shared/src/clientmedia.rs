@@ -48,6 +48,11 @@ pub struct AudioRoutes {
     pub routes: Mutex<HashMap<u64, Route>>,
     pub audible: Mutex<Option<Audible>>,
     pub alive: Duration,
+    /// Each person's client hears only that person's own sounds (the mixer's per-person buses) instead of one mix for the person the machine's
+    /// sound belongs to. Off by default (decision D-CLIENT-03 keeps one sound per machine until a person switches it on).
+    per_person: std::sync::atomic::AtomicBool,
+    /// The time source of the liveness window (the real clock unless a test gives its own with [`AudioRoutes::with_clock`]).
+    now: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 
 impl Default for AudioRoutes {
@@ -62,7 +67,12 @@ impl AudioRoutes {
     }
 
     pub fn with_alive(alive: Duration) -> AudioRoutes {
-        AudioRoutes { routes: Mutex::new(HashMap::new()), audible: Mutex::new(None), alive }
+        AudioRoutes::with_clock(alive, Instant::now)
+    }
+
+    /// Like [`AudioRoutes::with_alive`] with the time taken from `now` (tests drive it by hand; the product uses the real clock).
+    pub fn with_clock(alive: Duration, now: impl Fn() -> Instant + Send + Sync + 'static) -> AudioRoutes {
+        AudioRoutes { routes: Mutex::new(HashMap::new()), audible: Mutex::new(None), alive, per_person: std::sync::atomic::AtomicBool::new(false), now: Arc::new(now) }
     }
 
     /// Say whose sound this machine plays (the person signed in at the screen). Until it is set nobody is sent anything and the machine's
@@ -79,7 +89,7 @@ impl AudioRoutes {
     pub fn open(&self, session: u64, person: &str, side: Side) -> Opened {
         let mut r = self.routes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(x) = r.get_mut(&session) {
-            x.last_pull = Instant::now();
+            x.last_pull = (self.now)();
             if x.side == side {
                 return Opened::Same;
             }
@@ -89,7 +99,7 @@ impl AudioRoutes {
             x.flush = true;
             return Opened::Switched;
         }
-        r.insert(session, Route { person: person.to_string(), side, chunker: Chunker::new(2), queue: JitterQueue::bounded(), seq: 0, last_pull: Instant::now(), flush: false });
+        r.insert(session, Route { person: person.to_string(), side, chunker: Chunker::new(2), queue: JitterQueue::bounded(), seq: 0, last_pull: (self.now)(), flush: false });
         Opened::New
     }
 
@@ -111,17 +121,52 @@ impl AudioRoutes {
         }
     }
 
-    /// One mixed period from the mixer (the tee calls this). Returns true when some route took it.
-    pub fn tap(&self, rate: u32, channels: u8, pcm: &[i16]) -> bool {
-        if rate != m::AUDIO_RATE || !(1..=2).contains(&channels) {
+    /// Switch the per-person sound on or off (see the field). Routes already open keep what they hold; the next period follows the new mode.
+    pub fn set_per_person(&self, on: bool) {
+        self.per_person.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn per_person(&self) -> bool {
+        self.per_person.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// One period of one owner's own mix from the mixer's per-person buses (only while [`AudioRoutes::per_person`] is on): the routes of that
+    /// person take it; the machine's own sounds (`owner` empty) go to the routes of the person the machine's sound belongs to. Another person's
+    /// client never hears it. Returns true when some route took it.
+    pub fn tap_bus(&self, owner: &str, rate: u32, channels: u8, pcm: &[i16]) -> bool {
+        if !self.per_person() || rate != m::AUDIO_RATE || !(1..=2).contains(&channels) {
             return false;
         }
         let stereo: std::borrow::Cow<'_, [i16]> = if channels == 1 { pcm.iter().flat_map(|s| [*s, *s]).collect::<Vec<_>>().into() } else { pcm.into() };
-        let now = Instant::now();
+        let now = (self.now)();
         let mut took = false;
         let mut r = self.routes.lock().unwrap_or_else(|e| e.into_inner());
         for route in r.values_mut() {
-            if now.duration_since(route.last_pull) > self.alive || !self.is_audible(&route.person) {
+            let mine = if owner.is_empty() { self.is_audible(&route.person) } else { route.person == owner };
+            if !mine || now.saturating_duration_since(route.last_pull) > self.alive {
+                continue;
+            }
+            for c in route.chunker.push(&stereo) {
+                route.queue.push(m::encode_audio(route.seq, &c));
+                route.seq = route.seq.wrapping_add(1);
+            }
+            took = true;
+        }
+        took
+    }
+
+    /// One mixed period from the mixer (the tee calls this). Returns true when some route took it.
+    pub fn tap(&self, rate: u32, channels: u8, pcm: &[i16]) -> bool {
+        // in the per-person mode the whole mix is not used: each route gets its own person's bus through `tap_bus`
+        if self.per_person() || rate != m::AUDIO_RATE || !(1..=2).contains(&channels) {
+            return false;
+        }
+        let stereo: std::borrow::Cow<'_, [i16]> = if channels == 1 { pcm.iter().flat_map(|s| [*s, *s]).collect::<Vec<_>>().into() } else { pcm.into() };
+        let now = (self.now)();
+        let mut took = false;
+        let mut r = self.routes.lock().unwrap_or_else(|e| e.into_inner());
+        for route in r.values_mut() {
+            if now.saturating_duration_since(route.last_pull) > self.alive || !self.is_audible(&route.person) {
                 continue;
             }
             for c in route.chunker.push(&stereo) {
@@ -137,7 +182,7 @@ impl AudioRoutes {
     pub fn pull(&self, session: u64) -> Pulled {
         let mut r = self.routes.lock().unwrap_or_else(|e| e.into_inner());
         let Some(route) = r.get_mut(&session) else { return Pulled::default() };
-        route.last_pull = Instant::now();
+        route.last_pull = (self.now)();
         let flush = std::mem::take(&mut route.flush);
         let mut chunks = Vec::new();
         while let Some(c) = route.queue.pop() {
@@ -147,7 +192,7 @@ impl AudioRoutes {
     }
 
     pub fn live(&self, route: &Route) -> bool {
-        route.last_pull.elapsed() <= self.alive && self.is_audible(&route.person)
+        (self.now)().saturating_duration_since(route.last_pull) <= self.alive && self.is_audible(&route.person)
     }
 
     /// Must the machine's own speakers stay silent: some live route plays on the client only.
@@ -179,6 +224,7 @@ pub const DEVICE_PERMISSIONS: &[(&str, &str, &str)] = &[
     ("camera.view", "camera.view", "watch the machine's cameras that the person may view"),
     ("client.camera.offer", "client.camera.offer", "share the device's camera with the machine (asked every use)"),
     ("client.microphone.offer", "client.microphone.offer", "share the device's microphone with the machine (asked every use)"),
+    ("files.transfer", "files.client", "list the home folder and send files between it and the device (asked every file)"),
 ];
 
 /// What the shell's red band shows.
@@ -210,7 +256,17 @@ pub fn permission_capability(name: &str) -> Option<&'static str> {
 }
 
 /// The assistant's rule for the client-device tools.
-pub const DEVICE_PROMPT_RULE: &str = "\nCLIENT DEVICES (experimental): client_devices lists the browsers, windows and phones enrolled to use this desktop and what each may ask for (audio.out = the machine's sound on the device, clipboard.client, camera.view = the machine's cameras, client.camera.offer and client.microphone.offer = the device's own camera and microphone shown to the machine). client_device_permission switches one of those on or off for one device, and client_device_revoke revokes a device; both ask the person first, and only an administrator may. 'On' only means the device may ask: the clipboard and the device's camera and microphone still ask on the machine at every use. You cannot make or show a one-time link; the person does that in Settings.";
+pub const DEVICE_PROMPT_RULE: &str = "\nCLIENT DEVICES (experimental): client_devices lists the browsers, windows and phones enrolled to use this desktop and what each may ask for (audio.out = the machine's sound on the device, clipboard.client, camera.view = the machine's cameras, client.camera.offer and client.microphone.offer = the device's own camera and microphone shown to the machine). client_device_permission switches one of those on or off for one device, client_device_role puts a device on a role (viewer, listener, presenter, full: every switch of the role at once), and client_device_revoke revokes a device; all three ask the person first, and only an administrator may. 'On' only means the device may ask: the clipboard and the device's camera and microphone still ask on the machine at every use. You cannot make or show a one-time link; the person does that in Settings.";
+
+/// The role table of a client device (F-CORE-30): named presets over [`GRANTABLE`], so a person picks "listener" instead of five switches.
+/// A role only says what the device MAY ASK for; a hard ask stays a card at every use. `viewer` (the default of a new device) may ask
+/// for nothing: it sees the picture and sends keys, mouse and size, as before. The instance enforces it at the broker, never the client.
+pub const DEVICE_ROLES: &[(&str, &str, &[&str])] = &[
+    ("viewer", "sees the picture and sends keys and mouse; asks for nothing else", &[]),
+    ("listener", "also hears this computer's sound", &["speaker.play"]),
+    ("presenter", "also hears sound and shares its clipboard", &["speaker.play", "clipboard.client"]),
+    ("full", "may also ask to view cameras here, to offer its own camera and microphone and to send files", &["speaker.play", "clipboard.client", "camera.view", "client.camera.offer", "client.microphone.offer", "files.client"]),
+];
 
 /// Instance cameras as JPEG frames (the hub in the product, a fake in tests).
 pub trait CameraFeed: Send + Sync {

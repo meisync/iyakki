@@ -43,10 +43,10 @@ def pictures():
     d = ImageDraw.Draw(im); d.rectangle((0, 4, 63, 7), fill=0)
     yield "blank", im
 
-def strip(im, comp):
+def strip(im, comp, info=None):
     b = io.BytesIO()
     # the encoder codes 1 bits as black runs; our pictures have black = 0, so the bits are turned over first
-    ImageOps.invert(im.convert("L")).convert("1", dither=Image.Dither.NONE).save(b, format="TIFF", compression=comp)
+    ImageOps.invert(im.convert("L")).convert("1", dither=Image.Dither.NONE).save(b, format="TIFF", compression=comp, **({"tiffinfo": info} if info else {}))
     t = Image.open(io.BytesIO(b.getvalue()))
     off = t.tag_v2[273]; cnt = t.tag_v2[279]
     off = off[0] if isinstance(off, tuple) else off; cnt = cnt[0] if isinstance(cnt, tuple) else cnt
@@ -66,4 +66,25 @@ for name, im in pictures():
     open(os.path.join(here, name + ".g4"), "wb").write(strip(im, "group4"))
     if name != "runs" or True:
         open(os.path.join(here, name + ".g3"), "wb").write(strip(im, "group3"))
+    # Group 3 mixed one and two dimensional coding (T4Options bit 0: a tag bit after each end-of-line says which): the same encoder, K above 0
+    open(os.path.join(here, name + ".g3m"), "wb").write(strip(im, "group3", {292: 1}))
+# two bit planes of one 24 by 18 grid for the JBIG2 MMR halftone test: each is its own Group 4 stream (they are laid one after the other)
+rnd = random.Random(11)
+for name in ("ht0", "ht1"):
+    im = Image.new("1", (24, 18), 1)
+    px = im.load()
+    for y in range(18):
+        for x in range(24):
+            px[x, y] = 0 if ((x // 3 + y // 2 + (1 if name == "ht1" else 0)) % 3 == 0) ^ (rnd.random() < 0.08) else 1
+    w, h = im.size
+    rows = bytearray()
+    for y in range(h):
+        bits = [1 if im.getpixel((x, y)) == 0 else 0 for x in range(w)]
+        for i in range(0, w, 8):
+            v = 0
+            for j in range(8):
+                v = (v << 1) | (bits[i + j] if i + j < w else 0)
+            rows.append(v)
+    open(os.path.join(here, name + ".pbm"), "wb").write(struct.pack(">II", w, h) + bytes(rows))
+    open(os.path.join(here, name + ".g4"), "wb").write(strip(im, "group4"))
 print("ok")

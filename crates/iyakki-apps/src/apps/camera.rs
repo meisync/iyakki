@@ -769,7 +769,7 @@ impl CameraApp {
         let (pw, ph) = (p.pm.width() as f32, p.pm.height() as f32);
         let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
         let t = if self.mirror { Transform::from_row(-dw / pw, 0.0, 0.0, dh / ph, d.x + dw, d.y) } else { Transform::from_row(dw / pw, 0.0, 0.0, dh / ph, d.x, d.y) };
-        g.pm.draw_pixmap(0, 0, p.pm.as_ref(), &paint, t, None);
+        g.pm_mut().draw_pixmap(0, 0, p.pm.as_ref(), &paint, t, None);
         if self.shot == Shot::Passport {
             self.draw_guides(g, d, p.width, p.height, s);
         }
@@ -858,7 +858,7 @@ impl CameraApp {
                 let k = (tw / pm.width() as f32).min(th / pm.height() as f32);
                 let (w, h) = (pm.width() as f32 * k, pm.height() as f32 * k);
                 let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
-                g.pm.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_translate(x + (tw - w) / 2.0, r.y + (th - h) / 2.0).pre_scale(k, k), None);
+                g.pm_mut().draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_translate(x + (tw - w) / 2.0, r.y + (th - h) / 2.0).pre_scale(k, k), None);
             }
             if t.video {
                 g.rrect(x + 4.0 * s, r.y + th - 20.0 * s, 34.0 * s, 16.0 * s, 8.0 * s, [0, 0, 0, 170]);
@@ -1061,7 +1061,7 @@ impl CameraApp {
                     let k = (box_.w / pm.width() as f32).min(box_.h / pm.height() as f32);
                     let (w, h) = (pm.width() as f32 * k, pm.height() as f32 * k);
                     let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
-                    g.pm.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_translate(box_.x + (box_.w - w) / 2.0, box_.y + (box_.h - h) / 2.0).pre_scale(k, k), None);
+                    g.pm_mut().draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_translate(box_.x + (box_.w - w) / 2.0, box_.y + (box_.h - h) / 2.0).pre_scale(k, k), None);
                 }
                 let note = if t.video { format!("{} · a video: play it from MEDIA (Videos) · ← → other shots · Esc close", t.path.display()) } else { format!("{} · ← → other shots · Esc close", t.path.display()) };
                 let note = g.fit(13.0 * s, &note, Face::Sans, p.w - 32.0 * s);
@@ -1075,7 +1075,7 @@ impl CameraApp {
                 if let Some(pm) = &pp.pm {
                     let k = ph / pm.height() as f32;
                     let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
-                    g.pm.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_translate(p.x + 20.0 * s, ty).pre_scale(k, k), None);
+                    g.pm_mut().draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_translate(p.x + 20.0 * s, ty).pre_scale(k, k), None);
                 }
                 let sp = &pp.spec;
                 let tx = p.x + 20.0 * s + ph * pp.w as f32 / pp.h as f32 + 20.0 * s;

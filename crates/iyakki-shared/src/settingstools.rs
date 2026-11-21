@@ -208,14 +208,14 @@ pub struct TypedEnv {
     /// An administrator (the page may be for administrators only).
     pub admin: bool,
     /// The machine settings the shell holds (the same store the Settings pages change; never open the file a second time).
-    pub settings: Arc<std::sync::Mutex<crate::settings::SettingsStore>>,
+    pub settings: crate::settings_ref::SettingsRef,
     pub audit: Arc<dyn Fn(&str, &str) + Send + Sync>,
 }
 
 impl TypedEnv {
     /// The agent's view of a UI-built [`Env`]; `None` when its settings are not this install's store.
     pub fn from_base(base: &Env) -> Option<TypedEnv> {
-        let settings = base.settings.clone().downcast::<std::sync::Mutex<crate::settings::SettingsStore>>().ok()?;
+        let settings = base.settings.clone().downcast::<crate::settings_ref::SettingsRef>().ok()?.as_ref().clone();
         Some(TypedEnv { dir: base.dir.clone(), user: base.user.clone(), admin: base.admin, settings, audit: base.audit.clone() })
     }
     pub fn audit(&self, action: &str, detail: &str) {

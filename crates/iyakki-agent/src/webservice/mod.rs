@@ -18,6 +18,7 @@ mod events;
 mod notifyapi;
 mod files;
 mod flowruns;
+mod hookapi;
 mod gitread;
 mod handlers;
 pub mod hooks;
@@ -32,10 +33,16 @@ pub mod tenants;
 pub mod tileevents;
 pub mod tiles;
 mod tiledock;
+pub mod tilepage;
+pub mod tilebridge;
+pub mod webbundle;
+pub mod bundlewrap;
+pub mod bundletools;
 pub(crate) mod tilehome;
 pub(crate) mod tilebrowser;
 pub(crate) mod tileassistant;
 pub(crate) mod tilecameras;
+pub(crate) mod tileterminal;
 mod tenantcfg;
 pub mod tls;
 pub mod tools;
@@ -93,9 +100,11 @@ impl Profile {
     pub fn tools(self) -> &'static [&'static str] {
         match self {
             Profile::AgentApi => &["now", "web_search", "web_fetch", "web_research", "web_feed", "web_links", "weather", "stock_quote", "search_documents", "data_open", "data_describe", "data_query"],
-            Profile::FlowsRunner | Profile::TileHost => &[],
+            Profile::FlowsRunner => &[],
+            // only an administrator is given these (bundletools.rs); each install and removal asks
+            Profile::TileHost => &["tile_bundle_list", "tile_bundle_install", "tile_bundle_remove"],
             Profile::DataApi => &["data_open", "data_describe", "data_query"],
-            Profile::Cloud => &["deploy_team_host", "tiles_list", "now", "web_search", "web_fetch", "web_research", "web_feed", "web_links", "weather", "stock_quote", "search_documents", "data_open", "data_describe", "data_query", "flow_list", "flow_get", "flow_runs", "flow_run_status"],
+            Profile::Cloud => &["deploy_team_host", "k8s_apply_yaml", "tiles_list", "now", "web_search", "web_fetch", "web_research", "web_feed", "web_links", "weather", "stock_quote", "search_documents", "data_open", "data_describe", "data_query", "flow_list", "flow_get", "flow_runs", "flow_run_status", "webhook_list", "webhook_create", "webhook_regenerate", "webhook_enable", "webhook_disable", "webhook_public"],
         }
     }
 

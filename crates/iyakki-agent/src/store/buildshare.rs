@@ -73,6 +73,41 @@ pub fn valid_variant(s: &str) -> bool {
     plain(s, 40, "-_.") && !s.bytes().any(|b| b.is_ascii_uppercase())
 }
 
+/// The CPU family a machine type names: `x86_64` or `aarch64` (`arm64` and `aarch_64` are the same family; Apple Silicon is `aarch64`).
+/// `None` when the name carries no architecture (`pc`, `mac`): it is then taken as `x86_64`, the only family the early images used.
+pub fn arch_of(machine_type: &str) -> Option<&'static str> {
+    let t = machine_type.to_ascii_lowercase();
+    for (word, fam) in [("x86_64", "x86_64"), ("amd64", "x86_64"), ("aarch64", "aarch64"), ("arm64", "aarch64")] {
+        if t.ends_with(word) || t.contains(&format!("-{word}-")) || t.contains(&format!("_{word}_")) {
+            return Some(fam);
+        }
+    }
+    None
+}
+
+/// The machine type of a device: its image variant (`pc`, `mac`, `pc-x86_64`) with the CPU family from the running system. A variant that
+/// already names a family is kept as it is (`pc-aarch64`); `pc` on an Apple Silicon or other ARM 64 device becomes `pc-aarch64`.
+pub fn machine_type_for(variant: &str, cpu: &str) -> Option<String> {
+    let v = variant.trim().to_ascii_lowercase();
+    let fam = match cpu.trim().to_ascii_lowercase().as_str() {
+        "x86_64" | "amd64" => "x86_64",
+        "aarch64" | "arm64" => "aarch64",
+        _ => return None,
+    };
+    let t = if arch_of(&v).is_some() { v } else { format!("{v}-{fam}") };
+    valid_variant(&t).then_some(t)
+}
+
+/// Whether a build of `machine_type` can run on a device of CPU family `cpu` (a name without a family counts as `x86_64`).
+pub fn fits_cpu(machine_type: &str, cpu: &str) -> bool {
+    let fam = match cpu.trim().to_ascii_lowercase().as_str() {
+        "x86_64" | "amd64" => "x86_64",
+        "aarch64" | "arm64" => "aarch64",
+        _ => return false,
+    };
+    arch_of(machine_type).unwrap_or("x86_64") == fam
+}
+
 pub fn valid_channel(s: &str) -> bool {
     valid_variant(s)
 }
@@ -286,6 +321,21 @@ pub fn verify(body: &[u8], pin: &str) -> Result<List, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn machine_types_name_the_processor_family_for_x86_arm_and_apple_silicon() {
+        assert_eq!(arch_of("pc-x86_64"), Some("x86_64"));
+        assert_eq!(arch_of("pc-aarch64"), Some("aarch64"));
+        assert_eq!(arch_of("mac-arm64"), Some("aarch64"));
+        assert_eq!(arch_of("pc"), None);
+        assert_eq!(machine_type_for("pc", "x86_64").as_deref(), Some("pc-x86_64"));
+        assert_eq!(machine_type_for("mac", "arm64").as_deref(), Some("mac-aarch64"));
+        assert_eq!(machine_type_for("pc-aarch64", "aarch64").as_deref(), Some("pc-aarch64"));
+        assert_eq!(machine_type_for("PC", "riscv64"), None);
+        assert_eq!(machine_type_for("bad/name", "x86_64"), None);
+        assert!(fits_cpu("pc-x86_64", "x86_64") && fits_cpu("pc", "amd64") && fits_cpu("mac-aarch64", "arm64"));
+        assert!(!fits_cpu("pc-aarch64", "x86_64") && !fits_cpu("pc-x86_64", "aarch64") && !fits_cpu("pc", "riscv64"));
+    }
     use super::*;
 
     fn key(n: u8) -> SigningKey {

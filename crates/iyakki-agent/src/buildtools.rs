@@ -44,6 +44,14 @@ pub trait Backend: Send + Sync {
     /// Download and check one build into `dir`; the sentence to report.
     fn fetch(&self, c: &Cfg, b: &Build, dir: &Path) -> Result<String, String>;
     fn out_root(&self) -> PathBuf;
+    /// This device's own machine type (its image variant and CPU family, `pc-aarch64`), when it can say. Used when a tool is not given one.
+    fn machine_type(&self) -> Option<String> {
+        None
+    }
+    /// The CPU family of this device (`x86_64`, `aarch64`), when it can say. An install of a build for another family is refused.
+    fn cpu(&self) -> Option<String> {
+        None
+    }
     /// The SHA-256 of every layer this device holds (`None`: a single-root device, or not known). Decides which layered build fits.
     fn held_layers(&self) -> Option<std::collections::BTreeSet<String>> {
         None
@@ -147,6 +155,13 @@ impl Backend for RealBackend {
     fn out_root(&self) -> PathBuf {
         self.svc.dir().join("local").join("builds")
     }
+    fn machine_type(&self) -> Option<String> {
+        let rel = iyakki_shared::relinfo::ReleaseInfo::load(Path::new("/etc/iyakki-release"))?;
+        bs::machine_type_for(&rel.variant, std::env::consts::ARCH)
+    }
+    fn cpu(&self) -> Option<String> {
+        Some(std::env::consts::ARCH.to_string())
+    }
     fn held_layers(&self) -> Option<std::collections::BTreeSet<String>> {
         let c = crate::devmode::centre::Centre::real(self.svc.dir());
         let vol = c.boot_read().ok()?;
@@ -184,9 +199,12 @@ impl BuildTools {
     }
 
     fn pick(&self, a: &Value) -> Result<(Cfg, String, String), String> {
-        let (v, ch) = (sarg(a, "machine_type"), if sarg(a, "channel").is_empty() { "dev" } else { sarg(a, "channel") });
+        // without a machine type the device's own is used (its image variant and CPU family)
+        let own = self.backend.machine_type();
+        let v = if sarg(a, "machine_type").is_empty() { own.as_deref().unwrap_or("") } else { sarg(a, "machine_type") };
+        let ch = if sarg(a, "channel").is_empty() { "dev" } else { sarg(a, "channel") };
         if !bs::valid_variant(v) || !bs::valid_channel(ch) {
-            return Err("say the machine type (for example pc-x86_64) and, if not dev, the channel".into());
+            return Err("say the machine type (for example pc-x86_64 or pc-aarch64) and, if not dev, the channel".into());
         }
         Ok((self.need_cfg()?, v.to_string(), ch.to_string()))
     }
@@ -239,6 +257,11 @@ impl BuildTools {
     /// Fetch the newest build that fits this device, check it, and install it through the device's own update path. Does not restart.
     fn install(&self, a: &Value) -> Result<String, String> {
         let p = self.pick(a)?;
+        if let Some(cpu) = self.backend.cpu() {
+            if !bs::fits_cpu(&p.1, &cpu) {
+                return Err(format!("{} is a build for another kind of processor than this device's ({cpu}); it was not fetched or installed. Use builds_fetch to only download it.", p.1));
+            }
+        }
         let l = self.backend.list(&p.0)?;
         let b = self.chosen(&l, &p)?;
         let dir = self.target(&p);
@@ -266,8 +289,8 @@ impl Tools for BuildTools {
         v.retain(|d| !is_builds_tool(&d.spec.name));
         v.push(ToolDef { spec: ToolSpec { name: STATUS_TOOL.into(), description: "Show the newest build per machine type in the team's shared build store, from its signed list. Read-only; downloads nothing.".into(), schema: json!({"type": "object", "properties": {}}) }, risk: Risk::Safe, untrusted: false });
         v.push(ToolDef { spec: ToolSpec { name: SET_TOOL.into(), description: "Remember which shared build store to use: its address, the update public key (64 hex characters) its list must be signed by, and optionally the path of a file holding the read token. Always asks. Never put a token in the call, only the file's path.".into(), schema: json!({"type": "object", "properties": {"url": {"type": "string"}, "update_public_key": {"type": "string"}, "read_token_file": {"type": "string"}}, "required": ["url", "update_public_key"]}) }, risk: Risk::Ask, untrusted: false });
-        v.push(ToolDef { spec: ToolSpec { name: FETCH_TOOL.into(), description: "Download the newest build of one machine type (for example pc-x86_64) from the shared build store into a folder, checking every file against the signed list. Always asks; installs nothing.".into(), schema: json!({"type": "object", "properties": {"machine_type": {"type": "string"}, "channel": {"type": "string", "description": "dev (default)"}}, "required": ["machine_type"]}) }, risk: Risk::Ask, untrusted: false });
-        v.push(ToolDef { spec: ToolSpec { name: INSTALL_TOOL.into(), description: "Download the newest build of one machine type that fits this device from the shared build store, check every file against the signed list, and install it through this device's own update path (the boot files are replaced, the previous version is kept, nothing restarts). A layered build is chosen only when this device holds its base layers. Always asks, every time; the card lists what changes and every point that needs a yes.".into(), schema: json!({"type": "object", "properties": {"machine_type": {"type": "string"}, "channel": {"type": "string", "description": "dev (default)"}}, "required": ["machine_type"]}) }, risk: Risk::Ask, untrusted: false });
+        v.push(ToolDef { spec: ToolSpec { name: FETCH_TOOL.into(), description: "Download the newest build of one machine type (for example pc-x86_64) from the shared build store into a folder, checking every file against the signed list. Always asks; installs nothing.".into(), schema: json!({"type": "object", "properties": {"machine_type": {"type": "string"}, "channel": {"type": "string", "description": "dev (default)"}}, "required": []}) }, risk: Risk::Ask, untrusted: false });
+        v.push(ToolDef { spec: ToolSpec { name: INSTALL_TOOL.into(), description: "Download the newest build of one machine type that fits this device from the shared build store, check every file against the signed list, and install it through this device's own update path (the boot files are replaced, the previous version is kept, nothing restarts). A layered build is chosen only when this device holds its base layers. Always asks, every time; the card lists what changes and every point that needs a yes.".into(), schema: json!({"type": "object", "properties": {"machine_type": {"type": "string"}, "channel": {"type": "string", "description": "dev (default)"}}, "required": []}) }, risk: Risk::Ask, untrusted: false });
         v
     }
     fn call(&self, name: &str, args: &Value) -> Result<String, String> {

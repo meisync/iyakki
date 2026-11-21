@@ -1,6 +1,6 @@
-# Browser plug-ins (header modifier and page tools): design, not built
+# Browser plug-ins (header modifier and page tools)
 
-Status: design agreed in conversation 2026-11-06; nothing here is implemented. Related: [`../FULL-BROWSER.md`](../FULL-BROWSER.md), `crates/iyakki-agent/src/browserheaders.rs`, `crates/iyakki-apps/src/apps/browser_headers.rs`, `docs/STORE.md` (package kind `extension`).
+Status: design agreed in conversation 2026-11-06. Written by 2026-11-19: the registry and permission cards (Rust, alpha.7 lane d1), the header modifier (web process extension, F-BROW-79) and, in the final Impl wave, the helper's half: user scripts, user styles and the User-Agent read from the snapshot (`dist/webview/wpe-helper/extsnap.h` parses them, `helper.c` `apply_plugins` puts them in the content manager and on the live settings). The cookie editor and the JSON viewer of the first set are not written. Not run against a real engine. Related: [`../FULL-BROWSER.md`](../FULL-BROWSER.md), `crates/iyakki-agent/src/browserheaders.rs`, `crates/iyakki-apps/src/apps/browser_headers.rs`, `docs/STORE.md` (package kind `extension`).
 
 ## What exists
 
@@ -36,6 +36,12 @@ WPE WebKit has no WebExtensions API, so Chrome and Firefox extensions cannot run
 ## Tests to write with it
 
 Rule matching (shared with the reader); the protocol message round trip; the loop guard; refusals; a fake-helper test of "the helper got the rules and not the values in any log"; a run against a local HTTP server that echoes headers (QEMU or the Mac) for the real engine; UA string reaching the server.
+
+## What the helper does with the snapshot (written 2026-11-19)
+
+* `content.script` (hook kind 4, capability `web.content.script`): up to 16 entries, each a script or a style sheet with at most 32 KiB, `at_end`, and the sites it runs on. The sites become the engine's own match patterns (`https://*.example.com/*`, one per scheme; a plug-in's `*.example.com` means the domain and its subdomains, which is what the engine's `*.` pattern matches); a site with a port is left out (the engine's patterns have none, so it could only match more); an entry with no usable site is dropped and named, never run on every site. Scripts and styles go in the top frame only. The previous snapshot's entries are removed first, so a plug-in switched off is gone from the next page.
+* `user.agent` (hook kind 6, capability `web.user.agent`): one line of printable ASCII, at most 400 characters, set with `webkit_settings_set_user_agent`; empty or absent returns to the engine's own. It applies to the next page (the shell sends the snapshot before each page).
+* Parsing is plain C (`extsnap.h`) and is tested with the host's compiler against the Rust encoder (`iyakki-agent::browserext_tests`, `content-check.c`).
 
 ## Not done because
 

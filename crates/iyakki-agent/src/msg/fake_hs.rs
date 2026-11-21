@@ -36,6 +36,12 @@ pub struct Hs {
     pub echo_error: Option<String>,
     pub sync_calls: u32,
     pub extra_sync_events: Vec<serde_json::Value>,
+    /// What `/keys/query` and `/keys/claim` answer (set by a test), and the to-device bodies the server was given.
+    pub query_answer: serde_json::Value,
+    pub claim_answer: serde_json::Value,
+    pub to_device: Vec<(String, Vec<u8>)>,
+    /// To-device events the next `since` sync carries (taken once).
+    pub extra_to_device: Vec<serde_json::Value>,
 }
 
 pub struct FakeHs {
@@ -154,6 +160,9 @@ fn handle(hs: &mut Hs, r: &Req) -> (u16, String, String) {
     if let Some(rest) = path.strip_prefix("/_matrix/client/v3/rooms/") {
         let rest = rest.replace("%21", "!").replace("%3A", ":");
         if let Some((room, tail)) = rest.split_once('/') {
+            if tail == "joined_members" {
+                return j(serde_json::json!({"joined": {"@alice:test": {}, "@bob:test": {}}}));
+            }
             if tail == "state/m.room.encryption" {
                 return match room {
                     ENC => j(serde_json::json!({"algorithm": "m.megolm.v1.aes-sha2"})),
@@ -180,6 +189,16 @@ fn handle(hs: &mut Hs, r: &Req) -> (u16, String, String) {
             }
         }
     }
+    if path == "/_matrix/client/v3/keys/query" {
+        return j(hs.query_answer.clone());
+    }
+    if path == "/_matrix/client/v3/keys/claim" {
+        return j(hs.claim_answer.clone());
+    }
+    if let Some(t) = path.strip_prefix("/_matrix/client/v3/sendToDevice/") {
+        hs.to_device.push((t.to_string(), r.body.clone()));
+        return j(serde_json::json!({}));
+    }
     if path == "/_matrix/media/v3/upload" {
         hs.uploads.push(r.body.clone());
         return j(serde_json::json!({"content_uri": format!("mxc://test/up{}", hs.uploads.len())}));
@@ -199,7 +218,8 @@ fn handle(hs: &mut Hs, r: &Req) -> (u16, String, String) {
             serde_json::json!({"type": "m.room.member", "sender": "@bob:test", "event_id": "$m5", "content": {"membership": "join"}}),
         ];
         events.extend(hs.extra_sync_events.drain(..));
-        return j(serde_json::json!({"next_batch": "s2", "rooms": {"join": {PLAIN: {"timeline": {"events": events}}}}}));
+        let td: Vec<_> = hs.extra_to_device.drain(..).collect();
+        return j(serde_json::json!({"next_batch": "s2", "to_device": {"events": td}, "device_one_time_keys_count": {"signed_curve25519": 50}, "rooms": {"join": {PLAIN: {"timeline": {"events": events}}}}}));
     }
     err(404, "M_UNRECOGNIZED", "Unrecognized request")
 }

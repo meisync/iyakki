@@ -36,7 +36,7 @@ def keyboard_walk(rep, page, title, limit=120):
     noring = [s["d"] + " " + s["name"] for s in stops if not s["ring"] and not s["d"].startswith("a.skip")]
     rep.check("%s: every Tab stop shows where the focus is" % title, noring == [], noring[:4])
     # back with Shift+Tab: the same stops in the opposite order
-    page.evaluate("var l=document.querySelectorAll('input,select,textarea,button,a[href],[tabindex]');var v=Array.prototype.filter.call(l,function(e){var r=e.getBoundingClientRect();return r.width>0&&e.tabIndex>=0&&!e.closest('[hidden]')});if(v.length)v[v.length-1].focus();")
+    page.evaluate("var l=document.querySelectorAll('input,select,textarea,button,a[href],[tabindex]');var v=Array.prototype.filter.call(l,function(e){var r=e.getBoundingClientRect();return r.width>0&&e.tabIndex>=0&&!e.disabled&&!e.closest('[hidden]')});if(v.length)v[v.length-1].focus();")
     back = []
     for _ in range(len(stops) + 2):
         d = page.evaluate(WALK_JS)
@@ -72,8 +72,10 @@ def page_numbers(rep, page, title, base, t_click_ms):
     rep.check("page %s: nothing requested from outside; drawn in under 3 s" % title, d["outside"] == 0 and t_click_ms < 3000, d)
 
 
-def idle_rate(rep, page, title, seconds=6):
+def idle_rate(rep, page, title, seconds=8):
     """Requests a page makes by itself (polling) per minute: the service refuses a person more than 60 a minute, so the pages must stay well under."""
+    # the page's own start-up requests (a lazily loaded script, the first picture of a tile) are not polling: let them finish first
+    time.sleep(3)
     n0 = len(page.requests)
     time.sleep(seconds)
     per_min = round((len(page.requests) - n0) * 60.0 / seconds)

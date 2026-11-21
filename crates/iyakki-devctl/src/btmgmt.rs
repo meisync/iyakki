@@ -572,6 +572,16 @@ impl<T: Transport> Mgmt<T> {
         Ok(cur)
     }
 
+    /// Lets a phone find this computer and pair with it (Bluetooth sharing, F-HOTSPOT-15): the settings of [`Mgmt::prepare`], connectable,
+    /// the "no input, no output" capability (the phone shows or confirms the number; nothing for the person to type here) and visible to
+    /// others for `secs` seconds. Returns the settings bits. The window closes by itself; nothing stays visible afterwards.
+    pub fn open_to_phones(&mut self, index: u16, secs: u16) -> Result<u32, Error> {
+        self.prepare(index)?;
+        self.set_connectable(index, true)?;
+        self.set_io_capability(index, IO_NO_INPUT_NO_OUTPUT)?;
+        self.set_discoverable(index, true, secs.max(1))
+    }
+
     /// Scans for `dur` (classic and low energy) and returns the devices seen, strongest signal first.
     pub fn scan(&mut self, index: u16, dur: Duration) -> Result<Vec<Found>, Error> {
         self.scan_types(index, dur, 7)
@@ -1154,6 +1164,37 @@ mod tests {
         m.unpair(0, "AA:00:00:00:00:01", ADDR_BREDR).unwrap();
         assert_eq!(*m.t.sent.last().unwrap().last().unwrap(), 1, "unpair also disconnects");
         assert!(m.disconnect(0, "nonsense", 0).is_err());
+    }
+
+    #[test]
+    fn opening_to_phones_makes_the_controller_connectable_for_a_limited_time_and_leaves_nothing_visible_for_good() {
+        let info = info_reply();
+        let mut m = fake(vec![]);
+        for _ in 0..3 {
+            m.t.script.push((OP_READ_INFO, vec![complete(OP_READ_INFO, 0, 0, &info)]));
+        }
+        for (op, bits) in [(OP_SET_BREDR, SET_BREDR), (OP_SET_SSP, SET_SSP), (OP_SET_LE, SET_LE), (OP_SET_BONDABLE, SET_BONDABLE), (OP_SET_CONNECTABLE, SET_CONNECTABLE), (OP_SET_DISCOVERABLE, SET_DISCOVERABLE)] {
+            m.t.script.push((op, vec![complete(op, 0, 0, &bits.to_le_bytes())]));
+        }
+        m.t.script.push((OP_SET_IO_CAPABILITY, vec![complete(OP_SET_IO_CAPABILITY, 0, 0, &[])]));
+        let cur = m.open_to_phones(0, 120).unwrap();
+        assert_eq!(cur, SET_DISCOVERABLE);
+        let sent: Vec<&Vec<u8>> = m.t.sent.iter().filter(|p| matches!(u16::from_le_bytes([p[0], p[1]]), OP_SET_CONNECTABLE | OP_SET_IO_CAPABILITY | OP_SET_DISCOVERABLE)).collect();
+        assert_eq!(sent.len(), 3);
+        assert_eq!(&sent[0][6..], &[1], "connectable on");
+        assert_eq!(&sent[1][6..], &[IO_NO_INPUT_NO_OUTPUT]);
+        assert_eq!(&sent[2][6..], &[1, 120, 0], "visible for 120 seconds, never for good");
+        // 0 would mean "until switched off": the window is at least one second
+        let mut m = fake(vec![]);
+        for _ in 0..3 {
+            m.t.script.push((OP_READ_INFO, vec![complete(OP_READ_INFO, 0, 0, &info)]));
+        }
+        for (op, bits) in [(OP_SET_BREDR, SET_BREDR), (OP_SET_SSP, SET_SSP), (OP_SET_LE, SET_LE), (OP_SET_BONDABLE, SET_BONDABLE), (OP_SET_CONNECTABLE, SET_CONNECTABLE), (OP_SET_DISCOVERABLE, SET_DISCOVERABLE)] {
+            m.t.script.push((op, vec![complete(op, 0, 0, &bits.to_le_bytes())]));
+        }
+        m.t.script.push((OP_SET_IO_CAPABILITY, vec![complete(OP_SET_IO_CAPABILITY, 0, 0, &[])]));
+        m.open_to_phones(0, 0).unwrap();
+        assert_eq!(&m.t.sent.last().unwrap()[6..], &[1, 1, 0]);
     }
 
     #[test]

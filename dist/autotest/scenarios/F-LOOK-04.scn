@@ -1,0 +1,19 @@
+# autotest pilot, batch A (2026-11-21). Written against the Feature text with sha 30a0332dc18a0470; honest subset only: everything not checked is under not-covered.
+row: F-LOOK-04
+targets: qemu
+profile: ram
+feature-sha: 30a0332dc18a0470
+doc: the Appearance page names the three built-in Looks Default, Compact and Classic
+clause: 1 the Appearance page names the three built-in Looks Default, Compact and Classic
+not-covered: Compact is denser with smaller icons
+not-covered: Classic is a plain grid with no island and no dock
+not-covered: seeing each Look on a screen
+key s
+wait app=Settings
+skip-unless-button Appearance
+click-sidebar Appearance
+wait app=Settings page=Appearance
+shot page
+expect-not-blank
+expect-text Default, Compact, Classic
+expect-page Appearance

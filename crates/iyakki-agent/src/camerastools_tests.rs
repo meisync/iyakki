@@ -654,7 +654,7 @@ fn a_chat_tool_turns_a_network_camera_for_a_moment_then_stops_it_and_never_for_a
     let (f2, waited) = (fake.clone(), Arc::new(Mutex::new(Vec::<Duration>::new())));
     let w2 = waited.clone();
     let tools = CameraViewTools { ..r.tools }.with_ptz(
-        Arc::new(move |addr, user, pass| {
+        Arc::new(move |_, addr, user, pass| {
             assert!(addr.starts_with("rtsp://10.0.0.5") && user == "admin" && pass.is_empty());
             crate::onvif::PtzCamera::probe(crate::onvif::Onvif::new(Box::new(f2.clone()), Box::new(MoveSource), user, pass), "http://c/device_service")
         }),
@@ -675,12 +675,72 @@ fn a_chat_tool_turns_a_network_camera_for_a_moment_then_stops_it_and_never_for_a
     assert!(tools.call("camera_move", &json!({"camera": "Yard", "action": "go_to", "position": "driveway"})).unwrap().contains("Driveway"));
     assert!(fake.0.lock().unwrap().iter().any(|l| l == "GotoPreset preset"));
     assert!(tools.call("camera_move", &json!({"camera": "Yard", "action": "go_to", "position": "moon"})).unwrap_err().contains("no saved position"));
+    // a place across the camera's range: asked first, sent as one absolute move, never outside the range
+    let card = tools.preview("camera_move", &json!({"camera": "Yard", "action": "to", "pan": 0.25, "tilt": -0.5, "zoom": 1.0})).unwrap();
+    assert!(card.contains("pan 0.25") && card.contains("physically"), "{card}");
+    assert!(tools.call("camera_move", &json!({"camera": "Yard", "action": "to", "pan": 0.25, "tilt": -0.5, "zoom": 1.0})).unwrap().contains("pan 0.25"));
+    assert!(fake.0.lock().unwrap().iter().any(|l| l == "AbsoluteMove"));
+    assert!(tools.refusal("camera_move", &json!({"camera": "Yard", "action": "to", "pan": 2.0})).is_some());
     for bad in [json!({"camera": "Yard", "action": "spin"}), json!({"camera": "Yard", "action": "left", "seconds": 60}), json!({"camera": "Yard", "action": "go_to"}), json!({"action": "stop"})] {
         assert!(tools.refusal("camera_move", &bad).is_some(), "{bad}");
     }
     let audit = r.audit.lock().unwrap().clone();
     assert!(audit.iter().any(|l| l.contains("camera.move") && l.contains("Yard: left")) && audit.iter().filter(|l| l.contains("camera.move")).all(|l| !l.contains("10.0.0.5")), "{audit:?}");
     // a camera whose probe finds nothing to move is a plain sentence
-    let still = CameraViewTools { ..tools }.with_ptz(Arc::new(|_, _, _| Ok(None)), Arc::new(|_| {}));
+    let still = CameraViewTools { ..tools }.with_ptz(Arc::new(|_, _, _, _| Ok(None)), Arc::new(|_| {}));
     assert!(still.call("camera_move", &json!({"camera": "Yard", "action": "stop"})).unwrap_err().contains("no pan, tilt or zoom"));
+}
+
+struct SinkRoute(crate::mixer::Mixer);
+impl crate::camsource::SoundRoute for SinkRoute {
+    fn open(&self, rate: u32, label: &str) -> Result<crate::mixer::SourceWriter, String> {
+        self.0.open_source_with(crate::mixer::SourceKind::Media, rate, 1, label, false).map_err(|e| e.to_string())
+    }
+}
+struct NoMixer;
+impl crate::camsource::SoundRoute for NoMixer {
+    fn ready(&self) -> Result<(), String> {
+        Err("Camera sound plays through IYAKKI's mixer; switch it on in Settings, Sound.".into())
+    }
+    fn open(&self, _: u32, _: &str) -> Result<crate::mixer::SourceWriter, String> {
+        Err("no".into())
+    }
+}
+
+#[test]
+fn camera_listen_asks_every_time_is_checked_in_words_and_stop_with_nothing_running_says_so() {
+    let r = rig("listen-card", 50);
+    let defs = r.tools.defs();
+    assert_eq!(defs.iter().find(|d| d.spec.name == "camera_listen").unwrap().risk, Risk::Ask);
+    assert!(r.tools.grant_blocker("camera_listen", &json!({"camera": "x"})).is_some(), "no standing grant for a camera's microphone");
+    assert!(!r.tools.pre_approved("camera_listen"));
+    assert!(r.tools.refusal("camera_listen", &json!({"camera": "x", "seconds": 2})).is_some());
+    assert!(r.tools.refusal("camera_listen", &json!({"camera": "x", "seconds": 5000})).is_some());
+    assert!(r.tools.refusal("camera_listen", &json!({"camera": "x", "action": "sideways"})).unwrap().contains("start or stop"));
+    assert!(r.tools.refusal("camera_listen", &json!({})).unwrap().contains("camera"), "a start names the camera");
+    assert!(r.tools.refusal("camera_listen", &json!({"action": "stop"})).is_none(), "a stop needs no name");
+    assert!(r.tools.call("camera_listen", &json!({"camera": "nowhere"})).is_err());
+    assert!(r.tools.call("camera_listen", &json!({"action": "stop"})).unwrap().contains("No camera sound"));
+    let _ = std::fs::remove_dir_all(&r.dir);
+}
+
+#[test]
+fn a_chat_started_camera_sound_plays_on_its_own_thread_ends_on_stop_and_is_refused_with_the_mixer_off() {
+    let _rt = crate::mixer::rt_serial();
+    let sink = crate::mixer::FakeSink::new();
+    let mixer = crate::mixer::Mixer::start(crate::mixer::MixerCfg::default(), Box::new(sink.clone()));
+    let r = rig_usb("listen-run", 50, Arc::new(crate::cameras::tests::MicUsb));
+    let tools = r.tools.with_sound_route(Arc::new(SinkRoute(mixer)));
+    let card = tools.preview("camera_listen", &json!({"camera": "HD Webcam", "seconds": 30})).unwrap();
+    assert!(card.contains("SOUND") && card.contains("HD Webcam") && card.contains("30 seconds") && card.contains("nothing is recorded"), "{card}");
+    let said = tools.call("camera_listen", &json!({"camera": "HD Webcam", "seconds": 30})).unwrap();
+    assert!(said.contains("Playing the sound of") && said.contains("Nothing is recorded"), "{said}");
+    iyakki_testkit::wait::wait_for_state(Duration::from_secs(30), || if sink.lock().opens >= 1 && !sink.lock().samples.is_empty() { Ok(()) } else { Err("the speaker has no sound yet".to_string()) });
+    assert!(r.audit.lock().unwrap().iter().any(|l| l.contains("amy|camera.listen|HD Webcam: started from the chat")));
+    assert!(tools.call("camera_listen", &json!({"action": "stop"})).unwrap().contains("Stopped the sound of"));
+    assert!(tools.call("camera_listen", &json!({"action": "stop"})).unwrap().contains("No camera sound"));
+    // a new start ends the old one; with the mixer off a start is refused before any thread begins
+    let off = tools.with_sound_route(Arc::new(NoMixer));
+    assert!(off.call("camera_listen", &json!({"camera": "HD Webcam"})).unwrap_err().contains("mixer"));
+    off.hub.stop_all();
 }

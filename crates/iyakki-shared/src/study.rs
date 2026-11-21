@@ -273,7 +273,7 @@ pub fn parse_every(s: &str) -> Result<&'static str, String> {
 }
 
 /// What the model asked for (the syllabus lines are its own; everything else is checked here).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct PlanSpec {
     pub topic: String,
     pub unit: String,

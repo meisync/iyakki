@@ -27,7 +27,12 @@ pub struct FakeCore {
     host: FakeHost,
     media: crate::media::FakeMedia,
     files: FakeFiles,
+    route: std::sync::Arc<crate::audioroute::FakeAudioRoute>,
+    route_at: Mutex<Option<RouteAt>>,
 }
+
+/// Makes the route over given sound roots (a test over a made-up tree on disk brings its own reader).
+type RouteAt = std::sync::Arc<dyn Fn(&std::path::Path, &std::path::Path) -> std::sync::Arc<dyn iyakki_core_api::AudioRoute> + Send + Sync>;
 
 /// Machine facts in memory: whatever a test sets, empty otherwise.
 #[derive(Default)]
@@ -143,6 +148,7 @@ pub struct FakeResume {
     switch: std::sync::atomic::AtomicBool,
     who: Mutex<Option<String>>,
     apps: Mutex<Vec<String>>,
+    items: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeResume {
@@ -189,6 +195,14 @@ impl SessionResume for FakeResume {
     }
     fn apps(&self) -> Vec<String> {
         if self.allowed() { lk(&self.apps).clone() } else { Vec::new() }
+    }
+    fn remember_items(&self, items: &[(String, String)]) {
+        if self.allowed() && lk(&self.who).is_some() {
+            *lk(&self.items) = items.to_vec();
+        }
+    }
+    fn items(&self) -> Vec<(String, String)> {
+        if self.allowed() { lk(&self.items).clone() } else { Vec::new() }
     }
 }
 
@@ -546,6 +560,14 @@ impl FakeCore {
         &self.cloud
     }
     /// The scripted browser sessions (pages, known-bad sites, the calls it saw).
+    /// The made-up sound facts the core's `audio_route` answers from.
+    pub fn audio_route_fake(&self) -> std::sync::Arc<crate::audioroute::FakeAudioRoute> {
+        self.route.clone()
+    }
+    /// Answer `audio_route_at` with the route `f` makes over the roots (default: the made-up in-memory tree, whatever the roots).
+    pub fn set_route_at(&self, f: impl Fn(&std::path::Path, &std::path::Path) -> std::sync::Arc<dyn iyakki_core_api::AudioRoute> + Send + Sync + 'static) {
+        *self.route_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::sync::Arc::new(f));
+    }
     pub fn browser_fake(&self) -> &crate::fakebrowser::FakeBrowser {
         &self.browser
     }
@@ -566,6 +588,16 @@ impl Core for FakeCore {
     }
     fn mixer(&self) -> &dyn Mixer {
         &self.mixer
+    }
+    fn audio_route(&self) -> std::sync::Arc<dyn iyakki_core_api::AudioRoute> {
+        self.route.clone()
+    }
+    fn audio_route_at(&self, proc_root: &std::path::Path, sys_root: &std::path::Path) -> std::sync::Arc<dyn iyakki_core_api::AudioRoute> {
+        let f = self.route_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        match f {
+            Some(f) => f(proc_root, sys_root),
+            None => self.route.clone(),
+        }
     }
     fn sound(&self) -> &dyn iyakki_core_api::SoundControl {
         &self.sound

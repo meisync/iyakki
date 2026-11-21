@@ -543,7 +543,7 @@ fn the_flows_assist_readout_lists_switches_waiting_suggestions_and_counters_and_
 
 #[test]
 fn dev_scan_lists_each_announced_device_with_name_address_and_services_and_listens_two_seconds() {
-    use iyakki_netscan::mdns::net::Found;
+    use iyakki_core_local::netscan::mdns::net::Found;
     let found = vec![
         Found { host: "iyakki-0a1b2c.local".into(), addrs: vec!["192.168.50.66".parse().unwrap(), "fe80::1".parse().unwrap()], services: vec![("_iyakki-dev._tcp".into(), 7979), ("_iyakki-web._tcp".into(), 8443)], txt: vec![] },
         Found { host: "iyakki-ffeedd.local".into(), addrs: vec!["192.168.50.70".parse().unwrap()], services: vec![("_iyakki-dev._tcp".into(), 7979)], txt: vec![] },

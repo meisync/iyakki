@@ -12,7 +12,7 @@ use crate::settingstools::{no_args, Entry, Env};
 use crate::syssounds::{Cue, MAX_OFFSET_DB, MIN_OFFSET_DB};
 pub use iyakki_shared::settingstools_machine::{PROMPT_RULE};
 
-pub const TOOLS: [&str; 9] = ["startup_status", "system_sounds_status", "system_sounds_set", "battery_settings_status", "battery_settings_set", "power_settings_status", "power_settings_set", "cloud_mode_status", "cloud_mode_set"];
+pub const TOOLS: [&str; 11] = ["startup_status", "system_sounds_status", "system_sounds_set", "battery_settings_status", "battery_settings_set", "power_settings_status", "power_settings_set", "cloud_mode_status", "cloud_mode_set", "radio_settings_status", "radio_settings_set"];
 
 
 fn read(env: &Env, f: impl Fn(&Settings) -> String) -> Result<String, String> {
@@ -50,6 +50,10 @@ fn battery_text(s: &Settings) -> String {
 fn power_text(s: &Settings) -> String {
     let p = &s.power;
     format!("Power profile: {}. Sleep after idle: {}. Sleep even while busy: {}. Closing the lid: {}. Power button: {}.", p.profile.label(), if p.sleep_after_min == 0 { "never".to_string() } else { format!("{} minutes", p.sleep_after_min) }, if p.sleep_when_busy { "yes" } else { "no" }, p.lid.label(), p.button.label())
+}
+
+fn radio_text(s: &Settings) -> String {
+    format!("Radio: reconnect tries {} (0 to {}), moving on to the next station {}. {}", s.radio.retries(), iyakki_shared::radiorecover::MAX_RETRIES, if s.radio.auto_switch() { "on" } else { "off" }, s.radio.describe())
 }
 
 fn cloud_text(s: &Settings) -> String {
@@ -184,6 +188,33 @@ pub fn entries(env: &Env) -> Vec<Entry> {
         })
         .admin(),
     );
+    let (e9, e10) = (env.clone(), env.clone());
+    v.push(Entry::read("Radio", "radio_settings_status", "Show what the radio does when a live station drops: how many times it reconnects the same station, and whether it then goes on to the next station of the list.", no_args(), move |_| read(&e9, radio_text)));
+    v.push(
+        Entry::change(
+            "Radio",
+            "radio_settings_set",
+            "Change what the radio does when a live station drops: `retries` (0 to 5 reconnects of the same station, default 2) and `auto_switch` (true: go on to the next station of the list after the retries, default; false: stop). Playing the first station still needs the person to start it. The person approves a card first.",
+            json!({"type": "object", "properties": {"retries": {"type": "integer", "minimum": 0, "maximum": 5}, "auto_switch": {"type": "boolean"}}}),
+            |_| "Change the radio's reconnect settings".into(),
+            move |a| {
+                if a.get("retries").is_none() && a.get("auto_switch").is_none() {
+                    return Err("say `retries` (0 to 5) or `auto_switch` (true or false)".into());
+                }
+                change(&e10, "settings.radio", |s| {
+                    if let Some(n) = a.get("retries") {
+                        let n = n.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n <= iyakki_shared::radiorecover::MAX_RETRIES).ok_or("retries is 0 to 5")?;
+                        s.radio.retries = Some(n);
+                    }
+                    if let Some(b) = a.get("auto_switch").and_then(Value::as_bool) {
+                        s.radio.no_auto_switch = !b;
+                    }
+                    Ok(())
+                }, radio_text)
+            },
+        )
+        .admin(),
+    );
     // fan control (Settings -> Power) and the privileged VPN helper (Settings -> VPN): the services init keeps running
     v.extend(crate::settingstools_helpers::entries(env, std::path::PathBuf::from("/sys")));
     v
@@ -199,7 +230,7 @@ mod tests {
     fn the_switches_change_the_settings_store_validate_and_ask_every_time() {
         let r = rig("machine", true);
         let t = tools(&r, entries(&r.env));
-        assert_policy(&t, &["startup_status", "system_sounds_status", "battery_settings_status", "power_settings_status", "cloud_mode_status"], &["system_sounds_set", "battery_settings_set", "power_settings_set", "cloud_mode_set"]);
+        assert_policy(&t, &["startup_status", "system_sounds_status", "battery_settings_status", "power_settings_status", "cloud_mode_status", "radio_settings_status"], &["system_sounds_set", "battery_settings_set", "power_settings_set", "cloud_mode_set", "radio_settings_set"]);
         assert!(t.call("system_sounds_set", &json!({"offset_db": -40})).is_err(), "out of range is refused by validate and nothing is kept");
         assert_eq!(r.env.settings.lock().unwrap().get().sounds.offset_db, crate::syssounds::DEFAULT_OFFSET_DB);
         assert!(t.call("system_sounds_set", &json!({"cue": "notify", "cue_on": false})).unwrap().contains("off"));
@@ -214,6 +245,11 @@ mod tests {
         assert_eq!((p.lid, p.button), (crate::power::LidAction::Sleep, crate::power::ButtonAction::Lock));
         assert!(t.call("power_settings_set", &json!({"lid": "explode"})).is_err() && t.call("power_settings_set", &json!({"power_button": "off"})).is_err());
         assert!(t.call("power_settings_set", &json!({"profile": "turbo"})).is_err());
+        t.call("radio_settings_set", &json!({"retries": 1, "auto_switch": false})).unwrap();
+        let rr = r.env.settings.lock().unwrap().get().radio.clone();
+        assert_eq!((rr.retries(), rr.auto_switch()), (1, false));
+        assert!(t.call("radio_settings_set", &json!({"retries": 9})).is_err() && t.call("radio_settings_set", &json!({})).is_err());
+        assert_eq!(r.env.settings.lock().unwrap().get().radio.retries(), 1, "a refused change keeps nothing");
         t.call("cloud_mode_set", &json!({"mode": "on"})).unwrap();
         assert_eq!(r.env.settings.lock().unwrap().get().cloud, Setting::On);
         assert!(t.call("cloud_mode_set", &json!({"mode": "maybe"})).is_err());

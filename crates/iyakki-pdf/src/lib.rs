@@ -23,12 +23,14 @@ pub mod font;
 pub mod geom;
 pub mod image;
 pub mod interp;
+pub mod jbig2;
 pub mod md;
 pub mod ocr;
 pub mod obj;
 pub mod order;
 pub mod raster;
 pub mod render;
+pub mod ruled;
 pub mod table;
 pub mod text;
 pub mod thai;
@@ -36,7 +38,7 @@ pub mod ttf;
 pub mod write;
 
 pub use doc::{Document, FormField, Info, Rendered};
-pub use form::{EditableField, FieldKind};
+pub use form::{ButtonAction, ButtonInfo, EditableField, FieldKind, ResetPlan, SignatureInfo};
 pub use file::PdfError;
 pub use render::{BoxGlyphs, FontStyle, GlyphBitmap, GlyphSource};
 pub use text::{CharBox, Hit};
@@ -62,6 +64,8 @@ mod shaped_pdf_tests;
 
 #[cfg(test)]
 mod table_tests;
+#[cfg(test)]
+mod ruled_tests;
 
 #[cfg(test)]
 mod ccitt_tests;

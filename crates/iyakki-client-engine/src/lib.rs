@@ -26,8 +26,14 @@ pub const GLUE_JS: &str = include_str!("../js/engine.js");
 /// The browser key store (WebCrypto Ed25519 with an IndexedDB fallback).
 pub const KEYS_JS: &str = include_str!("../js/keys.js");
 #[cfg(not(target_arch = "wasm32"))]
+/// Draws an app's display list with the engine and makes its input lines; shared by the preview page and the page behind the one-time link.
+pub const UIDISPLAY_JS: &str = include_str!("../js/uidisplay.js");
+#[cfg(not(target_arch = "wasm32"))]
 /// The media half of the page: the machine's sound, the clipboard on a button press, a machine camera, this device's camera and microphone.
 pub const MEDIA_JS: &str = include_str!("../js/media.js");
+#[cfg(not(target_arch = "wasm32"))]
+/// The file transfer of the page: browse the home folder, download, upload.
+pub const FILES_JS: &str = include_str!("../js/files.js");
 #[cfg(not(target_arch = "wasm32"))]
 /// The audio worklet (player and microphone capture); also holds the queue logic the node tests exercise.
 pub const WORKLET_JS: &str = include_str!("../js/audio-worklet.js");

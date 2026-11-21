@@ -226,6 +226,22 @@ fn new_box() -> MultiLine {
     m
 }
 
+/// The reading voice and the sound of a core that serves neither to this program (the UI over the socket, D-SPLIT-03-QUIET): every piece fails in words
+/// and nothing is played.
+struct NotServedVoice;
+
+impl Synth for NotServedVoice {
+    fn synth(&self, _text: &str) -> Result<Vec<u8>, String> {
+        Err("The reading voice is not served over the UI socket yet.".into())
+    }
+}
+
+impl Sink for NotServedVoice {
+    fn play(&self, _wav: &[u8]) -> Result<Box<dyn iyakki_shared::story::Playing>, String> {
+        Err("Sound for reading is not served over the UI socket yet.".into())
+    }
+}
+
 impl VoiceApp {
     pub fn new(cx: &AppCx) -> VoiceApp {
         VoiceApp::with_rig(cx, Rig::for_user(cx.core.clone(), &cx.session.user))
@@ -389,8 +405,8 @@ impl VoiceApp {
         }
         let path = std::env::var("PATH").unwrap_or_default();
         let play_cmd = cx.agent.hostengines_player_command(&v.play_cmd, &path).unwrap_or(v.play_cmd.clone());
-        let sink: Arc<dyn Sink> = self.rig.sink.clone().unwrap_or_else(|| cx.voicedesk_facet().command_sink(play_cmd).expect("the real core plays with a command"));
-        (cx.voicedesk_facet().choice_synth(voice.engine.clone(), opts).expect("the real core serves the reading voice"), sink)
+        let sink: Arc<dyn Sink> = self.rig.sink.clone().unwrap_or_else(|| cx.voicedesk_facet().command_sink(play_cmd).unwrap_or_else(|| Arc::new(NotServedVoice)));
+        (cx.voicedesk_facet().choice_synth(voice.engine.clone(), opts).unwrap_or_else(|| Arc::new(NotServedVoice)), sink)
     }
 
     fn begin(&mut self, cx: &AppCx, text: String, base: usize, voice: ReadVoice) {

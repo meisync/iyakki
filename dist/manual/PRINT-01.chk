@@ -1,0 +1,16 @@
+scenario: PRINT-01
+title: Print to PDF and a PDF viewer
+area: Browser
+rows: F-BROW-35
+machines: any
+needs: person
+prereq: The Browser tile works and a page is open. No paper printer is needed.
+step: On any web page choose Print, then Print to PDF.
+expect: A file is saved in your Documents folder with the page inside, correctly paginated.
+clause: pdf
+step: Open the saved PDF from Files.
+expect: The viewer shows the page; zoom in and out and the text stays sharp.
+clause: viewer
+step: Search for a word you can see on the page.
+expect: The viewer finds it and marks it.
+clause: search

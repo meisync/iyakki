@@ -1,13 +1,12 @@
 //! Chat tools for Settings -> Network: WiFi (`wifi_status`, `wifi_scan`, `wifi_join`, `wifi_forget`) and the WiFi hotspot's country,
 //! security and band (`hotspot_status`, `hotspot_set`). Reads are free; every change asks the person on a card, every time, no session
-//! grant. They call the same code as the page: `iyakki_devctl::wifi::join_now` for joining, the hotspot file functions of
+//! grant. They call the same code as the page: `iyakki_core_local::wifijoin::join` for joining, the hotspot file functions of
 //! `sharing::real` for the hotspot. The assistant never types a secret: a passphrase, an enterprise password or a WEP key is read from
 //! the person's vault entry named in `secret_entry` (made with `vault_request`), and nothing secret is logged or shown on the card.
 // SPDX-License-Identifier: Apache-2.0
 
 
-use iyakki_devctl::wifi::{Ap, Known, Security};
-use iyakki_devctl::wifi_ext::{self, EapMethod, Enterprise};
+use iyakki_core_local::wifijoin::{self, Ap, EapMethod, Enterprise, Known, Security};
 use serde_json::{json, Value};
 
 use crate::settingstools::{arg_str, no_args, Entry, Env};
@@ -15,7 +14,63 @@ pub use iyakki_shared::settingstools_wifi::{PROMPT_RULE, SecretReader, WifiCtl};
 
 const TAB: &str = "Network";
 
-pub const TOOLS: [&str; 6] = ["wifi_status", "wifi_scan", "wifi_join", "wifi_forget", "hotspot_status", "hotspot_set"];
+pub const TOOLS: [&str; 9] = ["wifi_status", "wifi_scan", "wifi_join", "wifi_forget", "wifi_adapter_set", "hotspot_status", "hotspot_set", "internet_share_status", "internet_share_set"];
+
+/// How long a start or stop waits for the sharing service to answer.
+#[cfg(not(test))]
+const SHARE_WAIT_MS: u64 = 6000;
+#[cfg(test)]
+const SHARE_WAIT_MS: u64 = 0;
+
+/// What internet sharing is doing and what can be shared through (the Settings page's lists, in words).
+pub fn share_status_text(b: &dyn crate::sharing::control::Backend) -> String {
+    let wifi = b.wifi_ap();
+    let c = crate::sharing::view::choices_full(&b.interfaces(), wifi, if wifi { None } else { b.wifi_ap_why() }.as_deref(), b.nap_why().as_deref());
+    let mut v = crate::sharing::cli::status_text(&b.status());
+    v.push("internet can come from: ".to_string() + &if c.uplinks.is_empty() { "nothing (no connection has a route to the internet)".to_string() } else { c.uplinks.iter().map(|u| u.label.clone()).collect::<Vec<_>>().join("; ") });
+    for d in &c.downs {
+        v.push(format!("share through: {}{}", d.label, if d.usable { String::new() } else { format!(" (cannot be used: {})", d.why) }));
+    }
+    v.join("\n")
+}
+
+/// Start or stop internet sharing like `iyakki share start|stop`: `through` is `bluetooth` (phones connect to this computer), `wifi`
+/// (the hotspot) or the name of a cable's interface. The same plan and policy checks run first, so a mistake is explained before anything is written.
+pub fn share_apply(b: &dyn crate::sharing::control::Backend, a: &Value, wait_ms: u64) -> Result<String, String> {
+    use crate::sharing::cli::{run, Cmd};
+    let action = arg_str(a, "action")?;
+    let cmd = match action.as_str() {
+        "stop" => Cmd::Stop,
+        "start" => {
+            let via = match opt(a, "through")?.as_deref() {
+                None => None,
+                Some("bluetooth") => Some(wifijoin::BT_NAP_IFACE.to_string()),
+                Some("wifi") => Some(crate::wifi_ap::AP_IFACE.to_string()),
+                Some(n) => Some(n.to_string()),
+            };
+            if via.as_deref() == Some(wifijoin::BT_NAP_IFACE) {
+                if let Some(why) = b.nap_why() {
+                    return Err(why);
+                }
+            }
+            let hours = match a.get("hours") {
+                None | Some(Value::Null) => crate::sharing::DEFAULT_IDLE_HOURS,
+                Some(h) => h.as_u64().filter(|h| (1..=u64::from(crate::sharing::MAX_IDLE_HOURS)).contains(h)).ok_or("`hours` must be a whole number from 1 to 72")? as u8,
+            };
+            Cmd::Start { uplink: opt(a, "uplink")?, via, hours, isolate: a.get("isolate").and_then(Value::as_bool).unwrap_or(true), allow_lan: a.get("allow_lan").and_then(Value::as_bool).unwrap_or(false) }
+        }
+        _ => return Err("`action` is start or stop".into()),
+    };
+    let mut lines = Vec::new();
+    let code = run(b, cmd, &mut |l| lines.push(l.to_string()), wait_ms);
+    let text = lines.join("\n");
+    match code {
+        0 => Ok(text),
+        // the request is written; the service runs inside the system and answers a moment later
+        1 if text.contains("did not answer yet") => Ok(text),
+        _ => Err(text),
+    }
+}
 
 
 
@@ -38,7 +93,13 @@ fn kind_of(k: &Known) -> &'static str {
 fn status_text(c: &WifiCtl) -> String {
     let mut out = Vec::new();
     match c.iface() {
-        Some(i) => out.push(format!("WiFi adapter: {i}{}.", c.wifi.current_ssid(&i).map(|s| format!(", joined to {s}")).unwrap_or_else(|| ", not joined".into()))),
+        Some(i) => {
+            out.push(format!("WiFi adapter: {i}{}.", c.wifi.current_ssid(&i).map(|s| format!(", joined to {s}")).unwrap_or_else(|| ", not joined".into())));
+            let all = c.adapters();
+            if all.len() > 1 {
+                out.push(format!("Adapters that can join networks: {} (wifi_adapter_set chooses).", all.join(", ")));
+            }
+        }
         None => out.push(c.no_adapter()),
     }
     let k = c.known.list();
@@ -110,7 +171,7 @@ fn build_known(c: &WifiCtl, read: &SecretReader, a: &Value, now: i64) -> Result<
         Security::Open => Known::new(&ssid, "", Security::Open, hidden, now),
         Security::Wep => {
             if a.get("accept_wep_risk").and_then(Value::as_bool) != Some(true) {
-                return Err(format!("{} Pass accept_wep_risk true only after the person has read this.", wifi_ext::wep_warning()));
+                return Err(format!("{} Pass accept_wep_risk true only after the person has read this.", wifijoin::wep_warning()));
             }
             Known::new_wep(&ssid, &secret()?, hidden, now)
         }
@@ -192,7 +253,7 @@ pub fn entries(env: &Env, c: WifiCtl, read: SecretReader) -> Vec<Entry> {
                 let k = build_known(&c, &rd, a, now)?;
                 let iface = c.iface().ok_or_else(|| c.no_adapter())?;
                 e.audit("settings.wifi.join", &k.ssid);
-                iyakki_devctl::wifi::join_now(&c.wifi, &c.known, &c.mac, &iface, k)
+                wifijoin::join(&c.wifi, &c.known, &c.mac, &iface, k)
             })
             .with_preview(move |a| {
                 let ssid = a["ssid"].as_str().unwrap_or("?");
@@ -200,7 +261,7 @@ pub fn entries(env: &Env, c: WifiCtl, read: SecretReader) -> Vec<Entry> {
                 let mut s = format!("This computer will join {ssid} and remember it (tried first from now on, also at the next start).");
                 if sec == "wep" {
                     s.push(' ');
-                    s.push_str(wifi_ext::wep_warning());
+                    s.push_str(wifijoin::wep_warning());
                 }
                 if sec == "enterprise" {
                     s.push_str(" The login is kept in an owner-only file of this computer because the network must come up before anyone signs in.");
@@ -225,6 +286,51 @@ pub fn entries(env: &Env, c: WifiCtl, read: SecretReader) -> Vec<Entry> {
                     let _ = c.wifi.apply(&i, &c.known.list());
                 }
                 Ok(format!("Forgot {ssid}."))
+            })
+            .admin(),
+        );
+    }
+    {
+        let (c, e) = (c.clone(), env.clone());
+        let schema = json!({"type": "object", "properties": {"adapter": {"type": "string", "description": "the interface name from wifi_status, for example wlan1"}}, "required": ["adapter"]});
+        v.push(
+            Entry::change(TAB, "wifi_adapter_set", "Choose which WiFi adapter scans and joins when the computer has two or more. The person approves a card first.", schema, |a| format!("Use the WiFi adapter {}", a["adapter"].as_str().unwrap_or("?")), move |a| {
+                let name = arg_str(a, "adapter")?;
+                if !c.adapters().contains(&name) {
+                    return Err(format!("{name} is not a WiFi adapter that can join networks here ({})", c.adapters().join(", ")));
+                }
+                c.known.set_chosen_adapter(Some(&name))?;
+                e.audit("settings.wifi.adapter", &name);
+                Ok(format!("WiFi adapter {name} is in use now."))
+            })
+            .admin(),
+        );
+    }
+    {
+        let e = env.clone();
+        v.push(Entry::read(TAB, "internet_share_status", "Say whether this computer is sharing its internet with other devices (a cable, the WiFi hotspot or phones over Bluetooth), what it can share through and why something cannot be used.", no_args(), move |_| Ok(share_status_text(&crate::sharing::control::FileBackend { data: e.dir.clone() }))).admin());
+    }
+    {
+        let e = env.clone();
+        let schema = json!({"type": "object", "properties": {
+            "action": {"type": "string", "description": "start or stop"},
+            "through": {"type": "string", "description": "start only: bluetooth (phones connect to this computer), wifi (the hotspot) or the name of a cable's interface; empty: the only free cable"},
+            "uplink": {"type": "string", "description": "start only: the connection that has the internet; empty: the one with the default route"},
+            "hours": {"type": "integer", "description": "start only: switch off after this many hours with nobody using it (1 to 72, default 2)"},
+            "isolate": {"type": "boolean", "description": "start only: devices cannot reach each other (default true)"},
+            "allow_lan": {"type": "boolean", "description": "start only: devices may reach this computer's local network (default false)"}}, "required": ["action"]});
+        v.push(
+            Entry::change(TAB, "internet_share_set", "Start or stop sharing this computer's internet with other devices: through a cable, the WiFi hotspot or phones over Bluetooth. Everything they download counts as the person's. The person approves a card first, every time.", schema, |a| {
+                if a["action"].as_str() == Some("stop") {
+                    "Stop sharing the internet".to_string()
+                } else {
+                    let through = a.get("through").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or("the free cable");
+                    format!("Share this computer's internet through {through}: other devices get access to the connection and what they download counts as yours")
+                }
+            }, move |a| {
+                let text = share_apply(&crate::sharing::control::FileBackend { data: e.dir.clone() }, a, SHARE_WAIT_MS)?;
+                e.audit("settings.share.internet", &format!("{} {}", a["action"].as_str().unwrap_or(""), a.get("through").and_then(Value::as_str).unwrap_or("")));
+                Ok(text)
             })
             .admin(),
         );
@@ -277,8 +383,8 @@ pub fn entries(env: &Env, c: WifiCtl, read: SecretReader) -> Vec<Entry> {
 mod tests;
 
 #[cfg(test)]
-use iyakki_devctl::mac::MacEnv;
+use iyakki_core_local::wifijoin::MacEnv;
 #[cfg(test)]
-use iyakki_devctl::wifi::KnownStore;
+use iyakki_core_local::wifijoin::KnownStore;
 #[cfg(test)]
-use iyakki_devctl::wifi::Wifi;
+use iyakki_core_local::wifijoin::Wifi;

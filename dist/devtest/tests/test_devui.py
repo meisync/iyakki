@@ -259,5 +259,169 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(self.run_one(f)["status"], "error")
 
 
+@unittest.skipUnless(devui.HAVE_PIL, "needs PIL")
+class WheelScenarioTests(unittest.TestCase):
+    """The shipped wheel-and-scrollbar scenario run against a fake screen: it scrolls only a page that shows a scrollbar, and checks the page moved."""
+
+    class Screen(devui.Device):
+        def __init__(self, d, thumb=True, moves=True, buttons=("Backup",)):
+            super().__init__("fake", run_dir=d)
+            self.buttons = buttons
+            self.app, self.page, self.thumb, self.moves = "Home", "", thumb, moves
+            self.scrolled, self.n, self.offset = [], 0, 0
+
+        def state(self):
+            return st(self.app, self.page, buttons=[(b, 40, 300, 160, 30) for b in self.buttons] if self.app == "Settings" else [])
+
+        def key(self, k):
+            self.app = "Settings"
+
+        def wait_for(self, app=None, page=None, text=None, timeout=15):
+            return self.state()
+
+        def click_sidebar(self, label):
+            self.page = label
+
+        def scroll(self, x, y, down=True, distance=300):
+            self.scrolled.append((x, y, down, distance))
+            self.offset += 4 if self.moves else 0
+
+        def go_home(self):
+            self.app = "Home"
+            return self.state()
+
+        def screenshot(self, label, state=None):
+            from PIL import Image
+            self.n += 1
+            img = Image.new("RGB", (200, 100), (30, 30, 30))
+            for y in range(100):  # lines of text that move with the page
+                if (y + self.offset) % 10 < 3:
+                    for x in range(10, 120):
+                        img.putpixel((x, y), (220, 220, 220))
+            if self.thumb:
+                for y in range(20, 60):
+                    for x in range(180, 186):
+                        img.putpixel((x, y), (200, 200, 200))
+            path = os.path.join(self.run_dir, "%02d-%s.png" % (self.n, label))
+            img.save(path)
+            return devui.Shot(path, label, self.n, state)
+
+    def run_it(self, name="settings-wheel-scrollbar", **kw):
+        with tempfile.TemporaryDirectory() as d:
+            dev = self.Screen(d, **kw)
+            return dev, devui.run_scenario(dev, devui.SCENARIOS[name], d)
+
+    def test_the_network_page_scenario_scrolls_down_and_back_up_and_is_skipped_when_it_fits(self):
+        self.assertIn("settings-wheel-network", devui.SCENARIOS)
+        dev, r = self.run_it("settings-wheel-network", buttons=("Network",))
+        self.assertEqual(r["status"], "pass", r)
+        self.assertEqual([c[2] for c in dev.scrolled], [True, False])
+        dev, r = self.run_it("settings-wheel-network", buttons=("Network",), thumb=False)
+        self.assertEqual((r["status"], dev.scrolled), ("skipped", []))
+
+    def test_a_page_with_a_scrollbar_is_scrolled_once_in_the_middle_and_must_move(self):
+        dev, r = self.run_it()
+        self.assertEqual(r["status"], "pass", r)
+        self.assertEqual(dev.scrolled, [(100, 50, True, 300)])
+
+    def test_a_page_that_fits_is_skipped_and_the_wheel_is_never_used(self):
+        dev, r = self.run_it(thumb=False)
+        self.assertEqual((r["status"], dev.scrolled), ("skipped", []))
+
+    def test_a_wheel_that_moves_nothing_fails_the_scenario(self):
+        dev, r = self.run_it(moves=False)
+        self.assertEqual(r["status"], "fail", r)
+
+    def test_bad_wheel_steps_are_refused_in_words(self):
+        head, steps = builtin_scenarios.parse_scn("scroll sideways\n")
+        self.assertEqual(steps, ["scroll sideways"])
+
+
+class PairScriptTests(unittest.TestCase):
+    """dist/qemu/dev-pair-test.py can be imported by a runner: nothing runs at import and `pair_guest` is the one function to call."""
+
+    def load(self):
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "qemu", "dev-pair-test.py")
+        spec = importlib.util.spec_from_file_location("dev_pair_test", path)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def test_import_runs_nothing_and_offers_the_functions(self):
+        m = self.load()
+        for name in ("pair_guest", "run_vm", "configure", "main"):
+            self.assertTrue(callable(getattr(m, name)), name)
+        self.assertEqual((m.OUT, m.usb, m.out_dir, m.fails), (None, None, None, []))
+
+    def test_configure_says_what_is_missing_instead_of_booting(self):
+        m = self.load()
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit) as e:
+                m.configure([d], {"PATH": ""})
+            self.assertIn("needs", str(e.exception))
+            self.assertEqual(m.fails, [])
+
+
+class SharedPairingTests(unittest.TestCase):
+    """qemu_guest.py reuses the pairing flow of dist/qemu/dev-pair-test.py (the `Vm` class) instead of mirroring it."""
+
+    def fake_vm(self):
+        import qemu_guest
+        m = qemu_guest.load_pair_script()
+        vm = m.Vm.__new__(m.Vm)
+        vm.tag, vm.port, vm.fails, vm.keys, vm.texts = "t", 17979, [], [], []
+        vm.cmd = lambda c, wait=0.15: vm.keys.append(c)
+        vm.typ = lambda text: vm.keys.append("typ:" + text)
+        return m, vm
+
+    def test_the_guest_class_builds_on_the_shared_vm_and_keeps_no_copy_of_the_recipe(self):
+        import qemu_guest
+        src = open(os.path.join(os.path.dirname(os.path.abspath(qemu_guest.__file__)), "qemu_guest.py")).read()
+        self.assertNotIn("\"-accel\"", src)
+        self.assertNotIn("screendump", src)
+        m = qemu_guest.load_pair_script()
+        for name in ("boot", "close", "snap", "shot", "make_account", "read_pair_code", "pair_from_host"):
+            self.assertTrue(callable(getattr(m.Vm, name)), name)
+        self.assertEqual(qemu_guest.SCRATCH_PASSWORD, m.SCRATCH_PASSWORD)
+
+    def test_the_pairing_code_is_read_from_the_screen_and_the_firewall_allow_is_pressed(self):
+        m, vm = self.fake_vm()
+        screens = iter(["Developer mode is on", "Pair: AB3D5 - 9XY2Z", "the firewall allows the local network for ten minutes"])
+        vm.page = lambda q: "page"
+        vm.shot = lambda name: next(screens)
+        vm.wait_for = lambda what, secs, name: vm.shot(name)
+        vm.check = lambda *a: None
+        self.assertEqual(vm.read_pair_code(), "AB3D5-9XY2Z")
+        self.assertEqual(vm.keys[-1], "sendkey f")
+
+    def test_no_code_on_the_screen_is_a_noted_failure_not_a_crash(self):
+        m, vm = self.fake_vm()
+        vm.page = lambda q: ""
+        vm.shot = lambda name: "nothing here"
+        vm.wait_for = lambda what, secs, name: "nothing here"
+        vm.check = lambda *a: None
+        self.assertIsNone(vm.read_pair_code())
+        self.assertTrue(any("no pairing code" in f for f in vm.fails))
+        del m.fails[:]
+
+    def test_pair_from_host_names_the_port_and_the_device(self):
+        m, vm = self.fake_vm()
+        calls = []
+        class R:  # a finished process
+            returncode = 0
+        orig = m.subprocess.run
+        m.subprocess.run = lambda argv, **kw: (calls.append((argv, kw["env"]["HOME"])), R())[1]
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                home = os.path.join(d, "h")
+                vm.pair_from_host("/x/iyakki", "AAAAA-BBBBB", home, name="qemu-guest")
+        finally:
+            m.subprocess.run = orig
+        argv, home_used = calls[0]
+        self.assertEqual(argv, ["/x/iyakki", "dev", "pair", "127.0.0.1:17979", "--code", "AAAAA-BBBBB", "--as", "qemu-guest", "--home", home])
+        self.assertEqual(home_used, home)
+
+
 if __name__ == "__main__":
     unittest.main()

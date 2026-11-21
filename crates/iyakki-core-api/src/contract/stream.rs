@@ -15,6 +15,9 @@ pub enum StreamKind {
     Log,
     CameraFrame,
     File,
+    /// A kind a newer release added; a caller skips the stream.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

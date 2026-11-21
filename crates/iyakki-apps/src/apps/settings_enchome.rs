@@ -25,6 +25,8 @@ pub(super) struct EncPanel {
     pub(super) progress: Arc<Mutex<String>>,
     /// The job was the move itself (its end is audited as a move).
     working_move: bool,
+    /// The person pressed Cancel during the move: the job reads it between files and before the switch (`migrate::run_cancellable`).
+    pub(super) cancel: Arc<std::sync::atomic::AtomicBool>,
     pub(super) env: Option<EnvFactory>,
     /// What the last drawing showed (state, has an administrator slot, an old plain copy waits): the buttons follow it.
     shown: Option<(State, bool, bool)>,
@@ -58,6 +60,7 @@ impl SettingsApp {
             (Purpose::AdminSlot { enable: false }, _) => Form::new("Remove the administrator slot").with_note("Afterwards only your password and your recovery key open the folder.").secret("Your sign-in password", ""),
             (Purpose::AdminSlot { enable: true }, 0) => Form::new("Allow an administrator slot").with_note("Whoever knows the administrator's password can open and READ this folder and reset your sign-in password without losing it. You can remove the slot here at any time.").secret("Your sign-in password", ""),
             (Purpose::AdminSlot { enable: true }, _) => Form::new("Allow an administrator slot").with_note("Choose the password the administrator will use for this folder (it is not their sign-in password).").secret("Administrator's password for this folder", "").secret("Repeat it", ""),
+            (Purpose::Export, _) => Form::new("Export as a LUKS2 file").with_note("Writes your whole encrypted home as a standard LUKS2 file in the data folder (it never overwrites a file). It opens with this same password on any Linux computer. The folder must be locked first. Your recovery key is not part of it.").secret("Your sign-in password", ""),
             (Purpose::Migrate, _) => Form::new("Move my existing files").with_note("The next screen shows exactly what will be copied. Nothing is changed before you press Move.").secret("Your sign-in password", ""),
         };
         if let Some(n) = note {
@@ -158,6 +161,8 @@ impl SettingsApp {
         let store = cx.store.clone();
         let user = cx.session.user.clone();
         let progress = self.ench.progress.clone();
+        self.ench.cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+        let cancel = self.ench.cancel.clone();
         if let Ok(mut p) = progress.lock() {
             *p = if is_move { "Checking the plan again".into() } else { String::new() };
         }
@@ -172,12 +177,12 @@ impl SettingsApp {
                 };
                 let verify = |p: &str| store.lock().map(|mut s| s.authenticate(&user, p).is_ok()).unwrap_or(false);
                 let ctx = Ctx { env: &env, user: &user, verify_signin: &verify };
-                form.submit_with(&ctx, &mut |st| {
+                form.submit_with_cancel(&ctx, &mut |st| {
                     if let Ok(mut p) = progress.lock() {
-                        *p = ef::step_words(st).to_string();
+                        *p = ef::step_words(st);
                     }
                     true
-                });
+                }, &|| cancel.load(std::sync::atomic::Ordering::SeqCst));
             });
             if std::panic::catch_unwind(run).is_err() {
                 form = ef::Form::default();
@@ -247,12 +252,20 @@ impl SettingsApp {
             Request::AdminSlotOn => Purpose::AdminSlot { enable: true },
             Request::AdminSlotOff => Purpose::AdminSlot { enable: false },
             Request::Migrate => Purpose::Migrate,
+            Request::Export => Purpose::Export,
         };
         self.ench_start(cx, p);
     }
 
     pub(super) fn handle_ench(&mut self, k: &Key, cx: &AppCx) {
         let Key::Char(c) = k else { return };
+        if *c == 'c' && self.ench.working_move && self.ench.working.is_some() {
+            // Cancel the move: asked between files and before the switch; the new folder is then deleted and the files stay where they were
+            self.ench.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            cx.audit.record(&cx.session.user, "enchome.move.cancel", "");
+            self.ok("Cancelling the move: it stops at the next file, the new encrypted folder is deleted and your files stay as they are. If it is already switching over it finishes first.");
+            return;
+        }
         if self.ench.working.is_some() || self.job.is_some() {
             self.fail("Another operation is still running. Wait for it to finish.");
             return;
@@ -261,6 +274,7 @@ impl SettingsApp {
         match (*c, st.state) {
             ('c', State::NotSetUp) => self.ench_start(cx, Purpose::Create),
             ('m', State::NotSetUp) => self.ench_start(cx, Purpose::Migrate),
+            ('x', State::Locked) => self.ench_start(cx, Purpose::Export),
             ('u', State::Locked) => self.ench_start(cx, Purpose::Unlock),
             ('r', State::Locked) => self.ench_start(cx, Purpose::UnlockWithRecovery),
             ('l', State::Open) => {
@@ -296,12 +310,13 @@ impl SettingsApp {
 
     pub(super) fn ench_buttons(&self) -> Vec<Btn> {
         if self.ench.working.is_some() {
-            return vec![];
+            // only the move can be cancelled
+            return if self.ench.working_move { vec![("Cancel the move", ERR, 'c')] } else { vec![] };
         }
         let (state, admin, plain) = self.ench.shown.unwrap_or((State::NotSetUp, false, false));
         match state {
             State::NotSetUp => vec![("Make my home encrypted", ACCENT, 'c'), ("Move my existing files", TEXT, 'm')],
-            State::Locked => vec![("Open", ACCENT, 'u'), ("Open with recovery key", TEXT, 'r'), ("New recovery key", TEXT, 'k'), (if admin { "Remove administrator slot" } else { "Allow administrator slot" }, TEXT, 'a'), ("Close with screen lock", TEXT, 's')],
+            State::Locked => vec![("Open", ACCENT, 'u'), ("Open with recovery key", TEXT, 'r'), ("New recovery key", TEXT, 'k'), (if admin { "Remove administrator slot" } else { "Allow administrator slot" }, TEXT, 'a'), ("Close with screen lock", TEXT, 's'), ("Export as LUKS2 file", TEXT, 'x')],
             State::Open => {
                 let mut v = vec![("Lock now", ACCENT, 'l'), ("New recovery key", TEXT, 'k'), (if admin { "Remove administrator slot" } else { "Allow administrator slot" }, TEXT, 'a'), ("Close with screen lock", TEXT, 's')];
                 if plain {

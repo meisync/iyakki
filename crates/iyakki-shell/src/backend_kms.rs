@@ -363,61 +363,37 @@ fn is_windowed() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
 }
 
-/// The card to try: the first `/dev/dri/cardN` whose sysfs directory has two or more connected connectors (`pick_card_with(.., 1)`: one is
-/// enough, for a single screen the person asked the shell to drive).
-#[cfg(test)]
-fn pick_card(drm_sys: &std::path::Path) -> Option<String> {
-    pick_card_with(drm_sys, 2)
-}
-
-fn pick_card_with(drm_sys: &std::path::Path, at_least: usize) -> Option<String> {
-    let conns = crate::display::read_connectors(drm_sys);
-    let mut by_card: std::collections::BTreeMap<String, usize> = Default::default();
-    if let Ok(rd) = std::fs::read_dir(drm_sys) {
-        for e in rd.flatten() {
-            let n = e.file_name().to_string_lossy().to_string();
-            if let Some((card, _)) = n.split_once('-') {
-                if card.starts_with("card") && card[4..].chars().all(|c| c.is_ascii_digit()) {
-                    let name = n.split_once('-').map(|x| x.1.to_string()).unwrap_or_default();
-                    if conns.iter().any(|c| c.name == name && c.connected) {
-                        *by_card.entry(card.to_string()).or_default() += 1;
-                    }
-                }
-            }
-        }
-    }
-    by_card.into_iter().find(|(_, n)| *n >= at_least).map(|(c, _)| format!("/dev/dri/{c}"))
-}
-
 /// Called at the start of the framebuffer loop: when this machine has two displays and may use them, run the display loop
 /// here. Never on a development computer, in a window or in a test (see [`decide`]).
 pub fn maybe_run(shell: &mut crate::shell::Shell, stop: &std::sync::atomic::AtomicBool) -> Outcome {
     use crate::memgate::DisplayMode;
-    let sys = std::path::Path::new("/sys/class/drm");
-    let connected = crate::display::read_connectors(sys).iter().filter(|c| c.connected).count();
-    publish_fallback(sys, "one display is connected");
+    let facts = shell.screen_facts();
+    crate::screen::set_facts(facts.clone());
+    let facts = &*facts;
+    let connected = facts.connectors().iter().filter(|c| c.connected).count();
+    publish_fallback(facts, "one display is connected");
     if connected == 0 {
         return Outcome::NotUsed;
     }
-    let modes: Vec<DisplayMode> = crate::display::read_connectors(sys).iter().filter(|c| c.connected).filter_map(|c| c.modes.first().map(|m| DisplayMode { w: m.0, h: m.1 })).collect();
+    let modes: Vec<DisplayMode> = facts.connectors().iter().filter(|c| c.connected).filter_map(|c| c.modes.first().map(|m| DisplayMode { w: m.0, h: m.1 })).collect();
     let features = shell.display_features(&modes);
     if let Err(why) = decide(connected, is_windowed(), &features) {
         if connected >= 2 {
             log::info!("shell: several displays are not driven by the shell: {why}; using the framebuffer");
         }
-        publish_fallback(sys, &why);
+        publish_fallback(facts, &why);
         return Outcome::NotUsed;
     }
-    let Some(card) = pick_card_with(sys, connected.min(2)) else {
+    let Some(card) = facts.card_with(connected.min(2)) else {
         log::info!("shell: several displays are connected but no single graphics card has two of them; using the framebuffer");
-        publish_fallback(sys, "no single graphics card has two connected displays");
+        publish_fallback(facts, "no single graphics card has two connected displays");
         return Outcome::NotUsed;
     };
     let drm = match crate::display::kms::RealDrm::open(&card, is_windowed()) {
         Ok(d) => d,
         Err(e) => {
             log::info!("shell: not taking over the displays ({e}); using the framebuffer");
-            publish_fallback(sys, &e);
+            publish_fallback(facts, &e);
             return Outcome::NotUsed;
         }
     };
@@ -425,7 +401,7 @@ pub fn maybe_run(shell: &mut crate::shell::Shell, stop: &std::sync::atomic::Atom
         Ok(k) => k,
         Err(e) => {
             log::info!("shell: could not set up the displays ({e}); using the framebuffer");
-            publish_fallback(sys, &e);
+            publish_fallback(facts, &e);
             return Outcome::NotUsed;
         }
     };
@@ -434,8 +410,8 @@ pub fn maybe_run(shell: &mut crate::shell::Shell, stop: &std::sync::atomic::Atom
 }
 
 /// Settings -> Displays when the shell does not drive the displays itself: the connected outputs from sysfs and the reason.
-pub fn publish_fallback(sys: &std::path::Path, why: &str) {
-    let conns = crate::display::read_connectors(sys);
+pub fn publish_fallback(facts: &dyn iyakki_core_api::screenfacts::ScreenFacts, why: &str) {
+    let conns = facts.connectors();
     let mut st = Status { kms: false, why_not: why.to_string(), ..Default::default() };
     for c in conns.iter().filter(|c| c.connected) {
         st.outputs.push(OutView { name: c.name.clone(), connected: true, modes: c.modes.iter().map(|m| (m.0, m.1, 0)).collect(), current: c.modes.first().copied(), pos: (0, 0), primary: false });

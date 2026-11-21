@@ -123,6 +123,16 @@ if [ "${IYAKKI_LOADER_DEFAULT:-1}" = 1 ]; then
     echo "post-image: IYAKKI_LOADER_DEFAULT=1 but the loader could not be made the default: this image keeps GRUB as the default" >&2
   fi
 fi
+# IYAKKI_SIDE_IMAGE=1 (opt in; F-BOOT-25, docs/MAC-HARDWARE.md): split lib/firmware and lib/modules out of the RAM disk into boot/side-<release>.sqfs
+# (read by Linux's own USB driver instead of the firmware's slow one), leave a small boot/initrd-small, and write the GRUB switch file. The ISO keeps
+# the full RAM disk. The FAT volume must still fit: the check below stops the build instead of letting genimage fail later.
+if [ "${IYAKKI_SIDE_IMAGE:-0}" = 1 ]; then
+  sh "$BOARD/../../side-image.sh" split "$TARGET_DIR" "$BINARIES_DIR/side" || { echo "post-image: IYAKKI_SIDE_IMAGE=1 but the side image could not be built" >&2; exit 1; }
+  cp "$BINARIES_DIR"/side/side-*.sqfs "$BINARIES_DIR/side/initrd-small" "$ROOT/boot/" || { echo "post-image: copying the side image failed" >&2; exit 1; }
+  sh "$BOARD/../../side-image.sh" grubcfg "$ROOT" || { echo "post-image: the side image menu switch could not be written" >&2; exit 1; }
+  need="$(sh "$BOARD/../../side-image.sh" bootsize "$ROOT")"
+  [ "$need" -le 256 ] || { echo "post-image: the boot volume needs ${need} MiB with the side image but genimage-install.cfg makes it 256M: raise it (repack.sh does that for the pc variant)" >&2; exit 1; }
+fi
 # partition 2 starts with our marker; the rest is zeros (IYAKKI formats it on first boot)
 dd if=/dev/zero of="$BINARIES_DIR/data-marker.img" bs=1M count=1 2>/dev/null
 printf 'IYAKKI-FORMAT-ME-v1\0' | dd of="$BINARIES_DIR/data-marker.img" conv=notrunc 2>/dev/null

@@ -105,6 +105,7 @@ class Parsers(unittest.TestCase):
         self.assertEqual(P.image_version(INFO_MINI), "0.1.0-alpha.3")
         self.assertIsNone(P.image_version("device  x y\n"))
         self.assertIsNone(P.model_of("nothing"))
+        self.assertEqual(P.model_of("device  Apple Inc. Macmini8,1 1.0\n"), "Macmini8,1")   # DMI version after the name (real device, 2026-11-18)
 
     def test_info_real_device_layout(self):
         # indented `key  value` lines, host name on the first line (evidence of 2026-11-12, Lenovo Legion Pro 5)

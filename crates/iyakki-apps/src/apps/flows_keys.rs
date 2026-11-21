@@ -91,14 +91,14 @@ impl FlowsApp {
         let (Some(run), Some(card)) = (self.run_id.clone(), self.open_card()) else { return };
         let who = self.env.who();
         let r = match what {
-            "approve" => self.env.engine().card_decide(&run, &card.id, CardDecision::Approve { by: who }),
+            "approve" => self.env.card_decide(&run, &card.id, CardDecision::Approve { by: who }),
             "reject" => {
                 // dismissing the card of a step that needs a permission withdraws the request (popup and INBOX entry)
                 let _user = self.env.user().to_string();
                 self.env.withdraw_permissions(&run);
-                self.env.engine().card_decide(&run, &card.id, CardDecision::Reject { by: who, note: String::new() })
+                self.env.card_decide(&run, &card.id, CardDecision::Reject { by: who, note: String::new() })
             }
-            "ask" => self.env.engine().card_decide(&run, &card.id, CardDecision::Investigate { by: who }),
+            "ask" => self.env.card_decide(&run, &card.id, CardDecision::Investigate { by: who }),
             _ => {
                 let Some(p) = &card.patch else { return };
                 let mut qb = super::dash_query::QueryBox::new(area::TEXT);
@@ -130,13 +130,13 @@ impl FlowsApp {
         let (mut ok, mut bad) = (0, 0);
         for id in ids {
             let r = if cancel {
-                self.env.engine().cancel(&id)
+                self.env.cancel(&id)
             } else {
-                match self.env.engine().get_run(&id) {
+                match self.env.get_run(&id) {
                     Some(run) => {
                         let mut req = StartRequest::new(&run.flow_id).trigger("manual", &self.env.who());
                         req.inputs = run.inputs.clone();
-                        self.env.engine().start_run(req).map(|_| ())
+                        self.env.start_run(req).map(|_| ())
                     }
                     None => Err("gone".into()),
                 }
@@ -223,7 +223,7 @@ impl FlowsApp {
             }
             id::R_CANCEL => {
                 if let Some(r) = self.run_id.clone() {
-                    match self.env.engine().cancel(&r) {
+                    match self.env.cancel(&r) {
                         Ok(()) => self.say(format!("Cancelling run {r}."), true),
                         Err(e) => self.say(e, false),
                     }
@@ -236,11 +236,11 @@ impl FlowsApp {
                 };
                 let who = self.env.who();
                 let res = match n {
-                    id::R_RETRY => self.env.engine().retry_node(&r, &node),
-                    id::R_SKIP => self.env.engine().skip_node(&r, &node, &who),
-                    id::R_RERUN => self.env.engine().rerun_from(&r, &node),
-                    id::R_APPROVE => self.env.engine().decide(&r, &node, true, &who, ""),
-                    _ => self.env.engine().decide(&r, &node, false, &who, ""),
+                    id::R_RETRY => self.env.retry_node(&r, &node),
+                    id::R_SKIP => self.env.skip_node(&r, &node, &who),
+                    id::R_RERUN => self.env.rerun_from(&r, &node),
+                    id::R_APPROVE => self.env.decide(&r, &node, true, &who, ""),
+                    _ => self.env.decide(&r, &node, false, &who, ""),
                 };
                 match res {
                     Ok(()) => self.say("Done.", true),
@@ -419,7 +419,7 @@ impl FlowsApp {
             }
             Key::Delete | Key::Char('d') => {
                 if let Some(f) = self.flows.get(self.list_sel) {
-                    let n = self.env.store().versions(&f.id).len();
+                    let n = self.env.versions(&f.id).len();
                     self.modal = Some(Modal::Confirm(format!("Delete the flow \"{}\" ({})? Its draft and {n} published version(s) are lost; its runs stay. Press y to delete, Esc or Enter keeps it.", f.name, f.id), Confirmed::DeleteFlow(f.id.clone())));
                 }
             }
@@ -691,7 +691,7 @@ impl FlowsApp {
                     Confirmed::AllowProgram(p) => match self.env.allow_program(&p) {
                         Ok(()) => {
                             if let (Some(r), Some(n)) = (self.run_id.clone(), self.run_node.clone()) {
-                                let _ = self.env.engine().retry_node(&r, &n);
+                                let _ = self.env.retry_node(&r, &n);
                             }
                             self.say(format!("`{p}` is allowed; the step runs again."), true);
                         }
@@ -699,9 +699,9 @@ impl FlowsApp {
                     },
                     Confirmed::Rollback(v) => {
                         if let Some(id) = self.cur.clone() {
-                            match self.env.store().rollback(&id, v, &self.env.who()) {
+                            match self.env.rollback(&id, v, &self.env.who()) {
                                 Ok(nv) => {
-                                    if let Some(f) = self.env.store().get_draft(&id) {
+                                    if let Some(f) = self.env.get_draft(&id) {
                                         self.flow = f;
                                     }
                                     self.revalidate();
@@ -769,7 +769,7 @@ impl FlowsApp {
                     Event::Key(Key::Char('x')) => {
                         let v = h.entries[h.sel].version;
                         let cur = self.cur.clone().unwrap_or_default();
-                        let published = self.env.store().meta_of(&cur).published;
+                        let published = self.env.meta_of(&cur).published;
                         keep = false;
                         let name = self.flow.name.clone();
                         let note = if v == published { " This is the CURRENT published version: it will be refused; roll back to another version first." } else { "" };
@@ -801,7 +801,7 @@ impl FlowsApp {
                 Event::Key(Key::Ctrl('s')) => {
                     let parsed = serde_json::from_str::<serde_json::Value>(&qb.text()).map_err(|e| e.to_string()).and_then(|v| iyakki_flow::heal::Patch::from_value(&v));
                     match (parsed, self.run_id.clone(), self.open_card()) {
-                        (Ok(p), Some(run), Some(card)) => match self.env.engine().card_decide(&run, &card.id, CardDecision::Edit { by: self.env.who(), patch: p }) {
+                        (Ok(p), Some(run), Some(card)) => match self.env.card_decide(&run, &card.id, CardDecision::Edit { by: self.env.who(), patch: p }) {
                             Ok(()) => self.say("Approved your version of the fix.", true),
                             Err(e) => self.say(e, false),
                         },

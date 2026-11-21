@@ -3,8 +3,7 @@
 //! Every wrapper that belongs to the ACCOUNT (the Settings tools, SSH, VPN, Bluetooth, cameras, documents, the model router, the fleet and so on) is
 //! put on top of a base tool set here, once. The chat calls [`account_chain`] with its own base (which may already carry the open project, the dashboard
 //! and the flows); the voice session calls it with the plain account base. Both therefore offer the same tools, with the same grants and the
-//! same approval cards. What stays chat-only is only what needs a chat's own open state (the open project, flow and dashboard wrappers and the
-//! chat's pending-work ledger): see [`CHAT_ONLY`].
+//! same approval cards. Nothing stays chat-only any more ([`CHAT_ONLY`] is empty): the open-state wrappers are bound by the voice session to the project, dashboard and flow the person opened last (D-GEMVOICE-40-NAMING).
 
 use std::sync::Arc;
 
@@ -20,7 +19,7 @@ pub struct ChainScope {
 }
 
 /// The wrappers that only a chat can build, because they need the chat's own open state. A voice session does not have them.
-pub const CHAT_ONLY: [&str; 4] = ["the open workspace's board tools", "the dashboard tools", "the flow tools", "the task tools"];
+pub const CHAT_ONLY: [&str; 0] = [];
 
 /// The job tools and the pending-work ledger, outermost on a chat and on a voice session alike (F-GEMVOICE-40): `wait_for`, `pending_list`
 /// and the jobs a spoken request may start, with the grants and approvals of the chat. `workspace` is the open project's name (a voice

@@ -111,6 +111,7 @@ def main():
             rep.run("client", clientsuite.suite, chrome, ROOT)
             rep.run("client-page", clientsuite.page_suite, chrome, ROOT)
             rep.run("client-media", clientsuite.media_suite, chrome, ROOT)
+            rep.run("client-app", clientsuite.app_suite, chrome, ROOT)
     finally:
         chrome.stop()
     return 1 if rep.summary() else 0

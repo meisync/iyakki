@@ -2,7 +2,7 @@
 
 use std::net::IpAddr;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ChatStats {
     pub tokens: u64,
     /// The server counted them (usage); otherwise they are counted from the stream or estimated from the text.
@@ -14,7 +14,7 @@ pub struct ChatStats {
     pub tokens_per_s: Option<f64>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TestReport {
     pub models: Vec<String>,
     pub default_model: Option<String>,
@@ -801,7 +801,7 @@ pub fn provider_id(preset: Preset, nickname: &str) -> Result<String, String> {
 }
 
 /// What the person filled in.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NewHost {
     pub nickname: String,
     pub preset: Preset,

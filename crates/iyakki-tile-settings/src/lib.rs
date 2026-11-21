@@ -13,10 +13,32 @@ mod guest;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub const TILE_WASM: &[u8] = include_bytes!("../tile.wasm");
-pub const CAPS: [&str; 2] = ["settings.get", "settings.set"];
+pub const CAPS: [&str; 4] = ["settings.get", "settings.set", "settings.page", "settings.form"];
 
 const REFRESH_MS: u32 = 10_000;
 const TOP: i32 = 40;
+/// The room the tab row takes when the account has read-only pages.
+const TABS_H: i32 = 28;
+const MAX_PAGES: usize = 6;
+const MAX_FORMS: usize = 3;
+const MAX_FIELDS: usize = 6;
+const MAX_VALUE: usize = 80;
+/// A form: what the service lists (`settings.get` `forms`). The tile only fills in text; the service decides what a form may change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Form {
+    pub id: String,
+    pub title: String,
+    pub fields: Vec<(String, String)>,
+}
+
+/// The forms the service lists: at most three of at most six fields.
+pub fn forms_of(v: &Value) -> Vec<Form> {
+    v["forms"].as_array().map(|a| a.iter().take(MAX_FORMS).filter_map(|f| {
+        let fields: Vec<(String, String)> = f["fields"].as_array()?.iter().take(MAX_FIELDS).filter_map(|x| Some((x["name"].as_str()?.chars().take(24).collect(), x["label"].as_str()?.chars().take(60).collect()))).collect();
+        if fields.is_empty() { return None; }
+        Some(Form { id: f["id"].as_str()?.chars().take(24).collect(), title: f["title"].as_str()?.chars().take(12).collect(), fields })
+    }).collect()).unwrap_or_default()
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -46,6 +68,27 @@ pub struct SettingsTile<S: Source> {
     /// A change that waits for the person's answer: (toggle id, wanted state).
     pending: Option<(String, bool)>,
     note: String,
+    /// The read-only pages the service offers (id, title) and the one shown (None: the overview).
+    pages: Vec<(String, String)>,
+    page: Option<usize>,
+    page_lines: Vec<String>,
+    /// The forms the service offers, the one shown, what was typed in each (kept while the tile runs), the field with the caret, and a
+    /// submission that waits for the person's answer.
+    forms: Vec<Form>,
+    form: Option<usize>,
+    values: Vec<Vec<String>>,
+    focus: usize,
+    form_pending: bool,
+}
+
+/// The pages the service lists: (id, title), at most six.
+pub fn pages_of(v: &Value) -> Vec<(String, String)> {
+    v["pages"].as_array().map(|a| a.iter().take(MAX_PAGES).filter_map(|t| Some((t["id"].as_str()?.chars().take(24).collect(), t["title"].as_str()?.chars().take(12).collect()))).collect()).unwrap_or_default()
+}
+
+/// The lines of one page's answer (`settings.page`): at most 30 lines of 160 characters.
+pub fn page_lines_of(v: &Value) -> Vec<String> {
+    v["lines"].as_array().map(|a| a.iter().take(30).filter_map(|l| l.as_str().map(|t| t.chars().take(160).collect())).collect()).unwrap_or_default()
 }
 
 /// The overview as lines, from the service's answer (`settings.get`).
@@ -94,7 +137,7 @@ pub fn lines_of(v: &Value) -> Vec<(Kind, String)> {
 
 impl<S: Source> SettingsTile<S> {
     pub fn new(src: S) -> Self {
-        let mut t = SettingsTile { src, size: (360, 480), dark: false, lines: vec![], error: String::new(), scroll: 0, since: 0, toggles: vec![], pending: None, note: String::new() };
+        let mut t = SettingsTile { src, size: (360, 480), dark: false, lines: vec![], error: String::new(), scroll: 0, since: 0, toggles: vec![], pending: None, note: String::new(), pages: vec![], page: None, page_lines: vec![], forms: vec![], form: None, values: vec![], focus: 0, form_pending: false };
         t.refresh();
         t
     }
@@ -135,8 +178,110 @@ impl<S: Source> SettingsTile<S> {
         }
     }
 
+    /// The tabs as (hit id, label, rect, shown), laid out in rows that wrap at the tile's width.
+    fn tabs(&self) -> Vec<(u32, String, Rect, bool)> {
+        if self.pages.is_empty() && self.forms.is_empty() {
+            return vec![];
+        }
+        let mut all: Vec<(u32, String, bool)> = vec![(30, "Overview".into(), self.page.is_none() && self.form.is_none())];
+        all.extend(self.pages.iter().enumerate().map(|(i, (_, t))| (31 + i as u32, t.clone(), self.page == Some(i))));
+        all.extend(self.forms.iter().enumerate().map(|(i, f)| (40 + i as u32, f.title.clone(), self.form == Some(i))));
+        let (mut x, mut row) = (8, 0);
+        let mut o = vec![];
+        for (id, label, on) in all {
+            let w = 20 + label.chars().count() as i32 * 7;
+            if x + w > self.size.0 - 4 && x > 8 {
+                x = 8;
+                row += 1;
+            }
+            o.push((id, label, Rect::new(x, 34 + row * TABS_H, w, 22), on));
+            x += w + 4;
+        }
+        o
+    }
+
+    fn top(&self) -> i32 {
+        let rows = self.tabs().iter().map(|t| (t.2.y - 34) / TABS_H + 1).max().unwrap_or(0);
+        TOP + rows * TABS_H
+    }
+
     fn per_page(&self) -> usize {
-        (((self.size.1 - TOP) / 18).max(1)) as usize
+        (((self.size.1 - self.top()) / 18).max(1)) as usize
+    }
+
+    fn total(&self) -> usize {
+        if self.form.is_some() { 0 } else if self.page.is_some() { self.page_lines.len() } else { self.lines.len() }
+    }
+
+    /// Show one read-only page (or the overview with `None`): the text of that page's status tool, read, never changed here.
+    fn show(&mut self, which: Option<usize>) {
+        self.scroll = 0;
+        self.since = 0;
+        self.form = None;
+        let Some(i) = which else {
+            self.page = None;
+            return;
+        };
+        let Some((id, _)) = self.pages.get(i).cloned() else { return };
+        match call_json(&mut self.src, "settings", "page", &serde_json::json!({"id": id}).to_string()) {
+            Ok(v) => {
+                self.error.clear();
+                self.page_lines = page_lines_of(&v);
+                self.page = Some(i);
+            }
+            Err(e) => self.error = clip(&e, 300, 12),
+        }
+    }
+
+    fn open_form(&mut self, i: usize) {
+        self.scroll = 0;
+        self.since = 0;
+        self.focus = 0;
+        self.page = None;
+        self.form_pending = false;
+        self.note.clear();
+        self.form = Some(i);
+    }
+
+    /// Send the typed values to the service, which makes the change through the person's own tool and asks first. Nothing typed is kept
+    /// after a change; a refusal keeps it so nothing has to be typed again.
+    fn submit(&mut self) {
+        let Some(i) = self.form else { return };
+        let (Some(f), Some(vals)) = (self.forms.get(i).cloned(), self.values.get(i).cloned()) else { return };
+        self.since = 0;
+        let mut values = serde_json::Map::new();
+        for ((name, _), v) in f.fields.iter().zip(vals) {
+            values.insert(name.clone(), Value::String(v));
+        }
+        match call_json(&mut self.src, "settings", "form", &serde_json::json!({"id": f.id, "values": values}).to_string()) {
+            Ok(v) if v["ok"].as_bool() == Some(true) => {
+                self.form_pending = false;
+                self.note = "Done.".into();
+                self.values[i] = vec![String::new(); f.fields.len()];
+                self.focus = 0;
+            }
+            Ok(v) if v["asked"].as_bool() == Some(true) => {
+                self.form_pending = true;
+                self.note = "Waiting for your answer in the approvals list.".into();
+            }
+            Ok(v) => {
+                self.form_pending = false;
+                self.note = v["error"].as_str().unwrap_or("that could not be changed").chars().take(200).collect();
+            }
+            Err(e) => {
+                self.form_pending = false;
+                self.note = e.chars().take(200).collect();
+            }
+        }
+    }
+
+    fn type_into(&mut self, text: &str) -> bool {
+        let (Some(i), f) = (self.form, self.focus) else { return false };
+        let Some(v) = self.values.get_mut(i).and_then(|v| v.get_mut(f)) else { return false };
+        let room = MAX_VALUE.saturating_sub(v.chars().count());
+        v.extend(text.chars().filter(|c| !c.is_control()).take(room));
+        self.form_pending = false;
+        true
     }
 
     fn refresh(&mut self) {
@@ -146,6 +291,17 @@ impl<S: Source> SettingsTile<S> {
                 self.error.clear();
                 self.lines = lines_of(&v);
                 self.toggles = toggles_of(&v);
+                self.pages = pages_of(&v);
+                self.forms = forms_of(&v);
+                if self.values.len() != self.forms.len() {
+                    self.values = self.forms.iter().map(|f| vec![String::new(); f.fields.len()]).collect();
+                }
+                if self.form.is_some_and(|i| i >= self.forms.len()) {
+                    self.form = None;
+                }
+                if self.page.is_some_and(|i| i >= self.pages.len()) {
+                    self.page = None;
+                }
                 if let Some((id, want)) = self.pending.clone() {
                     if self.toggles.iter().any(|t| t.id == id && t.on == want) {
                         self.pending = None;
@@ -171,6 +327,16 @@ impl<S: Source> App for SettingsTile<S> {
             }
             Event::Tick { dt_ms } => {
                 self.since = self.since.saturating_add(*dt_ms);
+                if self.form_pending {
+                    if self.since >= 2000 {
+                        self.submit();
+                        return true;
+                    }
+                    return false;
+                }
+                if self.form.is_some() {
+                    return false;
+                }
                 if let Some((id, on)) = self.pending.clone() {
                     if self.since >= 2000 {
                         self.set(&id, on);
@@ -179,13 +345,72 @@ impl<S: Source> App for SettingsTile<S> {
                     return false;
                 }
                 if self.since >= REFRESH_MS {
+                    if let Some(i) = self.page {
+                        self.show(Some(i));
+                        return true;
+                    }
                     self.refresh();
                     return true;
                 }
                 false
             }
-            Event::Hit { id: 2 } => {
+            Event::TextInput { text } if self.form.is_some() => self.type_into(text),
+            Event::Key { code: 8, down: true, .. } if self.form.is_some() => {
+                let (i, f) = (self.form.unwrap_or(0), self.focus);
+                if let Some(v) = self.values.get_mut(i).and_then(|v| v.get_mut(f)) {
+                    v.pop();
+                }
+                self.form_pending = false;
+                true
+            }
+            Event::Key { code: 9, down: true, .. } if self.form.is_some() => {
+                let n = self.form.and_then(|i| self.forms.get(i)).map_or(1, |f| f.fields.len().max(1));
+                self.focus = (self.focus + 1) % n;
+                true
+            }
+            Event::Key { code: 13, down: true, .. } if self.form.is_some() => {
+                self.submit();
+                true
+            }
+            Event::Hit { id } if (40..40 + MAX_FORMS as u32).contains(id) && ((*id - 40) as usize) < self.forms.len() => {
+                self.open_form((*id - 40) as usize);
+                true
+            }
+            Event::Hit { id } if (50..50 + MAX_FIELDS as u32).contains(id) && self.form.and_then(|i| self.forms.get(i)).is_some_and(|f| ((*id - 50) as usize) < f.fields.len()) => {
+                self.focus = (*id - 50) as usize;
+                true
+            }
+            Event::Hit { id: 60 } if self.form.is_some() => {
+                self.submit();
+                true
+            }
+            Event::Hit { id: 61 } if self.form.is_some() => {
+                let (i, n) = (self.form.unwrap_or(0), self.forms.get(self.form.unwrap_or(0)).map_or(0, |f| f.fields.len()));
+                if let Some(v) = self.values.get_mut(i) {
+                    *v = vec![String::new(); n];
+                }
+                self.focus = 0;
+                self.form_pending = false;
+                self.note.clear();
+                true
+            }
+            Event::Hit { id: 2 } if self.form.is_some() => {
                 self.refresh();
+                true
+            }
+            Event::Hit { id: 2 } => {
+                match self.page {
+                    Some(i) => self.show(Some(i)),
+                    None => self.refresh(),
+                }
+                true
+            }
+            Event::Hit { id: 30 } => {
+                self.show(None);
+                true
+            }
+            Event::Hit { id } if (31..31 + MAX_PAGES as u32).contains(id) && ((*id - 31) as usize) < self.pages.len() => {
+                self.show(Some((*id - 31) as usize));
                 true
             }
             Event::Hit { id: 3 } => {
@@ -193,7 +418,7 @@ impl<S: Source> App for SettingsTile<S> {
                 true
             }
             Event::Hit { id: 4 } => {
-                if self.scroll + self.per_page() < self.lines.len() {
+                if self.scroll + self.per_page() < self.total() {
                     self.scroll += self.per_page();
                 }
                 true
@@ -215,14 +440,60 @@ impl<S: Source> App for SettingsTile<S> {
         l.push(Op::Rect { r: Rect::new(0, 0, w, 32), color: p.bar });
         l.push(text(8, 8, 14, p.fg, "SETTINGS"));
         button(&mut l, 2, Rect::new(w - 84, 4, 76, 24), "Refresh", &p);
-        if self.lines.len() > self.per_page() {
+        if self.total() > self.per_page() {
             button(&mut l, 3, Rect::new(w - 128, 4, 38, 24), "Up", &p);
             button(&mut l, 4, Rect::new(w - 172, 4, 38, 24), "Down", &p);
         }
-        let mut y = TOP;
+        for (id, label, r, on) in self.tabs() {
+            if on {
+                l.push(Op::RoundRect { r, radius: 6, color: p.accent });
+                l.push(text(r.x + 10, r.y + 4, 13, Color::rgb(255, 255, 255), &label));
+                iyakki_tile_kit::named_hit(&mut l, id, iyakki_tile_kit::abi::Role::Button, r, &label, "shown", 0);
+            } else {
+                l.push(Op::RoundRect { r, radius: 6, color: p.bar });
+                l.push(text(r.x + 10, r.y + 4, 13, p.fg, &label));
+                iyakki_tile_kit::named_hit(&mut l, id, iyakki_tile_kit::abi::Role::Button, r, &label, "", 0);
+            }
+        }
+        let mut y = self.top();
         if !self.error.is_empty() {
             l.push(text(8, y, 12, p.bad, &clip(&self.error, w - 16, 12)));
             y += 20;
+        }
+        if let Some(f) = self.form.and_then(|i| self.forms.get(i).map(|f| (i, f))) {
+            let (i, f) = f;
+            l.push(text(8, y, 11, p.mute, "Passwords are never typed here: give the name of a vault entry."));
+            y += 18;
+            for (k, (_, label)) in f.fields.iter().enumerate() {
+                l.push(text(12, y, 11, p.mute, &clip(label, w - 24, 11)));
+                y += 15;
+                let r = Rect::new(8, y, w - 16, 24);
+                l.push(Op::RoundRect { r, radius: 4, color: if self.focus == k { p.accent } else { p.bar } });
+                l.push(Op::RoundRect { r: Rect::new(r.x + 1, r.y + 1, r.w - 2, r.h - 2), radius: 4, color: p.bg });
+                let v = self.values.get(i).and_then(|v| v.get(k)).cloned().unwrap_or_default();
+                let shown = if self.focus == k { format!("{v}|") } else { v.clone() };
+                l.push(text(14, y + 5, 13, p.fg, &clip(&shown, w - 28, 13)));
+                iyakki_tile_kit::named_hit(&mut l, 50 + k as u32, iyakki_tile_kit::abi::Role::Field, r, label, &v, 0);
+                y += 30;
+            }
+            button(&mut l, 60, Rect::new(8, y, 90, 26), "Apply", &p);
+            button(&mut l, 61, Rect::new(104, y, 70, 26), "Clear", &p);
+            if !self.note.is_empty() {
+                let c = if self.note.starts_with("Waiting") { Color(200, 130, 20, 255) } else if self.note == "Done." { p.mute } else { p.bad };
+                l.push(text(8, h - 16, 11, c, &clip(&self.note, w - 16, 11)));
+            }
+            return l;
+        }
+        if self.page.is_some() {
+            for t in self.page_lines.iter().skip(self.scroll).take(self.per_page()) {
+                l.push(text(12, y, 13, p.fg, &clip(t, w - 20, 13)));
+                y += line_height(13) + 3;
+            }
+            if self.page_lines.is_empty() {
+                l.push(text(12, y, 13, p.mute, "nothing to show"));
+            }
+            l.push(text(8, h - 16, 11, p.mute, "Shown only. To change it, use the Settings page or the chat."));
+            return l;
         }
         for (k, t) in self.lines.iter().skip(self.scroll).take(self.per_page()) {
             let (size, c, x): (u32, Color, i32) = match k {
@@ -326,7 +597,7 @@ mod tests {
     fn the_only_changes_it_can_ask_for_are_the_two_switches_and_only_by_settings_set() {
         let mut t = tile(vec![Ok(answer())]);
         let ids: Vec<u32> = t.frame().ops.iter().filter_map(|o| if let Op::Hit { id, .. } = o { Some(*id) } else { None }).collect();
-        assert!(ids.iter().all(|i| (2..=4).contains(i) || (20..28).contains(i)), "{ids:?}");
+        assert!(ids.iter().all(|i| (2..=4).contains(i) || (20..28).contains(i) || (30..40).contains(i)), "{ids:?}");
         for id in 0..300 {
             t.event(&Event::Hit { id });
         }
@@ -370,5 +641,112 @@ mod tests {
             let t = tile(vec![Ok(bad.to_string())]);
             assert!(t.frame().encode().is_ok());
         }
+    }
+
+    fn with_pages() -> String {
+        json!({"user": "ann", "role": "user", "admin": false, "models": [], "tools": 3, "pages": [{"id": "display", "title": "Display"}, {"id": "sound", "title": "Sound"}]}).to_string()
+    }
+
+    #[test]
+    fn pages_are_tabs_each_read_by_settings_page_and_never_changed_from_here() {
+        let page = || Ok(json!({"title": "Display", "lines": ["Screen 1: 2560x1440", "Screen 2: off"]}).to_string());
+        let mut t = tile(vec![Ok(with_pages()), page(), Err("gone".into())]);
+        let x = texts(&t.frame());
+        assert!(x.contains(&"Overview".to_string()) && x.contains(&"Display".to_string()) && x.contains(&"Sound".to_string()), "{x:?}");
+        assert!(t.event(&Event::Hit { id: 31 }));
+        let x = texts(&t.frame());
+        assert!(x.contains(&"Screen 1: 2560x1440".to_string()) && !x.contains(&"Account".to_string()), "{x:?}");
+        assert_eq!(t.source().calls.last().unwrap(), &("settings".to_string(), "page".to_string()));
+        // a failed page is one red line and the old page stays; a tab that does not exist does nothing
+        assert!(t.event(&Event::Hit { id: 32 }));
+        assert_eq!(t.error(), "gone");
+        let n = t.source().calls.len();
+        assert!(!t.event(&Event::Hit { id: 35 }));
+        assert_eq!(t.source().calls.len(), n);
+        assert!(t.event(&Event::Hit { id: 30 }));
+        assert!(texts(&t.frame()).contains(&"Account".to_string()));
+        assert!(t.source().calls.iter().all(|c| c.0 == "settings" && ["get", "page"].contains(&c.1.as_str())), "{:?}", t.source().calls);
+    }
+
+    #[test]
+    fn hostile_page_lists_and_lines_do_not_panic_and_are_capped() {
+        for bad in [json!({"pages": 5}), json!({"pages": [1, null, {"id": 3}]}), json!({"pages": vec![json!({"id": "a", "title": "b"}); 50]})] {
+            let t = tile(vec![Ok(bad.to_string())]);
+            assert!(t.frame().encode().is_ok());
+        }
+        assert_eq!(pages_of(&json!({"pages": vec![json!({"id": "a", "title": "b"}); 50]})).len(), MAX_PAGES);
+        assert_eq!(page_lines_of(&json!({"lines": vec!["x".repeat(500); 99]})).len(), 30);
+        assert_eq!(page_lines_of(&json!({"lines": ["x".repeat(500)]}))[0].len(), 160);
+        assert!(page_lines_of(&json!({"lines": 5})).is_empty());
+    }
+
+    fn with_forms() -> String {
+        json!({"user": "ann", "role": "admin", "admin": true, "models": [], "tools": 3, "pages": [{"id": "display", "title": "Display"}], "forms": [
+            {"id": "wifi", "title": "Join Wi-Fi", "fields": [{"name": "ssid", "label": "Network name"}, {"name": "secret_entry", "label": "Vault entry"}]},
+            {"id": "model", "title": "Model", "fields": [{"name": "provider", "label": "Provider"}]}]})
+        .to_string()
+    }
+
+    fn type_in(t: &mut SettingsTile<Fake>, s: &str) {
+        t.event(&Event::TextInput { text: s.into() });
+    }
+
+    #[test]
+    fn a_form_is_typed_in_sent_by_settings_form_waits_for_the_answer_and_is_cleared_after_a_yes() {
+        let mut t = tile(vec![Ok(with_forms()), Ok(json!({"ok": false, "asked": true}).to_string()), Ok(json!({"ok": true}).to_string())]);
+        let x = texts(&t.frame());
+        assert!(x.contains(&"Join Wi-Fi".to_string()) && x.contains(&"Model".to_string()), "{x:?}");
+        assert!(t.event(&Event::Hit { id: 40 }));
+        let x = texts(&t.frame());
+        assert!(x.contains(&"Network name".to_string()) && x.contains(&"Apply".to_string()), "{x:?}");
+        type_in(&mut t, "home\u{7}-net");
+        assert!(t.event(&Event::Key { code: 9, mods: 0, down: true }));
+        type_in(&mut t, "wifi-pass");
+        assert!(texts(&t.frame()).contains(&"wifi-pass|".to_string()));
+        assert!(t.event(&Event::Hit { id: 60 }));
+        let (d, m) = t.source().calls.last().cloned().unwrap();
+        assert_eq!((d.as_str(), m.as_str()), ("settings", "form"));
+        assert!(texts(&t.frame()).iter().any(|x| x.starts_with("Waiting for your answer")));
+        // nothing is sent again before two seconds; then it asks again with the same values and a yes clears the form
+        let n = t.source().calls.len();
+        assert!(!t.event(&Event::Tick { dt_ms: 1000 }));
+        assert_eq!(t.source().calls.len(), n);
+        assert!(t.event(&Event::Tick { dt_ms: 1000 }));
+        assert!(texts(&t.frame()).contains(&"Done.".to_string()));
+        assert!(!texts(&t.frame()).iter().any(|x| x.contains("home-net") || x.contains("wifi-pass")));
+    }
+
+    #[test]
+    fn a_refusal_keeps_what_was_typed_backspace_and_clear_work_and_limits_hold() {
+        let mut t = tile(vec![Ok(with_forms()), Ok(json!({"ok": false, "error": "type the network name"}).to_string())]);
+        t.event(&Event::Hit { id: 40 });
+        type_in(&mut t, "abc");
+        t.event(&Event::Key { code: 8, mods: 0, down: true });
+        assert!(texts(&t.frame()).contains(&"ab|".to_string()));
+        t.event(&Event::Key { code: 13, mods: 0, down: true });
+        let x = texts(&t.frame());
+        assert!(x.contains(&"type the network name".to_string()) && x.contains(&"ab|".to_string()), "{x:?}");
+        type_in(&mut t, &"z".repeat(500));
+        assert!(t.values[0][0].chars().count() == MAX_VALUE);
+        t.event(&Event::Hit { id: 61 });
+        assert!(t.values[0][0].is_empty());
+        // a field that does not exist is not focused; leaving the form for the overview works
+        assert!(!t.event(&Event::Hit { id: 59 }));
+        assert!(t.event(&Event::Hit { id: 30 }));
+        assert!(texts(&t.frame()).contains(&"Account".to_string()));
+        assert!(t.source().calls.iter().all(|c| c.0 == "settings" && ["get", "form"].contains(&c.1.as_str())));
+    }
+
+    #[test]
+    fn many_tabs_wrap_to_more_rows_and_hostile_form_lists_do_not_panic() {
+        let mut t = tile(vec![Ok(with_forms())]);
+        t.event(&Event::Resize { w: 200, h: 400, scale_pct: 100 });
+        let rows: std::collections::BTreeSet<i32> = t.tabs().iter().map(|x| x.2.y).collect();
+        assert!(rows.len() >= 2 && t.tabs().iter().all(|x| x.2.x + x.2.w <= 200));
+        for bad in [json!({"forms": 4}), json!({"forms": [1, {"id": "a"}, {"id": "a", "title": "b", "fields": []}, {"id": "a", "title": "b", "fields": 3}]}), json!({"forms": vec![json!({"id": "a", "title": "b", "fields": [{"name": "n", "label": "l"}]}); 20]})] {
+            let t = tile(vec![Ok(bad.to_string())]);
+            assert!(t.frame().encode().is_ok());
+        }
+        assert_eq!(forms_of(&json!({"forms": vec![json!({"id": "a", "title": "b", "fields": vec![json!({"name": "n", "label": "l"}); 20]}); 20]})).len(), MAX_FORMS);
     }
 }

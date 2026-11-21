@@ -6,15 +6,14 @@
 //!   directory by one cluster when it is full) and claims **free** clusters;
 //! * the order is data first, then the FAT (every copy), then the directory entry last, so a power loss leaves at worst some
 //!   unreferenced clusters (a file system check reclaims them), never an entry that points at nothing;
-//! * names are 8.3 (upper case); matching of existing names is case-insensitive and understands long names;
+//! * new names are upper-case 8.3 or, for any other creatable name, long-name entries with a generated short alias (`can_create`); matching of existing names is case-insensitive and understands long names;
 //! * FAT32 only (FAT12/16 ESPs are refused by the planner).
 //!
 //! The kernel's FAT driver must not have the volume mounted: the planner refuses a mounted ESP.
 
 use std::collections::BTreeSet;
-use std::fs::File;
 use std::io::Read;
-use std::os::unix::fs::FileExt;
+use crate::posix::DiskIo;
 
 const EOC: u32 = 0x0FFF_FFFF;
 
@@ -26,7 +25,7 @@ fn le32(b: &[u8], o: usize) -> u64 {
 }
 
 pub struct Fat32Rw<'a> {
-    f: &'a File,
+    f: &'a dyn DiskIo,
     base: u64,
     bps: u64,
     spc: u64,
@@ -56,6 +55,52 @@ pub fn short_name(name: &str) -> Result<[u8; 11], String> {
     Ok(n)
 }
 
+/// Can the writer create a file or folder called `name`? An upper-case 8.3 name is written as it is; any other name of letters, digits and
+/// `._-+,;=[]()~!#$%&'@^{}` (at most 255 characters, no leading or trailing dot) is written as a long name with a generated short alias.
+pub fn can_create(name: &str) -> bool {
+    short_name(name).is_ok() || long_name_ok(name)
+}
+
+fn long_name_ok(name: &str) -> bool {
+    !name.is_empty() && name.chars().count() <= 255 && !name.starts_with('.') && !name.ends_with('.') && name.chars().all(|c| c.is_alphanumeric() || "._-+,;=[]()~!#$%&'@^{}".contains(c))
+}
+
+/// The checksum of a short name that every long-name entry before it carries.
+fn lfn_checksum(short: &[u8; 11]) -> u8 {
+    short.iter().fold(0u8, |sum, b| (sum >> 1).wrapping_add((sum & 1) << 7).wrapping_add(*b))
+}
+
+/// The long-name directory entries for `name` (last part first, as they lie in the directory) in front of the short name `short`.
+fn lfn_entries(name: &str, short: &[u8; 11]) -> Vec<[u8; 32]> {
+    let mut units: Vec<u16> = name.encode_utf16().collect();
+    if units.len() % 13 != 0 {
+        units.push(0);
+    }
+    while units.len() % 13 != 0 {
+        units.push(0xFFFF);
+    }
+    let n = units.len() / 13;
+    let sum = lfn_checksum(short);
+    let mut out = Vec::with_capacity(n);
+    for ord in (1..=n).rev() {
+        let mut e = [0u8; 32];
+        e[0] = ord as u8 | if ord == n { 0x40 } else { 0 };
+        e[11] = 0x0F;
+        e[13] = sum;
+        let part = &units[(ord - 1) * 13..ord * 13];
+        for (k, o) in [1usize, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30].iter().enumerate() {
+            e[*o..*o + 2].copy_from_slice(&part[k].to_le_bytes());
+        }
+        out.push(e);
+    }
+    out
+}
+
+/// The part of a long name that goes into a short alias: upper case, only the characters a short name may hold (others become `_`).
+fn alias_part(s: &str, max: usize) -> String {
+    s.chars().filter(|c| *c != '.').map(|c| c.to_ascii_uppercase()).map(|c| if c.is_ascii_uppercase() || c.is_ascii_digit() || "_-$~!#%&'()@^{}".contains(c) { c } else { '_' }).take(max).collect()
+}
+
 fn civil(days: i64) -> (i64, u32, u32) {
     // days since 1970-01-01 -> (year, month, day)
     let z = days + 719468;
@@ -82,7 +127,7 @@ fn fat_now() -> (u16, u16) {
 }
 
 impl<'a> Fat32Rw<'a> {
-    pub fn open(f: &'a File, base: u64, len: u64) -> Result<Fat32Rw<'a>, String> {
+    pub fn open(f: &'a dyn DiskIo, base: u64, len: u64) -> Result<Fat32Rw<'a>, String> {
         let mut b = vec![0u8; 512];
         f.read_exact_at(&mut b, base).map_err(|e| format!("reading the EFI System Partition: {e}"))?;
         let (bps, spc, reserved, nfats) = (le16(&b, 11), b[13] as u64, le16(&b, 14), b[16] as u64);
@@ -268,17 +313,38 @@ impl<'a> Fat32Rw<'a> {
         Ok(None)
     }
 
-    /// Write a 32-byte entry into the first free slot of the directory at `dir`, extending the directory when it is full.
-    fn add_entry(&mut self, dir: u32, entry: &[u8; 32]) -> Result<(), String> {
+    /// Write consecutive entries (long-name entries, then the short one) into the first run of free slots of the directory at `dir` that
+    /// lies inside one cluster, extending the directory when there is none. One write: a reader sees all of them or none.
+    fn add_entries(&mut self, dir: u32, entries: &[[u8; 32]]) -> Result<(), String> {
         let chain = self.chain(dir)?;
         let cb = self.cluster_bytes() as usize;
+        let n = entries.len();
+        if n * 32 > cb {
+            return Err("the name is too long for this volume's clusters".into());
+        }
+        let flat: Vec<u8> = entries.iter().flatten().copied().collect();
         for &c in &chain {
             let mut buf = vec![0u8; cb];
             self.f.read_exact_at(&mut buf, self.offset(c)).map_err(|e| e.to_string())?;
-            for (i, e) in buf.chunks_exact(32).enumerate() {
-                if e[0] == 0 || e[0] == 0xE5 {
-                    self.f.write_all_at(entry, self.offset(c) + 32 * i as u64).map_err(|e| format!("writing the directory: {e}"))?;
-                    return Ok(());
+            let slots = cb / 32;
+            let mut run = 0usize;
+            for i in 0..slots {
+                let first = buf[i * 32];
+                // a zero slot ends the directory: everything behind it is free
+                if first == 0 {
+                    if slots - (i - run) >= n {
+                        return self.f.write_all_at(&flat, self.offset(c) + 32 * (i - run) as u64).map_err(|e| format!("writing the directory: {e}"));
+                    }
+                    // the names do not fit in what is left of this cluster: those slots become "deleted" (a zero slot would end the
+                    // directory for readers, hiding what is written in the next cluster) and the entries go behind them
+                    let mut dead = vec![0u8; (slots - i) * 32];
+                    dead.chunks_exact_mut(32).for_each(|e| e[0] = 0xE5);
+                    self.f.write_all_at(&dead, self.offset(c) + 32 * i as u64).map_err(|e| format!("writing the directory: {e}"))?;
+                    break;
+                }
+                run = if first == 0xE5 { run + 1 } else { 0 };
+                if run == n {
+                    return self.f.write_all_at(&flat, self.offset(c) + 32 * (i + 1 - n) as u64).map_err(|e| format!("writing the directory: {e}"));
                 }
             }
         }
@@ -288,8 +354,55 @@ impl<'a> Fat32Rw<'a> {
         let last = *chain.last().ok_or("empty directory chain")?;
         self.set_entry(last, new);
         self.flush()?;
-        self.f.write_all_at(entry, self.offset(new)).map_err(|e| format!("writing the directory: {e}"))?;
+        self.f.write_all_at(&flat, self.offset(new)).map_err(|e| format!("writing the directory: {e}"))?;
         Ok(())
+    }
+
+    /// The directory entries for a new file or folder `name` in `dir`: an upper-case 8.3 name is one entry; any other creatable name gets
+    /// long-name entries and a short alias that is not in use (`ROOTFS~1.GZ`; a name that differs from an 8.3 name only in case keeps the
+    /// plain alias `IMAGE`).
+    fn entry_set(&self, dir: u32, name: &str, attr: u8, first: u32, size: u32) -> Result<Vec<[u8; 32]>, String> {
+        if let Ok(sfn) = short_name(name) {
+            return Ok(vec![Self::make_entry(&sfn, attr, first, size)]);
+        }
+        if !long_name_ok(name) {
+            return Err(format!("\"{name}\" is not a name the writer creates (letters, digits and . _ - + , ; = [ ] ( ) ~ ! # $ % & ' @ ^ {{ }} only)"));
+        }
+        let (base, ext) = name.rsplit_once('.').unwrap_or((name, ""));
+        let plain = short_name(&name.to_ascii_uppercase()).ok();
+        let sfn = match plain {
+            Some(p) if self.alias_free(dir, &p)? => p,
+            _ => {
+                let (b, x) = (alias_part(base, 6), alias_part(ext, 3));
+                let b = if b.is_empty() { "_".to_string() } else { b };
+                let mut found = None;
+                for n in 1..1_000_000u32 {
+                    let tail = format!("~{n}");
+                    let b = &b[..b.len().min(8 - tail.len())];
+                    let mut a = [b' '; 11];
+                    a[..b.len()].copy_from_slice(b.as_bytes());
+                    a[b.len()..b.len() + tail.len()].copy_from_slice(tail.as_bytes());
+                    a[8..8 + x.len()].copy_from_slice(x.as_bytes());
+                    if self.alias_free(dir, &a)? {
+                        found = Some(a);
+                        break;
+                    }
+                }
+                found.ok_or("no free short alias for the name")?
+            }
+        };
+        let mut v = lfn_entries(name, &sfn);
+        v.push(Self::make_entry(&sfn, attr, first, size));
+        Ok(v)
+    }
+
+    /// Is the 11-byte short name unused in `dir` (by a short name or a long one)?
+    fn alias_free(&self, dir: u32, a: &[u8; 11]) -> Result<bool, String> {
+        let text: String = {
+            let (b, x) = (String::from_utf8_lossy(&a[..8]).trim_end().to_string(), String::from_utf8_lossy(&a[8..]).trim_end().to_string());
+            if x.is_empty() { b } else { format!("{b}.{x}") }
+        };
+        Ok(self.locate(dir, &text)?.is_none())
     }
 
     fn make_entry(name: &[u8; 11], attr: u8, first: u32, size: u32) -> [u8; 32] {
@@ -319,7 +432,8 @@ impl<'a> Fat32Rw<'a> {
                 Some((_, false)) => return Err(format!("\"{p}\" exists on the EFI System Partition and is a file, not a folder")),
                 None => {
                     all_existed = false;
-                    let name = short_name(&p.to_ascii_uppercase())?;
+                    let upper = p.to_ascii_uppercase();
+                    let name = if short_name(&upper).is_ok() { upper } else { (*p).to_string() };
                     let c = self.alloc(1)?[0];
                     let cb = self.cluster_bytes() as usize;
                     let mut data = vec![0u8; cb];
@@ -331,7 +445,8 @@ impl<'a> Fat32Rw<'a> {
                     data[32..64].copy_from_slice(&dotdot);
                     self.f.write_all_at(&data, self.offset(c)).map_err(|e| e.to_string())?;
                     self.flush()?;
-                    self.add_entry(dir, &Self::make_entry(&name, 0x10, c, 0))?;
+                    let set = self.entry_set(dir, &name, 0x10, c, 0)?;
+                    self.add_entries(dir, &set)?;
                     dir = c;
                 }
             }
@@ -378,19 +493,22 @@ impl<'a> Fat32Rw<'a> {
         })
     }
 
-    /// Create the file `name` (8.3, upper case) in `dir` with `size` bytes read from `src`. Refuses an existing name.
+    /// Create the file `name` (see [`can_create`]) in `dir` with `size` bytes read from `src`. Refuses an existing name.
     pub fn create_file(&mut self, dir: u32, name: &str, size: u64, src: &mut dyn Read, progress: &mut dyn FnMut(u64)) -> Result<(), String> {
         if self.find(dir, name)?.is_some() {
             return Err(format!("{name} already exists in that folder of the EFI System Partition; it is not overwritten"));
         }
-        let sfn = short_name(name)?;
+        if !can_create(name) {
+            return Err(format!("\"{name}\" is not a name the writer creates"));
+        }
         if size > u32::MAX as u64 {
             return Err("a file over 4 GiB does not fit FAT32".into());
         }
         let first = self.write_payload(size, src, progress)?;
         self.f.sync_data().map_err(|e| e.to_string())?;
         self.flush()?;
-        self.add_entry(dir, &Self::make_entry(&sfn, 0x20, first, size as u32))?;
+        let set = self.entry_set(dir, name, 0x20, first, size as u32)?;
+        self.add_entries(dir, &set)?;
         self.f.sync_data().map_err(|e| e.to_string())?;
         Ok(())
     }

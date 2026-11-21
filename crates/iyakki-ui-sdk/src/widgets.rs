@@ -52,7 +52,7 @@ pub fn button(c: &mut dyn Canvas, th: &Theme, m: &Metrics, r: Rect, label: &str,
     let w = c.measure(size, &t, TextStyle::Bold);
     let ink = if primary { iyakki_uikit::skins::label_on(th, th.accent) } else { th.text };
     c.text(r.x + ((r.w - w) / 2.0).max(0.0), r.y + ((r.h - size) / 2.0).max(0.0), size, ink, &t, TextStyle::Bold);
-    c.hit(r, Hit { action, name: label.to_string(), role: Role::Button });
+    c.hit(r, Hit { action, name: label.to_string(), role: Role::Button, ..Default::default() });
     r
 }
 
@@ -64,7 +64,7 @@ pub fn row(c: &mut dyn Canvas, th: &Theme, m: &Metrics, r: Rect, text: &str, sel
     let pad = m.gap(Space::Md) + m.gap(Space::Xxs);
     let t = fit(c, size, text, TextStyle::Regular, (r.w - 2.0 * pad).max(0.0));
     c.text(r.x + pad, r.y + ((r.h - size) / 2.0).max(0.0), size, th.text, &t, TextStyle::Regular);
-    c.hit(r, Hit { action, name: text.to_string(), role: Role::ListItem });
+    c.hit(r, Hit { action, name: text.to_string(), role: Role::ListItem, state: if selected { Hit::SELECTED } else { 0 }, value: String::new() });
     r
 }
 
@@ -92,7 +92,7 @@ pub fn field(c: &mut dyn Canvas, th: &Theme, m: &Metrics, r: Rect, label: &str, 
             c.rect(Rect::new(r.x + pad + w + m.line(Line::Normal), y, m.line(Line::Thick), size * 1.2), th.accent);
         }
     }
-    c.hit(r, Hit { action, name: label.to_string(), role: Role::Field });
+    c.hit(r, Hit { action, name: label.to_string(), role: Role::Field, state: 0, value: value.to_string() });
     r
 }
 
@@ -117,7 +117,7 @@ pub fn wallpaper_picker(c: &mut dyn Canvas, th: &Theme, m: &Metrics, r: Rect, cu
         let size = m.size(TypeRole::Body);
         let t = fit(c, size, id.name(), TextStyle::Regular, (cell.w - m.gap(Space::Md) - m.gap(Space::Lg)).max(0.0));
         c.text(cell.x + m.gap(Space::Md), cell.y + ((cell.h - size) / 2.0).max(0.0), size, th.text, &t, TextStyle::Regular);
-        c.hit(cell, Hit { action: base + i as u32, name: format!("Wallpaper {}", id.name()), role: Role::Button });
+        c.hit(cell, Hit { action: base + i as u32, name: format!("Wallpaper {}", id.name()), role: Role::Button, ..Default::default() });
         used = used.max(cell.bottom() - r.y);
     }
     Rect::new(r.x, r.y, r.w, used)

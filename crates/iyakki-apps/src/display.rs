@@ -29,7 +29,7 @@ thread_local! {
 
 /// Where the kernel's connectors are: `/sys/class/drm`, or a fake folder a test of this thread named.
 pub fn drm_dir() -> std::path::PathBuf {
-    DRM_DIR.with(|d| d.borrow().clone()).unwrap_or_else(|| "/sys/class/drm".into())
+    DRM_DIR.with(|d| d.borrow().clone()).unwrap_or_else(|| iyakki_core_local::LocalScreenFacts::system().drm_dir().to_path_buf())
 }
 
 #[cfg(any(test, feature = "testing"))]
@@ -40,28 +40,19 @@ pub fn set_drm_dir_for_tests(p: Option<std::path::PathBuf>) {
 /// How each connected display looks to the kernel and whether its list of sizes matches what it can do, as text. `sys_drm` is
 /// `/sys/class/drm` (a fake folder in tests). The app asks here instead of reading the kernel itself.
 pub fn status_text(sys_drm: &Path) -> String {
-    iyakki_devctl::drmmodes::status_text(sys_drm)
+    iyakki_core_api::device_types::devctl::drmmodes::status_text(sys_drm)
 }
 
 /// "Look again": ask the kernel to read the connected displays again, in the background, and paint everything again when a display's
 /// list of modes became right (the framebuffer and the KMS paths both notice the new modes by themselves). Returns how the displays
 /// look now, in one line. `sys_drm` is `/sys/class/drm` (a fake folder in tests).
 pub fn look_again(sys_drm: &Path) -> String {
-    iyakki_devctl::drmmodes::set_logger(|l| log::info!("{l}"));
-    iyakki_devctl::drmmodes::look_again(sys_drm, crate::splash::request_repaint)
+    iyakki_core_api::device_types::devctl::drmmodes::set_logger(|l| log::info!("{l}"));
+    iyakki_core_api::device_types::devctl::drmmodes::look_again(sys_drm, crate::splash::request_repaint)
 }
 
-/// One display connector as sysfs describes it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Connector {
-    /// "eDP-1", "HDMI-A-1" (the part of the sysfs directory name after `cardN-`).
-    pub name: String,
-    pub connected: bool,
-    /// `enabled` file when readable: "enabled" is true, "disabled" false.
-    pub enabled: Option<bool>,
-    /// The `modes` file in order, the first being the preferred one. Zero-size and unparsable lines are kept out.
-    pub modes: Vec<(u32, u32)>,
-}
+/// One display connector as sysfs describes it (the core's type, `iyakki_core_api::screenfacts`).
+pub use iyakki_core_api::screenfacts::Connector;
 
 /// The size to lay the shell out for, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,32 +71,11 @@ impl Visible {
 }
 
 /// Parse "2560x1600", "2560x1600p-60" or "U:2880x1800p-0" (the first `WxH` found).
-pub fn parse_mode(line: &str) -> Option<(u32, u32)> {
-    let s = line.trim();
-    let s = s.split_once(':').map_or(s, |(_, rest)| rest);
-    let (w, rest) = s.split_once('x')?;
-    let w: u32 = w.trim().parse().ok()?;
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    let h: u32 = digits.parse().ok()?;
-    (w > 0 && h > 0).then_some((w, h))
-}
+pub use iyakki_core_api::screenfacts::parse_mode;
 
-/// Read every `<drm>/card*-*` connector directory. Unreadable things are simply left out; never fails.
+/// Read every `<drm>/card*-*` connector directory (the core's reader). Unreadable things are simply left out; never fails.
 pub fn read_connectors(drm: &Path) -> Vec<Connector> {
-    let Ok(rd) = std::fs::read_dir(drm) else { return Vec::new() };
-    let mut dirs: Vec<_> = rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.starts_with("card") && n.contains('-')).collect();
-    dirs.sort();
-    let mut out = Vec::new();
-    for d in dirs {
-        let p = drm.join(&d);
-        let read = |f: &str| std::fs::read_to_string(p.join(f)).ok().map(|v| v.trim().to_string());
-        let Some(status) = read("status") else { continue };
-        let name = d.split_once('-').map(|(_, n)| n.to_string()).unwrap_or_else(|| d.clone());
-        let modes = read("modes").map(|m| m.lines().filter_map(parse_mode).collect()).unwrap_or_default();
-        let enabled = read("enabled").map(|e| e == "enabled");
-        out.push(Connector { name, connected: status == "connected", enabled, modes });
-    }
-    out
+    iyakki_core_local::screenfacts::read_connectors(drm)
 }
 
 /// A built-in panel: the one that is "the" screen when several are connected.
@@ -143,14 +113,19 @@ pub fn visible_size(buffer: (u32, u32), fb_var: (u32, u32), connectors: &[Connec
     Visible { width: base.0, height: base.1, source: format!("{base_src}; no connected display mode readable") }
 }
 
+/// [`visible_size`] over the connectors the core's screen facts give.
+pub fn visible_with(facts: &dyn iyakki_core_api::screenfacts::ScreenFacts, buffer: (u32, u32), fb_var: (u32, u32)) -> Visible {
+    visible_size(buffer, fb_var, &facts.connectors())
+}
+
 /// [`visible_size`] with the real sysfs.
 pub fn visible_now(buffer: (u32, u32), fb_var: (u32, u32)) -> Visible {
-    visible_size(buffer, fb_var, &read_connectors(Path::new("/sys/class/drm")))
+    visible_with(&iyakki_core_local::LocalScreenFacts::system(), buffer, fb_var)
 }
 
 /// What identifies the displays right now (connected connectors and their preferred mode), to notice a hot-plug or a mode change.
 pub fn signature(drm: &Path) -> String {
-    read_connectors(drm).iter().filter(|c| c.connected).map(|c| format!("{}:{}", c.name, c.modes.first().map_or("?".to_string(), |m| format!("{}x{}", m.0, m.1)))).collect::<Vec<_>>().join(",")
+    iyakki_core_api::screenfacts::signature_of(&read_connectors(drm))
 }
 
 /// Black out everything of a `pitch`-byte-per-row buffer of `rows` rows outside the top-left `w`x`h` pixels (`bytes` per pixel),

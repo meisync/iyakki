@@ -102,6 +102,6 @@ The assistant tool `image_build` (administrators; it asks every time) packs a fo
 build Job in the namespace `iyakki-build` of the dev cluster: a builder image runs `buildah bud` and `buildah push` to the in-cluster registry (`localhost:30500`), prints the image
 digest, and the result is written as an image app (`<data>/image-apps/<id>.json`, pinned by that digest, with the licence and port you gave). The folder may weigh 700 KB and hold 400
 files; `.env*`, key files, `.git`, `node_modules` and links are left out and listed on the card. The Job has no service-account token, runs at most 15 minutes with 2 GB of memory
-and removes itself and its ConfigMap. **It needs a builder image pinned by digest** in `<data>/image-builder.json` (`{"image": "name@sha256:..."}`); none is chosen yet, so
+and removes itself and its ConfigMap. **It needs a builder image pinned by digest**: the one this build ships (`iyakki_shared::imagebuildtools::BUILDER_IMAGE`, empty until the owner pins one) or the one an administrator sets for this computer with the chat tool `image_builder_set` (asks every time; `image_builder_status` shows it; it is written to `<data>/image-builder.json`, `{"image": "name@sha256:..."}`, and wins over the shipped one); none is chosen yet, so
 nothing builds until an administrator sets one. Code: `imagebuild.rs`, `imagebuildtools.rs`.
 \n

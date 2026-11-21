@@ -50,9 +50,13 @@
 
 <div id="stage" hidden>
   <canvas id="screen" tabindex="0" aria-label="The screen of the IYAKKI machine"></canvas>
+  <canvas id="app" tabindex="0" hidden aria-label="An app of the IYAKKI machine"></canvas>
+  <div id="app-aria" hidden></div>
+  <div id="app-title" hidden><span id="app-name"></span><button id="app-close" type="button" aria-label="Close the app">Close</button></div>
   <div id="bar">
     <span class="badge">EXPERIMENTAL</span>
     <span id="live" aria-live="polite">Connected</span>
+    <button id="apps" type="button" aria-label="Apps of the IYAKKI machine" hidden>Apps</button>
     <button id="devices" type="button" aria-label="Sound, clipboard and devices" hidden>Devices</button>
     <button id="kbd" type="button" aria-label="Show the keyboard">Keyboard</button>
     <button id="fit" type="button" aria-label="Fill the height of the window or show the whole picture">Fill height</button>
@@ -60,6 +64,11 @@
     <button id="bye" type="button" aria-label="Disconnect">Disconnect</button>
   </div>
   <div id="shared" role="status" hidden></div>
+  <section id="apps-menu" hidden aria-label="Apps of the IYAKKI machine">
+    <div class="phead"><h2>Apps</h2><button id="apps-close" type="button" aria-label="Close">Close</button></div>
+    <p class="fine">The machine draws these apps for this page as a list of shapes and text, and this page draws the list. The machine's own screen carries on behind. What you may open follows your role.</p>
+    <div id="apps-list" class="row"></div>
+  </section>
   <section id="panel" hidden aria-label="Sound, clipboard and devices">
     <div class="phead"><h2>Sound, clipboard and devices</h2><button id="panel-close" type="button" aria-label="Close">Close</button></div>
     <p class="fine">On this computer (the browser) and on the IYAKKI machine are different devices. Nothing here starts by itself.</p>
@@ -78,6 +87,15 @@
       <div class="row"><select id="cam-pick" hidden></select><input id="cam-unit" aria-label="Camera id" maxlength="120" autocomplete="off" spellcheck="false"><button id="cam-btn" type="button">Watch</button></div>
       <p class="fine" id="cam-state"></p>
       <canvas id="camview" hidden aria-label="Picture of the machine's camera"></canvas>
+    </div>
+    <div id="files-row" hidden>
+      <label>Files of your home folder on the machine (the machine asks on its own screen: once for the folder, then for every file)</label>
+      <div class="row"><button id="files-open" type="button">Show the folder</button><button id="files-up" type="button" hidden>Up</button><button id="files-refresh" type="button">Refresh</button></div>
+      <p class="fine" id="files-state" role="status"></p>
+      <p class="fine" id="files-dir"></p>
+      <ul id="files-list"></ul>
+      <label for="files-pick">Send a file to this folder (up to 8 MB)</label>
+      <input id="files-pick" type="file">
     </div>
     <div id="offer-row" hidden>
       <label>This device's own camera and microphone (the machine asks too, and shows a red band while they are in use)</label>

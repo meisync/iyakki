@@ -5,7 +5,7 @@
 //!   FAT32 writer (`Fat32Rw`): a file is replaced by writing the new clusters first and rewriting its one directory entry last (a power
 //!   cut leaves the old file or the new one, `Fat32Rw::replace_file`).
 //! * Only files that already exist on the stick are replaced, and only under `boot/` and `EFI/`. A new file is added only when its name is
-//!   an upper-case 8.3 name and its folder exists; any other new file is refused with the plan (nothing is half done). Nothing is deleted.
+//!   a name the writer can create (8.3, or a long name with a generated alias) and its folder exists; any other new file is refused with the plan (nothing is half done). Nothing is deleted.
 //! * Order: everything under `boot/` first (biggest first), the `EFI/` loaders last, so a stick cut in the middle still has its old loader
 //!   pointing at files that exist. After every file the new contents are read back and compared with the folder's.
 //! * The plan is shown first; nothing is written without `--yes`. The install-media marker is never touched.
@@ -153,7 +153,7 @@ pub fn plan(target: &Path, from: &Path) -> Result<Plan, String> {
             steps.push(Step { path, size, kind: Kind::Replace });
         } else {
             let name = path.rsplit('/').next().unwrap_or("");
-            if crate::fatwrite::short_name(name).is_ok() {
+            if crate::fatwrite::can_create(name) {
                 steps.push(Step { path, size, kind: Kind::Add });
             } else {
                 refused.push(path);
@@ -161,7 +161,7 @@ pub fn plan(target: &Path, from: &Path) -> Result<Plan, String> {
         }
     }
     if !refused.is_empty() {
-        return Err(format!("these files are new on the stick and their names are not upper-case 8.3 names, which is all the writer can create: {}. Nothing was written.", refused.join(", ")));
+        return Err(format!("these files are new on the stick and their names are not names the writer can create: {}. Nothing was written.", refused.join(", ")));
     }
     // boot files first (biggest first), loaders last
     steps.sort_by(|a, b| is_loader(&a.path).cmp(&is_loader(&b.path)).then(b.size.cmp(&a.size)).then(a.path.cmp(&b.path)));
