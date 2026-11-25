@@ -1,0 +1,16 @@
+# autotest alpha.10 batch F (lane Q8, 2026-11-24); split into sub-row F-BROW-79a on 2026-11-24 (lane SC2): this scenario covers the whole visible clause, the API and rule clauses are F-BROW-79b.
+row: F-BROW-79a
+targets: qemu
+profile: ram
+feature-sha: 51641a7a301c9322
+doc: Settings, Browser offers Custom headers (read only, nothing is changed)
+clause: 1 Settings, Browser offers Custom headers
+key s
+wait app=Settings
+skip-unless-button Browser
+click-sidebar Browser
+wait app=Settings page="Browser"
+shot page
+expect-not-blank
+expect-text Custom headers
+expect-page Browser

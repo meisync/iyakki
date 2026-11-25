@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-GEMVOICE-15",
+  "feature_sha": "19d1a53db9505883",
+  "title": "account tools in a voice session (experimental)",
+  "clauses": [
+    {
+      "id": "tools-speak",
+      "text": "A spoken request that needs an account tool is answered through the tool",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "In a voice session, say a request that uses an account tool, for example what sound output is in use.",
+          "expect": "The assistant answers through the tool. An approval card appears for anything that asks first."
+        }
+      ]
+    }
+  ]
+}

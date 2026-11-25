@@ -1,0 +1,25 @@
+{
+ "schema": 1,
+ "row": "F-KBD-22",
+ "feature_sha": "ed48b7a7893547da",
+ "title": "hold Fn to cycle the Touch Bar strips",
+ "clauses": [
+  {
+   "id": "fn-hold",
+   "text": "holding Fn on the Apple keyboard cycles the Touch Bar strips, and a short press changes nothing",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Hold the Fn key on the Apple keyboard for about two seconds, then release it. Then press Fn quickly.",
+     "expect": "The strips change once after the first half second of holding, then again about once a second while held. A quick press changes nothing."
+    },
+    {
+     "do": "If holding Fn does nothing, tap the on-screen chip that cycles the strips.",
+     "expect": "The chip still cycles the strips. Report that the Fn key does not reach the shell, if it does not."
+    }
+   ]
+  }
+ ]
+}

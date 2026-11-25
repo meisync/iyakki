@@ -170,12 +170,14 @@ fn run(spec: &Spec, policy: Policy, audit: &Audit, stop: &AtomicBool, state: &Mu
             }
         };
         starts += 1;
+        crate::keep_supervised(child.id());
         set(state, State::Running { pid: child.id(), starts });
         audit("service.start", &format!("{} pid {} (start {starts})", spec.name, child.id()));
         let reader = forward_output(&mut child, &spec.name, audit);
         let status = loop {
             if stop.load(Ordering::SeqCst) {
                 let s = terminate(&mut child, policy.grace);
+                crate::release_supervised(child.id());
                 if let Some(r) = reader {
                     let _ = r.join();
                 }
@@ -188,6 +190,7 @@ fn run(spec: &Spec, policy: Policy, audit: &Audit, stop: &AtomicBool, state: &Mu
             }
             std::thread::sleep(Duration::from_millis(10));
         };
+        crate::release_supervised(child.id());
         if let Some(r) = reader {
             let _ = r.join();
         }

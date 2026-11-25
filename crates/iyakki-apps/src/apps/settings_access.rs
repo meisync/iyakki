@@ -5,20 +5,21 @@
 //! (Super+Alt+Right), by a person who hears it.
 
 use super::*;
+use super::super::settings_device_port::AccessPort;
 use iyakki_shared::accessibility::{self as acc, Access, SLOW_CHOICES};
 
 
 impl SettingsApp {
-    fn ac_load(cx: &AppCx) -> Access {
-        acc::load(cx.data_dir(), &cx.session.user)
+    fn ac_load(p: &dyn AccessPort) -> Access {
+        acc::load(&p.data_dir(), &p.user())
     }
 
-    fn ac_save(&mut self, cx: &AppCx, what: &str, f: impl FnOnce(&mut Access)) -> Option<Access> {
-        let mut a = Self::ac_load(cx);
+    fn ac_save(&mut self, p: &dyn AccessPort, what: &str, f: impl FnOnce(&mut Access)) -> Option<Access> {
+        let mut a = Self::ac_load(p);
         f(&mut a);
-        match acc::save(cx.data_dir(), &cx.session.user, &a) {
+        match acc::save(&p.data_dir(), &p.user(), &a) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.accessibility", what);
+                p.audit("settings.accessibility", what);
                 Some(a)
             }
             Err(e) => {
@@ -28,7 +29,7 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn handle_access(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_access(&mut self, k: &Key, p: &dyn AccessPort) {
         let c = match k {
             Key::Char(c) => *c,
             _ => return,
@@ -36,8 +37,8 @@ impl SettingsApp {
         let on_off = |b: bool| if b { "on" } else { "off" };
         match c {
             'r' => {
-                if let Some(a) = self.ac_save(cx, "screen reader", |a| a.screen_reader = !a.screen_reader) {
-                    if a.screen_reader && !cx.b4().voice_ready() {
+                if let Some(a) = self.ac_save(p, "screen reader", |a| a.screen_reader = !a.screen_reader) {
+                    if a.screen_reader && !p.voice_ready() {
                         self.fail("Screen reader on, but no reading voice is installed, so it cannot speak yet. Set one up in Settings, Voice. Super+Alt+S turns the reader on or off from any screen.");
                     } else {
                         self.ok(format!("Screen reader {}. Super+Alt+S turns it on or off from any screen, also at sign-in.", on_off(a.screen_reader)));
@@ -45,72 +46,71 @@ impl SettingsApp {
                 }
             }
             't' => {
-                let mut sp = cx.services.system_speaker();
-                match sp.say("This is the screen reader voice. If you can hear this, the reader can speak.") {
+                match p.speak_test("This is the screen reader voice. If you can hear this, the reader can speak.") {
                     Ok(()) => self.ok("Speaking a test sentence."),
                     Err(e) => self.fail(format!("The voice could not speak: {e}")),
                 }
             }
             'b' => {
-                if let Some(a) = self.ac_save(cx, "braille display", |a| a.braille = !a.braille) {
-                    let found = cx.core.braille().status();
+                if let Some(a) = self.ac_save(p, "braille display", |a| a.braille = !a.braille) {
+                    let found = p.braille_status();
                     self.ok(format!("Braille output {}. {found}", on_off(a.braille)));
                 }
             }
             'g' => {
-                if let Some(a) = self.ac_save(cx, "braille grade", |a| a.braille_contracted = !a.braille_contracted) {
+                if let Some(a) = self.ac_save(p, "braille grade", |a| a.braille_contracted = !a.braille_contracted) {
                     self.ok(format!("Braille is now {}.", if a.braille_contracted { "contracted (grade 2)" } else { "uncontracted (grade 1)" }));
                 }
             }
             'n' => {
-                if let Some(a) = self.ac_save(cx, "speak notices", |a| a.speak_notices = !a.speak_notices) {
+                if let Some(a) = self.ac_save(p, "speak notices", |a| a.speak_notices = !a.speak_notices) {
                     self.ok(format!("Messages, errors and notices are {} read aloud.", if a.speak_notices { "now" } else { "no longer" }));
                 }
             }
             'c' => {
-                let on = !acc::high_contrast(cx.data_dir(), &cx.session.user);
-                match acc::set_high_contrast(cx.data_dir(), &cx.session.user, on) {
+                let on = !acc::high_contrast(&p.data_dir(), &p.user());
+                match acc::set_high_contrast(&p.data_dir(), &p.user(), on) {
                     Ok(()) => {
-                        crate::theme::apply_for(cx.data_dir(), &cx.session.user);
-                        cx.audit.record(&cx.session.user, "settings.accessibility", &format!("high contrast {}", on_off(on)));
+                        crate::theme::apply_for(&p.data_dir(), &p.user());
+                        p.audit("settings.accessibility", &format!("high contrast {}", on_off(on)));
                         self.ok(format!("High contrast {}.", on_off(on)));
                     }
                     Err(e) => self.fail(e),
                 }
             }
-            'u' | 'U' => self.change_ui_size(c == 'u', cx),
+            'u' | 'U' => self.change_ui_size(c == 'u', p),
             'p' => {
-                if let Some(a) = self.ac_save(cx, "large pointer", |a| a.large_pointer = !a.large_pointer) {
+                if let Some(a) = self.ac_save(p, "large pointer", |a| a.large_pointer = !a.large_pointer) {
                     self.ok(format!("Large pointer {} (it grows when the pointer moves next).", on_off(a.large_pointer)));
                 }
             }
             'f' => {
-                if let Some(a) = self.ac_save(cx, "big focus ring", |a| a.big_ring = !a.big_ring) {
+                if let Some(a) = self.ac_save(p, "big focus ring", |a| a.big_ring = !a.big_ring) {
                     self.ok(format!("Big focus ring {}.", on_off(a.big_ring)));
                 }
             }
             'm' => {
-                if let Some(a) = self.ac_save(cx, "reduce motion", |a| a.reduce_motion = !a.reduce_motion) {
+                if let Some(a) = self.ac_save(p, "reduce motion", |a| a.reduce_motion = !a.reduce_motion) {
                     self.ok(format!("Reduced motion {}: no moving backgrounds, no blinking caret.", on_off(a.reduce_motion)));
                 }
             }
             'k' => {
-                if let Some(a) = self.ac_save(cx, "sticky keys", |a| a.sticky_keys = !a.sticky_keys) {
+                if let Some(a) = self.ac_save(p, "sticky keys", |a| a.sticky_keys = !a.sticky_keys) {
                     self.ok(format!("Sticky keys {}. {}", on_off(a.sticky_keys), if a.sticky_keys { "Press Shift, Ctrl, Alt or Super, let go, then the next key. Twice in a row keeps it on until a third press." } else { "Modifier keys are held again." }));
                 }
             }
             'e' => {
-                if let Some(a) = self.ac_save(cx, "typing echo", |a| a.typing_echo = !a.typing_echo) {
+                if let Some(a) = self.ac_save(p, "typing echo", |a| a.typing_echo = !a.typing_echo) {
                     self.ok(format!("Typing echo {}: {}", on_off(a.typing_echo), if a.typing_echo { "each letter you type into a text field is spoken while the reader is on (a hidden password is never spoken)." } else { "typed letters are no longer spoken." }));
                 }
             }
             'w' => {
                 let next = {
-                    let cur = Self::ac_load(cx).slow_keys_ms;
+                    let cur = Self::ac_load(p).slow_keys_ms;
                     let at = SLOW_CHOICES.iter().position(|c| *c == cur).unwrap_or(0);
                     SLOW_CHOICES[(at + 1) % SLOW_CHOICES.len()]
                 };
-                if self.ac_save(cx, &format!("slow keys {next} ms"), |a| a.slow_keys_ms = next).is_some() {
+                if self.ac_save(p, &format!("slow keys {next} ms"), |a| a.slow_keys_ms = next).is_some() {
                     self.ok(if next == 0 { "Slow keys off: every key counts at once.".to_string() } else { format!("Slow keys: a key counts after it was held {next} milliseconds. Brushing a key does nothing.") });
                 }
             }
@@ -122,12 +122,12 @@ impl SettingsApp {
         vec![("Screen reader", ACCENT, 'r'), ("Test the voice", TEXT, 't'), ("High contrast", TEXT, 'c'), ("Bigger text", TEXT, 'u'), ("Large pointer", TEXT, 'p'), ("Focus ring", TEXT, 'f'), ("Reduce motion", TEXT, 'm'), ("Sticky keys", TEXT, 'k'), ("Slow keys", TEXT, 'w'), ("Typing echo", TEXT, 'e'), ("Braille display", TEXT, 'b'), ("Contracted braille", TEXT, 'g')]
     }
 
-    pub(super) fn render_access(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let cfg = Self::ac_load(cx);
-        let hc = acc::high_contrast(cx.data_dir(), &cx.session.user);
-        let level = crate::uisize::load(cx.data_dir(), &cx.session.user);
+    pub(super) fn render_access(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn AccessPort) {
+        let cfg = Self::ac_load(p);
+        let hc = acc::high_contrast(&p.data_dir(), &p.user());
+        let level = crate::uisize::load(&p.data_dir(), &p.user());
         let (size_name, size_f) = crate::uisize::LEVELS[level.min(crate::uisize::LEVELS.len() - 1)];
-        let voice = cx.b4().voice_ready();
+        let voice = p.voice_ready();
         let rows: Vec<(String, String, bool, char)> = vec![
             ("Screen reader".into(), if voice { "Speaks what you move to, messages and errors. Super+Alt+S turns it on or off anywhere, also at sign-in.".into() } else { "No reading voice is installed yet: set one up in Settings, Voice. Super+Alt+S turns it on or off anywhere.".into() }, cfg.screen_reader, 'r'),
             ("Read messages and errors aloud".into(), "Toasts, errors and notices, not only the control you moved to.".into(), cfg.speak_notices, 'n'),

@@ -156,6 +156,15 @@ impl Manager {
             let mut sup = self.sup.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if sup.is_none() {
                 *sup = Some(self.supervise());
+                // a return of the network ends the waiting of the tunnels (the hook goes with the manager)
+                let weak = Arc::downgrade(self);
+                crate::routeevents::global().on_return(&format!("sshtunnels:{:p}", Arc::as_ptr(self)), Arc::new(move || match weak.upgrade() {
+                    Some(m) => {
+                        m.network_returned();
+                        true
+                    }
+                    None => false,
+                }));
             }
         }
     }
@@ -455,6 +464,20 @@ impl Manager {
                 }
             }
         }
+    }
+
+    /// The way out of the computer came back (F-LIFE-19, audit P-11): a tunnel that waits out a back-off (up to five minutes) tries again at
+    /// the next step and its back-off starts over. A tunnel that needs the person (a hard fault) or runs is left alone. Returns how many.
+    pub fn network_returned(&self) -> usize {
+        let mut n = 0;
+        for rt in self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).values_mut() {
+            if rt.proc.is_none() && !rt.status.needs_you && rt.status.retry_at.is_some() {
+                rt.status.retry_at = None;
+                rt.status.attempts = 0;
+                n += 1;
+            }
+        }
+        n
     }
 
     /// Stops every client (the device is shutting down, or the person signed out).

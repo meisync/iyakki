@@ -1,15 +1,15 @@
 //! The STORE tile's management layer: updating, rolling back, pinning and removing what is installed (the lifecycle rules are
-//! `iyakki_agent::store::lifecycle`), and arranging it the way the person likes (tags, groups, display titles, drag and drop;
-//! `iyakki_shared::store_organize`). It is a child of `store.rs` so it can use the tile's own state.
+//! the store lifecycle), and arranging it the way the person likes (tags, groups, display titles, drag and drop;
+//! `iyakki_store_model::store_organize`). It is a child of `store.rs` so it can use the tile's own state.
 
 use crate::safeclamp::SafeClamp;
-use iyakki_shared::store_installed::{Entry as IEntry, Status, Type as IType};
-use iyakki_shared::store_lifecycle::{Life, LifeError, RemovePlan, Report, UpdatePlan};
-use iyakki_shared::store_lifecycle::RemoveOpts;
-use iyakki_shared::store_organize::{self as org, Org, COLOURS};
+use iyakki_store_model::store_installed::{Entry as IEntry, Status, Type as IType};
+use iyakki_store_model::store_lifecycle::{Life, LifeError, RemovePlan, Report, UpdatePlan};
+use iyakki_store_model::store_lifecycle::RemoveOpts;
+use iyakki_store_model::store_organize::{self as org, Org, COLOURS};
 
 use super::{blink, Ask, Done, Job, Mode, Purpose, ReviewView, Section, StoreApp, ACCENT, AMBER};
-use crate::apps::AppCx;
+use crate::apps::store_port::StorePort;
 use crate::fx;
 use crate::gfx::{rgb, Face, Gfx};
 use crate::ui::{Event, Key, Nav, TextField, DIM, ERR, MUTED, OK, R, TEXT};
@@ -222,8 +222,8 @@ impl StoreApp {
     }
 
     /// Read the person's arrangement again, forget what is no longer installed or listed, and take their grouping choice.
-    pub(super) fn reload_org(&mut self, cx: &AppCx) {
-        self.org = Org::load(self.store.dir(), &cx.session.user);
+    pub(super) fn reload_org(&mut self, cx: &dyn StorePort) {
+        self.org = Org::load(self.store.dir(), &cx.user());
         let mut existing: std::collections::HashSet<String> = self.inst.iter().map(Self::okey).collect();
         existing.extend(self.all_items.iter().map(|i| org::item_key(&i.entry.kind, &i.entry.name)));
         // only prune when there is something to compare with (a failed read of the stores must not wipe the arrangement)
@@ -232,7 +232,7 @@ impl StoreApp {
         }
         self.iview = View::from_id(&self.org.view);
         self.org_rev += 1;
-        self.rate = iyakki_shared::store_ratings::Ratings::load(self.store.dir(), &cx.session.user);
+        self.rate = iyakki_store_model::store_ratings::Ratings::load(self.store.dir(), &cx.user());
     }
 
     pub(super) fn org_save(&mut self) {
@@ -246,14 +246,14 @@ impl StoreApp {
         if words.is_empty() {
             return true;
         }
-        let hay = format!("{} {}", iyakki_shared::store_installed::hay(e), self.org.hay(&Self::okey(e)));
+        let hay = format!("{} {}", iyakki_store_model::store_installed::hay(e), self.org.hay(&Self::okey(e)));
         words.iter().all(|w| hay.contains(w))
     }
 
     /// The entries that pass the type chip, the Updates chip, the tag filters and the search, in the chosen order.
     pub(super) fn ifiltered_flat(&self) -> Vec<&IEntry> {
         let words: Vec<String> = self.iquery.value.to_lowercase().split_whitespace().map(str::to_string).collect();
-        iyakki_shared::store_installed::filter(&self.inst, self.ifilter, "", self.isort)
+        iyakki_store_model::store_installed::filter(&self.inst, self.ifilter, "", self.isort)
             .into_iter()
             .filter(|e| !self.iupdates || matches!(e.status, Status::Update(_)))
             .filter(|e| self.itags.iter().all(|t| self.org.tags_of(&Self::okey(e)).contains(t)))
@@ -462,7 +462,7 @@ impl StoreApp {
 
     /// A press on a row or heading. With a real pointer the click is decided on release (so it can become a drag); without one
     /// (the keyboard, tests) it acts at once.
-    pub(super) fn press(&mut self, p: Press, cx: &AppCx) {
+    pub(super) fn press(&mut self, p: Press, cx: &dyn StorePort) {
         let si = self.sel_index();
         let carried = match &p {
             Press::Item(i) => self.item_info(*i).map(|(k, t)| {
@@ -487,13 +487,13 @@ impl StoreApp {
         }
     }
 
-    fn head_click(&mut self, i: usize, cx: &AppCx) {
+    fn head_click(&mut self, i: usize, cx: &dyn StorePort) {
         let Some(h) = self.heads().get(i).cloned() else { return };
         self.on_head = (self.iview == View::Groups && self.section == Section::Installed).then(|| h.id.clone());
         self.toggle_head(&h, cx);
     }
 
-    pub(super) fn toggle_head(&mut self, h: &Head, _cx: &AppCx) {
+    pub(super) fn toggle_head(&mut self, h: &Head, _cx: &dyn StorePort) {
         match (h.kind, &h.id) {
             (HeadKind::Group, Some(id)) => {
                 self.org.toggle_collapsed(id);
@@ -509,7 +509,7 @@ impl StoreApp {
         }
     }
 
-    pub(super) fn pointer_up(&mut self, x: i32, y: i32, cx: &AppCx) {
+    pub(super) fn pointer_up(&mut self, x: i32, y: i32, cx: &dyn StorePort) {
         self.pointer = Some((x, y));
         let Some(d) = self.drag.take() else { return };
         if !d.active {
@@ -654,7 +654,7 @@ impl StoreApp {
         self.say(format!("Grouped by: {}.", v.label()), true);
     }
 
-    fn run_menu(&mut self, act: MenuAct, item: Option<String>, cx: &AppCx) {
+    fn run_menu(&mut self, act: MenuAct, item: Option<String>, cx: &dyn StorePort) {
         self.mode = Mode::Browse;
         if self.idetail.is_some() {
             self.mode = Mode::Detail;
@@ -692,7 +692,7 @@ impl StoreApp {
     }
 
     /// Keys of the Installed list that arrange things. True when handled.
-    pub(super) fn org_key(&mut self, k: &Key, cx: &AppCx) -> bool {
+    pub(super) fn org_key(&mut self, k: &Key, cx: &dyn StorePort) -> bool {
         // a heading under the cursor
         if let Some(h) = self.on_head.clone() {
             let head = self.heads().into_iter().find(|x| x.id == h);
@@ -777,7 +777,7 @@ impl StoreApp {
 
     // -------------------------------------------------------------------------------------- the small dialogs: keys
 
-    pub(super) fn edit_key(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn edit_key(&mut self, k: &Key, cx: &dyn StorePort) {
         let Mode::Edit(st) = &mut self.mode else { return };
         let word_start = |v: &str| v.rfind(',').map_or(0, |i| i + 1);
         match k {
@@ -880,7 +880,7 @@ impl StoreApp {
         }
     }
 
-    pub(super) fn menu_key(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn menu_key(&mut self, k: &Key, cx: &dyn StorePort) {
         let Mode::Menu(m) = &mut self.mode else { return };
         match k {
             Key::Esc => self.mode = if self.idetail.is_some() { Mode::Detail } else { Mode::Browse },
@@ -898,7 +898,7 @@ impl StoreApp {
         }
     }
 
-    fn menu_run(&mut self, cx: &AppCx) {
+    fn menu_run(&mut self, cx: &dyn StorePort) {
         let Mode::Menu(m) = &self.mode else { return };
         let (act, item) = (m.rows[m.sel].1.clone(), m.item.clone());
         self.run_menu(act, item, cx);
@@ -967,7 +967,7 @@ impl StoreApp {
     }
 
     /// Download and review the newer version in the background, then show what would change.
-    pub(super) fn start_update(&mut self, cx: &AppCx, key: &str) {
+    pub(super) fn start_update(&mut self, cx: &dyn StorePort, key: &str) {
         let Some(life) = self.life_of(key).cloned() else {
             self.say("That is not installed any more.", false);
             return;
@@ -981,10 +981,10 @@ impl StoreApp {
             return;
         }
         if !life.has_update() && life.entry.ty != IType::Cli {
-            self.say(format!("{}: {} {}", life.entry.title, life.check.label(), life.check.note()), life.check == iyakki_shared::store_lifecycle::Check::UpToDate);
+            self.say(format!("{}: {} {}", life.entry.title, life.check.label(), life.check.note()), life.check == iyakki_store_model::store_lifecycle::Check::UpToDate);
             return;
         }
-        let (st, _svc, actor, loaded, fetch) = (self.store.clone(), cx.services.clone(), self.actor(cx), self.loaded.clone(), self.fetch.clone());
+        let (st, actor, loaded, fetch) = (self.store.clone(), self.actor(cx), self.loaded.clone(), self.fetch.clone());
         let title = life.entry.title.clone();
         self.spawn_op(&format!("Downloading and checking {title}…"), move |_| match st.plan_update(&actor, &life, &loaded, fetch.as_ref()) {
             Ok(p) => Done::Planned(Box::new(p)),
@@ -993,13 +993,13 @@ impl StoreApp {
     }
 
     /// The plan was shown and accepted: apply it in the background (it checks the result and puts the old version back if needed).
-    pub(super) fn apply_plan(&mut self, cx: &AppCx, plan: UpdatePlan) {
-        let (st, _svc, actor) = (self.store.clone(), cx.services.clone(), self.actor(cx));
-        let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+    pub(super) fn apply_plan(&mut self, cx: &dyn StorePort, plan: UpdatePlan) {
+        let (st, actor) = (self.store.clone(), self.actor(cx));
+        let (audit, user) = (cx.recorder(), cx.user());
         let label = format!("Updating {} to {}…", plan.title, plan.to);
         self.spawn_op(&label, move |_| {
             let au = |a: &str, d: &str| audit.record(&user, a, d);
-            match st.apply_update(&actor, &plan, iyakki_shared::store_install::Confirm::all(), &au) {
+            match st.apply_update(&actor, &plan, iyakki_store_model::store_install::Confirm::all(), &au) {
                 Ok(m) => Done::Applied(Ok(m)),
                 Err(e) => Done::Applied(Err(e.to_string())),
             }
@@ -1015,9 +1015,9 @@ impl StoreApp {
         self.mode = Mode::Confirm(Ask::UpdateAll(rows));
     }
 
-    pub(super) fn run_update_all(&mut self, cx: &AppCx) {
-        let (st, _svc, policy, user, loaded, fetch) = (self.store.clone(), cx.services.clone(), cx.session.policy.clone(), cx.session.user.clone(), self.loaded.clone(), self.fetch.clone());
-        let audit = cx.audit.clone();
+    pub(super) fn run_update_all(&mut self, cx: &dyn StorePort) {
+        let (st, policy, user, loaded, fetch) = (self.store.clone(), cx.policy(), cx.user(), self.loaded.clone(), self.fetch.clone());
+        let audit = cx.recorder();
         self.spawn_op("Updating everything that can be updated…", move |say| {
             let au = |a: &str, d: &str| audit.record(&user, a, d);
             let rep = st.update_all(&policy, &user, &loaded, fetch.as_ref(), &au, &mut |m| say(m));
@@ -1035,10 +1035,10 @@ impl StoreApp {
         }
     }
 
-    pub(super) fn do_rollback(&mut self, cx: &AppCx, key: &str) {
+    pub(super) fn do_rollback(&mut self, cx: &dyn StorePort, key: &str) {
         let Some(life) = self.life_of(key).cloned() else { return };
-        let (st, _svc, actor) = (self.store.clone(), cx.services.clone(), self.actor(cx));
-        let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+        let (st, actor) = (self.store.clone(), self.actor(cx));
+        let (audit, user) = (cx.recorder(), cx.user());
         let label = format!("Going back to {}…", life.previous.clone().unwrap_or_default());
         self.spawn_op(&label, move |_| {
             let au = |a: &str, d: &str| audit.record(&user, a, d);
@@ -1046,7 +1046,7 @@ impl StoreApp {
         });
     }
 
-    pub(super) fn toggle_pin(&mut self, cx: &AppCx) {
+    pub(super) fn toggle_pin(&mut self, cx: &dyn StorePort) {
         let Some(e) = self.iselected() else { return };
         let Some(l) = self.life_of(&e.key).cloned() else { return };
         if l.pinned.is_some() {
@@ -1062,26 +1062,26 @@ impl StoreApp {
         } else {
             self.say(format!("{} has nothing to update, so there is nothing to pin.", e.title), false);
         }
-        self.reload(cx);
+        self.reload_port(cx);
     }
 
-    pub(super) fn ask_remove_plan(&mut self, cx: &AppCx, e: IEntry) {
+    pub(super) fn ask_remove_plan(&mut self, cx: &dyn StorePort, e: IEntry) {
         let Some(l) = self.life_of(&e.key).cloned() else {
             self.mode = Mode::Confirm(Ask::RemoveInstalled(Box::new(e)));
             return;
         };
-        let plan = self.store.plan_remove(&cx.session.user, &self.lives, &l);
+        let plan = self.store.plan_remove(&cx.user(), &self.lives, &l);
         self.mode = Mode::Confirm(Ask::RemovePlan(Box::new(RemoveUi { plan, entry: e, typing: None })));
     }
 
     /// Remove for real. `delete_data` was chosen and confirmed by typing the name (or is false).
-    pub(super) fn do_remove_plan(&mut self, cx: &AppCx, ui: RemoveUi, delete_data: bool, typed: String) {
+    pub(super) fn do_remove_plan(&mut self, cx: &dyn StorePort, ui: RemoveUi, delete_data: bool, typed: String) {
         let Some(life) = self.life_of(&ui.entry.key).cloned() else { return };
         let opts = RemoveOpts { delete_data, typed, ack_dependents: true };
-        let audit = cx.audit.clone();
-        let user = cx.session.user.clone();
+        let audit = cx.recorder();
+        let user = cx.user();
         let au = |a: &str, d: &str| audit.record(&user, a, d);
-        match self.store.remove_item(&cx.session.policy, &cx.session.user, &self.lives, &life, &opts, &au) {
+        match self.store.remove_item(&cx.policy(), &cx.user(), &self.lives, &life, &opts, &au) {
             Ok(m) => {
                 self.say(m, true);
                 self.idetail = None;
@@ -1092,13 +1092,13 @@ impl StoreApp {
                 self.say(m, false);
             }
         }
-        self.reload(cx);
+        self.reload_port(cx);
         let n = self.ifiltered().len();
         self.sel[1] = self.sel[1].min(n.saturating_sub(1));
     }
 
     /// Keys while a removal is being confirmed. True when the event was handled here.
-    pub(super) fn remove_key(&mut self, k: &Key, cx: &AppCx) -> bool {
+    pub(super) fn remove_key(&mut self, k: &Key, cx: &dyn StorePort) -> bool {
         let Mode::Confirm(Ask::RemovePlan(ui)) = &mut self.mode else { return false };
         if let Some(f) = &mut ui.typing {
             match k {
@@ -1362,7 +1362,7 @@ impl StoreApp {
     }
 
     /// A press on a menu row, suggestion or tag row from the pointer.
-    pub(super) fn dialog_click(&mut self, n: usize, cx: &AppCx) -> bool {
+    pub(super) fn dialog_click(&mut self, n: usize, cx: &dyn StorePort) -> bool {
         match &mut self.mode {
             Mode::Menu(m) if (TAB_MENU..TAB_MENU + 200).contains(&n) => {
                 m.sel = (n - TAB_MENU).min(m.rows.len().saturating_sub(1));
@@ -1396,7 +1396,7 @@ impl StoreApp {
         format!(
             "{real}{}{}{}",
             if e.version == "-" || e.version.is_empty() { String::new() } else { format!("v{} · ", e.version) },
-            if e.ty == IType::App { String::new() } else { format!("for {} · ", if e.scope == iyakki_shared::skills::Scope::Shared { "everyone" } else { "you" }) },
+            if e.ty == IType::App { String::new() } else { format!("for {} · ", if e.scope == iyakki_store_model::skills::Scope::Shared { "everyone" } else { "you" }) },
             if e.summary.is_empty() { &e.trust_label } else { &e.summary }
         )
     }
@@ -1411,14 +1411,14 @@ impl StoreApp {
 
 /// The line under an install or update review's title: what it is, whatever the person calls it. The real name and id come from the
 /// package itself; a display title of the person's own is never used here.
-pub(super) fn review_sub(r: &iyakki_shared::store_install::Review) -> String {
+pub(super) fn review_sub(r: &iyakki_store_model::store_install::Review) -> String {
     format!(
         "{} {} {} · {} · {}{}",
         super::kind_label(&r.kind),
         r.name,
         r.version,
         super::size_text(r.size as u64),
-        if r.scope == iyakki_shared::skills::Scope::Shared { "for everyone" } else { "for you" },
+        if r.scope == iyakki_store_model::skills::Scope::Shared { "for everyone" } else { "for you" },
         if r.installed.is_some() { " · replaces the installed version" } else { "" }
     )
 }

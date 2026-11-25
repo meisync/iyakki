@@ -1,0 +1,21 @@
+[package]
+name = "iyakki-tile-devtools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The DEV TOOLS tile (thirteen developer tools on one screen). Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit` and on the
+# pure leaf crates named in tests/data/tile_crate_deps.allow (`iyakki-devtools-engine`: the tools as plain functions, `iyakki-qr`: the QR code types),
+# never on the agent or the shared crate. The shell adapter is `crates/iyakki-apps/src/apps/devtools/mod.rs`; the ICMP and port-check tools stay there.
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-devtools-engine = { path = "../iyakki-devtools-engine" }
+iyakki-qr = { workspace = true }
+
+[features]
+# test seams the shell's own tests use; never on in a product build
+testing = []
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

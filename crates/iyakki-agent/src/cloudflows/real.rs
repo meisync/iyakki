@@ -206,8 +206,32 @@ impl crate::tenantconfig::api::ConfigAudit for AuditShim {
     }
 }
 
+/// What the loop does between two steps. The product waits [`STEP_SECS`] of wall time ([`WallPacer`]); a test passes its own pacer to
+/// [`start_with_pacer`] and lets the loop take exactly the steps it grants, so no machine load can change how many steps happened.
+pub trait Pacer: Send + Sync {
+    /// Called after every step. Returns when the next step may start, or at once when `stop` is set (a stopper that has a pacer of
+    /// its own wakes it up itself).
+    fn wait(&self, stop: &AtomicBool);
+}
+
+/// The product's pacer: [`STEP_SECS`] of wall time, cut short when `stop` is set.
+pub struct WallPacer;
+impl Pacer for WallPacer {
+    fn wait(&self, stop: &AtomicBool) {
+        let until = std::time::Instant::now() + Duration::from_secs(STEP_SECS);
+        while !stop.load(Ordering::Relaxed) && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
 /// Start the tenant scheduler thread; it stops (and hands the lease over) when `stop` is set.
 pub fn start(svc: Arc<Services>, auth: Arc<dyn Authenticator>, audit: Arc<dyn iyakki_core_api::AuditSink>, stop: Arc<AtomicBool>) -> Option<std::thread::JoinHandle<()>> {
+    start_with_pacer(svc, auth, audit, stop, Arc::new(WallPacer))
+}
+
+/// [`start`] with the wait between two steps given (see [`Pacer`]).
+pub fn start_with_pacer(svc: Arc<Services>, auth: Arc<dyn Authenticator>, audit: Arc<dyn iyakki_core_api::AuditSink>, stop: Arc<AtomicBool>, pacer: Arc<dyn Pacer>) -> Option<std::thread::JoinHandle<()>> {
     let data: PathBuf = svc.dir().to_path_buf();
     let tenant = crate::notifyhub::service::hub_for(&svc.dir().to_path_buf()).tenant.clone();
     let holder = format!("{}-{}", std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()).unwrap_or_else(|_| "pod".into()), std::process::id());
@@ -280,12 +304,7 @@ pub fn start(svc: Arc<Services>, auth: Arc<dyn Authenticator>, audit: Arc<dyn iy
                 for p in rep.paused {
                     audit.record(super::SERVICE_USER, "flow.schedule.paused", &format!("{p} owner lost access"));
                 }
-                for _ in 0..STEP_SECS * 10 {
-                    if stop.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
+                pacer.wait(&stop);
             }
             sched.shutdown(backend.as_ref());
         })

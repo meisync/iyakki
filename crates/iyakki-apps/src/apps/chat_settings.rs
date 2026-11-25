@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use crate::apps::chat_port::{ChatPort, CxChat};
+
 use iyakki_shared::agent::Tools;
 use iyakki_agent_api::{HeaderRuleStore, HeaderValues as Values};
 use iyakki_shared::keyboard::{FN_MODES, TOUCHBAR_CHOICES};
@@ -560,14 +562,14 @@ pub(crate) fn cert_seen(host: &str, port: u16) -> Option<Result<iyakki_proxy::ce
 }
 
 /// The known-bad site list and the certificate details view (F-BROW-98).
-fn safe_browsing_entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
+fn safe_browsing_entries(cx: &dyn ChatPort, env: &Env) -> Vec<Entry> {
     use super::browser_badsites as bs;
     let mut v = Vec::new();
     {
-        let c = cx.clone();
+        let c = cx.shared();
         v.push(Entry::read("Browser", "browser_badsites_status", "Show the known-bad site list: whether it is on, how many sites it holds, the first entries with their reasons, the suggested lists and what a running download says. Read only.", no_args(), move |_| {
-            let list = bs::load_list(&c);
-            let mut out = vec![format!("The known-bad site list is {} and holds {} site{}.", if bs::enabled(&c) { "on" } else { "off" }, list.len(), if list.len() == 1 { "" } else { "s" })];
+            let list = bs::load_list(&*c);
+            let mut out = vec![format!("The known-bad site list is {} and holds {} site{}.", if bs::enabled(&*c) { "on" } else { "off" }, list.len(), if list.len() == 1 { "" } else { "s" })];
             for (h, r) in list.entries(20) {
                 out.push(if r.is_empty() { format!("- {h}") } else { format!("- {h}: {r}") });
             }
@@ -585,37 +587,37 @@ fn safe_browsing_entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let (c, e) = (cx.clone(), env.clone());
+        let (c, e) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"on": {"type": "boolean"}}, "required": ["on"]});
         v.push(Entry::change("Browser", "browser_badsites_set", "Switch the known-bad site list on or off. While it is on, a listed site (and every site under it) is not opened. The person approves a card first.", schema, |a| format!("Turn the known-bad site list {}", if a["on"].as_bool().unwrap_or(true) { "on" } else { "off" }), move |a| {
             let on = arg_bool(a, "on")?;
-            bs::set_enabled(&c, on);
+            bs::set_enabled(&*c, on);
             e.audit("settings.browser", &format!("Known-bad site list: {}.", if on { "on" } else { "off" }));
             Ok(format!("The known-bad site list is {}.", if on { "on" } else { "off" }))
         }));
     }
     {
-        let (c, e) = (cx.clone(), env.clone());
+        let (c, e) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"site": {"type": "string", "description": "A site name such as example.org (without http:// or a path); every site under it is covered too"}, "reason": {"type": "string", "description": "Why it is listed (shown on the page that explains the block)"}}, "required": ["site"]});
         v.push(Entry::change("Browser", "browser_badsites_add", "Put one site on the known-bad site list: it and every site under it will not be opened and the person is told why. The person approves a card first.", schema, |a| format!("Never open {} (known-bad site list)", a["site"].as_str().unwrap_or("?")), move |a| {
             let site = arg_str(a, "site")?;
             let reason = a["reason"].as_str().unwrap_or("").trim().to_string();
-            let h = bs::add(&c, &site, &reason)?;
+            let h = bs::add(&*c, &site, &reason)?;
             e.audit("settings.browser", &format!("Known-bad site list: added {h}"));
             Ok(format!("{h} is on the known-bad site list; it and the sites under it will not open."))
         }));
     }
     {
-        let (c, e) = (cx.clone(), env.clone());
+        let (c, e) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"site": {"type": "string", "description": "The site name as listed, or 'all' to empty the list"}}, "required": ["site"]});
         v.push(Entry::change("Browser", "browser_badsites_remove", "Take one site off the known-bad site list (or empty the list with site all). The person approves a card first.", schema, |a| format!("Take {} off the known-bad site list", a["site"].as_str().unwrap_or("?")), move |a| {
             let site = arg_str(a, "site")?;
             if site.trim().eq_ignore_ascii_case("all") {
-                let n = bs::clear(&c);
+                let n = bs::clear(&*c);
                 e.audit("settings.browser", "Known-bad site list: emptied");
                 return Ok(format!("The known-bad site list is empty ({n} removed)."));
             }
-            if bs::remove(&c, &site) {
+            if bs::remove(&*c, &site) {
                 e.audit("settings.browser", &format!("Known-bad site list: removed {site}"));
                 Ok(format!("{} is off the known-bad site list.", site.trim()))
             } else {
@@ -624,7 +626,7 @@ fn safe_browsing_entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let (c, e) = (cx.clone(), env.clone());
+        let (c, e) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"list": {"type": "string", "description": "urlhaus (suggested), or leave out and give url"}, "url": {"type": "string", "description": "Instead of list: an https address of a text list (one site per line, or a hosts file)"}}});
         let describe = |a: &Value| match (a["url"].as_str(), a["list"].as_str()) {
             (Some(u), _) if !u.is_empty() => format!("Download the known-bad site list at {u}"),
@@ -647,7 +649,7 @@ fn safe_browsing_entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
                 (None, None) => return Err("Say which list (urlhaus) or give an https address as url".into()),
             };
             e.audit("settings.browser", &format!("Known-bad site list: downloading {what} (by chat)"));
-            if bs::start_download(bs::list_path(&c), bs::source(&c), addr) {
+            if bs::start_download(bs::list_path(&*c), bs::source(&*c), addr) {
                 Ok(format!("Downloading {what} in the background; browser_badsites_status shows the result."))
             } else {
                 Err("A list download is already running.".into())
@@ -655,7 +657,7 @@ fn safe_browsing_entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let c = cx.clone();
+        let c = cx.shared();
         let schema = json!({"type": "object", "properties": {"host": {"type": "string", "description": "The site name, for example www.example.org"}, "port": {"type": "integer", "description": "Default 443"}}, "required": ["host"]});
         v.push(Entry::read("Browser", "browser_certificate_view", "Show the certificate a site presents: who it was issued to and by, its dates, fingerprint, whether its names fit the address and whether it leads to a trusted authority, with warnings. It connects to the site and does only the TLS handshake (nothing is requested or sent). Subject to the account's list of allowed sites.", schema, move |a| {
             let host = arg_str(a, "host")?.trim().trim_end_matches('.').to_ascii_lowercase();
@@ -666,7 +668,7 @@ fn safe_browsing_entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
             if port == 0 || port > 65535 {
                 return Err("The port must be 1 to 65535".into());
             }
-            if !c.session.policy.allows_host(&host) {
+            if !c.policy().allows_host(&host) {
                 return Err(format!("Your account may not open pages from {host}."));
             }
             Ok(cert_probe(&host, port as u16)?.text())
@@ -675,13 +677,13 @@ fn safe_browsing_entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
     v
 }
 
-fn block_entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
+fn block_entries(cx: &dyn ChatPort, env: &Env) -> Vec<Entry> {
     use super::browser_block as bb;
     let mut v = Vec::new();
     {
-        let c = cx.clone();
+        let c = cx.shared();
         v.push(Entry::read("Browser", "browser_block_status", "Show the browser's ads and trackers blocking: the switch, each downloaded filter list (rules, age, licence, source), the sites allowed, and what a running download says. Read only.", no_args(), move |_| {
-            let (cfg, lists, now) = (bb::load(&c), bb::store(&c).list(), bb::now_secs());
+            let (cfg, lists, now) = (bb::load(&*c), bb::store(&*c).list(), bb::now_secs());
             let mut out = vec![format!("Blocking ads and trackers is {}.", if cfg.enabled { "on" } else { "off" })];
             if lists.is_empty() {
                 out.push("No filter list is downloaded, so nothing is blocked. browser_block_download fetches one (the person approves first).".into());
@@ -701,20 +703,20 @@ fn block_entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let (c, e) = (cx.clone(), env.clone());
+        let (c, e) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"on": {"type": "boolean"}}, "required": ["on"]});
         v.push(Entry::change("Browser", "browser_block_set", "Switch blocking of ads and trackers on or off for the person. The person approves a card first.", schema, |a| format!("Turn ads and trackers blocking {}", if a["on"].as_bool().unwrap_or(true) { "on" } else { "off" }), move |a| {
             let on = arg_bool(a, "on")?;
-            let mut cfg = bb::load(&c);
+            let mut cfg = bb::load(&*c);
             cfg.enabled = on;
-            bb::save(&c, &cfg);
-            bb::apply(&c);
+            bb::save(&*c, &cfg);
+            bb::apply(&*c);
             e.audit("settings.browser", &format!("Block ads and trackers: {}.", if on { "on" } else { "off" }));
             Ok(format!("Blocking ads and trackers is {}.", if on { "on" } else { "off" }))
         }));
     }
     {
-        let (c, e) = (cx.clone(), env.clone());
+        let (c, e) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"list": {"type": "string", "description": "easylist, easyprivacy, ublock-filters or standard (EasyList and EasyPrivacy)"}, "url": {"type": "string", "description": "Instead of list: an https:// address of a filter list"}}});
         let describe = |a: &Value| match (a["url"].as_str(), a["list"].as_str()) {
             (Some(u), _) if !u.is_empty() => format!("Download the filter list at {u}"),
@@ -738,7 +740,7 @@ fn block_entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
                 (None, None) => return Err("Say which list (easylist, easyprivacy, ublock-filters, standard) or give an https address as url".into()),
             };
             e.audit("settings.browser", &format!("Filter lists: downloading {what} (by chat)"));
-            if bb::start_job(bb::lists_dir(&c), bb::source(&c), job) {
+            if bb::start_job(bb::lists_dir(&*c), bb::source(&*c), job) {
                 Ok(format!("Downloading {what} in the background; browser_block_status shows the result."))
             } else {
                 Err("A list job is already running.".into())
@@ -746,10 +748,10 @@ fn block_entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let (c, e) = (cx.clone(), env.clone());
+        let (c, e) = (cx.shared(), env.clone());
         v.push(Entry::change("Browser", "browser_block_update", "Download every filter list that has an address again. The person approves a card first.", no_args(), |_| "Update the filter lists".to_string(), move |_| {
             e.audit("settings.browser", "Filter lists: updating (by chat)");
-            if bb::start_job(bb::lists_dir(&c), bb::source(&c), bb::Job::UpdateAll) {
+            if bb::start_job(bb::lists_dir(&*c), bb::source(&*c), bb::Job::UpdateAll) {
                 Ok("Updating the lists in the background; browser_block_status shows the result.".into())
             } else {
                 Err("A list job is already running.".into())
@@ -757,21 +759,21 @@ fn block_entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let (c, e) = (cx.clone(), env.clone());
+        let (c, e) = (cx.shared(), env.clone());
         v.push(Entry::change("Browser", "browser_block_remove", "Remove every downloaded filter list (nothing is blocked afterwards until a list is downloaded again). The person approves a card first.", no_args(), |_| "Remove the filter lists".to_string(), move |_| {
-            let store = bb::store(&c);
+            let store = bb::store(&*c);
             let n = store.list().len();
             for m in store.list() {
                 store.remove(&m.id);
             }
             bb::forget_loaded();
-            bb::apply(&c);
+            bb::apply(&*c);
             e.audit("settings.browser", "Removed the filter lists");
             Ok(if n == 0 { "There were no lists.".to_string() } else { format!("Removed {n} list{}.", if n == 1 { "" } else { "s" }) })
         }));
     }
     {
-        let (c, e) = (cx.clone(), env.clone());
+        let (c, e) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"site": {"type": "string", "description": "A host name such as example.org"}, "allow": {"type": "boolean", "description": "true lets the site through the blocker, false blocks it again"}}, "required": ["site", "allow"]});
         v.push(Entry::change("Browser", "browser_block_allow", "Let one site through the ads and trackers blocker, or stop doing so. The person approves a card first.", schema, |a| format!("{} {} for ads and trackers blocking", if a["allow"].as_bool().unwrap_or(true) { "Allow" } else { "Block again" }, a["site"].as_str().unwrap_or("?")), move |a| {
             let site = arg_str(a, "site")?.trim().to_ascii_lowercase();
@@ -779,7 +781,7 @@ fn block_entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
                 return Err("That is not a host name".into());
             }
             let allow = arg_bool(a, "allow")?;
-            let mut cfg = bb::load(&c);
+            let mut cfg = bb::load(&*c);
             if allow {
                 if cfg.allow.len() >= 500 {
                     return Err("500 sites are already allowed".into());
@@ -788,8 +790,8 @@ fn block_entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
             } else {
                 cfg.allow.remove(&site);
             }
-            bb::save(&c, &cfg);
-            bb::apply(&c);
+            bb::save(&*c, &cfg);
+            bb::apply(&*c);
             e.audit("settings.browser", &format!("Ads and trackers: {site} {}", if allow { "allowed" } else { "blocked again" }));
             Ok(format!("{site} is {}.", if allow { "allowed through the blocker" } else { "blocked again" }))
         }));
@@ -814,39 +816,38 @@ fn base_env(env: &Env) -> iyakki_shared::settingstools::Env {
 
 /// Every Settings tool of this module and of the agent crate, in front of `inner`.
 pub fn wrap(cx: &AppCx, inner: Arc<dyn Tools>) -> Arc<dyn Tools> {
-    let audit = cx.audit.clone();
-    let user = cx.session.user.clone();
-    let admin = cx.session.policy.manage_settings;
-    let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin, settings: cx.settings(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) };
+    let user = CxChat(cx).user().to_string();
+    let admin = CxChat(cx).policy().manage_settings;
+    let env = Env { dir: CxChat(cx).data_dir().to_path_buf(), user: user.clone(), admin, settings: CxChat(cx).settings(), audit: CxChat(cx).audit_sink() };
     let mut entries = Vec::new();
     entries.extend(cx.b4().settings_entries_a(&base_env(&env)));
-    entries.extend(super::chat_settings_assistant::entries(cx, &env));
+    entries.extend(super::chat_settings_assistant::entries(&CxChat(cx), &env));
     entries.extend({
-        let svc = cx.vault();
-        let user = cx.session.user.clone();
+        let svc = CxChat(cx).vault();
+        let user = CxChat(cx).user().to_string();
         let read: iyakki_shared::settingstools_wifi::SecretReader = Arc::new(move |e: &str| svc.user_get(&user, e).map(|z| z.to_string()).map_err(|_| format!("there is no usable vault entry \"{e}\" (the vault may be locked). Ask the person to store it with vault_request, then pass its name as secret_entry.")));
-        let linux = iyakki_shared::settingstools_linux::Access { allowed: cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full, net_hosts: cx.session.policy.net_hosts.clone() };
+        let linux = iyakki_shared::settingstools_linux::Access { allowed: CxChat(cx).policy().cli == iyakki_sec::policy::CliLevel::Full, net_hosts: CxChat(cx).policy().net_hosts.clone() };
         cx.b4().settings_entries_b(&base_env(&env), linux, iyakki_agent_api::WifiParts { ctl: wifi_ctl(), read })
     });
-    entries.extend(keyboard_entries(&env, cx.core.host().sys_root()));
+    entries.extend(keyboard_entries(&env, CxChat(cx).core().host().sys_root()));
     entries.extend(pointer_entries(&env));
     entries.extend(time_entries(&env));
-    entries.extend(header_entries(&env, super::browser_headers::vault_values(cx.vault(), &cx.session.user)));
+    entries.extend(header_entries(&env, super::browser_headers::vault_values(CxChat(cx).vault(), CxChat(cx).user())));
     entries.extend(plugin_entries(&env));
     entries.extend(layout_entries(&env));
     entries.extend(display_entries(&env, crate::display::drm_dir()));
-    entries.extend(block_entries(cx, &env));
-    entries.extend(safe_browsing_entries(cx, &env));
-    entries.extend(super::chat_browser_data::entries(cx, &env));
-    entries.extend(super::chat_camvision::entries(cx, &env));
-    entries.extend(super::chat_themes::entries(cx, &env));
-    entries.extend(super::chat_monitor::entries(cx, &env));
-    entries.extend(super::chat_resume::entries(cx, &env));
+    entries.extend(block_entries(&CxChat(cx), &env));
+    entries.extend(safe_browsing_entries(&CxChat(cx), &env));
+    entries.extend(super::chat_browser_data::entries(&CxChat(cx), &env));
+    entries.extend(super::chat_camvision::entries(&CxChat(cx), &env));
+    entries.extend(super::chat_themes::entries(&CxChat(cx), &env));
+    entries.extend(super::chat_monitor::entries(&CxChat(cx), &env));
+    entries.extend(super::chat_resume::entries(&CxChat(cx), &env));
     entries.extend(super::chat_hostname::entries(&env));
-    entries.extend(super::chat_embedbrowser::entries(cx, &env));
-    entries.extend(super::chat_embedcameras::entries(cx, &env));
-    entries.extend(super::chat_appevents::entries(cx, &env, inner.clone()));
-    entries.extend(super::chat_embedmedia::entries(cx, &env));
+    entries.extend(super::chat_embedbrowser::entries(&CxChat(cx), &env));
+    entries.extend(super::chat_embedcameras::entries(&CxChat(cx), &env));
+    entries.extend(super::chat_appevents::entries(&CxChat(cx), &env, inner.clone()));
+    entries.extend(super::chat_embedmedia::entries(&CxChat(cx), &env));
     Arc::new(SettingsTools::new(inner, admin, entries))
 }
 

@@ -3,6 +3,10 @@
 //! per-workspace override, vault profiles added later, and the box at every size and inside panes. Fakes only: the GPU cache is filled with
 //! fake node JSON and nothing here runs kubectl.
 use super::*;
+use crate::apps::AppCx;
+use crate::gfx::Gfx;
+use crate::ui::{Event, R};
+use iyakki_cluster_model::clusters::Registry;
 use crate::apps::tests::cx_with_admin_store;
 use crate::gfx::rgb;
 use crate::ui::Key;
@@ -29,7 +33,7 @@ fn cx_with(tag: &str, remotes: &[&str]) -> AppCx {
 #[test]
 fn one_cluster_means_no_box_no_hit_and_the_phrase_names_this_machine() {
     let cx = cx_with_admin_store("host-one");
-    let mut h = ClusterHost::new(BASE, &cx, "Shop");
+    let mut h = new(BASE, &cx, "Shop");
     assert!(!h.visible());
     let mut g = Gfx::new(800, 480);
     assert!(h.draw(&mut g, 10.0, 10.0, 300.0, 1.0, [1, 2, 3, 255]).is_none() && g.hits.is_empty());
@@ -46,7 +50,7 @@ fn the_gpu_badge_is_fresh_last_known_or_absent_in_the_rows_and_drawn_in_the_list
     iyakki_shared::aiprofile_remote::note_nodes(&cache, "gpu-host-old", "gpu-host-old", &nodes(1), 100);
     iyakki_shared::aiprofile_remote::note_failure(&cache, "gpu-host-old", "gpu-host-old", "no answer", 200);
     iyakki_shared::aiprofile_remote::note_nodes(&cache, "gpu-host-none", "gpu-host-none", r#"{"items":[{"metadata":{"name":"a"},"status":{"allocatable":{"cpu":"4"}}}]}"#, 100);
-    let mut h = ClusterHost::new(BASE, &cx, "");
+    let mut h = new(BASE, &cx, "");
     let gpu = |h: &ClusterHost, id: &str| h.rows().iter().find(|r| r.id == id).unwrap().gpu.clone();
     assert_eq!(gpu(&h, "gpu-host-fresh").as_deref(), Some("2 x NVIDIA GeForce RTX 4090 (24 GB each)"));
     assert_eq!(gpu(&h, "gpu-host-old").as_deref(), Some("1 x NVIDIA GeForce RTX 4090 (24 GB) (last known)"));
@@ -73,7 +77,7 @@ fn the_gpu_badge_is_fresh_last_known_or_absent_in_the_rows_and_drawn_in_the_list
 #[test]
 fn switching_is_role_checked_audited_and_a_workspace_with_its_own_cluster_switches_its_own() {
     let cx = cx_with("host-switch", &["lab"]);
-    let mut h = ClusterHost::new(BASE, &cx, "Shop");
+    let mut h = new(BASE, &cx, "Shop");
     assert!(h.visible());
     h.handle(&Event::Tab(BASE), &|_| None);
     assert!(h.sw.open);
@@ -95,7 +99,7 @@ fn switching_is_role_checked_audited_and_a_workspace_with_its_own_cluster_switch
     assert_eq!(h.handle(&Event::Tab(BASE + 2), &|_| None), HostOut::Manage);
     // a workspace with its own cluster: the switch sets that one and leaves the account's alone
     iyakki_agent::clusters::switch_workspace(cx.data_dir(), &cx.session.user, cx.session.role, "Shop", Some("local")).unwrap();
-    let mut w = ClusterHost::new(BASE, &cx, "Shop");
+    let mut w = new(BASE, &cx, "Shop");
     w.handle(&Event::Tab(BASE), &|_| None);
     let lab = w.rows().iter().position(|r| r.id == "lab").unwrap();
     w.handle(&Event::Tab(BASE + 10 + lab), &|_| None);
@@ -114,10 +118,10 @@ fn a_guest_gets_no_rows_and_a_user_only_the_clusters_visible_to_users() {
     r.save(&dir, &user).unwrap();
     cx.session.role = Role::Guest;
     cx.session.policy = Policy::resolve(Role::Guest, &Default::default());
-    assert!(!ClusterHost::new(BASE, &cx, "").visible());
+    assert!(!new(BASE, &cx, "").visible());
     cx.session.role = Role::User;
     cx.session.policy = Policy::resolve(Role::User, &Default::default());
-    let h = ClusterHost::new(BASE, &cx, "");
+    let h = new(BASE, &cx, "");
     assert_eq!(h.rows().iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["local", "lab"]);
     // a user cannot switch to what they do not see
     let mut h = h;
@@ -131,10 +135,10 @@ fn a_vault_profile_added_after_the_registry_was_saved_still_shows_up() {
     let cx = cx_with("host-vault", &["lab"]);
     let (dir, user) = (cx.data_dir().to_path_buf(), cx.session.user.clone());
     iyakki_shared::kubeprofiles::vault_add(&dir, &user, "later", "uvault:later-kube").unwrap();
-    let h = ClusterHost::new(BASE, &cx, "");
+    let h = new(BASE, &cx, "");
     assert!(h.rows().iter().any(|r| r.name == "later"), "{:?}", h.rows());
     // once, not on every read
-    let h2 = ClusterHost::new(BASE, &cx, "");
+    let h2 = new(BASE, &cx, "");
     assert_eq!(h2.rows().iter().filter(|r| r.name == "later").count(), 1);
 }
 
@@ -144,7 +148,7 @@ fn the_box_fits_every_size_and_pane_and_the_list_stays_inside() {
     iyakki_shared::aiprofile_remote::note_nodes(&iyakki_shared::aiprofile_remote::clusters_cache(), "gpu-host-geo", "gpu-host-geo", &nodes(8), 100);
     for (w, h, s) in [(360u32, 740u32, 1.0f32), (800, 480, 1.0), (1280, 720, 1.0), (1920, 1080, 1.5), (2560, 1600, 2.0)] {
         for pane in [R::new(0.0, 0.0, w as f32, h as f32), R::new(w as f32 * 0.3, h as f32 * 0.2, w as f32 * 0.6, h as f32 * 0.6)] {
-            let mut host = ClusterHost::new(BASE, &cx, "");
+            let mut host = new(BASE, &cx, "");
             let mut g = Gfx::new(w, h);
             g.clear(rgb(0, 0, 0));
             let b = host.draw(&mut g, pane.x + 6.0, pane.y + 6.0, pane.w - 12.0, s, [64, 196, 232, 255]).expect("shown");

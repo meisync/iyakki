@@ -1,0 +1,10 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 4b19b2311af831f3; honest subset only: everything not checked is under not-covered.
+row: F-APPSTORE-02
+targets: qemu
+profile: ram
+feature-sha: 4b19b2311af831f3
+doc: iyakki pkg verify on the real image gives Unsigned, Community, Trusted, Verified and Revoked
+clause: 1 `iyakki pkg verify` on the real image gives Unsigned, Community, Trusted, Verified and Revoked for the matching key set-ups
+not-covered: Official (pinned IYAKKI root keys): official-roots.txt is empty until the owner creates the root key
+not-covered: an expired, out-of-scope, forged or foreign certificate falls back to Community with the reason
+session-check: pkg_trust_levels

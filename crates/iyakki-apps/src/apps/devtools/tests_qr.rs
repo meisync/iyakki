@@ -1,6 +1,7 @@
 //! The QR code tool: the texts the codes hold, the symbol, the two pictures, the page at several sizes and the saves.
 
 use super::*;
+use crate::ui::{Event, Key};
 use iyakki_qr::qr::Level;
 use qrcode::PRESETS;
 
@@ -117,6 +118,7 @@ fn kinds_keep_their_own_text_and_the_level_changes_the_code() {
 
 #[test]
 fn the_keyboard_alone_picks_a_kind_types_and_copies() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     let mut f = Fx::new(1000, 700, 1.0);
     f.click(Event::Tab(T_TOOL + tools::QR));
     assert_eq!(f.app.focus, Focus::Input);
@@ -152,6 +154,7 @@ fn the_keyboard_alone_picks_a_kind_types_and_copies() {
 
 #[test]
 fn clear_empties_every_kind_and_copy_has_nothing_to_copy_when_empty() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     let mut f = Fx::new(1000, 700, 1.0);
     f.click(Event::Tab(T_TOOL + tools::QR));
     f.ev(Event::Paste("abc".into()));

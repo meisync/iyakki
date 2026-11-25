@@ -247,7 +247,8 @@ Many features are partial (%(partial)d of %(total)d rows in the feature matrix; 
 Read the <a href="%(repo)s/blob/HEAD/KNOWN-ISSUES.md">known issues</a> first.</div>
 <div class="btns">
 <a class="btn primary" href="%(repo)s/releases">Get the releases</a>
-<a class="btn" href="%(repo)s/blob/HEAD/docs/INSTALL.md">Install guide</a>
+<a class="btn" href="%(repo)s/blob/HEAD/docs/INSTALL-GUIDE.md">Install guide</a>
+<a class="btn" href="%(repo)s/blob/HEAD/docs/KNOWN-LIMITS.md">Known limits</a>
 <a class="btn" href="progress.html">See the progress</a>
 </div>
 
@@ -290,8 +291,9 @@ Status per feature is on the <a href="progress.html">progress page</a>; this is 
 <div class="card"><h3>Devices and system</h3><ul><li>SYSTEM, DISKS, NET SCAN, MESH, USERS (roles, limits, audit log), STORE</li><li>Bluetooth written in-house; encrypted home folders; lock screen</li></ul></div>
 <div class="card"><h3>Where it runs</h3><ul><li>Desktop window on Linux</li><li>USB stick on a PC or Mac</li><li>QEMU virtual machine</li><li>Browser front end, Docker, K3s</li></ul></div>
 </div>
-<p>Marked experimental or alpha in the project's own documents: the wake phrase of the My IYAKKI voice session (%(exp)s, off by default), the Connect a client feature and its window program
-(%(exp)s), and Linux programs in a sandbox (alpha, untried on a device).</p>
+<p>Marked experimental in the product and in the documents, and off unless you switch them on: the wake phrase of the My IYAKKI voice session (%(exp)s), the Gemini voice assistant and provider (%(exp)s),
+the client family, that is Connect a client and its window program (%(exp)s), the SDK-built versions of the Edit and Cli tiles (%(exp)s), WASM tiles, Fleet and the model router (%(exp)s).
+Linux programs in a sandbox are alpha and untried on a device. What is limited, unproven or parked is written for newcomers in the <a href="%(repo)s/blob/HEAD/docs/KNOWN-LIMITS.md">known limits</a>.</p>
 
 <h2 id="hardware">What has been tried on real hardware</h2>
 <p>From the <a href="%(repo)s/blob/HEAD/%(rel)s">release notes</a>: the alpha.2 USB image booted on four real computers (a Mac mini 2018, a MacBook Pro 14,1, an HP laptop and a Lenovo laptop),
@@ -301,8 +303,9 @@ the known issues say what is unproven. Secure Boot is verified in QEMU only on m
 <h2 id="try">How to try it</h2>
 <ol>
 <li>Download the latest alpha from the <a href="%(repo)s/releases">GitHub releases</a> and verify the checksums and signatures that come with it.</li>
-<li>Follow the <a href="%(repo)s/blob/HEAD/docs/INSTALL.md">install guide</a>: a desktop window on Linux (<code>./run.sh window</code>, needs the Rust toolchain), a USB stick, or a virtual machine.</li>
+<li>Follow the <a href="%(repo)s/blob/HEAD/docs/INSTALL-GUIDE.md">install guide</a>: which image fits your machine (a PC or an Intel Mac, a Raspberry Pi 5, an AMD KV260, a virtual machine, or the desktop window on Linux), how to write the stick or card, the first start and the first-run screen.</li>
 <li>Then the <a href="%(repo)s/blob/HEAD/docs/QUICKSTART.md">quickstart</a>. Chat needs a model: Settings, then Models.</li>
+<li>If it does not start, or you lose a password or a key, the <a href="%(repo)s/blob/HEAD/docs/RECOVERY-GUIDE.md">recovery guide</a> has the boot menu, safe graphics, going back to the previous version, resetting an account and collecting a diagnostics file.</li>
 </ol>
 <p><strong>The USB installer erases the drive you choose.</strong> Do not use it on a machine that holds anything you cannot lose.</p>
 
@@ -312,6 +315,7 @@ the known issues say what is unproven. Secure Boot is verified in QEMU only on m
 
 <h2 id="more">More</h2>
 <ul>
+<li><a href="%(repo)s/blob/HEAD/docs/INSTALL-GUIDE.md">Install guide</a> · <a href="%(repo)s/blob/HEAD/docs/RECOVERY-GUIDE.md">Recovery guide</a> · <a href="%(repo)s/blob/HEAD/docs/KNOWN-LIMITS.md">Known limits</a> · <a href="%(repo)s/blob/HEAD/docs/TESTED-HARDWARE.md">Tested hardware</a></li>
 <li><a href="%(repo)s/blob/HEAD/docs/ARCHITECTURE.md">Architecture</a> · <a href="%(repo)s/blob/HEAD/docs/INDEX.md">All documentation</a> · <a href="%(repo)s/blob/HEAD/CHANGELOG.md">Changelog</a></li>
 <li><a href="progress.html">Progress and roadmap</a> · <a href="privacy.html">Privacy and security</a> · <a href="%(repo)s/blob/HEAD/CONTRIBUTING.md">Contributing</a></li>
 </ul>

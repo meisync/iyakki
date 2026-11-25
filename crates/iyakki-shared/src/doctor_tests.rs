@@ -457,3 +457,17 @@ fn a_software_fall_back_of_the_browser_graphics_is_a_note_with_the_browser_setti
     assert!(x.text.contains("software") && x.detail.starts_with("Browser graphics: Automatic: software"));
     assert_eq!(ids(&f), vec!["engine-graphics-fallback"]);
 }
+
+#[test]
+fn a_clock_that_looks_wrong_for_the_device_key_and_firewall_is_warned_and_a_fine_one_is_not() {
+    use crate::clockskew::Skew;
+    let mut f = fine();
+    assert!(time_skew(&f).is_none(), "no judgement made: nothing to say");
+    f.clock_skew = Some(Skew::Fine);
+    assert!(time_skew(&f).is_none());
+    f.clock_skew = Some(Skew::BeforeBuild { now: 1, floor: 2 });
+    let x = time_skew(&f).unwrap();
+    assert_eq!((x.id, x.severity, x.fix.unwrap().action), ("time-skew", Severity::Warning, Action::Settings("tab:time")));
+    f.clock_skew = Some(Skew::Ahead { secs: 200 });
+    assert!(time_skew(&f).unwrap().detail.contains("200 seconds ahead"));
+}

@@ -174,3 +174,17 @@ fn a_bigger_text_size_draws_bigger_text_and_every_size_stays_inside_the_pane() {
         }
     }
 }
+
+#[test]
+fn a_pod_item_from_another_app_asks_for_a_shell_in_that_pod_and_anything_else_is_ignored() {
+    use iyakki_ui_sdk::terminal::PodSession;
+    let item = PodSession { context: "dev".into(), namespace: "shop".into(), pod: "web-1".into(), container: "app".into(), ..Default::default() }.to_item();
+    let mut app = CliApp::new(Box::new(MemTerminal::new()));
+    app.open_item("sandbox:x");
+    app.open_item("pod:too\nfew");
+    assert!(app.terminal().pending_question().is_none() && !app.terminal().in_screen(), "not a pod item: nothing is asked");
+    app.open_item(&item);
+    let q = app.terminal().pending_question().expect("the card is waiting");
+    assert!(q.summary.contains("pod web-1") && q.summary.contains("namespace shop"), "{}", q.summary);
+    assert!(app.terminal().in_screen() && app.terminal().screen_text().is_none(), "asked, nothing running before the yes");
+}

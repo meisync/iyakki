@@ -1,0 +1,18 @@
+# autotest alpha.10 batch F (lane Q8, 2026-11-24); split into sub-row F-LAUNCH-13a on 2026-11-24 (lane SC2): this scenario covers the whole visible clause, the API and rule clauses are F-LAUNCH-13b.
+row: F-LAUNCH-13a
+targets: qemu
+profile: ram
+feature-sha: 7538d0f87953f127
+doc: Settings, Appearance shows the Look picker with Default, Compact and Classic (read only, nothing is changed)
+clause: 1 Settings, Appearance shows the Look picker with Default, Compact and Classic
+key s
+wait app=Settings
+skip-unless-button Appearance
+click-sidebar Appearance
+wait app=Settings page="Appearance"
+shot page
+expect-not-blank
+expect-text Default
+expect-text Compact
+expect-text Classic
+expect-page Appearance

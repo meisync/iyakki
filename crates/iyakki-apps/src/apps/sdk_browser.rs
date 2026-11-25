@@ -243,4 +243,70 @@ mod tests {
         v.load_url("a.org");
         assert!(draw(&mut v).texts().contains(&"alpha text"));
     }
+
+    /// F-SDK-61 (UT2): the rest of the view's promises through the core: app content, back, forward, reload, stop, find, the engine choice and
+    /// its plain failure, the size policies, a permission question answered with Allow, and the wheel and keys going to the page.
+    #[test]
+    fn history_app_content_find_engine_size_policy_and_a_permission_question_all_go_through_the_core() {
+        use iyakki_core_api::browsersession::PromptKind;
+        use iyakki_ui_sdk::browser::{Engine, SizePolicy};
+        let core = core();
+        core.browser_fake().add_page("https://a.org/cam", FakePage::new("Camera", &["a meeting"]).asking(PromptKind::Permission, "Use the camera?"));
+        let mut v = view(&core);
+        v.load_url("a.org");
+        draw(&mut v);
+        v.load_url("https://a.org/cam");
+        let l = draw(&mut v);
+        assert_eq!(v.title(), "Camera");
+        assert!(v.can_back() && !v.can_forward());
+        assert!(l.a11y().iter().any(|n| n.name == "Allow"), "the permission question has its bar");
+        let allow = l.ops.iter().find_map(|o| if let iyakki_ui_sdk::list::Op::Hit(_, h) = o { (h.name == "Allow").then_some(h.action) } else { None }).unwrap();
+        v.event(&UiEvent::Action(allow));
+        assert_eq!(core.browser_fake().answers(), vec![("Use the camera?".to_string(), true)]);
+        v.back();
+        assert_eq!((v.title(), v.can_forward()), ("Alpha", true));
+        v.forward();
+        assert_eq!(v.title(), "Camera");
+        v.reload();
+        v.stop();
+        let calls = core.browser_fake().calls();
+        assert!(["reload", "stop"].iter().all(|w| calls.iter().any(|c| c == w)), "{calls:?}");
+        // content the app brings is shown under its own base and is never fetched
+        v.load_html("https://app.local/help", "made by the app");
+        assert!(draw(&mut v).texts().iter().any(|t| t.contains("made by the app")));
+        assert_eq!(v.url(), "https://app.local/help");
+        // find in page
+        v.load_url("a.org");
+        draw(&mut v);
+        let f = v.find("text", true);
+        assert_eq!((f.matches, f.current), (1, 1));
+        assert!(v.take_events().iter().any(|e| matches!(e, BrowserEvent::Find(f) if f.matches == 1)));
+        // the wheel and the keys go to the page only while the view is focused
+        v.set_focused(false);
+        assert!(!v.event(&UiEvent::Wheel(-1)));
+        v.set_focused(true);
+        assert!(v.event(&UiEvent::Wheel(-1)));
+        // the engine choice: the full engine that is not installed is said in plain words; auto falls back to the in-house one
+        let mut full = BrowserView::new(Box::new(CoreBrowserPort::new(core.clone(), "alice", "sample")), 7_000).with_engine(Engine::Full);
+        full.load_url("a.org");
+        let l = draw(&mut full);
+        assert!(l.texts().iter().any(|t| t.contains("not available") && t.contains("not installed")), "{:?}", l.texts());
+        let mut auto = BrowserView::new(Box::new(CoreBrowserPort::new(core.clone(), "alice", "sample")), 8_000).with_engine(Engine::Auto);
+        auto.load_url("a.org");
+        draw(&mut auto);
+        assert_eq!(auto.engine_used(), Some(Engine::InHouse));
+        // the size policies: the page is drawn inside the part of the rectangle the policy takes
+        let mut fixed = BrowserView::new(Box::new(CoreBrowserPort::new(core.clone(), "alice", "sample")), 9_000).with_size_policy(SizePolicy::Fixed(200.0, 100.0));
+        fixed.load_url("a.org");
+        let l = draw(&mut fixed);
+        let link = l.ops.iter().find_map(|o| if let iyakki_ui_sdk::list::Op::Hit(r, h) = o { (h.name == "Zip").then_some(*r) } else { None }).unwrap();
+        assert!(link.right() <= 210.0 && link.bottom() <= 110.0, "inside the fixed 200 by 100 at the area's corner: {link:?}");
+        let sp = core.browser_fake().opened_specs().last().cloned().unwrap();
+        assert_eq!((sp.width, sp.height), (200.0, 100.0), "the core was told the size the view uses");
+        v.close();
+        full.close();
+        auto.close();
+        fixed.close();
+        assert_eq!(core.browser_fake().open_sessions(), 0);
+    }
 }

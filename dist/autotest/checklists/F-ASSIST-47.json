@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-47",
+  "feature_sha": "891b4f68fe79fb32",
+  "title": "assistant history and workspaces",
+  "clauses": [
+    {
+      "id": "forget-chat",
+      "text": "Forgetting a chat needs the same key twice and touches only that chat",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Settings, Assistant: forget one chat (press the forget key twice).",
+          "expect": "Only that chat is forgotten and the other chats are unchanged."
+        }
+      ]
+    }
+  ]
+}

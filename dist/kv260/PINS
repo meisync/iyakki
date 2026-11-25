@@ -1,0 +1,8 @@
+# What the KV260 image is built from (docs/development/KV260-PLAN.md). Fetched at build time from the vendor; nothing here is shipped.
+# linux-xlnx (GPL-2.0 WITH Linux-syscall-note)  https://github.com/Xilinx/linux-xlnx
+#   tag xlnx_rebase_v6.12_LTS_2025.2 -> commit 31626ef92ff11f9d3dee01926720572666fcc65a (peeled tag, read with git ls-remote 2026-11-21; Makefile says 6.12.40)
+LINUX_XLNX_TAG=xlnx_rebase_v6.12_LTS_2025.2
+LINUX_XLNX_COMMIT=31626ef92ff11f9d3dee01926720572666fcc65a
+# The board's own boot firmware (U-Boot, Arm Trusted Firmware, PMU firmware, in the SOM's QSPI flash) is NOT built, shipped or written by IYAKKI.
+# Reference only: upstream U-Boot's board/xilinx/zynqmp/zynqmp_kria.env (the boot order below was read there on 2026-11-21).
+UBOOT_KRIA_ENV=https://github.com/u-boot/u-boot/blob/master/board/xilinx/zynqmp/zynqmp_kria.env

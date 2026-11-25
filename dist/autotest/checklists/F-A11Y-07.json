@@ -1,0 +1,34 @@
+{
+ "schema": 1,
+ "row": "F-A11Y-07",
+ "feature_sha": "00d9380fe603e357",
+ "title": "braille display shows what the reader speaks",
+ "clauses": [
+  {
+   "id": "braille-line",
+   "text": "the words the reader speaks appear on a connected USB HID braille display, and the line pans and routes back to the text",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Connect a USB HID braille display that follows the USB HID braille standard, turn the screen reader on, and move the focus across a few words.",
+     "expect": "The words the reader speaks appear in the braille cells; a line longer than the display pans with the display's keys, and a routing key on a cell moves to the character it came from."
+    }
+   ]
+  },
+  {
+   "id": "contracted",
+   "text": "the Accessibility switch for contracted braille (key G) changes the line shown on the display",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Accessibility, press G to turn contracted braille on, then read the same words on the display. Turn it off again.",
+     "expect": "The shell rewrites the line on the display at once: short words such as 'the' and 'and' take one cell when the switch is on."
+    }
+   ]
+  }
+ ]
+}

@@ -15,6 +15,7 @@ use iyakki_agent_api::{RouterPanel as RouterHandle};
 use serde_json::{json, Value};
 
 use super::*;
+use super::apps_port::RouterPort;
 
 /// What a confirmed card does.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +30,7 @@ pub(super) enum RouterAct {
 
 #[derive(Default)]
 pub(super) struct RouterPanel {
-    /// A seam for tests: the backend (the real one is made from the services and `cx.os.router()`).
+    /// A seam for tests: the backend (the real one is made by the port from the services and the core's router).
     pub(super) be: Option<Arc<dyn RouterHandle>>,
     /// A script being looked at before it is added: (name, text), and the line it is scrolled to.
     pub(super) review: Option<(String, String)>,
@@ -79,27 +80,26 @@ impl SettingsApp {
         self
     }
 
-    pub(super) fn router_be(&self, cx: &AppCx) -> Arc<dyn RouterHandle> {
+    pub(super) fn router_be(&self, p: &dyn RouterPort) -> Arc<dyn RouterHandle> {
         if let Some(b) = &self.router.be {
             return b.clone();
         }
-        let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-        cx.services.router_panel(&cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d)), cx.os.router())
+        p.router_panel()
     }
 
-    pub(super) fn router_models(&self, cx: &AppCx) -> Vec<Profile> {
-        self.router_be(cx).profiles()
+    pub(super) fn router_models(&self, p: &dyn RouterPort) -> Vec<Profile> {
+        self.router_be(p).profiles()
     }
 
-    pub(super) fn router_len(&self, cx: &AppCx) -> usize {
-        self.router_models(cx).len()
+    pub(super) fn router_len(&self, p: &dyn RouterPort) -> usize {
+        self.router_models(p).len()
     }
 
     fn router_ask(&mut self, args: Value, text: String) {
         self.modal = Some(Modal::Confirm(ConfirmKind::Router(RouterAct::Set(args.to_string())), text));
     }
 
-    pub(super) fn handle_router(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_router(&mut self, k: &Key, p: &dyn RouterPort) {
         if let Some((name, src)) = self.router.review.clone() {
             let last = src.lines().count().saturating_sub(1);
             match k {
@@ -119,16 +119,16 @@ impl SettingsApp {
             return;
         }
         if matches!(k, Key::Char('k')) {
-            let be = self.router_be(cx);
+            let be = self.router_be(p);
             return match be.cancel() {
                 Ok(m) => self.ok(m),
                 Err(e) => self.fail(e),
             };
         }
-        if !self.admin(cx) {
+        if !self.admin(p) {
             return;
         }
-        let be = self.router_be(cx);
+        let be = self.router_be(p);
         let cfg = be.config();
         let models = be.profiles();
         let len = models.len();
@@ -195,19 +195,19 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn router_pick(&mut self, cx: &AppCx, kind: PickKind, item: &str) {
-        let _ = cx;
+    pub(super) fn router_pick(&mut self, p: &dyn RouterPort, kind: PickKind, item: &str) {
+        let _ = p;
         match kind {
             PickKind::RouterStrategy => self.modal = Some(Modal::Confirm(ConfirmKind::Router(RouterAct::Strategy(item.to_string())), format!("Use the strategy {item} to decide which model takes each step?"))),
             _ => self.modal = Some(Modal::Confirm(ConfirmKind::Router(RouterAct::Remove(item.to_string())), format!("Remove the strategy script {item}?"))),
         }
     }
 
-    pub(super) fn router_confirm(&mut self, cx: &AppCx, act: RouterAct) {
-        if !self.admin(cx) {
+    pub(super) fn router_confirm(&mut self, p: &dyn RouterPort, act: RouterAct) {
+        if !self.admin(p) {
             return;
         }
-        let t = self.router_be(cx);
+        let t = self.router_be(p);
         let r = match act {
             RouterAct::Set(args) => serde_json::from_str::<Value>(&args).map_err(|e| e.to_string()).and_then(|a| t.set(&a)),
             RouterAct::Strategy(n) => t.strategy_set(&json!({"name": n})),
@@ -220,12 +220,12 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn router_budget_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
+    pub(super) fn router_budget_submit(&mut self, p: &dyn RouterPort, form: &Form) -> Result<String, String> {
         let num = |i: usize, what: &str| form.value(i).trim().parse::<u64>().map_err(|_| format!("{what}: a whole number"));
         let b = Budget { max_tokens: num(0, "Tokens")?, max_calls: u32::try_from(num(1, "Model calls")?).map_err(|_| "Model calls: too large")?, max_attempts: u32::try_from(num(2, "Tries per step")?).map_err(|_| "Tries per step: too large")?, max_escalations: u32::try_from(num(3, "Rounds with the planner")?).map_err(|_| "Rounds: too large")? };
         b.validate()?;
         let args = json!({"max_tokens": b.max_tokens, "max_calls": b.max_calls, "max_attempts": b.max_attempts, "max_escalations": b.max_escalations});
-        let cfg = self.router_be(cx).config();
+        let cfg = self.router_be(p).config();
         if cfg.budget == b {
             return Err("Nothing changed.".into());
         }
@@ -234,15 +234,15 @@ impl SettingsApp {
     }
 
     /// The script file named in the form is read from the person's home folder and shown in full before anything is kept.
-    pub(super) fn router_script_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
+    pub(super) fn router_script_submit(&mut self, p: &dyn RouterPort, form: &Form) -> Result<String, String> {
         let name = form.value(0).trim().to_string();
-        if !cx.agent.router_js_valid_name(&name) {
+        if !p.router_js_valid_name(&name) {
             return Err("A name is lowercase letters, digits, - and _, starting with a letter, at most 32, and not `default`.".into());
         }
         let rel = form.value(1).trim().to_string();
-        let home = cx.core.file_scope().home_root_for_writes(&cx.session.user, cx.data_dir());
-        let p = std::path::Path::new(&rel);
-        let full = if p.is_absolute() { p.to_path_buf() } else { home.join(p) };
+        let home = p.home_root_for_writes();
+        let rel_path = std::path::Path::new(&rel);
+        let full = if rel_path.is_absolute() { rel_path.to_path_buf() } else { home.join(rel_path) };
         if full.components().any(|c| matches!(c, std::path::Component::ParentDir)) || !full.starts_with(&home) {
             return Err("The file must be inside your own folder.".into());
         }
@@ -264,7 +264,7 @@ impl SettingsApp {
         vec![("Router on/off", acc, 'o'), ("Role", mu, 'r'), ("Cost", mu, 'c'), ("Where it runs", mu, 'z'), ("Use model on/off", mu, 'e'), ("Reset model", mu, 'u'), ("Farthest place", mu, 'm'), ("Budget", acc, 'b'), ("Strategy", acc, 's'), ("Add script", mu, 'a'), ("Remove script", ERR, 'x'), ("Cancel run", ERR, 'k')]
     }
 
-    pub(super) fn render_router(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+    pub(super) fn render_router(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn RouterPort) {
         let mut y = a.y;
         if let Some((name, src)) = self.router.review.clone() {
             let head = format!("The script {name} ({} bytes). It runs in a sandbox with no file, network or program access, and decides which model sees each step of your work.", src.len());
@@ -283,7 +283,7 @@ impl SettingsApp {
             }
             return;
         }
-        let be = self.router_be(cx);
+        let be = self.router_be(p);
         let c = be.config();
         let intro = "Experimental. A bigger model plans a goal into small steps, lighter models do them, and a stuck one asks the bigger one. Runs start in the chat (router_run), where the plan is shown on the card; this page sets the rules.";
         for w in g.wrap(13.0 * s, intro, Face::Sans, a.w) {

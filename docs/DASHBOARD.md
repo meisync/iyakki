@@ -5,7 +5,7 @@ ClickHouse, DuckDB, Neo4j and the k3s cluster of this machine today, more later.
 read-only.
 
 ```
- screen (apps/dash.rs, dash_charts.rs, dash_query.rs)     assistant tools (agent/dash/tools.rs)
+ screen (apps/dash.rs, iyakki-tile-dash charts/query)     assistant tools (agent/dash/tools.rs)
         |  worker threads, poll                                  |  same Env, same connectors
         v                                                        v
    iyakki_agent::dash   Env { user, policy, vault, runner, transport }
@@ -367,7 +367,7 @@ own key, apart from the ordinary chat.
 `crates/iyakki-agent/src/dash/`: `connector.rs` (seam, errors, HTTP), `frame.rs`, `readonly.rs`, `prom.rs`, `es.rs`,
 `clickhouse.rs`, `duckdb.rs`, `neo4j.rs`, `s3.rs`, `kube.rs` (the local cluster, with `kube_fixtures/` and `kube_tests.rs`), `seed.rs` (default dashboards, once per administrator), `share.rs` (sharing, view only, with `share_tests.rs`), `registry.rs`, `model.rs`, `engine.rs`, `multi.rs` (queries in parallel, the shared cache, partial results), `expr.rs` (the expression stage), `templates.rs`, `store.rs`, `session.rs` (the open
 dashboard, undo, the context), `explain.rs`, `tools.rs`. `crates/iyakki-apps/src/apps/`: `dash.rs` (the app),
-`dash_charts.rs` (renderers and the maths under them), `dash_query.rs` (query box), `dash_tests.rs`.
+`crates/iyakki-tile-dash/src/charts.rs` (renderers and the maths under them), `query.rs` (query box), `repair.rs` (banner of an unreachable source), `dash_tests.rs`.
 
 ## Not done
 

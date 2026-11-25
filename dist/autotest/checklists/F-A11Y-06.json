@@ -1,0 +1,38 @@
+{
+ "schema": 1,
+ "row": "F-A11Y-06",
+ "feature_sha": "c560959a57b59000",
+ "title": "screen reader sees web page and tile elements",
+ "clauses": [
+  {
+   "id": "page-tree",
+   "text": "with the screen reader on, the headings, links, buttons, fields and pictures of a Browser page are read in reading order",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Turn the screen reader on as in F-A11Y-02, open the Browser tile on a page with headings, links and a picture, then move through the page with Tab.",
+     "expect": "Each heading, link and picture is read with its name, role and state, in the order of the page."
+    },
+    {
+     "do": "Press Enter on a link the reader has named.",
+     "expect": "The link is followed; the page changes to the target."
+    }
+   ]
+  },
+  {
+   "id": "tile-review",
+   "text": "in a WASM tile the Ctrl+B key shows the Screen reader review with the counts of unnamed parts",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Open a WASM tile, press Ctrl+B, and read the review screen.",
+     "expect": "The screen says 'Screen reader review' and shows how many clickable parts have no name and the counts, with the verdict on the picture it shows now."
+    }
+   ]
+  }
+ ]
+}

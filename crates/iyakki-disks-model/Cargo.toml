@@ -1,0 +1,11 @@
+[package]
+name = "iyakki-disks-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The drive model and the drive engine's handle (disks, partitions, file systems, who is asking, plans, the DiskEngine trait): plain data and logic with no I/O. Split out of iyakki-core-api so the DISKS tile crate does not pull in the core API; iyakki-core-api::diskmodel re-exports every item under the old path."
+
+[dependencies]
+iyakki-sec = { workspace = true }
+iyakki-diskcrypt = { workspace = true }
+iyakki-storage = { workspace = true }

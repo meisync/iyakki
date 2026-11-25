@@ -208,3 +208,88 @@ fn a_finished_job_has_the_done_sound_and_not_the_notification_chime_as_well() {
     std::thread::sleep(Duration::from_millis(150));
     assert_eq!(out.played.lock().unwrap().len(), 2, "one sound for the batch");
 }
+
+/// A hook of this test only (a process-wide registry is shared by every shell test, so the probe has a name of its own).
+fn probe(name: &'static str, kind: iyakki_shared::sessionend::Kind) -> Arc<std::sync::atomic::AtomicUsize> {
+    let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let n2 = n.clone();
+    iyakki_shared::sessionend::global().register(name, kind, move |c| {
+        if c.user == "root" {
+            n2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return true;
+        }
+        false
+    });
+    n
+}
+
+#[test]
+fn a_sign_out_ends_the_session_sources_before_the_screen_changes_and_the_logout_cue_still_plays() {
+    use std::sync::atomic::Ordering;
+    let quick = fake::reset(100);
+    let mut sh = signed_in("end-order");
+    quick.played.lock().unwrap().clear();
+    let sound = probe("test-probe-order-sound", iyakki_shared::sessionend::Kind::Sound);
+    let cap = probe("test-probe-order-capture", iyakki_shared::sessionend::Kind::Capture);
+    key(&mut sh, Key::Esc);
+    assert_eq!(sh.screen_name(), "login");
+    assert!(sound.load(Ordering::SeqCst) >= 1 && cap.load(Ordering::SeqCst) >= 1, "both kinds ended");
+    assert!(quick.played.lock().unwrap().contains(&wav_len(Cue::Logout)), "the logout cue still played");
+    let audit = std::fs::read_to_string(sh.env.audit.path_buf()).unwrap_or_default();
+    let at = |needle: &str| audit.lines().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("{needle} not in {audit}"));
+    assert!(at("\"session.end\",\"detail\":\"test-probe-order-sound\"") < at("\"event\":\"logout\""), "the sources stop before the session is closed");
+    assert!(at("\"session.end.count\",\"detail\":\"sign-out") < at("\"event\":\"logout\""));
+    iyakki_shared::sessionend::global().unregister("test-probe-order-sound");
+    iyakki_shared::sessionend::global().unregister("test-probe-order-capture");
+}
+
+#[test]
+fn a_lock_ends_capture_only_and_a_change_of_sound_owner_ends_the_previous_persons_sound_only() {
+    use iyakki_shared::sessionend::Why;
+    use std::sync::atomic::Ordering;
+    let mut sh = signed_in("end-lock");
+    let sound = probe("test-probe-lock-sound", iyakki_shared::sessionend::Kind::Sound);
+    let cap = probe("test-probe-lock-capture", iyakki_shared::sessionend::Kind::Capture);
+    let (s0, c0) = (sound.load(Ordering::SeqCst), cap.load(Ordering::SeqCst));
+    assert!(sh.lock_screen("test"));
+    assert_eq!(sound.load(Ordering::SeqCst), s0, "playback goes on behind a lock");
+    assert!(cap.load(Ordering::SeqCst) > c0, "capture stops with the lock");
+    let c1 = cap.load(Ordering::SeqCst);
+    sh.end_session("root", Why::SoundSwitch, true);
+    assert!(sound.load(Ordering::SeqCst) > s0, "the previous owner's sound ends when the sound changes hands");
+    assert_eq!(cap.load(Ordering::SeqCst), c1, "a switch of the sound does not touch capture");
+    iyakki_shared::sessionend::global().unregister("test-probe-lock-sound");
+    iyakki_shared::sessionend::global().unregister("test-probe-lock-capture");
+}
+
+/// A probe that remembers why it was run (other tests sign out as the same person at the same time, so a test looks at the reasons seen).
+fn why_probe(name: &'static str, kind: iyakki_shared::sessionend::Kind) -> Arc<Mutex<Vec<iyakki_shared::sessionend::Why>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let s2 = seen.clone();
+    iyakki_shared::sessionend::global().register(name, kind, move |c| {
+        s2.lock().unwrap().push(c.why);
+        false
+    });
+    seen
+}
+
+#[test]
+fn before_the_machine_sleeps_capture_and_sound_stop_and_a_process_goes_on() {
+    use iyakki_shared::sessionend::{Kind, Why};
+    let mut sh = signed_in("end-sleep");
+    let sound = why_probe("test-probe-sleep-sound", Kind::Sound);
+    let cap = why_probe("test-probe-sleep-capture", Kind::Capture);
+    let proc = why_probe("test-probe-sleep-process", Kind::Process);
+    sh.sleep_now("root", "test");
+    let (s, c, p) = (sound.lock().unwrap().clone(), cap.lock().unwrap().clone(), proc.lock().unwrap().clone());
+    assert!(s.contains(&Why::Suspend), "the sound stops before the machine sleeps: {s:?}");
+    assert!(!s.contains(&Why::Lock), "a lock alone keeps the sound: {s:?}");
+    let (lock_at, suspend_at) = (c.iter().position(|w| *w == Why::Lock), c.iter().position(|w| *w == Why::Suspend));
+    assert!(lock_at.is_some() && suspend_at.is_some() && lock_at < suspend_at, "capture stops at the lock and again at the suspend: {c:?}");
+    assert!(!p.iter().any(|w| matches!(w, Why::Lock | Why::Suspend)), "terminals, forwards and jobs go on through a sleep: {p:?}");
+    let audit = std::fs::read_to_string(sh.env.audit.path_buf()).unwrap_or_default();
+    assert!(audit.contains("\"event\":\"session.end.count\",\"detail\":\"suspend "), "the suspend is audited with its count");
+    for n in ["test-probe-sleep-sound", "test-probe-sleep-capture", "test-probe-sleep-process"] {
+        iyakki_shared::sessionend::global().unregister(n);
+    }
+}

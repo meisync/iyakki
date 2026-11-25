@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-46",
+  "feature_sha": "0e4edcbc9481ec95",
+  "title": "stall limits per provider and token rate",
+  "clauses": [
+    {
+      "id": "stall-page",
+      "text": "Settings, Assistant shows Stall limits",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Settings, Assistant: find Stall limits and change a think limit by one step.",
+          "expect": "The row shows the new value in steps of 30 seconds."
+        }
+      ]
+    }
+  ]
+}

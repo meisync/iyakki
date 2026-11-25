@@ -183,7 +183,7 @@ impl FlowWatch {
     }
 }
 
-pub use iyakki_core_local::appevent_facts::link_state;
+pub use iyakki_core_local::appevent_facts::{link_state, link_state_routed};
 
 #[derive(Default)]
 pub struct LinkWatch {
@@ -902,7 +902,7 @@ pub fn real_inputs(services: &Arc<crate::services::Services>) -> Inputs {
             let env = crate::flows::FlowEnv::existing(&svc, user)?;
             Some(env.engine.summaries().into_iter().map(|s| (s.id, s.flow_name, s.status.is_terminal(), s.status == iyakki_flow::model::RunStatus::Succeeded)).collect())
         }),
-        link: Box::new(|| link_state(&crate::browserdev::sys_root())),
+        link: Box::new(|| link_state_routed(&crate::browserdev::sys_root(), &iyakki_core_local::net::ipv4_routes_text())),
         prefs: Box::new(move |user| {
             let who: String = user.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
             (std::fs::read_to_string(dir.join(format!("ui-{who}.json"))).unwrap_or_default(), std::fs::read_to_string(dir.join(format!("access-{who}.json"))).unwrap_or_default())

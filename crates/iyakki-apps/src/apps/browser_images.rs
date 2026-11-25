@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use iyakki_web::image::{self, Kind};
 use iyakki_web::{CookieStore, Fetch, Jar, Request, Url};
+use iyakki_chatview::pixmap::{bitmap_pixmap, shrink};
+pub use iyakki_chatview::pixmap::to_pixmap;
 use tiny_skia::Pixmap;
 
 /// What the browser knows about one picture.
@@ -29,7 +31,6 @@ impl ImgState {
 }
 
 /// Pictures larger than this are shrunk when they arrive.
-const MAX_SIDE: u32 = 2048;
 /// At most this many pictures per page, and this many bytes in all.
 pub const MAX_IMAGES: usize = 60;
 const MAX_BYTES: usize = 14 << 20;
@@ -88,19 +89,6 @@ impl Pic {
     }
 }
 
-/// Straight RGBA to the premultiplied pixmap the renderer wants.
-pub(crate) fn bitmap_pixmap(w: u32, h: u32, rgba: &[u8]) -> Result<Pixmap, String> {
-    let mut pm = Pixmap::new(w, h).ok_or("the picture has no size")?;
-    for (dst, src) in pm.data_mut().chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
-        let a = src[3] as u32;
-        dst[0] = (src[0] as u32 * a / 255) as u8;
-        dst[1] = (src[1] as u32 * a / 255) as u8;
-        dst[2] = (src[2] as u32 * a / 255) as u8;
-        dst[3] = src[3];
-    }
-    Ok(pm)
-}
-
 /// Decode a picture file; a GIF or WebP with several frames becomes an animation. `content_type` is the server's word, used only
 /// when the bytes alone do not say what the file is (an SVG that starts with a long comment, say).
 pub fn to_pic(bytes: &[u8], content_type: &str) -> Result<Pic, String> {
@@ -134,49 +122,6 @@ pub fn to_pic(bytes: &[u8], content_type: &str) -> Result<Pic, String> {
     to_pixmap(bytes).map(|p| Pic::Still(Arc::new(p)))
 }
 
-/// Decode a picture file into a pixmap (premultiplied, as the renderer wants it).
-pub fn to_pixmap(bytes: &[u8]) -> Result<Pixmap, String> {
-    let pm = match image::sniff(bytes) {
-        Kind::Png => Pixmap::decode_png(bytes).map_err(|e| format!("the PNG could not be read ({e})"))?,
-        Kind::Jpeg | Kind::Gif | Kind::Webp | Kind::Svg => {
-            let b = image::decode(bytes)?;
-            bitmap_pixmap(b.width, b.height, &b.rgba)?
-        }
-        _ => return image::decode(bytes).map(|_| unreachable!()),
-    };
-    Ok(shrink(pm))
-}
-
-/// Average blocks of pixels so that neither side is over [`MAX_SIDE`].
-fn shrink(pm: Pixmap) -> Pixmap {
-    let (w, h) = (pm.width(), pm.height());
-    let f = w.max(h).div_ceil(MAX_SIDE);
-    if f <= 1 {
-        return pm;
-    }
-    let (nw, nh) = ((w / f).max(1), (h / f).max(1));
-    let Some(mut out) = Pixmap::new(nw, nh) else { return pm };
-    let src = pm.data();
-    for y in 0..nh {
-        for x in 0..nw {
-            let mut acc = [0u32; 4];
-            for dy in 0..f {
-                for dx in 0..f {
-                    let (sx, sy) = ((x * f + dx).min(w - 1), (y * f + dy).min(h - 1));
-                    let o = ((sy * w + sx) * 4) as usize;
-                    for c in 0..4 {
-                        acc[c] += src[o + c] as u32;
-                    }
-                }
-            }
-            let o = ((y * nw + x) * 4) as usize;
-            for c in 0..4 {
-                out.data_mut()[o + c] = (acc[c] / (f * f)) as u8;
-            }
-        }
-    }
-    out
-}
 
 // ------------------------------------------------------------------------------------------------ the decoded-picture cache (F-BROX-13)
 
@@ -350,6 +295,7 @@ pub(crate) fn test_gif_loops(colors: &[[u8; 3]], delay_cs: u16, loops: Option<u1
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iyakki_chatview::pixmap::MAX_SIDE;
     use iyakki_web::Response;
     use std::collections::HashMap;
 

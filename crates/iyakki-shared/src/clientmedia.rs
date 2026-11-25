@@ -108,6 +108,14 @@ impl AudioRoutes {
         self.routes.lock().unwrap_or_else(|e| e.into_inner()).remove(&session).is_some()
     }
 
+    /// A person's sessions end (sign-out, or the sound changes owner): every route they have goes; returns how many.
+    pub fn close_person(&self, person: &str) -> usize {
+        let mut r = self.routes.lock().unwrap_or_else(|e| e.into_inner());
+        let n = r.len();
+        r.retain(|_, x| x.person != person);
+        n - r.len()
+    }
+
     pub fn side_of(&self, session: u64) -> Option<Side> {
         self.routes.lock().unwrap_or_else(|e| e.into_inner()).get(&session).map(|r| r.side)
     }

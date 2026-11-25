@@ -47,3 +47,30 @@ impl Fleet for NoFleet {
     }
     fn record(&self, _: &str, _: &str) {}
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SENTENCE: &str = "this machine has no pair group";
+
+    #[test]
+    fn a_machine_without_a_fleet_refuses_every_permission_with_the_same_sentence() {
+        let f: &dyn Fleet = &NoFleet;
+        for r in [f.read("groups"), f.join("join a group"), f.manage("create a group"), f.assign("send work"), f.receive("accept work")] {
+            assert_eq!(r, Err(SENTENCE.to_string()));
+        }
+    }
+
+    #[test]
+    fn the_refusal_does_not_depend_on_the_label_given_even_when_it_is_empty() {
+        assert_eq!(NoFleet.read("").unwrap_err(), SENTENCE);
+        assert_eq!(NoFleet.join("a much longer label that the refusal ignores").unwrap_err(), SENTENCE);
+    }
+
+    #[test]
+    fn recording_a_channel_step_on_a_machine_without_a_fleet_is_a_quiet_no_op() {
+        NoFleet.record("fleet.heartbeat", "id=1 members=0");
+        NoFleet.record("", "");
+    }
+}

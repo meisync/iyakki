@@ -1,0 +1,19 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 50c5bbaa921b9f01; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-HOTSPOT-14
+targets: qemu
+profile: ram
+feature-sha: 50c5bbaa921b9f01
+doc: Settings, Network, Share internet says who may start wired and USB sharing (read only)
+clause: 1 Settings, Network, key i shows the sharing policy line Who may start wired and USB sharing
+not-covered: the policy per kind for Wi-Fi and Bluetooth
+not-covered: changing it with p and who may change it
+not-covered: what a user who is not allowed sees when starting
+key s
+wait app=Settings
+skip-unless-button Network
+click-sidebar Network
+wait app=Settings page="Network"
+key i
+shot page
+expect-not-blank
+expect-text Who may start wired

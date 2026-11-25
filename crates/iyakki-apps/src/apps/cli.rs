@@ -8,6 +8,7 @@ use iyakki_agent_api::{Terminal};
 use iyakki_shared::clis::{self, CATALOG};
 
 use super::widgets::render_confirm;
+use super::cli_port::{CliPort, CxPort};
 use super::{blink, App, AppCx, Flow, ScrollLog};
 use crate::gfx::{rgb, Face, Gfx, Icon};
 use crate::ui::{Event, Key, TextField, DIM, ERR, MUTED, OK, R, TEXT};
@@ -77,18 +78,23 @@ pub struct CliApp {
 
 impl CliApp {
     pub fn new(cx: &AppCx) -> CliApp {
-        let cli = cx.services.terminal(&cx.session.user, cx.session.policy.clone(), cx.host.clone());
+        CliApp::with_port(&CxPort(cx))
+    }
+
+    /// The tile over any port (a fake in tests).
+    pub fn with_port(port: &dyn CliPort) -> CliApp {
+        let cli = port.open_terminal();
         let mut log = ScrollLog::default();
-        log.push(format!("IYAKKI terminal — {} ({}). Type `help`, or press F1 for the main commands.", cx.session.user, cx.session.role.name()), MUTED);
+        log.push(format!("IYAKKI terminal — {} ({}). Type `help`, or press F1 for the main commands.", port.user(), port.role_name()), MUTED);
         CliApp { tab: Tab::Terminal, sel: 0, list_top: 0, list_hover: false, mode: Mode::Browse, plan: None, status: None, cli, log, input: TextField::new("", false), history: vec![], hist_pos: None, conns: conn::Conns::new(), dl_auto: false, sess: None, sess_dirty: false }
     }
 
     /// Open the session `ssh` connection `c` asks for (Linux and macOS: a pseudo-terminal).
     #[cfg(unix)]
-    fn start_session(&mut self, c: &iyakki_shared::ssh::Connection, cx: &AppCx) -> Result<(), String> {
-        let env = cx.services.ssh_host(&cx.session.user);
+    fn start_session(&mut self, c: &iyakki_shared::ssh::Connection, port: &dyn CliPort) -> Result<(), String> {
+        let env = port.ssh();
         let args = c.login_args();
-        cx.audit.record(&cx.session.user, "ssh.login", &c.name);
+        port.audit("ssh.login", &c.name);
         let cwd = std::env::temp_dir();
         let (cols, rows) = (100, 30);
         let (link, keep) = env.interactive(&args, &cwd, cols, rows)?;
@@ -99,7 +105,7 @@ impl CliApp {
     }
 
     #[cfg(not(unix))]
-    fn start_session(&mut self, _c: &iyakki_shared::ssh::Connection, _cx: &AppCx) -> Result<(), String> {
+    fn start_session(&mut self, _c: &iyakki_shared::ssh::Connection, _port: &dyn CliPort) -> Result<(), String> {
         Err("A login with a terminal needs Linux or macOS (IYAKKI's own images have it); Connect still runs a command here.".into())
     }
 
@@ -127,19 +133,15 @@ impl CliApp {
         }
     }
 
-    fn can_manage(cx: &AppCx) -> bool {
-        cx.session.policy.manage_settings && cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full
-    }
-
-    fn handle_clis(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+    fn handle_clis(&mut self, ev: &Event, port: &dyn CliPort) -> Flow {
         match &self.mode {
             Mode::ConfirmInstall(id) => {
                 let id = *id;
                 if matches!(ev, Event::Key(Key::Char('y')) | Event::Key(Key::Enter)) {
                     self.mode = Mode::Browse;
-                    match cx.clis().install(id, &cx.session.user) {
+                    match port.tool_install(id) {
                         Ok(()) => {
-                            cx.audit.record(&cx.session.user, "cli.install", id);
+                            port.audit("cli.install", id);
                             self.status = Some((format!("Installing {id}…"), true));
                         }
                         Err(e) => self.status = Some((e, false)),
@@ -153,9 +155,9 @@ impl CliApp {
                 let id = *id;
                 if matches!(ev, Event::Key(Key::Char('y')) | Event::Key(Key::Enter)) {
                     self.mode = Mode::Browse;
-                    match cx.clis().remove(id) {
+                    match port.tool_remove(id) {
                         Ok(()) => {
-                            cx.audit.record(&cx.session.user, "cli.remove", id);
+                            port.audit("cli.remove", id);
                             self.status = Some((format!("Removed {id}."), true));
                         }
                         Err(e) => self.status = Some((e, false)),
@@ -169,10 +171,10 @@ impl CliApp {
                 let start = matches!(self.mode, Mode::ConfirmStart);
                 if matches!(ev, Event::Key(Key::Char('y')) | Event::Key(Key::Enter)) {
                     self.mode = Mode::Browse;
-                    let r = if start { cx.sandbox_cluster().start() } else { cx.sandbox_cluster().stop() };
+                    let r = if start { port.cluster_start() } else { port.cluster_stop() };
                     match r {
                         Ok(()) => {
-                            cx.audit.record(&cx.session.user, if start { "cluster.start" } else { "cluster.stop" }, "");
+                            port.audit(if start { "cluster.start" } else { "cluster.stop" }, "");
                             self.status = Some((if start { "Starting the container cluster…".into() } else { "The container cluster is stopped.".into() }, true));
                         }
                         Err(e) => self.status = Some((e, false)),
@@ -186,10 +188,10 @@ impl CliApp {
                 let start = matches!(self.mode, Mode::ConfirmStartOllama);
                 if matches!(ev, Event::Key(Key::Char('y')) | Event::Key(Key::Enter)) {
                     self.mode = Mode::Browse;
-                    let r = if start { cx.ollama().start() } else { cx.ollama().stop() };
+                    let r = if start { port.ollama_start() } else { port.ollama_stop() };
                     match r {
                         Ok(()) => {
-                            cx.audit.record(&cx.session.user, if start { "ollama.start" } else { "ollama.stop" }, "");
+                            port.audit(if start { "ollama.start" } else { "ollama.stop" }, "");
                             self.status = Some((if start { "Starting Ollama… (it appears in Models when it answers)".into() } else { "Ollama is stopped.".into() }, true));
                         }
                         Err(e) => self.status = Some((e, false)),
@@ -203,19 +205,19 @@ impl CliApp {
         }
         let n = CATALOG.len();
         let ask = |this: &mut Self, install: bool| {
-            if !Self::can_manage(cx) {
+            if !port.may_manage_tools() {
                 this.status = Some(("Only administrators with a full terminal can install or remove tools.".into(), false));
                 return;
             }
             let d = &CATALOG[this.sel.min(n - 1)];
             if matches!(d.source, clis::Source::System) {
-                this.status = Some((format!("{} comes with the system and is not downloaded here. {}", d.name, cx.clis().system_status(d.id).map(|s| s.how_to).unwrap_or_default()), false));
+                this.status = Some((format!("{} comes with the system and is not downloaded here. {}", d.name, port.tool_system_status(d.id).map(|s| s.how_to).unwrap_or_default()), false));
                 return;
             }
             if install {
-                this.plan = cx.clis().install_plan(d.id);
+                this.plan = port.tool_install_plan(d.id);
                 this.mode = Mode::ConfirmInstall(d.id);
-            } else if cx.clis().is_installed(d.id).is_some() {
+            } else if port.tool_installed(d.id).is_some() {
                 this.mode = Mode::ConfirmRemove(d.id);
             } else {
                 this.status = Some((format!("{} is not installed.", d.name), false));
@@ -234,7 +236,7 @@ impl CliApp {
                 let d = &CATALOG[self.sel.min(n - 1)];
                 if matches!(d.source, clis::Source::System) {
                     self.status = Some((format!("{} comes with the system and is updated by its package manager.", d.name), false));
-                } else if cx.clis().is_installed(d.id).is_none() {
+                } else if port.tool_installed(d.id).is_none() {
                     self.status = Some((format!("{} is not installed; press i to install it.", d.name), false));
                 } else {
                     ask(self, true);
@@ -242,20 +244,20 @@ impl CliApp {
             }
             // the person asks for a newer download list now (a background check; the screen keeps working)
             Event::Key(Key::Char('r')) => {
-                if !Self::can_manage(cx) {
+                if !port.may_manage_tools() {
                     self.status = Some(("Only administrators with a full terminal can check for updates.".into(), false));
                 } else {
-                    cx.agent.helpers_b6().dl_fetch_start(&cx.clis().manifest_dir(), true);
+                    port.download_list_check(true);
                 }
             }
             Event::Key(Key::Char('b')) => {
                 let d = &CATALOG[self.sel.min(n - 1)];
-                if !Self::can_manage(cx) {
+                if !port.may_manage_tools() {
                     self.status = Some(("Only administrators with a full terminal can change tools.".into(), false));
                 } else {
-                    match cx.clis().rollback(d.id) {
+                    match port.tool_rollback(d.id) {
                         Ok(m) => {
-                            cx.audit.record(&cx.session.user, "cli.rollback", d.id);
+                            port.audit("cli.rollback", d.id);
                             self.status = Some((m, true));
                         }
                         Err(e) => self.status = Some((e, false)),
@@ -265,7 +267,7 @@ impl CliApp {
             Event::Tab(11) | Event::Key(Key::Char('x')) | Event::Key(Key::Delete) => ask(self, false),
             Event::Tab(16) | Event::Key(Key::Char('g')) if Self::agent_of(CATALOG[self.sel.min(n - 1)].id).is_some() => {
                 let d = &CATALOG[self.sel.min(n - 1)];
-                if cx.clis().is_installed(d.id).is_none() {
+                if port.tool_installed(d.id).is_none() {
                     self.status = Some((format!("Install {} first.", d.name), false));
                 } else if let Some(agent) = crate::agent_login::agent_of_cli(d.id) {
                     // the shell opens the sign-in dialog (agent_login.rs): the vendor's login runs there, with its address, code and QR code
@@ -275,38 +277,38 @@ impl CliApp {
             Event::Tab(17) | Event::Key(Key::Char('c')) if Self::agent_of(CATALOG[self.sel.min(n - 1)].id).is_some() => {
                 let d = &CATALOG[self.sel.min(n - 1)];
                 let id = Self::agent_of(d.id).unwrap_or_default();
-                if cx.clis().is_installed(d.id).is_none() {
+                if port.tool_installed(d.id).is_none() {
                     self.status = Some((format!("Install {} first.", d.name), false));
-                } else if cx.agents_cfg().agent(id).is_some_and(|a| a.auth_args().is_none()) {
+                } else if port.agent_sign_in_unchecked(id) {
                     self.status = Some((format!("{} has no documented sign-in status command. Sign in with the button, then try a message in the chat.", d.name), false));
                 } else {
-                    cx.ext_status().refresh(cx.agents_cfg());
+                    port.agent_recheck();
                     self.status = Some((format!("Checking {}'s sign-in status (its own `auth status` command; no model is called)…", d.name), true));
                 }
             }
             Event::Tab(12) | Event::Key(Key::Char('s')) if CATALOG[self.sel.min(n - 1)].id == "k3s" => {
-                if !Self::can_manage(cx) {
+                if !port.may_manage_tools() {
                     self.status = Some(("Only administrators with a full terminal can start or stop the cluster.".into(), false));
                 } else {
                     self.mode = Mode::ConfirmStart;
                 }
             }
             Event::Tab(14) | Event::Key(Key::Char('s')) if CATALOG[self.sel.min(n - 1)].id == "ollama" => {
-                if !Self::can_manage(cx) {
+                if !port.may_manage_tools() {
                     self.status = Some(("Only administrators with a full terminal can start or stop Ollama.".into(), false));
                 } else {
                     self.mode = Mode::ConfirmStartOllama;
                 }
             }
             Event::Tab(15) | Event::Key(Key::Char('t')) if CATALOG[self.sel.min(n - 1)].id == "ollama" => {
-                if !Self::can_manage(cx) {
+                if !port.may_manage_tools() {
                     self.status = Some(("Only administrators with a full terminal can start or stop Ollama.".into(), false));
                 } else {
                     self.mode = Mode::ConfirmStopOllama;
                 }
             }
             Event::Tab(13) | Event::Key(Key::Char('t')) if CATALOG[self.sel.min(n - 1)].id == "k3s" => {
-                if !Self::can_manage(cx) {
+                if !port.may_manage_tools() {
                     self.status = Some(("Only administrators with a full terminal can start or stop the cluster.".into(), false));
                 } else {
                     self.mode = Mode::ConfirmStop;
@@ -325,19 +327,18 @@ impl CliApp {
 
     /// The download list line: a notice after an applied update, and the "Check for updates" control with the last result in plain words.
     /// Returns the height used.
-    fn draw_dl_check(&mut self, g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, cx: &AppCx) -> f32 {
+    fn draw_dl_check(&mut self, g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, port: &dyn CliPort) -> f32 {
         use iyakki_shared::dlmanifest_fetch as fetch;
-        let dir = cx.clis().manifest_dir();
         if !self.dl_auto {
             self.dl_auto = true;
             // never in tests: they must not reach the network
             #[cfg(not(any(test, feature = "testing")))]
-            cx.agent.helpers_b6().dl_fetch_start(&dir, false);
+            port.download_list_check(false);
         }
-        for (action, detail) in cx.agent.helpers_b6().dl_fetch_take_audit() {
-            cx.audit.record(&cx.session.user, &action, &detail);
+        for (action, detail) in port.download_list_audit() {
+            port.audit(&action, &detail);
         }
-        let st = cx.agent.helpers_b6().dl_fetch_status(&dir);
+        let st = port.download_list_status();
         let mut used = 0.0;
         if let Some(n) = &st.notice {
             let n = g.fit(13.0 * s, n, Face::Sans, w);
@@ -354,7 +355,7 @@ impl CliApp {
         used + 12.0 * s * 2.1 + 8.0 * s
     }
 
-    fn draw_clis(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx) {
+    fn draw_clis(&mut self, g: &mut Gfx, area: R, s: f32, port: &dyn CliPort) {
         let x = area.x + 24.0 * s;
         let w = area.w - 48.0 * s;
         let mut y = area.y + 4.0 * s;
@@ -363,8 +364,8 @@ impl CliApp {
             g.text(x, y, 14.0 * s, if *ok { OK } else { ERR }, &m, Face::Sans);
             y += 24.0 * s;
         }
-        y += self.draw_dl_check(g, x, y, w, s, cx);
-        let installed = cx.clis().installed();
+        y += self.draw_dl_check(g, x, y, w, s, port);
+        let installed = port.tools_installed();
         let list_w = (w * 0.34).clamp_safe(220.0 * s, 360.0 * s);
         let rh = 46.0 * s;
         let gap = 5.0 * s;
@@ -381,8 +382,8 @@ impl CliApp {
             crate::fx::row_at(g, r.x, r.y, r.w, r.h, 12.0 * s, i == self.sel, false, ACCENT);
             g.hit(r, Event::Row(i), d.name);
             let inst = installed.iter().find(|x| x.id == d.id);
-            let sys = cx.clis().system_status(d.id);
-            let job = cx.clis().job(d.id).filter(|j| !j.finished);
+            let sys = port.tool_system_status(d.id);
+            let job = port.tool_job(d.id).filter(|j| !j.finished);
             let here = inst.is_some() || sys.as_ref().is_some_and(|s| s.found);
             g.rect(r.x, r.y + 9.0 * s, 4.0 * s, r.h - 18.0 * s, if here { OK } else if job.is_some() { ACCENT } else { DIM });
             let nm = g.fit(15.0 * s, d.name, Face::Bold, r.w - 30.0 * s);
@@ -427,7 +428,7 @@ impl CliApp {
             *ty += 4.0 * s;
         };
         // a tool that comes with the system: found, never downloaded
-        if let Some(st) = cx.clis().system_status(d.id) {
+        if let Some(st) = port.tool_system_status(d.id) {
             line(g, &mut ty, "STATUS", &if st.found { format!("available: {} at {}", st.label, st.path) } else { "not found on this machine".to_string() }, if st.found { OK } else { rgb(255, 196, 94) });
             line(g, &mut ty, "COMMANDS", &if st.found { st.commands.join("   ") } else { cmds.join("   ") }, TEXT);
             line(g, &mut ty, "HOW TO GET IT", &st.how_to, TEXT);
@@ -461,7 +462,7 @@ impl CliApp {
         }
         // an external coding agent: what the AI IDE sees of it, and the vendor's sign-in
         if let Some(aid) = Self::agent_of(d.id) {
-            let (text, col) = match (inst.is_some(), cx.ext_status().get(aid)) {
+            let (text, col) = match (inst.is_some(), port.agent_status(aid)) {
                 (false, _) => ("install it first".to_string(), MUTED),
                 (true, None) => ("checking…".to_string(), MUTED),
                 (true, Some(st)) if st.ready() => (format!("{}{}", st.chip, match &st.auth { iyakki_extagentx::Auth::SignedIn(w) => format!(" ({w})"), iyakki_extagentx::Auth::Unknown => " (sign-in cannot be checked from here)".to_string(), _ => String::new() }), OK),
@@ -469,7 +470,7 @@ impl CliApp {
             };
             line(g, &mut ty, "IN THE AI IDE", &format!("{text} · listed in the chat's model list and Settings → Agents"), col);
             if inst.is_some() {
-                let (t, col) = crate::agent_login::chip(&crate::agent_login::state(cx, aid, true));
+                let (t, col) = crate::agent_login::chip(&port.agent_sign_in(aid));
                 line(g, &mut ty, "SIGNED IN", &t, col);
                 line(g, &mut ty, "SIGN IN", "the Login button runs the vendor's own sign-in and shows its address, code and a QR code to scan with a phone; your login stays in your home folder, IYAKKI never sees it", MUTED);
             }
@@ -479,8 +480,8 @@ impl CliApp {
         }
         // the container cluster, on the k3s entry
         if d.id == "k3s" {
-            let st = cx.sandbox_cluster().state();
-            let missing = cx.sandbox_cluster().requirements();
+            let st = port.cluster_state();
+            let missing = port.cluster_requirements();
             line(g, &mut ty, "CONTAINER CLUSTER", &st.label(), if st == iyakki_shared::cluster::ClusterState::Running { OK } else { TEXT });
             if !missing.is_empty() {
                 line(g, &mut ty, "CANNOT START YET", &missing.join("; "), rgb(255, 196, 94));
@@ -490,22 +491,22 @@ impl CliApp {
         // the local model server, on the Ollama entry
         if d.id == "ollama" {
             use iyakki_shared::ollama::OllamaState;
-            let st = cx.ollama().state();
+            let st = port.ollama_state();
             let (label, col) = match &st {
                 OllamaState::Stopped => ("stopped".to_string(), TEXT),
                 OllamaState::Starting => ("starting…".to_string(), TEXT),
-                OllamaState::Running { external, version } => (format!("running, version {version}{} at {}", if *external { " (started elsewhere)" } else { "" }, cx.ollama().url()), OK),
+                OllamaState::Running { external, version } => (format!("running, version {version}{} at {}", if *external { " (started elsewhere)" } else { "" }, port.ollama_url()), OK),
                 OllamaState::Stopping => ("stopping…".to_string(), TEXT),
                 OllamaState::Failed(e) => (e.clone(), ERR),
             };
             line(g, &mut ty, "LOCAL SERVER", &label, col);
             if inst.is_some() && matches!(st, OllamaState::Running { .. }) {
-                line(g, &mut ty, "MODELS", &format!("kept in {} · pull more from the chat or Settings → Models", cx.ollama().models_dir().display()), MUTED);
+                line(g, &mut ty, "MODELS", &format!("kept in {} · pull more from the chat or Settings → Models", port.ollama_models_dir().display()), MUTED);
             }
             line(g, &mut ty, "WHAT IT IS FOR", "answers the chat on this machine's own processor or graphics card; it is added to Models as ollama-local when it is ready", MUTED);
         }
         // progress
-        if let Some(j) = cx.clis().job(d.id) {
+        if let Some(j) = port.tool_job(d.id) {
             if !j.finished {
                 let bar = R::new(px + 20.0 * s, ty + 6.0 * s, pw - 40.0 * s, 14.0 * s);
                 let frac = if j.total > 0 { (j.done as f32 / j.total as f32).clamp(0.0, 1.0) } else { 0.0 };
@@ -514,14 +515,14 @@ impl CliApp {
                 g.text(px + 20.0 * s, ty + 28.0 * s, 13.0 * s, if j.error.is_some() { ERR } else { TEXT }, &t, Face::Sans);
             }
         }
-        if let Some(e) = cx.clis().job(d.id).and_then(|j| j.error) {
+        if let Some(e) = port.tool_job(d.id).and_then(|j| j.error) {
             let t = g.fit(13.0 * s, &e, Face::Sans, pw - 40.0 * s);
             g.text(px + 20.0 * s, ty + 28.0 * s, 13.0 * s, ERR, &t, Face::Sans);
         }
         // buttons
         let by = y + ph - 54.0 * s;
-        if Self::can_manage(cx) {
-            let busy = cx.clis().running();
+        if port.may_manage_tools() {
+            let busy = port.tools_busy();
             let label = if inst.is_some() { "Update (i)" } else { "Install (i)" };
             let w1 = if busy { g.button_off(px + 20.0 * s, by, 15.0 * s, label) } else { g.button(px + 20.0 * s, by, 15.0 * s, label, ACCENT, Event::Tab(10)) };
             let mut bx = px + 20.0 * s + w1 + 10.0 * s;
@@ -529,23 +530,23 @@ impl CliApp {
                 bx += g.button(bx, by, 15.0 * s, "Remove (x)", ERR, Event::Tab(11)) + 10.0 * s;
             }
             if Self::agent_of(d.id).is_some() && inst.is_some() && !busy {
-                let st = crate::agent_login::state(cx, Self::agent_of(d.id).unwrap_or_default(), true);
+                let st = port.agent_sign_in(Self::agent_of(d.id).unwrap_or_default());
                 bx += crate::agent_login::buttons(g, bx, by, 15.0 * s, Self::agent_of(d.id).unwrap_or_default(), &st);
                 bx += g.button(bx, by, 15.0 * s, "Status (c)", TEXT, Event::Tab(17)) + 10.0 * s;
             }
             if d.id == "ollama" && inst.is_some() {
                 use iyakki_shared::ollama::OllamaState;
-                if matches!(cx.ollama().state(), OllamaState::Running { .. } | OllamaState::Starting) {
+                if matches!(port.ollama_state(), OllamaState::Running { .. } | OllamaState::Starting) {
                     g.button(bx, by, 15.0 * s, "Stop Ollama (t)", ERR, Event::Tab(15));
                 } else {
                     g.button(bx, by, 15.0 * s, "Start Ollama (s)", OK, Event::Tab(14));
                 }
             }
             if d.id == "k3s" && inst.is_some() {
-                let st = cx.sandbox_cluster().state();
+                let st = port.cluster_state();
                 if matches!(st, iyakki_shared::cluster::ClusterState::Running | iyakki_shared::cluster::ClusterState::Starting) {
                     g.button(bx, by, 15.0 * s, "Stop cluster (t)", ERR, Event::Tab(13));
-                } else if cx.sandbox_cluster().requirements().is_empty() {
+                } else if port.cluster_requirements().is_empty() {
                     g.button(bx, by, 15.0 * s, "Start cluster (s)", OK, Event::Tab(12));
                 } else {
                     g.button_off(bx, by, 15.0 * s, "Start cluster (s)");
@@ -555,9 +556,9 @@ impl CliApp {
             let note = "Only administrators with a full terminal can install or remove tools.";
             g.text(px + 20.0 * s, by + 8.0 * s, 13.0 * s, DIM, note, Face::Sans);
             // signing in is personal: anyone who may run commands can do it
-            if let (Some(aid), true) = (Self::agent_of(d.id), inst.is_some() && cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full) {
+            if let (Some(aid), true) = (Self::agent_of(d.id), inst.is_some() && port.full_terminal()) {
                 let nw = g.text_width(13.0 * s, note, Face::Sans);
-                let st = crate::agent_login::state(cx, aid, true);
+                let st = port.agent_sign_in(aid);
                 crate::agent_login::buttons(g, px + 40.0 * s + nw, by, 15.0 * s, aid, &st);
             }
         }
@@ -567,7 +568,7 @@ impl CliApp {
         self.log.lines.iter().map(|(t, _)| t.as_str()).collect()
     }
 
-    fn run_line(&mut self, cx: &AppCx) -> Flow {
+    fn run_line(&mut self, port: &dyn CliPort) -> Flow {
         let line = self.input.take();
         self.hist_pos = None;
         self.log.push(format!("{}{}", self.cli.prompt(), line), OK);
@@ -578,7 +579,7 @@ impl CliApp {
         let cmd = line.split_whitespace().next().unwrap_or("");
         // ssh, scp, sftp and sshtrust can take long: they run on a thread and stream into this log
         if let Some(call) = self.cli.ssh_call(&line) {
-            cx.audit.record(&cx.session.user, "cli.exec", call.command());
+            port.audit("cli.exec", call.command());
             if !self.conns.start_call(call) {
                 self.log.push("another ssh command is still running; wait for it to finish", ERR);
             }
@@ -587,18 +588,18 @@ impl CliApp {
         let o = self.cli.exec(&line);
         // log which command ran (never its arguments, which may hold secrets) and refusals
         let denied = o.text.contains("not permitted") || o.text.contains("permission denied") || o.text.contains("disabled");
-        cx.audit.record(&cx.session.user, if denied { "cli.denied" } else { "cli.exec" }, cmd);
+        port.audit(if denied { "cli.denied" } else { "cli.exec" }, cmd);
         match o.action {
             Action::Clear => self.log.clear(),
             Action::PowerOff => {
                 self.log.push(o.text, MUTED);
-                cx.audit.record(&cx.session.user, "power.off", "");
-                cx.host.power_off();
+                port.audit("power.off", "");
+                port.power_off();
             }
             Action::Reboot => {
                 self.log.push(o.text, MUTED);
-                cx.audit.record(&cx.session.user, "power.reboot", "");
-                cx.host.reboot();
+                port.audit("power.reboot", "");
+                port.reboot();
             }
             Action::None => {
                 if !o.text.is_empty() {
@@ -608,6 +609,24 @@ impl CliApp {
         }
         Flow::Stay
     }
+
+    /// The IYAKKI menu's Linux apps page: `sandbox:<name>` opens the terminal inside that sandbox (`linux use <name>`).
+    fn open_item_with(&mut self, item: &str, port: &dyn CliPort) {
+        if let Some(name) = item.strip_prefix("sandbox:") {
+            self.tab = Tab::Terminal;
+            self.input.set(&format!("linux use {name}"));
+            let _ = self.run_line(port);
+        } else if let Some(p) = iyakki_ui_sdk::terminal::PodSession::from_item(item) {
+            // the whole-session terminal of a pod is the SDK version's (the core asks the person there); this CLI says so and shows the command
+            self.tab = Tab::Terminal;
+            let e = iyakki_core_api::terminal::PtyExec { kubeconfig: p.kubeconfig, context: p.context, namespace: p.namespace, pod: p.pod, container: p.container, shell: p.shell };
+            let said = match e.argv() {
+                Ok(a) => format!("A shell in pod {} opens in the SDK version of CLI (Settings, Appearance, SDK version). The command is: kubectl {}", e.pod, a.join(" ")),
+                Err(why) => format!("A shell in a pod was asked for but cannot be opened: {why}"),
+            };
+            self.status = Some((said, false));
+        }
+    }
 }
 
 impl App for CliApp {
@@ -616,11 +635,7 @@ impl App for CliApp {
     }
     /// The IYAKKI menu's Linux apps page: `sandbox:<name>` opens the terminal inside that sandbox (`linux use <name>`).
     fn open_item(&mut self, item: &str, cx: &AppCx) {
-        if let Some(name) = item.strip_prefix("sandbox:") {
-            self.tab = Tab::Terminal;
-            self.input.set(&format!("linux use {name}"));
-            let _ = self.run_line(cx);
-        }
+        self.open_item_with(item, &CxPort(cx));
     }
     fn icon(&self) -> Icon {
         Icon::Cli
@@ -675,13 +690,23 @@ impl App for CliApp {
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        self.handle_with(ev, &CxPort(cx))
+    }
+
+    fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+        self.render_with(g, area, s, &CxPort(cx), tick)
+    }
+}
+
+impl CliApp {
+    fn handle_with(&mut self, ev: &Event, port: &dyn CliPort) -> Flow {
         // the assistant asked (and the person approved) for a login to a saved connection: the same checks as the L key, then the session
         if matches!(ev, Event::Tick) && self.sess.is_none() {
-            if let Some(name) = cx.agent.sshsessiontools_take_login(cx.data_dir(), &cx.session.user) {
+            if let Some(name) = port.take_ssh_login() {
                 self.tab = Tab::Connections;
-                self.conns.login_by_name(cx, &name);
+                self.conns.login_by_name(port, &name);
                 if let Some(conn) = self.conns.login.take() {
-                    if let Err(e) = self.start_session(&conn, cx) {
+                    if let Err(e) = self.start_session(&conn, port) {
                         self.conns.say(&e, false);
                     }
                 }
@@ -699,7 +724,7 @@ impl App for CliApp {
                 if let Some(mut v) = self.sess.take() {
                     v.close();
                 }
-                cx.audit.record(&cx.session.user, "ssh.logout", "session closed");
+                port.audit("ssh.logout", "session closed");
             }
             self.sess_dirty = true;
             return Flow::Stay;
@@ -735,14 +760,14 @@ impl App for CliApp {
         }
         // SSH calls started from either tab go on in the background: their output reaches the terminal log
         if matches!(ev, Event::Tick) {
-            self.conns.tick(cx);
+            self.conns.tick(port);
         }
-        let flow = if self.tab == Tab::Connections { Some(self.conns.handle(ev, cx)) } else { None };
+        let flow = if self.tab == Tab::Connections { Some(self.conns.handle(ev, port)) } else { None };
         for (t, c) in self.conns.out.drain(..) {
             self.log.push(t, c);
         }
         if let Some(conn) = self.conns.login.take() {
-            if let Err(e) = self.start_session(&conn, cx) {
+            if let Err(e) = self.start_session(&conn, port) {
                 self.conns.say(&e, false);
             }
         }
@@ -750,7 +775,7 @@ impl App for CliApp {
             return f;
         }
         if self.tab == Tab::Clis {
-            return self.handle_clis(ev, cx);
+            return self.handle_clis(ev, port);
         }
         // selecting and copying the output
         if self.log.handle(ev) {
@@ -760,7 +785,7 @@ impl App for CliApp {
             Event::Tick => self.log.on_tick(),
             Event::Key(Key::Ctrl('a')) if self.input.value.is_empty() => self.log.pane.select_all(),
             Event::Key(Key::Esc) => return Flow::Back,
-            Event::Key(Key::Enter) => return self.run_line(cx),
+            Event::Key(Key::Enter) => return self.run_line(port),
             Event::Paste(t) => {
                 self.input.paste(t);
             }
@@ -794,7 +819,7 @@ impl App for CliApp {
         Flow::Stay
     }
 
-    fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+    fn render_with(&mut self, g: &mut Gfx, area: R, s: f32, port: &dyn CliPort, tick: u64) {
         if let Some(v) = self.sess.as_mut() {
             v.render(g, R::new(area.x + 16.0 * s, area.y + 4.0 * s, area.w - 32.0 * s, area.h - 12.0 * s), s, tick);
             return;
@@ -802,11 +827,11 @@ impl App for CliApp {
         let off = self.draw_tabs(g, area, s);
         let area = R::new(area.x, area.y + off, area.w, area.h - off);
         if self.tab == Tab::Connections {
-            self.conns.render(g, area, s, cx, tick);
+            self.conns.render(g, area, s, port, tick);
             return;
         }
         if self.tab == Tab::Clis {
-            self.draw_clis(g, area, s, cx);
+            self.draw_clis(g, area, s, port);
             match &self.mode {
                 Mode::ConfirmInstall(id) if self.plan.is_some() => {
                     let d = clis::def(id).expect("catalogue entry");
@@ -852,6 +877,21 @@ mod tests {
             app.handle(&Event::Key(Key::Char(c)), cx);
         }
         app.handle(&Event::Key(Key::Enter), cx);
+    }
+
+    #[test]
+    fn a_pod_item_says_where_the_whole_session_opens_and_shows_the_checked_command_and_a_bad_one_is_refused() {
+        let (cx, _d) = cx_with_backend("cli-pod", iyakki_shared::chat::Unconfigured);
+        let mut app = CliApp::new(&cx);
+        let item = iyakki_tile_k8s::forwards::pod_item("", "dev", "shop", "web-1", "");
+        app.open_item(&item, &cx);
+        let (t, ok) = app.status.clone().unwrap();
+        assert!(!ok && t.contains("SDK version") && t.contains("kubectl --context=dev exec -it --namespace=shop web-1 -- sh"), "{t}");
+        app.open_item(&iyakki_tile_k8s::forwards::pod_item("", "", "Shop", "web-1", ""), &cx);
+        assert!(app.status.clone().unwrap().0.contains("cannot be opened"));
+        app.status = None;
+        app.open_item("pod:half", &cx);
+        assert!(app.status.is_none(), "a thing that is not a pod item is not ours");
     }
 
     #[test]
@@ -1167,3 +1207,7 @@ mod term_tests;
 #[cfg(test)]
 #[path = "cli_dlcheck_tests.rs"]
 mod dlcheck_tests;
+
+#[cfg(test)]
+#[path = "cli_fake_tests.rs"]
+mod fake_tests;

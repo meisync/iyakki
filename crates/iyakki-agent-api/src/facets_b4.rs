@@ -407,13 +407,7 @@ pub trait SshTunnels: Send + Sync {
 }
 impl SshTunnels for NoB4 {}
 
-/// The running voice assistant worker, as the Voice tile drives it.
-pub trait MineWorker: Send + Sync {
-    fn send(&self, cmd: iyakki_shared::voiceassist_ports::Cmd);
-    fn status(&self) -> iyakki_shared::voiceassist::Status;
-    /// The wake phrase was heard: start listening, with what was said after it.
-    fn wake(&self, text: &str);
-}
+pub use iyakki_shared::facets::MineWorker;
 
 /// The connected cluster of a workspace, for the project tools.
 pub struct ProjectCluster {

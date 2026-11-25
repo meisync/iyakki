@@ -1,0 +1,23 @@
+{
+ "schema": 1,
+ "row": "F-BATT-04",
+ "feature_sha": "9ed8c30aaa7f173c",
+ "title": "the Battery page of Settings on a laptop shows its three switches (rea",
+ "clauses": [
+  {
+   "id": "battery-look",
+   "text": "the Battery page of Settings on a laptop shows its three switches (read only)",
+   "machines": [
+    "macbook-pro",
+    "hp"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Battery on a laptop on battery power, then plug the charger in.",
+     "expect": "The bar, the status line and the time change with the charger, and the percentage switch adds or removes the number in the top bar.",
+     "runner_did": "Checked the page text first (when run through the runner)"
+    }
+   ]
+  }
+ ]
+}

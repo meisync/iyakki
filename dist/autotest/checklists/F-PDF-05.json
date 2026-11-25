@@ -1,0 +1,25 @@
+{
+ "schema": 1,
+ "row": "F-PDF-05",
+ "feature_sha": "d13d73310352f8d8",
+ "title": "PDF viewer: pages, search, selection and touch",
+ "clauses": [
+  {
+   "id": "touch-pinch-swipe",
+   "text": "On a touch screen, a two-finger pinch zooms the page and a two-finger swipe turns pages.",
+   "machines": [
+    "lenovo",
+    "hp",
+    "macbook-pro",
+    "mac-mini-2018",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "On a machine with a touch screen, open a multi-page PDF. Pinch two fingers apart, then together. Then slide two fingers sideways across the page.",
+     "expect": "The pinch zooms in and out and the sideways swipe turns to the next or previous page. A one-finger scroll still scrolls the page."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,9 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 8df8fa033423406d; honest subset only: everything not checked is under not-covered.
+row: F-DEV-10
+targets: real
+profile: ram
+feature-sha: 8df8fa033423406d
+doc: iyakki dev usb brings developer mode up over one USB-C cable between two computers
+human: usb-link | Connect two computers with one USB-C cable and run iyakki dev usb check, then pair. Expect: The seven steps turn green one by one and the pair works; if not, note which step stops (KI-992 is open).
+not-covered: iyakki dev usb brings developer mode up over one USB-C cable between two computers
+needs-hw: two computers and a USB-C cable

@@ -33,6 +33,7 @@ pub mod tenants;
 pub mod tileevents;
 pub mod tiles;
 mod tiledock;
+mod tilestore;
 pub mod tilepage;
 pub mod tilebridge;
 pub mod webbundle;

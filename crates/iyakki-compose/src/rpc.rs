@@ -93,9 +93,9 @@ impl RpcRoots {
     fn parts(&self, svc: Option<&Arc<iyakki_agent::services::Services>>) -> iyakki_ui_rpc::ServedParts {
         let core_terminal: Option<Arc<dyn iyakki_core_api::Terminal>> = match (svc, &self.accounts) {
             (Some(svc), Some(accounts)) => {
-                let t = iyakki_agent::terminalfacet::Terminals::new(svc.clone());
+                let t = iyakki_agent::terminalfacet::Terminals::shared(svc.clone());
                 t.set_policies(Arc::new(AccountPolicies(accounts.clone())));
-                Some(Arc::new(t))
+                Some(t)
             }
             _ => None,
         };
@@ -188,6 +188,8 @@ impl RpcRoots {
                 let fetch: Arc<dyn iyakki_shared::store_catalog::Fetch> = Arc::new(iyakki_shared::store_catalog::HttpFetch(real.quick_upstream()));
                 h = h.with_store_side(fetch, self.audit_fn(), accounts.clone(), self.file_scope.clone(), real.dir().to_path_buf());
                 h = h.with_web_fetch(core_web(real.dir()));
+                // the acting person is the one who signed in over the connection, and an approval is a core-issued ticket (alpha.8 SEC3)
+                h = h.with_login_binding();
             }
         }
         if let Some(a) = &self.audit {

@@ -13,6 +13,7 @@ use iyakki_fw::model::{Config, Kind as FwKind, Ping, Preset, Proto, Rule};
 use iyakki_fw::service::Handle;
 
 use super::*;
+use crate::apps::settings::network_port::NetworkSettingsPort;
 
 pub(super) use crate::fx::AMBER;
 
@@ -370,17 +371,17 @@ pub(super) fn share_blocked_note(port: u16) -> Option<String> {
 
 impl SettingsApp {
     /// The Shared folders page's "f": switch the Shared folders preset on (applied now, confirmed on the Firewall page).
-    pub(super) fn fw_open_shares(&mut self, cx: &AppCx) {
-        self.fw_open_shares_impl(cx, true)
+    pub(super) fn fw_open_shares(&mut self, p: &dyn NetworkSettingsPort) {
+        self.fw_open_shares_impl(p, true)
     }
 
     /// The same, answered "yes" to the card that came up when a share started: the person stays on the Shared folders page.
-    pub(super) fn fw_open_shares_here(&mut self, cx: &AppCx) {
-        self.fw_open_shares_impl(cx, false)
+    pub(super) fn fw_open_shares_here(&mut self, p: &dyn NetworkSettingsPort) {
+        self.fw_open_shares_impl(p, false)
     }
 
-    fn fw_open_shares_impl(&mut self, cx: &AppCx, go_to_firewall: bool) {
-        if !self.admin(cx) {
+    fn fw_open_shares_impl(&mut self, p: &dyn NetworkSettingsPort, go_to_firewall: bool) {
+        if !self.admin(p) {
             return;
         }
         if !self.fw.writable {
@@ -391,13 +392,15 @@ impl SettingsApp {
             return self.ok("The firewall already lets the local network reach shared folders.");
         }
         c.set_preset(Preset::SharedFolders, true);
-        let user = cx.session.user.clone();
+        let user = p.acting_user().to_string();
         let (r, kept) = self.propose_and_keep_if_only_opening(c, &user);
         match r {
             Ok(()) => {
-                cx.audit.record(&user, "firewall.preset", "shares on, from Shared folders");
+                p.audit("firewall.preset", "shares on, from Shared folders");
                 if go_to_firewall {
-                    self.open_item("tab:firewall", cx);
+                    if let Some(i) = self.tabs.iter().position(|x| *x == Tab::Firewall) {
+                        self.tab = i;
+                    }
                 }
                 self.ok(if kept { "Opened the firewall for shared folders. It stays open until you close it." } else { "Opened the firewall for shared folders. Press k within 60 seconds to keep it, or v to go back." });
             }
@@ -467,14 +470,14 @@ impl SettingsApp {
         v
     }
 
-    pub(super) fn handle_firewall(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_firewall(&mut self, k: &Key, p: &dyn NetworkSettingsPort) {
         if *k == Key::Char('A') {
             self.fw.advanced = !self.fw.advanced;
             self.sel[self.tab] = 0;
             self.ok(if self.fw.advanced { "Advanced: every rule, preset and the log. Choose Simple view to go back." } else { "Simple view." });
             return;
         }
-        if !self.fw.advanced && self.handle_fw_simple(k, cx) {
+        if !self.fw.advanced && self.handle_fw_simple(k, p) {
             return;
         }
         let len = self.fw_len();
@@ -493,13 +496,13 @@ impl SettingsApp {
         if !changes {
             return;
         }
-        if !self.admin(cx) {
+        if !self.admin(p) {
             return;
         }
         if !self.fw.writable {
             return self.fail("This window runs on another computer; it cannot change IYAKKI's firewall.");
         }
-        let user = cx.session.user.clone();
+        let user = p.acting_user().to_string();
         let rule = self.fw_cfg().rules.get(sel).cloned();
         match k {
             Key::Char('a') => self.open_form(FormKind::Fw(FwForm::Rule(None)), rule_form(None)),
@@ -515,7 +518,7 @@ impl SettingsApp {
                             x.enabled = on;
                         }
                     });
-                    cx.audit.record(&user, "firewall.rule.toggle", &format!("{} {} {}", r.kind.label(), r.value, if on { "on" } else { "off" }));
+                    p.audit("firewall.rule.toggle", &format!("{} {} {}", r.kind.label(), r.value, if on { "on" } else { "off" }));
                     self.ok(format!("{} is {} (not applied yet: y).", r.value, if on { "allowed again" } else { "switched off" }));
                 }
                 None => self.fail("Choose a rule first (Up/Down)."),
@@ -525,7 +528,7 @@ impl SettingsApp {
                     self.fw_edit(|c| {
                         c.remove(r.id);
                     });
-                    cx.audit.record(&user, "firewall.rule.delete", &format!("{} {}", r.kind.label(), r.value));
+                    p.audit("firewall.rule.delete", &format!("{} {}", r.kind.label(), r.value));
                     self.ok(format!("Removed the rule for {} (not applied yet: y).", r.value));
                 }
                 None => self.fail("Choose a rule first (Up/Down)."),
@@ -554,7 +557,7 @@ impl SettingsApp {
                     match r {
                         Ok(()) => {
                             self.fw.draft = None;
-                            cx.audit.record(&user, if kept { "firewall.keep" } else { "firewall.apply" }, if kept { "from Settings: only opens, kept at once" } else { "from Settings" });
+                            p.audit(if kept { "firewall.keep" } else { "firewall.apply" }, if kept { "from Settings: only opens, kept at once" } else { "from Settings" });
                             let st = self.fw.handle.lock().status();
                             self.ok(if matches!(st, Status::Pending { .. }) { "Applied. Press k within 60 seconds to keep these rules, or v to go back. If nothing is pressed they are taken back." } else { "Applied." });
                         }
@@ -566,7 +569,7 @@ impl SettingsApp {
                 let r = self.fw.handle.lock().keep(&user);
                 match r {
                     Ok(()) => {
-                        cx.audit.record(&user, "firewall.keep", "");
+                        p.audit("firewall.keep", "");
                         self.ok("Kept: these rules are saved and stay after a restart.")
                     }
                     Err(e) => self.fail(e),
@@ -576,7 +579,7 @@ impl SettingsApp {
                 let r = self.fw.handle.lock().revert(&format!("{user} pressed Revert"));
                 match r {
                     Ok(()) => {
-                        cx.audit.record(&user, "firewall.revert", "");
+                        p.audit("firewall.revert", "");
                         self.ok("Reverted to the rules you last kept.")
                     }
                     Err(e) => self.fail(e),
@@ -587,7 +590,7 @@ impl SettingsApp {
                 match r {
                     Ok(()) => {
                         self.fw.draft = None;
-                        cx.audit.record(&user, "firewall.disable", "emergency off from Settings");
+                        p.audit("firewall.disable", "emergency off from Settings");
                         self.ok("The firewall is off. Switch it on again with o and y when you are ready.")
                     }
                     Err(e) => self.fail(format!("Could not switch the firewall off: {e}")),
@@ -602,7 +605,7 @@ impl SettingsApp {
                 self.ok("The list of blocked attempts is cleared.");
             }
             Key::Char('i') => match crate::ui::clipboard::latest() {
-                Some(t) => self.fw_import(cx, &t),
+                Some(t) => self.fw_import(p, &t),
                 None => self.fail("Copy the exported rules first, then press i."),
             },
             _ => {}
@@ -610,23 +613,22 @@ impl SettingsApp {
     }
 
     /// Take exported rules as unapplied changes.
-    pub(super) fn fw_import(&mut self, cx: &AppCx, text: &str) {
+    pub(super) fn fw_import(&mut self, p: &dyn NetworkSettingsPort, text: &str) {
         match Config::from_json(text) {
             Ok(c) => {
                 let n = c.rules.len();
                 self.fw_edit(|d| *d = c);
-                cx.audit.record(&cx.session.user, "firewall.import", &format!("{n} rules"));
+                p.audit("firewall.import", &format!("{n} rules"));
                 self.ok(format!("Imported {n} rule(s) as changes (not applied yet: y)."));
             }
             Err(e) => self.fail(e),
         }
     }
 
-    pub(super) fn fw_submit(&mut self, cx: &AppCx, kind: &FwForm, form: &mut Form) -> Result<String, String> {
-        if !self.admin(cx) {
+    pub(super) fn fw_submit(&mut self, p: &dyn NetworkSettingsPort, kind: &FwForm, form: &mut Form) -> Result<String, String> {
+        if !self.admin(p) {
             return Err("Only administrators can change the firewall.".into());
         }
-        let user = cx.session.user.clone();
         match kind {
             FwForm::Rule(id) => {
                 let old = id.and_then(|i| self.fw_cfg().rules.into_iter().find(|r| r.id == i));
@@ -643,39 +645,39 @@ impl SettingsApp {
                         c.add(r.clone());
                     }
                 });
-                cx.audit.record(&user, if id.is_some() { "firewall.rule.edit" } else { "firewall.rule.add" }, &detail);
+                p.audit(if id.is_some() { "firewall.rule.edit" } else { "firewall.rule.add" }, &detail);
                 Ok(format!("{} (not applied yet: y).{}", if id.is_some() { "Saved the rule" } else { "Added the rule" }, if warn.is_empty() { String::new() } else { format!(" Note: {warn}") }))
             }
-            FwForm::Port | FwForm::Address => self.fw_simple_submit(cx, kind, form),
+            FwForm::Port | FwForm::Address => self.fw_simple_submit(p, kind, form),
             FwForm::Outgoing => {
                 let mut c = self.fw_cfg();
                 let said = apply_outgoing_form(form, &mut c.outgoing)?;
                 self.fw_edit(|d| *d = c);
-                cx.audit.record(&user, "firewall.outgoing", &said);
+                p.audit("firewall.outgoing", &said);
                 Ok(format!("{said} (not applied yet: y)."))
             }
             FwForm::Presets => {
                 let mut c = self.fw_cfg();
                 apply_presets_form(form, &mut c)?;
                 self.fw_edit(|d| *d = c);
-                cx.audit.record(&user, "firewall.presets", "changed");
+                p.audit("firewall.presets", "changed");
                 Ok("Presets changed (not applied yet: y).".into())
             }
         }
     }
 
     /// "VPN kill switch is active ..." while the VPN guard is in place (see `Manager::guard_line`), read at most every 2 seconds.
-    pub(super) fn fw_vpn_line(&mut self, cx: &AppCx) -> Option<String> {
+    pub(super) fn fw_vpn_line(&mut self, p: &dyn NetworkSettingsPort) -> Option<String> {
         if self.fw.vpn_line.as_ref().is_none_or(|(t, _)| t.elapsed().as_secs() >= 2) {
-            let line = self.vpn_mgr(cx).guard_line();
+            let line = self.vpn_mgr(p).guard_line();
             self.fw.vpn_line = Some((Instant::now(), line));
         }
         self.fw.vpn_line.as_ref().and_then(|(_, l)| l.clone())
     }
 
-    pub(super) fn render_firewall(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+    pub(super) fn render_firewall(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn NetworkSettingsPort) {
         if !self.fw.advanced {
-            return self.render_firewall_simple(g, a, s, cx);
+            return self.render_firewall_simple(g, a, s, p);
         }
         let v = self.fw.handle.lock().view();
         let now = iyakki_clock::now_unix();
@@ -707,7 +709,7 @@ impl SettingsApp {
         for (t, c) in status_lines(&v, changes, self.fw.writable) {
             line(g, &mut y, &t, c, 13.0 * s, Face::Sans);
         }
-        if let Some(t) = self.fw_vpn_line(cx) {
+        if let Some(t) = self.fw_vpn_line(p) {
             line(g, &mut y, &t, AMBER, 13.0 * s, Face::Sans);
         }
         line(g, &mut y, &presets_line(&cfg), MUTED, 13.0 * s, Face::Sans);

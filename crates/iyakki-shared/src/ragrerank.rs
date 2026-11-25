@@ -57,3 +57,69 @@ impl Mode {
 pub fn model_ok(m: &str) -> bool {
     !m.is_empty() && m.len() <= 80 && m.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':' | b'/'))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_names_off_lexical_and_the_model_by_name() {
+        assert_eq!(Mode::Off.text(), "off");
+        assert_eq!(Mode::Lexical.text(), "lexical");
+        assert_eq!(Mode::Model { model: "bge-reranker-v2".into() }.text(), "model bge-reranker-v2");
+    }
+
+    #[test]
+    fn the_default_mode_is_off() {
+        assert_eq!(Mode::default(), Mode::Off);
+    }
+
+    #[test]
+    fn parse_accepts_off_and_lexical_ignoring_surrounding_spaces() {
+        assert_eq!(Mode::parse("  lexical ", ""), Ok(Mode::Lexical));
+        assert_eq!(Mode::parse("off", "ignored"), Ok(Mode::Off));
+    }
+
+    #[test]
+    fn parse_takes_a_trimmed_model_name_for_model_mode() {
+        assert_eq!(Mode::parse("model", "  bge-reranker-v2.m3 "), Ok(Mode::Model { model: "bge-reranker-v2.m3".into() }));
+    }
+
+    #[test]
+    fn parse_refuses_model_mode_without_a_valid_model_name() {
+        assert!(Mode::parse("model", "").unwrap_err().contains("reranking model"));
+        assert!(Mode::parse("model", "my model").is_err());
+    }
+
+    #[test]
+    fn parse_refuses_an_unknown_mode_word_and_is_case_sensitive() {
+        assert_eq!(Mode::parse("fancy", ""), Err("mode is off, lexical or model".to_string()));
+        assert!(Mode::parse("OFF", "").is_err());
+    }
+
+    #[test]
+    fn model_names_accept_letters_digits_and_the_separators_up_to_80_bytes() {
+        assert!(model_ok("a"));
+        assert!(model_ok("org/model:tag.v1-2_x"));
+        assert!(model_ok(&"a".repeat(80)));
+    }
+
+    #[test]
+    fn model_names_refuse_empty_long_spaced_and_non_ascii_names() {
+        assert!(!model_ok(""));
+        assert!(!model_ok(&"a".repeat(81)));
+        assert!(!model_ok("a b"));
+        assert!(!model_ok("modèle"));
+    }
+
+    #[test]
+    fn the_mode_file_is_rag_rerank_json_in_the_data_folder() {
+        assert_eq!(Mode::path(Path::new("/data")), PathBuf::from("/data/rag-rerank.json"));
+    }
+
+    #[test]
+    fn mode_serialises_with_a_mode_tag_and_the_model_as_a_field() {
+        assert_eq!(serde_json::to_string(&Mode::Lexical).unwrap(), r#"{"mode":"lexical"}"#);
+        assert_eq!(serde_json::to_string(&Mode::Model { model: "m1".into() }).unwrap(), r#"{"mode":"model","model":"m1"}"#);
+    }
+}

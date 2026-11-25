@@ -1,0 +1,6 @@
+[package]
+name = "iyakki-hostrules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Whether a host name is loopback, a private range or cluster-local (one pure function). iyakki_shared::hostrules re-exports it (alpha.9 P6, D-S2-01)."

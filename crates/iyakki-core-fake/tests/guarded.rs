@@ -587,3 +587,29 @@ fn the_sound_output_state_is_a_plain_read_and_a_refused_read_never_silences_a_pl
     let denied = GuardedOs::new(fake.clone(), broker, Caller { app: "x".into(), kind: CallerKind::Store { installation: "i".into() }, person: "p".into(), device: "d".into() }).output_state();
     assert_eq!((denied.device(), denied.generation(), denied.gain()), (None, 0, 100));
 }
+
+#[test]
+fn port_forwards_ask_a_card_every_start_reads_and_stops_need_none_and_an_unnamed_app_starts_nothing() {
+    use iyakki_core_api::portforward::{Request, Target};
+    let r = Request { kubeconfig: String::new(), context: "dev".into(), namespace: "shop".into(), kind: Target::Service, name: "web".into(), remote: 80, local: None };
+    let card = yes();
+    let (fake, log, g) = rig("k8s", card.clone());
+    let a = g.port_forwards().start(&r).unwrap();
+    let b = g.port_forwards().start(&r).unwrap();
+    assert_eq!(*card.1.lock().unwrap(), 2, "a card for every start");
+    assert_eq!(g.port_forwards().list().len(), 2);
+    assert!(g.port_forwards().stop(a.id) && !g.port_forwards().stop(a.id));
+    assert_eq!(g.port_forwards().stop_all(), 1);
+    assert_eq!(*card.1.lock().unwrap(), 2, "listing and stopping ask nothing");
+    assert!(!rows(&log, "k8s.portforward").is_empty() && rows(&log, "k8s.portforward").iter().all(|r| r.allowed), "the decisions are logged");
+    assert!(b.local >= 40000 && fake.port_forwards_fake().spawned().len() == 2);
+    // the person says no
+    let (fake, log2, g) = rig("k8s", Arc::new(Answer(CardAnswer::Deny, Default::default())));
+    assert!(g.port_forwards().start(&r).unwrap_err().contains("card_declined"));
+    assert!(fake.port_forwards_fake().spawned().is_empty(), "nothing reached the machine");
+    assert_eq!(rows(&log2, "k8s.portforward")[0].reason, "card_declined");
+    // an app the table does not name starts nothing (the tile's table row is the only one)
+    let (fake, _log3, g) = rig("somewidget", yes());
+    assert!(g.port_forwards().start(&r).is_err());
+    assert!(fake.port_forwards_fake().spawned().is_empty());
+}

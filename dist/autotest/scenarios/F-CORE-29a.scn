@@ -1,0 +1,10 @@
+# autotest pilot, batch A (2026-11-21); split into sub-row F-CORE-29a on 2026-11-21: this scenario covers the whole visible clause, the API clauses are F-CORE-29b.
+row: F-CORE-29a
+targets: qemu
+provided-by: program  # every clause is given by the iyakki program (core, shell, Settings, SAMPLE); the rootfs of alpha.8 and alpha.10 differ in no file this scenario reads (docs/development/AUTOTEST.md)
+profile: ram
+feature-sha: 2eeebb862380078b
+doc: `dev info` carries the compatibility report with the paired computer as a peer
+clause: 1 `dev info` carries the compatibility report with the paired computer as a peer
+expect-info compat\s+core
+expect-info compat\s+peer computer

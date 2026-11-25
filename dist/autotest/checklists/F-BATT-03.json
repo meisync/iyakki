@@ -1,0 +1,42 @@
+{
+ "schema": 1,
+ "row": "F-BATT-03",
+ "feature_sha": "c2745e7316a26efa",
+ "title": "low-battery messages and the countdown",
+ "clauses": [
+  {
+   "id": "messages",
+   "text": "a message appears once at 20 percent and once at 10 percent while discharging, and a Plug in now card at 5 percent",
+   "machines": [
+    "lenovo",
+    "hp",
+    "macbook-pro"
+   ],
+   "steps": [
+    {
+     "do": "Unplug the adapter and let the laptop run down until the battery is at 20 percent.",
+     "expect": "A single message about the low battery appears once; it does not repeat at each reading."
+    },
+    {
+     "do": "Let the battery fall to 10 percent, then to 5 percent. Plug the adapter in at 5 percent.",
+     "expect": "One message at 10 percent and the Plug in now card at 5 percent; plugging in clears the warnings."
+    }
+   ]
+  },
+  {
+   "id": "countdown",
+   "text": "at 3 percent or the firmware's Critical level a 30 second countdown card appears, and Cancel shutdown stops it",
+   "machines": [
+    "lenovo",
+    "hp",
+    "macbook-pro"
+   ],
+   "steps": [
+    {
+     "do": "Only when the battery reaches 3 percent (or the firmware's Critical level), watch for the countdown card. Press Cancel shutdown, or press Esc, before the 30 seconds end.",
+     "expect": "The 30 second countdown appears and Cancel shutdown or Esc stops it; the computer stays on."
+    }
+   ]
+  }
+ ]
+}

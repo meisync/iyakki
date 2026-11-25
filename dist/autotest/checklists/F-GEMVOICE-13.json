@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-GEMVOICE-13",
+  "feature_sha": "fae39ac8bc303130",
+  "title": "Gemini voice page (experimental)",
+  "clauses": [
+    {
+      "id": "consent-tap",
+      "text": "The consent card does not agree on Enter alone, and only a person's choice says yes",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Settings, Gemini voice (experimental): read the consent card. Leave it on No and press Enter. Then press Yes only if you agree.",
+          "expect": "Enter alone does not agree. The card names the open microphone and the tool results."
+        }
+      ]
+    }
+  ]
+}

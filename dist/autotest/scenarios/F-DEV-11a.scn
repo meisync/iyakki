@@ -1,0 +1,16 @@
+# autotest alpha.10 batch F (lane Q8, 2026-11-24); split into sub-row F-DEV-11a on 2026-11-24 (lane SC2): this scenario covers the whole visible clause, the API and rule clauses are F-DEV-11b.
+row: F-DEV-11a
+targets: qemu
+profile: ram
+feature-sha: 6be646c5bec3685c
+doc: Settings, Developer mode offers Connect over USB-C (read only, nothing is changed)
+clause: 1 Settings, Developer mode offers Connect over USB-C
+key s
+wait app=Settings
+skip-unless-button Developer mode
+click-sidebar Developer mode
+wait app=Settings page="Developer mode"
+skip-unless-button Connect over USB-C
+shot page
+expect-not-blank
+expect-page Developer mode

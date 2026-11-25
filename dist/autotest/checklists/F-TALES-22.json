@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-TALES-22",
+ "feature_sha": "3b860c20d9b17f8f",
+ "title": "Tales Save PDF writes story.pdf",
+ "clauses": [
+  {
+   "id": "save-pdf-look",
+   "text": "The PDF has the title, who it is for, chapters, paragraphs and pictures in their places; the first picture is the cover.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Open story.pdf in a PDF viewer.",
+     "expect": "The first page has the title and the first picture as its cover. Chapters and paragraphs follow in order, and the pictures are in their places. Videos are left out."
+    }
+   ]
+  }
+ ]
+}

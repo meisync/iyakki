@@ -7,6 +7,9 @@
 | Document | Read it for |
 |---|---|
 | [`../README.md`](../README.md) | What IYAKKI is, the tiles, the three ways to run, status |
+| [`INSTALL-GUIDE.md`](INSTALL-GUIDE.md) | For a newcomer: which image for which machine, checking the download, writing the stick or card, the first start, the first-run screen, the first useful things |
+| [`RECOVERY-GUIDE.md`](RECOVERY-GUIDE.md) | The boot menu, hardware check, safe graphics, remote diagnostics, previous version, seed root, forgotten password, encrypted-home recovery key, reinstalling keeping data, diagnostics bundle |
+| [`KNOWN-LIMITS.md`](KNOWN-LIMITS.md) | Limits, untried items, experimental and parked features in plain words (generated from the known-issues list) |
 | [`INSTALL.md`](INSTALL.md) | Window mode, USB stick, installing to a disk, VM, variants, upgrade, backup, boot problems |
 | [`QUICKSTART.md`](QUICKSTART.md) | A 15-minute tour with expected results |
 | [`ZRAM-AND-INSTALL.md`](ZRAM-AND-INSTALL.md) | Memory tuning (zram, swap file) and the on-device installer (`iyakki install`, Settings, System) |

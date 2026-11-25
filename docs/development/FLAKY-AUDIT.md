@@ -23,8 +23,8 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 | Crate | sleep | elapsed | port | env | cwd | static | tmpname | stubsleep | attempts | cluster | risky total |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | iyakki-accounts | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 |
-| iyakki-agent | 138 / 319 | 60 / 41 | 9 / 112 | 6 / 33 | 0 / 0 | 32 / 21 | 1 / 0 | 18 / 40 | 15 / 0 | 0 / 2 | 279 |
-| iyakki-apps | 140 / 213 | 9 / 37 | 2 / 7 | 0 / 16 | 0 / 0 | 15 / 15 | 2 / 0 | 2 / 24 | 59 / 1 | 0 / 0 | 229 |
+| iyakki-agent | 138 / 318 | 59 / 41 | 9 / 112 | 6 / 33 | 0 / 0 | 32 / 21 | 1 / 0 | 18 / 40 | 15 / 0 | 0 / 2 | 278 |
+| iyakki-apps | 140 / 213 | 9 / 37 | 2 / 7 | 0 / 16 | 0 / 0 | 15 / 16 | 2 / 1 | 2 / 23 | 59 / 1 | 0 / 0 | 229 |
 | iyakki-archive | 0 / 0 | 1 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 1 |
 | iyakki-battery | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 |
 | iyakki-bindelta | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 3 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 3 |
@@ -37,7 +37,7 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 | iyakki-core-api | 0 / 0 | 0 / 2 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 0 | 0 |
 | iyakki-core-browser | 0 / 1 | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 |
 | iyakki-core-fake | 1 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 1 |
-| iyakki-core-local | 0 / 0 | 1 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 6 | 0 / 0 | 0 / 0 | 1 |
+| iyakki-core-local | 0 / 0 | 1 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 8 | 0 / 0 | 0 / 0 | 1 |
 | iyakki-dash | 6 / 0 | 1 / 1 | 1 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 1 / 0 | 1 / 0 | 10 |
 | iyakki-devctl | 1 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 0 | 1 |
 | iyakki-drivers | 1 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 2 | 1 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 2 |
@@ -45,6 +45,7 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 | iyakki-flow | 2 / 5 | 3 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 5 |
 | iyakki-fw | 6 / 2 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 6 |
 | iyakki-js | 1 / 4 | 0 / 1 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 1 |
+| iyakki-k8s-model | 6 / 5 | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 6 |
 | iyakki-link | 0 / 2 | 1 / 0 | 1 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 | 2 |
 | iyakki-macrecovery | 0 / 1 | 2 / 0 | 1 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 3 |
 | iyakki-netscan | 3 / 2 | 3 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 6 |
@@ -58,7 +59,7 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 | iyakki-schema | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 |
 | iyakki-sdk-emulator | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 |
 | iyakki-sdk-tile | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 1 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 1 |
-| iyakki-shared | 13 / 8 | 1 / 1 | 1 / 0 | 0 / 3 | 0 / 0 | 0 / 4 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 15 |
+| iyakki-shared | 7 / 3 | 1 / 0 | 1 / 0 | 0 / 3 | 0 / 0 | 0 / 4 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 9 |
 | iyakki-shell | 29 / 35 | 4 / 7 | 0 / 0 | 0 / 2 | 0 / 0 | 11 / 8 | 0 / 0 | 1 / 2 | 9 / 0 | 0 / 0 | 54 |
 | iyakki-site-apps | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 |
 | iyakki-sshfs | 4 / 6 | 1 / 0 | 1 / 4 | 0 / 0 | 0 / 0 | 1 / 2 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 7 |
@@ -66,11 +67,15 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 | iyakki-swarm | 2 / 4 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 2 |
 | iyakki-tile-board | 1 / 4 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 1 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 2 |
 | iyakki-tile-cameras | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 2 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 2 |
+| iyakki-tile-dash | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 |
 | iyakki-tile-example | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 1 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 1 |
 | iyakki-tile-host | 0 / 0 | 1 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 1 |
 | iyakki-tile-hostfiles | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 |
+| iyakki-tile-k8s | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 |
 | iyakki-tile-pdf | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 |
 | iyakki-tile-radio | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 1 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 1 |
+| iyakki-tile-runlog | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 2 | 0 / 0 | 0 / 0 | 0 |
+| iyakki-tile-system | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 0 | 0 |
 | iyakki-ui-bin | 0 / 0 | 0 / 2 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 |
 | iyakki-ui-client | 0 / 0 | 0 / 0 | 1 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 1 |
 | iyakki-ui-rpc | 0 / 2 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 |
@@ -80,11 +85,11 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 | iyakki-wasm | 0 / 2 | 2 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 2 |
 | iyakki-web | 3 / 5 | 1 / 3 | 0 / 0 | 0 / 0 | 0 / 0 | 1 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 5 |
 | iyakki-webview | 4 / 2 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 0 | 4 |
-| **all** | 444 / 680 | 114 / 121 | 20 / 123 | 12 / 62 | 0 / 0 | 80 / 73 | 4 / 0 | 23 / 85 | 85 / 2 | 1 / 3 | 783 |
+| **all** | 444 / 679 | 113 / 121 | 20 / 123 | 12 / 62 | 0 / 0 | 80 / 76 | 4 / 1 | 23 / 89 | 85 / 2 | 1 / 3 | 782 |
 
 ## Risky hits
 
-### iyakki-agent (279)
+### iyakki-agent (278)
 
 * `sleep` crates/iyakki-agent/src/accessbroker_tests.rs:77: `std::thread::sleep(Duration::from_millis(1));`
 * `sleep` crates/iyakki-agent/src/accessbroker_tests.rs:117: `std::thread::sleep(Duration::from_millis(20));`
@@ -164,7 +169,7 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 * `sleep` crates/iyakki-agent/src/devmode/cli_adb.rs:720: `std::thread::sleep(Duration::from_secs(1));`
 * `static` crates/iyakki-agent/src/devmode/cli_adb.rs:770: `pub static INTERRUPT: AtomicBool = AtomicBool::new(false);`
 * `sleep` crates/iyakki-agent/src/devmode/cli_adb.rs:988: `Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(30)),`
-* `static` crates/iyakki-agent/src/devmode/mod.rs:649: `static H: OnceLock<Mutex<Handoff>> = OnceLock::new();`
+* `static` crates/iyakki-agent/src/devmode/mod.rs:651: `static H: OnceLock<Mutex<Handoff>> = OnceLock::new();`
 * `sleep` crates/iyakki-agent/src/devmode/tty_tests.rs:111: `std::thread::sleep(Duration::from_millis(400));`
 * `stubsleep` crates/iyakki-agent/src/devmode/tty_tests.rs:138: `let id = exec_tty(&r, &k, &p, sid, "sleep 1; stty size", "24", "80");`
 * `stubsleep` crates/iyakki-agent/src/devmode/tty_tests.rs:148: `let o = call(&r, &k, &p, "POST", "/v1/dev/shell/exec", &[("sid", &s)], b"sleep 1").unwrap();`
@@ -280,10 +285,10 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 * `env` crates/iyakki-agent/src/providers.rs:1178: `std::env::set_var("IYAKKI_TEST_PROVIDER_KEY", "KEY123");`
 * `elapsed` crates/iyakki-agent/src/quiet.rs:574: `assert!(t.elapsed() < Duration::from_secs(3));`
 * `sleep` crates/iyakki-agent/src/radio.rs:1156: `std::thread::sleep(Duration::from_millis(5));`
-* `sleep` crates/iyakki-agent/src/radio.rs:1384: `std::thread::sleep(wait.min(Duration::from_millis(5)));`
-* `sleep` crates/iyakki-agent/src/radio.rs:1417: `std::thread::sleep(Duration::from_millis(5));`
-* `attempts` crates/iyakki-agent/src/radio.rs:1669: `for _ in 0..4000 {`
-* `sleep` crates/iyakki-agent/src/radio.rs:1674: `std::thread::sleep(Duration::from_millis(10));`
+* `sleep` crates/iyakki-agent/src/radio.rs:1403: `std::thread::sleep(wait.min(Duration::from_millis(5)));`
+* `sleep` crates/iyakki-agent/src/radio.rs:1436: `std::thread::sleep(Duration::from_millis(5));`
+* `attempts` crates/iyakki-agent/src/radio.rs:1688: `for _ in 0..4000 {`
+* `sleep` crates/iyakki-agent/src/radio.rs:1693: `std::thread::sleep(Duration::from_millis(10));`
 * `env` crates/iyakki-agent/src/rag_ext_tests.rs:22: `std::env::set_var("IYAKKI_TEST_EXT_KEY", "EXTKEY");`
 * `static` crates/iyakki-agent/src/ragtools_tests.rs:49: `static WEATHER_EDITION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);`
 * `static` crates/iyakki-agent/src/ragtools_tests.rs:50: `static NEWS_EDITION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);`
@@ -296,8 +301,8 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 * `sleep` crates/iyakki-agent/src/router_parallel_tests.rs:344: `std::thread::sleep(Duration::from_millis(100));`
 * `sleep` crates/iyakki-agent/src/sandbox/tests.rs:600: `std::thread::sleep(Duration::from_millis(100));`
 * `elapsed` crates/iyakki-agent/src/sandbox/tests.rs:774: `assert!(r.timed_out && t0.elapsed() < Duration::from_secs(5));`
-* `port` crates/iyakki-agent/src/services.rs:2229: `let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();`
-* `sleep` crates/iyakki-agent/src/services.rs:2233: `std::thread::sleep(std::time::Duration::from_millis(700));`
+* `port` crates/iyakki-agent/src/services.rs:2230: `let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();`
+* `sleep` crates/iyakki-agent/src/services.rs:2234: `std::thread::sleep(std::time::Duration::from_millis(700));`
 * `sleep` crates/iyakki-agent/src/sftp_tests.rs:492: `std::thread::sleep(std::time::Duration::from_secs(150));`
 * `sleep` crates/iyakki-agent/src/sharedfolder_tests.rs:774: `std::thread::sleep(Duration::from_millis(300));`
 * `sleep` crates/iyakki-agent/src/sharedfolder_tests.rs:925: `std::thread::sleep(Duration::from_millis(200));`
@@ -341,12 +346,12 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 * `static` crates/iyakki-agent/src/webservice/tests.rs:63: `static FAKE_FILES: Mutex<std::collections::BTreeMap<String, String>> = Mutex::new(std::collections::BTreeMap::new());`
 * `static` crates/iyakki-agent/src/webservice/tests.rs:67: `static FAKE_ACCESS: Mutex<(bool, bool, bool, bool)> = Mutex::new((false, false, true, true));`
 * `static` crates/iyakki-agent/src/webservice/tests.rs:68: `static FAKE_SWITCHES: Mutex<(bool, bool, bool, bool)> = Mutex::new((true, false, true, true));`
-* `sleep` crates/iyakki-agent/src/webservice/tests.rs:1243: `std::thread::sleep(Duration::from_millis(200));`
-* `port` crates/iyakki-agent/src/webservice/tests.rs:1494: `let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();`
-* `sleep` crates/iyakki-agent/src/webservice/tests.rs:1859: `std::thread::sleep(Duration::from_millis(100));`
-* `elapsed` crates/iyakki-agent/src/webservice/tests.rs:2075: `assert!(t0.elapsed() < Duration::from_millis(1700), "announced after {:?}", t0.elapsed());`
-* `sleep` crates/iyakki-agent/src/webservice/tests.rs:2328: `std::thread::sleep(std::time::Duration::from_millis(700));`
-* `port` crates/iyakki-agent/src/webservice/tests.rs:2462: `let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();`
+* `sleep` crates/iyakki-agent/src/webservice/tests.rs:1248: `std::thread::sleep(Duration::from_millis(200));`
+* `port` crates/iyakki-agent/src/webservice/tests.rs:1499: `let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();`
+* `sleep` crates/iyakki-agent/src/webservice/tests.rs:1864: `std::thread::sleep(Duration::from_millis(100));`
+* `elapsed` crates/iyakki-agent/src/webservice/tests.rs:2080: `assert!(t0.elapsed() < Duration::from_millis(1700), "announced after {:?}", t0.elapsed());`
+* `sleep` crates/iyakki-agent/src/webservice/tests.rs:2333: `std::thread::sleep(std::time::Duration::from_millis(700));`
+* `port` crates/iyakki-agent/src/webservice/tests.rs:2467: `let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();`
 * `sleep` crates/iyakki-agent/src/webservice/tiles_tests.rs:107: `std::thread::sleep(Duration::from_millis(200));`
 * `elapsed` crates/iyakki-agent/src/webservice/tiles_tests.rs:308: `assert!(t.elapsed() < Duration::from_secs(5), "stopped by its budget");`
 * `sleep` crates/iyakki-agent/src/webservice/tiles_tests.rs:1544: `let tabs; for (let i = 0; i < 60; i++) { try { tabs = await (await fetch("http://127.0.0.1:" + PORT + "/json")).json(); if (tabs.length) bre`
@@ -355,7 +360,6 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 * `sleep` crates/iyakki-agent/src/webservice/tiles_tests.rs:1611: `await sleep(800);`
 * `sleep` crates/iyakki-agent/src/webservice/tiles_tests.rs:1616: `await sleep(4500);`
 * `sleep` crates/iyakki-agent/src/webservice/tiles_tests.rs:1640: `std::thread::sleep(Duration::from_millis(800));`
-* `elapsed` crates/iyakki-agent/tests/cloud_hub_ticks.rs:74: `assert!(t.elapsed() < Duration::from_secs(8), "stopping does not wait for another full step");`
 * `sleep` crates/iyakki-agent/tests/directlink_kernel.rs:26: `std::thread::sleep(std::time::Duration::from_millis(300));`
 * `sleep` crates/iyakki-agent/tests/directlink_kernel.rs:46: `time.sleep(1)`
 * `elapsed` crates/iyakki-agent/tests/live_lemonade.rs:329: `assert!(t2.elapsed() < Duration::from_millis(200), "cached");`
@@ -405,20 +409,20 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 * `attempts` crates/iyakki-apps/src/apps/browser_navpolicy_tests.rs:20: `for _ in 0..60 {`
 * `sleep` crates/iyakki-apps/src/apps/browser_navpolicy_tests.rs:22: `std::thread::sleep(std::time::Duration::from_millis(5));`
 * `elapsed` crates/iyakki-apps/src/apps/browser_sound.rs:313: `assert!(t0.elapsed() < Duration::from_secs(3));`
-* `attempts` crates/iyakki-apps/src/apps/chat.rs:4283: `for _ in 0..200 {`
-* `sleep` crates/iyakki-apps/src/apps/chat.rs:4288: `std::thread::sleep(std::time::Duration::from_millis(5));`
-* `sleep` crates/iyakki-apps/src/apps/chat.rs:4361: `std::thread::sleep(std::time::Duration::from_millis(300));`
-* `sleep` crates/iyakki-apps/src/apps/chat.rs:4388: `std::thread::sleep(std::time::Duration::from_millis(250));`
-* `sleep` crates/iyakki-apps/src/apps/chat.rs:4397: `std::thread::sleep(std::time::Duration::from_millis(250));`
-* `sleep` crates/iyakki-apps/src/apps/chat.rs:4407: `std::thread::sleep(std::time::Duration::from_millis(250));`
-* `sleep` crates/iyakki-apps/src/apps/chat.rs:4421: `std::thread::sleep(std::time::Duration::from_millis(250));`
-* `sleep` crates/iyakki-apps/src/apps/chat.rs:4477: `std::thread::sleep(std::time::Duration::from_millis(250));`
-* `attempts` crates/iyakki-apps/src/apps/chat.rs:4498: `for _ in 0..400 {`
-* `sleep` crates/iyakki-apps/src/apps/chat.rs:4503: `std::thread::sleep(std::time::Duration::from_millis(10));`
-* `attempts` crates/iyakki-apps/src/apps/chat.rs:4526: `for _ in 0..400 {`
-* `elapsed` crates/iyakki-apps/src/apps/chat.rs:4540: `assert!(!app.is_speaking() && t.elapsed() < std::time::Duration::from_secs(2));`
-* `attempts` crates/iyakki-apps/src/apps/chat.rs:5626: `for _ in 0..200 {`
-* `sleep` crates/iyakki-apps/src/apps/chat.rs:5631: `std::thread::sleep(std::time::Duration::from_millis(5));`
+* `attempts` crates/iyakki-apps/src/apps/chat.rs:4284: `for _ in 0..200 {`
+* `sleep` crates/iyakki-apps/src/apps/chat.rs:4289: `std::thread::sleep(std::time::Duration::from_millis(5));`
+* `sleep` crates/iyakki-apps/src/apps/chat.rs:4362: `std::thread::sleep(std::time::Duration::from_millis(300));`
+* `sleep` crates/iyakki-apps/src/apps/chat.rs:4389: `std::thread::sleep(std::time::Duration::from_millis(250));`
+* `sleep` crates/iyakki-apps/src/apps/chat.rs:4398: `std::thread::sleep(std::time::Duration::from_millis(250));`
+* `sleep` crates/iyakki-apps/src/apps/chat.rs:4408: `std::thread::sleep(std::time::Duration::from_millis(250));`
+* `sleep` crates/iyakki-apps/src/apps/chat.rs:4422: `std::thread::sleep(std::time::Duration::from_millis(250));`
+* `sleep` crates/iyakki-apps/src/apps/chat.rs:4478: `std::thread::sleep(std::time::Duration::from_millis(250));`
+* `attempts` crates/iyakki-apps/src/apps/chat.rs:4499: `for _ in 0..400 {`
+* `sleep` crates/iyakki-apps/src/apps/chat.rs:4504: `std::thread::sleep(std::time::Duration::from_millis(10));`
+* `attempts` crates/iyakki-apps/src/apps/chat.rs:4527: `for _ in 0..400 {`
+* `elapsed` crates/iyakki-apps/src/apps/chat.rs:4541: `assert!(!app.is_speaking() && t.elapsed() < std::time::Duration::from_secs(2));`
+* `attempts` crates/iyakki-apps/src/apps/chat.rs:5627: `for _ in 0..200 {`
+* `sleep` crates/iyakki-apps/src/apps/chat.rs:5632: `std::thread::sleep(std::time::Duration::from_millis(5));`
 * `sleep` crates/iyakki-apps/src/apps/chat_ask_tests.rs:266: `std::thread::sleep(std::time::Duration::from_millis(5));`
 * `sleep` crates/iyakki-apps/src/apps/chat_assist_tests.rs:37: `std::thread::sleep(Duration::from_millis(*pause));`
 * `sleep` crates/iyakki-apps/src/apps/chat_assist_tests.rs:305: `std::thread::sleep(Duration::from_millis(*pause));`
@@ -447,9 +451,9 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 * `sleep` crates/iyakki-apps/src/apps/chat_wake_tests.rs:34: `std::thread::sleep(std::time::Duration::from_millis(10));`
 * `attempts` crates/iyakki-apps/src/apps/chat_wake_tests.rs:46: `for _ in 0..40 {`
 * `sleep` crates/iyakki-apps/src/apps/chat_wake_tests.rs:48: `std::thread::sleep(std::time::Duration::from_millis(10));`
-* `static` crates/iyakki-apps/src/apps/checkup_tests.rs:26: `static DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };`
-* `static` crates/iyakki-apps/src/apps/checkup_tests.rs:27: `static HELD: std::cell::RefCell<Option<MutexGuard<'static, ()>>> = const { std::cell::RefCell::new(None) };`
-* `port` crates/iyakki-apps/src/apps/cli.rs:1089: `let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();`
+* `static` crates/iyakki-apps/src/apps/checkup_tests.rs:28: `static DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };`
+* `static` crates/iyakki-apps/src/apps/checkup_tests.rs:29: `static HELD: std::cell::RefCell<Option<MutexGuard<'static, ()>>> = const { std::cell::RefCell::new(None) };`
+* `port` crates/iyakki-apps/src/apps/cli.rs:1113: `let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();`
 * `sleep` crates/iyakki-apps/src/apps/cli_term_tests.rs:257: `std::thread::sleep(std::time::Duration::from_millis(20));`
 * `attempts` crates/iyakki-apps/src/apps/dash_tests.rs:830: `for _ in 0..100 {`
 * `sleep` crates/iyakki-apps/src/apps/dash_tests.rs:832: `std::thread::sleep(std::time::Duration::from_millis(3));`
@@ -472,14 +476,14 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 * `sleep` crates/iyakki-apps/src/apps/flows_tests.rs:1356: `std::thread::sleep(Duration::from_millis(30));`
 * `attempts` crates/iyakki-apps/src/apps/flows_tests.rs:1797: `for _ in 0..600 {`
 * `sleep` crates/iyakki-apps/src/apps/flows_tests.rs:1802: `std::thread::sleep(Duration::from_millis(10));`
-* `sleep` crates/iyakki-apps/src/apps/git_tile_tests.rs:176: `std::thread::sleep(Duration::from_millis(4));`
-* `attempts` crates/iyakki-apps/src/apps/git_tile_tests.rs:583: `for _ in 0..20 {`
-* `sleep` crates/iyakki-apps/src/apps/git_tile_tests.rs:585: `std::thread::sleep(Duration::from_millis(2));`
-* `sleep` crates/iyakki-apps/src/apps/git_tile_tests.rs:592: `std::thread::sleep(Duration::from_millis(600));`
-* `attempts` crates/iyakki-apps/src/apps/git_tile_tests.rs:595: `for _ in 0..20 {`
-* `sleep` crates/iyakki-apps/src/apps/git_tile_tests.rs:597: `std::thread::sleep(Duration::from_millis(2));`
-* `sleep` crates/iyakki-apps/src/apps/git_tile_tests.rs:948: `std::thread::sleep(Duration::from_millis(80));`
-* `sleep` crates/iyakki-apps/src/apps/git_tile_tests.rs:951: `std::thread::sleep(Duration::from_millis(5));`
+* `sleep` crates/iyakki-apps/src/apps/git_tile_tests.rs:190: `std::thread::sleep(Duration::from_millis(4));`
+* `attempts` crates/iyakki-apps/src/apps/git_tile_tests.rs:598: `for _ in 0..20 {`
+* `sleep` crates/iyakki-apps/src/apps/git_tile_tests.rs:600: `std::thread::sleep(Duration::from_millis(2));`
+* `sleep` crates/iyakki-apps/src/apps/git_tile_tests.rs:607: `std::thread::sleep(Duration::from_millis(600));`
+* `attempts` crates/iyakki-apps/src/apps/git_tile_tests.rs:610: `for _ in 0..20 {`
+* `sleep` crates/iyakki-apps/src/apps/git_tile_tests.rs:612: `std::thread::sleep(Duration::from_millis(2));`
+* `sleep` crates/iyakki-apps/src/apps/git_tile_tests.rs:963: `std::thread::sleep(Duration::from_millis(80));`
+* `sleep` crates/iyakki-apps/src/apps/git_tile_tests.rs:966: `std::thread::sleep(Duration::from_millis(5));`
 * `attempts` crates/iyakki-apps/src/apps/ide_bottom.rs:922: `for _ in 0..500 {`
 * `sleep` crates/iyakki-apps/src/apps/ide_bottom.rs:927: `std::thread::sleep(Duration::from_millis(10));`
 * `attempts` crates/iyakki-apps/src/apps/ide_bottom.rs:950: `for _ in 0..500 {`
@@ -491,10 +495,10 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 * `attempts` crates/iyakki-apps/src/apps/ide_browser_tests.rs:606: `for _ in 0..100 {`
 * `sleep` crates/iyakki-apps/src/apps/ide_browser_tests.rs:609: `std::thread::sleep(Duration::from_millis(20));`
 * `sleep` crates/iyakki-apps/src/apps/ide_gitview_tests.rs:242: `std::thread::sleep(Duration::from_millis(600));`
-* `sleep` crates/iyakki-apps/src/apps/ide_k8s.rs:1413: `std::thread::sleep(Duration::from_millis(10));`
-* `attempts` crates/iyakki-apps/src/apps/ide_k8s.rs:1425: `for _ in 0..100 {`
-* `sleep` crates/iyakki-apps/src/apps/ide_k8s.rs:1427: `std::thread::sleep(Duration::from_millis(5));`
-* `sleep` crates/iyakki-apps/src/apps/ide_k8s.rs:1444: `std::thread::sleep(Duration::from_millis(10));`
+* `sleep` crates/iyakki-apps/src/apps/ide_k8s.rs:1404: `std::thread::sleep(Duration::from_millis(10));`
+* `attempts` crates/iyakki-apps/src/apps/ide_k8s.rs:1416: `for _ in 0..100 {`
+* `sleep` crates/iyakki-apps/src/apps/ide_k8s.rs:1418: `std::thread::sleep(Duration::from_millis(5));`
+* `sleep` crates/iyakki-apps/src/apps/ide_k8s.rs:1435: `std::thread::sleep(Duration::from_millis(10));`
 * `sleep` crates/iyakki-apps/src/apps/ide_notes_tests.rs:282: `std::thread::sleep(Duration::from_millis(20));`
 * `sleep` crates/iyakki-apps/src/apps/ide_notes_tests.rs:288: `std::thread::sleep(Duration::from_millis(20));`
 * `sleep` crates/iyakki-apps/src/apps/ide_tasks_tests.rs:315: `std::thread::sleep(Duration::from_millis(50));`
@@ -503,16 +507,16 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 * `attempts` crates/iyakki-apps/src/apps/ide_tests.rs:123: `for _ in 0..1500 {`
 * `sleep` crates/iyakki-apps/src/apps/ide_tests.rs:128: `std::thread::sleep(Duration::from_millis(5));`
 * `port` crates/iyakki-apps/src/apps/ide_tile_tests.rs:658: `let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();`
-* `stubsleep` crates/iyakki-apps/src/apps/jobs_ui.rs:589: `let id = start(&cx, "", "noisy", "seq 1 300; sleep 2; seq 301 400; sleep 30");`
-* `sleep` crates/iyakki-apps/src/apps/jobs_ui.rs:701: `std::thread::sleep(Duration::from_millis(400));`
-* `sleep` crates/iyakki-apps/src/apps/jobs_ui.rs:722: `std::thread::sleep(Duration::from_millis(400));`
-* `sleep` crates/iyakki-apps/src/apps/k8s_tile_tests.rs:399: `std::thread::sleep(Duration::from_millis(100));`
-* `sleep` crates/iyakki-apps/src/apps/k8s_tile_tests.rs:403: `std::thread::sleep(Duration::from_millis(700));`
-* `sleep` crates/iyakki-apps/src/apps/k8s_tile_tests.rs:405: `std::thread::sleep(Duration::from_millis(100));`
-* `sleep` crates/iyakki-apps/src/apps/k8s_tile_tests.rs:408: `std::thread::sleep(Duration::from_millis(300));`
-* `sleep` crates/iyakki-apps/src/apps/lab_tests.rs:378: `std::thread::sleep(std::time::Duration::from_millis(80));`
-* `attempts` crates/iyakki-apps/src/apps/learn_tests.rs:825: `for _ in 0..600 {`
-* `sleep` crates/iyakki-apps/src/apps/learn_tests.rs:830: `std::thread::sleep(std::time::Duration::from_millis(10));`
+* `stubsleep` crates/iyakki-apps/src/apps/jobs_real_tests.rs:67: `let id = start(&cx, "", "noisy", "seq 1 300; sleep 2; seq 301 400; sleep 30");`
+* `sleep` crates/iyakki-apps/src/apps/jobs_real_tests.rs:179: `std::thread::sleep(Duration::from_millis(400));`
+* `sleep` crates/iyakki-apps/src/apps/jobs_real_tests.rs:200: `std::thread::sleep(Duration::from_millis(400));`
+* `sleep` crates/iyakki-apps/src/apps/k8s_tile_tests.rs:402: `std::thread::sleep(Duration::from_millis(100));`
+* `sleep` crates/iyakki-apps/src/apps/k8s_tile_tests.rs:406: `std::thread::sleep(Duration::from_millis(700));`
+* `sleep` crates/iyakki-apps/src/apps/k8s_tile_tests.rs:408: `std::thread::sleep(Duration::from_millis(100));`
+* `sleep` crates/iyakki-apps/src/apps/k8s_tile_tests.rs:411: `std::thread::sleep(Duration::from_millis(300));`
+* `sleep` crates/iyakki-apps/src/apps/lab_tests.rs:387: `std::thread::sleep(std::time::Duration::from_millis(80));`
+* `attempts` crates/iyakki-apps/src/apps/learn_tests.rs:824: `for _ in 0..600 {`
+* `sleep` crates/iyakki-apps/src/apps/learn_tests.rs:829: `std::thread::sleep(std::time::Duration::from_millis(10));`
 * `attempts` crates/iyakki-apps/src/apps/mcp_fake_tests.rs:119: `for _ in 0..200 {`
 * `sleep` crates/iyakki-apps/src/apps/mcp_fake_tests.rs:124: `std::thread::sleep(std::time::Duration::from_millis(5));`
 * `attempts` crates/iyakki-apps/src/apps/media.rs:2402: `for _ in 0..300 {`
@@ -524,8 +528,8 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 * `sleep` crates/iyakki-apps/src/apps/media.rs:3502: `std::thread::sleep(std::time::Duration::from_millis(1200));`
 * `attempts` crates/iyakki-apps/src/apps/media_fake_tests.rs:132: `for _ in 0..500 {`
 * `sleep` crates/iyakki-apps/src/apps/media_fake_tests.rs:137: `std::thread::sleep(std::time::Duration::from_millis(10));`
-* `static` crates/iyakki-apps/src/apps/mod.rs:1033: `static ONCE: std::sync::Once = std::sync::Once::new();`
-* `static` crates/iyakki-apps/src/apps/mod.rs:1134: `static HOME: std::sync::OnceLock<()> = std::sync::OnceLock::new();`
+* `static` crates/iyakki-apps/src/apps/mod.rs:943: `static ONCE: std::sync::Once = std::sync::Once::new();`
+* `static` crates/iyakki-apps/src/apps/mod.rs:1044: `static HOME: std::sync::OnceLock<()> = std::sync::OnceLock::new();`
 * `sleep` crates/iyakki-apps/src/apps/pdfview.rs:220: `std::thread::sleep(std::time::Duration::from_millis(4));`
 * `sleep` crates/iyakki-apps/src/apps/pdfview.rs:245: `std::thread::sleep(std::time::Duration::from_millis(4));`
 * `attempts` crates/iyakki-apps/src/apps/pdfview.rs:269: `for _ in 0..3000 {`
@@ -560,21 +564,21 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 * `attempts` crates/iyakki-apps/src/apps/settings_sshtunnels_tests.rs:172: `for _ in 0..200 {`
 * `sleep` crates/iyakki-apps/src/apps/settings_sshtunnels_tests.rs:177: `std::thread::sleep(std::time::Duration::from_millis(10));`
 * `elapsed` crates/iyakki-apps/src/apps/soundask.rs:167: `assert!(t0.elapsed() < Duration::from_secs(5));`
-* `sleep` crates/iyakki-apps/src/apps/story.rs:6297: `std::thread::sleep(Duration::from_millis(self.0.delay_ms));`
-* `sleep` crates/iyakki-apps/src/apps/story.rs:6497: `std::thread::sleep(Duration::from_millis(5));`
-* `sleep` crates/iyakki-apps/src/apps/story.rs:6639: `std::thread::sleep(Duration::from_millis(5));`
-* `sleep` crates/iyakki-apps/src/apps/story.rs:8883: `std::thread::sleep(Duration::from_millis(this.delay_ms));`
-* `attempts` crates/iyakki-apps/src/apps/story.rs:8970: `for _ in 0..20 {`
-* `sleep` crates/iyakki-apps/src/apps/story.rs:8972: `std::thread::sleep(Duration::from_millis(5));`
-* `sleep` crates/iyakki-apps/src/apps/story.rs:9274: `std::thread::sleep(Duration::from_millis(100));`
-* `sleep` crates/iyakki-apps/src/apps/story.rs:9619: `std::thread::sleep(Duration::from_millis(600));`
-* `sleep` crates/iyakki-apps/src/apps/story.rs:10456: `let url = (0..200).find_map(|_| { std::thread::sleep(Duration::from_millis(20)); std::fs::read_to_string(eng.join("opened")).ok().filter(|u|`
+* `sleep` crates/iyakki-apps/src/apps/story/tests.rs:85: `std::thread::sleep(Duration::from_millis(self.0.delay_ms));`
+* `sleep` crates/iyakki-apps/src/apps/story/tests.rs:285: `std::thread::sleep(Duration::from_millis(5));`
+* `sleep` crates/iyakki-apps/src/apps/story/tests.rs:427: `std::thread::sleep(Duration::from_millis(5));`
+* `sleep` crates/iyakki-apps/src/apps/story/tests.rs:2671: `std::thread::sleep(Duration::from_millis(this.delay_ms));`
+* `attempts` crates/iyakki-apps/src/apps/story/tests.rs:2758: `for _ in 0..20 {`
+* `sleep` crates/iyakki-apps/src/apps/story/tests.rs:2760: `std::thread::sleep(Duration::from_millis(5));`
+* `sleep` crates/iyakki-apps/src/apps/story/tests.rs:3062: `std::thread::sleep(Duration::from_millis(100));`
+* `sleep` crates/iyakki-apps/src/apps/story/tests.rs:3407: `std::thread::sleep(Duration::from_millis(600));`
+* `sleep` crates/iyakki-apps/src/apps/story/tests.rs:4244: `let url = (0..200).find_map(|_| { std::thread::sleep(Duration::from_millis(20)); std::fs::read_to_string(eng.join("opened")).ok().filter(|u|`
 * `tmpname` crates/iyakki-apps/src/apps/story_live_tests.rs:230: `let p = std::env::temp_dir().join("iyakki-live-wrong-live-read-wrong");`
-* `sleep` crates/iyakki-apps/src/apps/system.rs:1157: `std::thread::sleep(Duration::from_millis(20));`
-* `sleep` crates/iyakki-apps/src/apps/system.rs:1267: `std::thread::sleep(Duration::from_millis(30));`
-* `sleep` crates/iyakki-apps/src/apps/system.rs:1284: `std::thread::sleep(Duration::from_millis(50));`
-* `attempts` crates/iyakki-apps/src/apps/system_procs_tests.rs:106: `for _ in 0..500 {`
-* `sleep` crates/iyakki-apps/src/apps/system_procs_tests.rs:111: `std::thread::sleep(std::time::Duration::from_millis(10));`
+* `sleep` crates/iyakki-apps/src/apps/system.rs:233: `std::thread::sleep(Duration::from_millis(20));`
+* `sleep` crates/iyakki-apps/src/apps/system.rs:343: `std::thread::sleep(Duration::from_millis(30));`
+* `sleep` crates/iyakki-apps/src/apps/system.rs:360: `std::thread::sleep(Duration::from_millis(50));`
+* `attempts` crates/iyakki-apps/src/apps/system_procs_tests.rs:107: `for _ in 0..500 {`
+* `sleep` crates/iyakki-apps/src/apps/system_procs_tests.rs:112: `std::thread::sleep(std::time::Duration::from_millis(10));`
 * `sleep` crates/iyakki-apps/src/apps/voice_rec_tests.rs:51: `std::thread::sleep(Duration::from_millis(5));`
 * `sleep` crates/iyakki-apps/src/apps/voice_rec_tests.rs:116: `std::thread::sleep(Duration::from_millis(1100));`
 * `elapsed` crates/iyakki-apps/src/apps/web_agent.rs:640: `assert!(t.elapsed() < Duration::from_secs(5) && e.contains("signed out"), "{e}");`
@@ -695,6 +699,15 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 ### iyakki-js (1)
 
 * `sleep` crates/iyakki-js/src/cache.rs:181: `std::thread::sleep(std::time::Duration::from_millis(20));`
+
+### iyakki-k8s-model (6)
+
+* `sleep` crates/iyakki-k8s-model/src/k8s.rs:1189: `std::thread::sleep(Duration::from_millis(100));`
+* `sleep` crates/iyakki-k8s-model/src/k8s.rs:1191: `std::thread::sleep(Duration::from_millis(250));`
+* `sleep` crates/iyakki-k8s-model/src/k8sexp_tests.rs:720: `std::thread::sleep(Duration::from_millis(100));`
+* `sleep` crates/iyakki-k8s-model/src/k8sexp_tests.rs:722: `std::thread::sleep(Duration::from_millis(150));`
+* `sleep` crates/iyakki-k8s-model/src/k8sexp_tests.rs:732: `std::thread::sleep(Duration::from_millis(120));`
+* `sleep` crates/iyakki-k8s-model/src/k8sexp_tests.rs:742: `std::thread::sleep(Duration::from_millis(1500));`
 
 ### iyakki-link (2)
 
@@ -837,22 +850,16 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 
 * `static` crates/iyakki-sdk-tile/tests/wasm32_guest.rs:24: `static BUILT: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();`
 
-### iyakki-shared (15)
+### iyakki-shared (9)
 
-* `sleep` crates/iyakki-shared/src/browserjobs.rs:689: `std::thread::sleep(Duration::from_millis(5));`
+* `sleep` crates/iyakki-shared/src/browserjobs.rs:640: `std::thread::sleep(Duration::from_millis(5));`
 * `sleep` crates/iyakki-shared/src/clientlink/tests.rs:150: `std::thread::sleep(std::time::Duration::from_millis(300));`
 * `port` crates/iyakki-shared/src/doctor_tests.rs:335: `let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();`
 * `elapsed` crates/iyakki-shared/src/doctor_tests.rs:445: `assert!(t.elapsed() < std::time::Duration::from_secs(3));`
-* `sleep` crates/iyakki-shared/src/k8s.rs:1188: `std::thread::sleep(Duration::from_millis(100));`
-* `sleep` crates/iyakki-shared/src/k8s.rs:1190: `std::thread::sleep(Duration::from_millis(250));`
-* `sleep` crates/iyakki-shared/src/k8sexp_real_tests.rs:119: `std::thread::sleep(std::time::Duration::from_secs(2));`
-* `sleep` crates/iyakki-shared/src/k8sexp_tests.rs:720: `std::thread::sleep(Duration::from_millis(100));`
-* `sleep` crates/iyakki-shared/src/k8sexp_tests.rs:722: `std::thread::sleep(Duration::from_millis(150));`
-* `sleep` crates/iyakki-shared/src/k8sexp_tests.rs:732: `std::thread::sleep(Duration::from_millis(120));`
-* `sleep` crates/iyakki-shared/src/k8sexp_tests.rs:742: `std::thread::sleep(Duration::from_millis(1500));`
+* `sleep` crates/iyakki-shared/src/k8sexp_real_tests.rs:120: `std::thread::sleep(std::time::Duration::from_secs(2));`
 * `sleep` crates/iyakki-shared/src/mediaserve.rs:340: `std::thread::sleep(Duration::from_millis(100));`
-* `sleep` crates/iyakki-shared/src/screencap.rs:187: `std::thread::sleep(Duration::from_millis(5));`
-* `sleep` crates/iyakki-shared/src/screencap.rs:222: `std::thread::sleep(Duration::from_millis(5));`
+* `sleep` crates/iyakki-shared/src/screencap.rs:194: `std::thread::sleep(Duration::from_millis(5));`
+* `sleep` crates/iyakki-shared/src/screencap.rs:229: `std::thread::sleep(Duration::from_millis(5));`
 * `sleep` crates/iyakki-shared/src/secretreq.rs:137: `std::thread::sleep(Duration::from_millis(50));`
 
 ### iyakki-shell (54)
@@ -866,15 +873,15 @@ A hit is `ok` when the file shows the guard (a wall-clock deadline near a sleep,
 * `static` crates/iyakki-shell/src/monkey_tests.rs:43: `static STORE_SETUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };`
 * `static` crates/iyakki-shell/src/monkey_tests.rs:45: `static CAUGHT: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };`
 * `static` crates/iyakki-shell/src/monkey_tests.rs:49: `static ONCE: std::sync::Once = std::sync::Once::new();`
-* `attempts` crates/iyakki-shell/src/shell.rs:6191: `for _ in 0..400 {`
-* `sleep` crates/iyakki-shell/src/shell.rs:6196: `std::thread::sleep(std::time::Duration::from_millis(10));`
-* `sleep` crates/iyakki-shell/src/shell.rs:6944: `std::thread::sleep(std::time::Duration::from_millis(5));`
-* `attempts` crates/iyakki-shell/src/shell.rs:7238: `for _ in 0..400 {`
-* `sleep` crates/iyakki-shell/src/shell.rs:7243: `std::thread::sleep(std::time::Duration::from_millis(5));`
-* `attempts` crates/iyakki-shell/src/shell.rs:7252: `for _ in 0..20 {`
-* `sleep` crates/iyakki-shell/src/shell.rs:7254: `std::thread::sleep(std::time::Duration::from_millis(5));`
-* `sleep` crates/iyakki-shell/src/shell.rs:7323: `std::thread::sleep(std::time::Duration::from_millis(1100)); // file names carry the second`
-* `stubsleep` crates/iyakki-shell/src/shell.rs:7458: `let body = if die { "sleep 1; exit 1" } else { "read c; exit 0" };`
+* `attempts` crates/iyakki-shell/src/shell.rs:6220: `for _ in 0..400 {`
+* `sleep` crates/iyakki-shell/src/shell.rs:6225: `std::thread::sleep(std::time::Duration::from_millis(10));`
+* `sleep` crates/iyakki-shell/src/shell.rs:6973: `std::thread::sleep(std::time::Duration::from_millis(5));`
+* `attempts` crates/iyakki-shell/src/shell.rs:7267: `for _ in 0..400 {`
+* `sleep` crates/iyakki-shell/src/shell.rs:7272: `std::thread::sleep(std::time::Duration::from_millis(5));`
+* `attempts` crates/iyakki-shell/src/shell.rs:7281: `for _ in 0..20 {`
+* `sleep` crates/iyakki-shell/src/shell.rs:7283: `std::thread::sleep(std::time::Duration::from_millis(5));`
+* `sleep` crates/iyakki-shell/src/shell.rs:7352: `std::thread::sleep(std::time::Duration::from_millis(1100)); // file names carry the second`
+* `stubsleep` crates/iyakki-shell/src/shell.rs:7487: `let body = if die { "sleep 1; exit 1" } else { "read c; exit 0" };`
 * `elapsed` crates/iyakki-shell/src/shell_cameras_tests.rs:73: `assert!(t.elapsed() < Duration::from_secs(5), "the tile did not start its camera");`
 * `elapsed` crates/iyakki-shell/src/shell_cameras_tests.rs:130: `assert!(t.elapsed() < Duration::from_secs(5), "the tile in a pane did not start its camera");`
 * `elapsed` crates/iyakki-shell/src/shell_cameras_tests.rs:157: `assert!(t.elapsed() < Duration::from_secs(5), "the tile did not look again after the unlock");`

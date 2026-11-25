@@ -3,6 +3,7 @@
 //! first-use explanation. Everywhere except the desktop window the page says that host files are not available and why.
 
 use super::*;
+use super::apps_port::HostAccessPort;
 use iyakki_shared::hostfiles as hf;
 
 use crate::apps::hostfiles::{HostDialog, HostEnv, Out as HostOut};
@@ -25,12 +26,12 @@ fn mb(b: u64) -> String {
 
 impl SettingsApp {
     /// The shared folders (valid or not), for the list.
-    pub(super) fn host_rows(cx: &AppCx) -> Vec<(hf::HostMount, bool)> {
-        iyakki_shared::media::MediaStore::new(cx.data_dir(), &cx.session.user).host_mount_states()
+    pub(super) fn host_rows(p: &dyn HostAccessPort) -> Vec<(hf::HostMount, bool)> {
+        iyakki_shared::media::MediaStore::new(&p.data_dir(), &p.user()).host_mount_states()
     }
 
-    fn host_env(cx: &AppCx) -> HostEnv {
-        crate::apps::hostfiles::env_for_cx(cx)
+    fn host_env(p: &dyn HostAccessPort) -> HostEnv {
+        p.host_env()
     }
 
     /// Keys and clicks for a dialog opened from this page; true when one is open (it takes everything).
@@ -51,24 +52,24 @@ impl SettingsApp {
         true
     }
 
-    pub(super) fn handle_host(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_host(&mut self, k: &Key, p: &dyn HostAccessPort) {
         if !iyakki_shared::hostfiles::enabled() {
             return;
         }
-        let rows = Self::host_rows(cx);
+        let rows = Self::host_rows(p);
         let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
-        let env = Self::host_env(cx);
+        let env = Self::host_env(p);
         match k {
             Key::Char('a') => self.host.dlg = Some(Box::new(HostDialog::share(env, ACCENT))),
             Key::Char('i') => self.host.dlg = Some(Box::new(HostDialog::open(env, ACCENT))),
             Key::Char('l') => self.host.trail = !self.host.trail,
             Key::Char('m') => {
                 if let Some((m, _)) = rows.get(sel) {
-                    let mut store = hf::HostMounts::load(cx.data_dir(), &cx.session.user);
+                    let mut store = hf::HostMounts::load(&p.data_dir(), &p.user());
                     let to = !m.write;
                     match store.set_write(&m.name, to) {
                         Ok(()) => {
-                            cx.audit.record(&cx.session.user, "host.mount.mode", &format!("host:{} {}", m.name, if to { "read-write" } else { "read-only" }));
+                            p.audit("host.mount.mode", &format!("host:{} {}", m.name, if to { "read-write" } else { "read-only" }));
                             self.ok(format!("host:{} is now {}.", m.name, if to { "read-write: changes are made on the computer" } else { "read-only" }));
                         }
                         Err(e) => self.fail(e),
@@ -89,7 +90,7 @@ impl SettingsApp {
         vec![("Add folder…", ACCENT, 'a'), ("Options…", TEXT, 'o'), ("Change mode", TEXT, 'm'), ("Convert to copy", TEXT, 'c'), ("Unlink", ERR, 'u'), ("Import files…", TEXT, 'i'), ("Audit trail", TEXT, 'l')]
     }
 
-    pub(super) fn render_host(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+    pub(super) fn render_host(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn HostAccessPort) {
         if !iyakki_shared::hostfiles::enabled() {
             let mut y = a.y + controls::section_title(g, a.x, a.y, s, "Not available here");
             for l in g.wrap(15.0 * s, hf::UNAVAILABLE, Face::Sans, a.w) {
@@ -124,7 +125,7 @@ impl SettingsApp {
         y += 8.0 * s;
         if self.host.trail {
             y += controls::section_title(g, a.x, y, s, "Audit trail: host files");
-            let lines: Vec<String> = cx.audit.recent(400).into_iter().filter(|l| l.contains(" host.")).take(40).collect();
+            let lines: Vec<String> = p.audit_recent(400).into_iter().filter(|l| l.contains(" host.")).take(40).collect();
             if lines.is_empty() {
                 g.text(a.x, y, 14.0 * s, DIM, "Nothing yet.", Face::Sans);
             }
@@ -139,7 +140,7 @@ impl SettingsApp {
             return;
         }
         y += controls::section_title(g, a.x, y, s, "Shared folders");
-        let rows = Self::host_rows(cx);
+        let rows = Self::host_rows(p);
         if rows.is_empty() {
             g.text(a.x, y, 14.0 * s, DIM, "No folder is shared. Press a to share one (read-only), or i to import files.", Face::Sans);
             return;

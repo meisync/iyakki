@@ -3,14 +3,14 @@
 //! See `docs/development/UI-BOUNDARY.md`, section 11, and F-SPLIT-03.
 
 pub mod askform;
-pub mod failfix;
-pub mod hookstore;
+pub use iyakki_flows_model::failfix;
+pub use iyakki_flows_model::hookstore;
 pub mod machines;
-pub mod programs;
+pub use iyakki_flows_model::programs;
 pub mod remote;
-pub mod spec;
+pub use iyakki_flows_model::spec;
 
-pub mod hookview;
+pub use iyakki_flows_model::hookview;
 
 /// What the shell and the flows host agree on for permission requests.
 pub mod permission {

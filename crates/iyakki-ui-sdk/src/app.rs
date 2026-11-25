@@ -26,6 +26,9 @@ pub trait UiApp {
     fn wants_keyboard(&self) -> bool {
         false
     }
+    /// The shell opened this app because another app asked for one thing in it (the K8S tile asks the Terminal for a shell in a pod): plain text,
+    /// never a secret. The default does nothing.
+    fn open_item(&mut self, _item: &str) {}
     fn event(&mut self, ev: &UiEvent, cx: &mut UiCx) -> Flow;
     /// Draw the whole frame. Lay it out from `canvas.size()` and `cx.metrics()`.
     fn view(&mut self, canvas: &mut dyn Canvas, cx: &UiCx);

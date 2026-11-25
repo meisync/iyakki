@@ -239,3 +239,48 @@ fn refusal_unknown_capability_and_hard_ask_without_a_card_through_the_local_brok
     assert_eq!(b3.decide(&rec), Ok(()));
     assert!(log.recent(10).iter().any(|e| e.reason == "unknown_capability") && log.recent(10).iter().any(|e| e.reason == "no_card"));
 }
+
+// ---- the model router's camera (F-ROUTER-03): the same route, through `CameraSenses`
+
+#[test]
+fn the_router_takes_a_photo_by_id_or_name_through_the_hub_and_its_broker_and_has_no_microphone_here() {
+    use crate::router::{CameraSenses, Senses};
+    let d = tmp("senses");
+    let h = Arc::new(hub(&d, Arc::new(OneUsb)));
+    let (broker, log) = local(&d, None);
+    h.set_broker(broker, "iyakki-test");
+    let s = CameraSenses { hub: h.clone(), who: amy(&d), mic: None };
+    assert_eq!(s.available(), (true, false));
+    assert_eq!(s.cameras(), vec![("usb:video0".to_string(), "HD Webcam".to_string())]);
+    for name in ["", "usb:video0", "hd webcam"] {
+        let jpeg = s.photo(name).unwrap_or_else(|e| panic!("{name:?}: {e}"));
+        assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "a picture, as the camera's own encoder made it");
+    }
+    let e = s.photo("front door").unwrap_err();
+    assert!(e.contains("there is no camera called"), "an unknown camera is refused, never guessed: {e}");
+    assert!(s.sound(3).unwrap_err().contains("no microphone"), "no listener, no sound");
+    let rows = log.recent(10);
+    assert_eq!(rows.len(), 1, "the photos are one use line of the broker's log");
+    assert!(rows[0].allowed && rows[0].capability == "camera.view" && rows[0].person == "amy");
+    h.stop_all();
+}
+
+#[test]
+fn the_router_gets_no_photo_from_a_caller_without_the_grant_or_a_person_without_camera_rights_and_nothing_is_opened() {
+    use crate::router::{CameraSenses, Senses};
+    let d = tmp("senses-deny");
+    let h = Arc::new(hub(&d, Arc::new(OneUsb)));
+    let (broker, log) = local(&d, None);
+    h.set_broker_as(broker, "box", "notes", CallerKind::Store { installation: "tile/user/amy/notes".into() });
+    let s = CameraSenses { hub: h.clone(), who: amy(&d), mic: None };
+    let e = s.photo("").unwrap_err();
+    assert!(e.contains("not_granted"), "{e}");
+    assert_eq!(h.running(), 0, "the camera was never opened");
+    assert_eq!(log.recent(10).len(), 1);
+    assert!(!log.recent(10)[0].allowed);
+    let mut nobody = amy(&d);
+    nobody.usb_ok = false;
+    let blind = CameraSenses { hub: h, who: nobody, mic: None };
+    assert!(blind.cameras().is_empty());
+    assert_eq!(blind.photo("").unwrap_err(), "there is no camera");
+}

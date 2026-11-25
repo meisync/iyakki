@@ -1,0 +1,19 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 9dd5f7be8c46140f; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-IDE-09
+targets: qemu
+profile: ram
+feature-sha: 9dd5f7be8c46140f
+doc: The AI IDE main tabs include Browser (read only)
+clause: 1 The AI IDE tab strip offers Editor, Board, Browser and K8s
+not-covered: the Browser tab showing a page inside the IDE and Ctrl+Shift+O
+not-covered: the embedding of the web view
+skip-unless-button group Build
+click group Build
+skip-unless-button AI IDE
+click AI IDE
+wait text="Editor|Board"
+shot page
+expect-not-blank
+expect-text Editor
+expect-text Board
+expect-text Browser

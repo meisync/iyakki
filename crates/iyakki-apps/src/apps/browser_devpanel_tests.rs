@@ -180,6 +180,7 @@ fn console_network_and_timings_show_the_scrubbed_lines_and_the_filters_work() {
 
 #[test]
 fn what_is_copied_is_the_shown_rows_scrubbed() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     let (_fake, cx, mut a, _g) = in_full("dev_copy", "--static");
     key(&mut a, &cx, Key::F(12));
     dev_page(&mut a, &cx);

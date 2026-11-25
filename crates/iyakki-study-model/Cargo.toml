@@ -1,0 +1,12 @@
+[package]
+name = "iyakki-study-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The study plans, quizzes and lessons of LEARN: data types and pure rules (scoring, dates, parsing, cleaning), with no I/O; split out of iyakki-shared so the LEARN tile crate does not pull in the shared crate."
+
+[dependencies]
+iyakki-clock = { workspace = true }
+iyakki-sec = { workspace = true }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }

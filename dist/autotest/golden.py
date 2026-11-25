@@ -29,7 +29,7 @@ def parse_masks(words):
 
 
 def golden_path(golden_root, row, step):
-    if not re.match(r"^[A-Za-z0-9._-]+$", step) or not re.match(r"^F-[A-Z0-9]+-\d+$", row):
+    if not re.match(r"^[A-Za-z0-9._-]+$", step) or not re.match(r"^F-[A-Z0-9]+-\d+[a-z]?$", row):
         raise ValueError("bad golden name %s/%s" % (row, step))
     return os.path.join(golden_root, row, step + ".png")
 

@@ -177,6 +177,25 @@ impl TerminalView {
         }
     }
 
+    /// Ask for a whole session inside a pod (the K8S tile's "Open a terminal"): the same card as a full terminal, naming the pod. Nothing starts
+    /// until the person answers it.
+    pub fn open_pod(&mut self, pod: &crate::terminal::PodSession) -> bool {
+        if self.in_screen() || self.question.is_some() {
+            return false;
+        }
+        match self.port.screen_open_pod(FIRST_SIZE.0, FIRST_SIZE.1, pod) {
+            Ok(q) => {
+                self.question = Some(q);
+                self.screen = Screen::Asking;
+                true
+            }
+            Err(e) => {
+                self.fail(e);
+                false
+            }
+        }
+    }
+
     pub fn leave_screen(&mut self) {
         if self.in_screen() {
             self.port.screen_close();

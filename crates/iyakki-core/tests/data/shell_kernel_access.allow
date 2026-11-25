@@ -1,2 +1,6 @@
 # Direct kernel/hardware access in non-test tile code (see tests/dependency_ratchet.rs and docs/development/UI-OS-SPLIT-PLAN.md).
 # One line per file: <path> <count>. The list may only shrink; lower a number (or delete the line) when a slice is moved to IYAKKI core.
+# settings.rs was cut short by the first test-module line, so this page was never counted; S0 moved it into its own file (a display string "/dev/<name>", not an access)
+crates/iyakki-apps/src/apps/settings_storage.rs 1
+# S2: the form arms moved out of settings.rs (also past its first test-module line, so never counted before); the two hits are `trim_start_matches("/dev/")` string comparisons on a typed disk name, not accesses
+crates/iyakki-apps/src/apps/settings_forms_a.rs 2

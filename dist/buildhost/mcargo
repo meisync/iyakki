@@ -24,6 +24,8 @@ fi
 HOST=${MAC_HOST:-$(pick)}
 [ -z "$HOST" ] && { echo "mcargo: no Mac answers" >&2; exit 97; }
 dir=$(cd "${1:?worktree dir}" && pwd); shift
+# guard (2026-11-24): a first argument that is not a worktree directory made rsync copy "/" to the host; refuse anything without a Cargo.toml
+[ -n "$dir" ] && [ "$dir" != / ] && [ -f "$dir/Cargo.toml" ] || { echo "mcargo: the first argument must be a worktree directory (usage: mcargo WORKTREE_DIR CARGO_ARGS...), got: ${1:-}" >&2; exit 2; }
 name=$(basename "$dir")
 RH=$(ssh -o BatchMode=yes -o ConnectTimeout=10 $HOST 'echo $HOME') || exit 97
 remote=$RH/$MAC_ROOT/m-$name

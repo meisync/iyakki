@@ -1,0 +1,14 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 2944aa3f60a81ea1; honest subset only: everything not checked is under not-covered.
+row: F-SDK-188
+targets: qemu
+profile: ram
+feature-sha: 2944aa3f60a81ea1
+doc: an event that happens while SAMPLE is closed reaches it marked late and leaves no inbox note
+clause: 1 an event (a link change) that happens while the app is not polling reaches it afterwards marked late, and no inbox note is made for it
+not-covered: the 41 typed events with version, scope and payload schema
+not-covered: one bounded queue per app (100, 7 days, the oldest dropped and counted as one missed marker)
+not-covered: latest-only coalescing of state events and the per-minute limits
+not-covered: a sequence number that only grows, replay of the last 50, requeue
+not-covered: custom.<app>.<name> events and the persistence store trait
+not-covered: audit lines without values
+session-check: app_events_late_after_away

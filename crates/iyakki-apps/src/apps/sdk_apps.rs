@@ -130,6 +130,10 @@ impl<A: UiApp> App for SdkAppTile<A> {
         let pane = iyakki_ui_sdk::desktop::Pane { screen: self.host.pane.screen, view: view.to_string(), w, h };
         self.host.place(pane, iyakki_ui_sdk::desktop::ViewInfo { name: view.to_string(), index, count });
     }
+    fn open_item(&mut self, item: &str, cx: &AppCx) {
+        self.bind(cx);
+        self.host.app.open_item(item);
+    }
     fn take_jump(&mut self) -> Option<(String, String)> {
         self.asked.lock().unwrap_or_else(|e| e.into_inner()).take().map(|a| (a, String::new()))
     }

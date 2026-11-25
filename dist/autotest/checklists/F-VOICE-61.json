@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-61",
+  "feature_sha": "c805e2b2af9d2ce8",
+  "title": "My IYAKKI cloud client on Windows and macOS",
+  "clauses": [
+    {
+      "id": "win-mac-speak",
+      "text": "On Windows or macOS in cloud mode, speech is sent to the cloud and the answer is spoken back",
+      "machines": [
+        "lenovo",
+        "hp",
+        "macbook-pro",
+        "mac-mini-2018"
+      ],
+      "steps": [
+        {
+          "do": "On a Windows or macOS device in cloud mode, start My IYAKKI and speak a question.",
+          "expect": "Your speech is heard and the answer is spoken back on that device."
+        }
+      ]
+    }
+  ]
+}

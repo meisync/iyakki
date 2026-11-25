@@ -8,6 +8,7 @@
 
 use crate::safeclamp::SafeClamp;
 use super::*;
+use super::super::settings_device_port::DisplaysPort;
 use crate::display::outputs::{hub, DisplayConfig, Request};
 use crate::memgate::{self, DisplayMode, Switch};
 
@@ -64,18 +65,23 @@ impl SettingsApp {
     }
 
     /// The Memory line, the switch and what the gate allows now.
+    /// The same for the shell's own tests, which hold the whole context.
     pub fn disp_gate(&self, cx: &AppCx) -> (String, Switch) {
-        let sw = memgate::read_switch(cx.data_dir());
+        self.disp_gate_on(cx)
+    }
+
+    pub(super) fn disp_gate_on(&self, p: &dyn DisplaysPort) -> (String, Switch) {
+        let sw = memgate::read_switch(&p.data_dir());
         let st = hub().status();
         let modes: Vec<DisplayMode> = st.outputs.iter().filter(|o| o.connected).filter_map(|o| o.current.or(o.modes.first().map(|m| (m.0, m.1)))).map(|(w, h)| DisplayMode { w, h }).collect();
-        let mem = memgate::read_mem_os(&*cx.os);
+        let mem = p.mem_facts();
         let a = memgate::features_with(sw, mem, &modes, &[]);
         (memgate::memory_line(&a, mem), sw)
     }
 
-    pub(super) fn handle_displays(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_displays(&mut self, k: &Key, p: &dyn DisplaysPort) {
         self.disp_sync();
-        if !self.admin(cx) {
+        if !self.admin(p) {
             return;
         }
         match k {
@@ -101,12 +107,12 @@ impl SettingsApp {
         }
         match k {
             Key::Char('s') => {
-                let next = memgate::read_switch(cx.data_dir()).next();
-                let _ = memgate::write_switch(cx.data_dir(), next);
+                let next = memgate::read_switch(&p.data_dir()).next();
+                let _ = memgate::write_switch(&p.data_dir(), next);
                 self.ok(format!("Screen features: {}.", next.label()));
             }
             Key::Char('e') | Key::Char('E') => {
-                self.disp.mons = cx.core.monitors().list();
+                self.disp.mons = p.monitors_list();
                 self.disp.mons_looked = true;
                 self.ok(if self.disp.mons.is_empty() { "No external monitor answers over DDC/CI (the kernel may lack the I2C driver, or the screen is built in).".to_string() } else { format!("{} monitor(s) looked at; b chooses the one to set.", self.disp.mons.len()) });
             }
@@ -121,10 +127,10 @@ impl SettingsApp {
                     None => Some(ids[0].clone()),
                     Some(i) => ids.get(i + 1).cloned(),
                 };
-                match cx.core.monitors().choose(next.as_deref()) {
+                match p.monitor_choose(next.as_deref()) {
                     Ok(()) => {
-                        cx.audit.record(&cx.session.user, "settings.display.monitor_choose", next.as_deref().unwrap_or("none"));
-                        self.disp.mons = cx.core.monitors().list();
+                        p.audit("settings.display.monitor_choose", next.as_deref().unwrap_or("none"));
+                        self.disp.mons = p.monitors_list();
                         self.ok(match next {
                             Some(i) => format!("Monitor {i} is chosen: u and j change only its brightness."),
                             None => "No monitor is chosen now.".to_string(),
@@ -139,10 +145,10 @@ impl SettingsApp {
                 };
                 let up = matches!(k, Key::Char('u') | Key::Char('U'));
                 let want = if up { cur.saturating_add(10).min(100) } else { cur.saturating_sub(10).max(1) };
-                match cx.core.monitors().set_brightness(want) {
+                match p.monitor_brightness(want) {
                     Ok(got) => {
-                        cx.audit.record(&cx.session.user, "settings.display.monitor_brightness", &format!("{got}%"));
-                        self.disp.mons = cx.core.monitors().list();
+                        p.audit("settings.display.monitor_brightness", &format!("{got}%"));
+                        self.disp.mons = p.monitors_list();
                         self.ok(format!("The monitor now reads back {got}%."));
                     }
                     Err(e) => self.fail(e),
@@ -168,7 +174,7 @@ impl SettingsApp {
                 if list.is_empty() {
                     return self.fail("This display did not list any sizes.");
                 }
-                let saved = crate::display::outputs::load(cx.data_dir(), &cx.session.user).mode_of(&o.name);
+                let saved = crate::display::outputs::load(&p.data_dir(), &p.user()).mode_of(&o.name);
                 let cur = self.disp.draft.mode_of(&o.name).or(saved).or(o.current).and_then(|c| list.iter().position(|s| *s == c)).unwrap_or(0);
                 let next = if matches!(k, Key::Char('R')) { (cur + list.len() - 1) % list.len() } else { (cur + 1) % list.len() };
                 self.disp.draft.set_mode(&o.name, list[next]);
@@ -177,18 +183,18 @@ impl SettingsApp {
             Key::Char('y') | Key::Enter if Self::disp_single_fb(&st) => {
                 let Some(o) = self.disp_selected() else { return };
                 let Some(size) = self.disp.draft.mode_of(&o.name) else { return self.ok("Nothing has changed: r picks a size first.") };
-                if memgate::read_switch(cx.data_dir()) == Switch::Off {
+                if memgate::read_switch(&p.data_dir()) == Switch::Off {
                     return self.fail("Screen features are switched off: s changes that, then keep the size again.");
                 }
-                let mut cfg = crate::display::outputs::load(cx.data_dir(), &cx.session.user);
+                let mut cfg = crate::display::outputs::load(&p.data_dir(), &p.user());
                 cfg.set_mode(&o.name, size);
-                if let Err(e) = crate::display::outputs::save(cx.data_dir(), &cx.session.user, &cfg) {
+                if let Err(e) = crate::display::outputs::save(&p.data_dir(), &p.user(), &cfg) {
                     return self.fail(format!("The size could not be saved: {e}."));
                 }
-                if memgate::read_switch(cx.data_dir()) != Switch::On {
-                    let _ = memgate::write_switch(cx.data_dir(), Switch::On);
+                if memgate::read_switch(&p.data_dir()) != Switch::On {
+                    let _ = memgate::write_switch(&p.data_dir(), Switch::On);
                 }
-                cx.audit.record(&cx.session.user, "settings.display.resolution", &format!("{} {}x{}", o.name, size.0, size.1));
+                p.audit("settings.display.resolution", &format!("{} {}x{}", o.name, size.0, size.1));
                 self.ok(format!("{} will use {}x{} the next time the shell starts driving it. Screen features is now Always on.", o.name, size.0, size.1));
             }
             _ if !st.kms => self.fail(format!("The shell does not drive the displays here: {}.", if st.why_not.is_empty() { "unknown".to_string() } else { st.why_not.clone() })),
@@ -273,10 +279,10 @@ impl SettingsApp {
         v
     }
 
-    pub(super) fn render_displays(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+    pub(super) fn render_displays(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn DisplaysPort) {
         self.disp_sync();
         let st = hub().status();
-        let (line, sw) = self.disp_gate(cx);
+        let (line, sw) = self.disp_gate_on(p);
         let mut y = a.y;
         let wrap = |g: &mut Gfx, text: &str, size: f32, color: [u8; 4], y: &mut f32| {
             for l in g.wrap(size, text, Face::Sans, a.w) {
@@ -291,7 +297,7 @@ impl SettingsApp {
             wrap(g, &format!("One picture on every screen (the framebuffer): {why}."), 14.0 * s, crate::fx::AMBER, &mut y);
         }
         if Self::disp_single_fb(&st) {
-            let saved = st.outputs.iter().find(|o| o.connected).and_then(|o| crate::display::outputs::load(cx.data_dir(), &cx.session.user).mode_of(&o.name));
+            let saved = st.outputs.iter().find(|o| o.connected).and_then(|o| crate::display::outputs::load(&p.data_dir(), &p.user()).mode_of(&o.name));
             wrap(g, "This screen is drawn at the size the firmware chose. r picks another size from the ones it offers and y keeps it for the next start, when the shell drives this screen itself (Screen features turns to Always on).", 13.0 * s, MUTED, &mut y);
             if let Some(m) = saved {
                 wrap(g, &format!("Kept for the next start: {}x{}", m.0, m.1), 13.0 * s, TEXT, &mut y);

@@ -4,9 +4,10 @@
 //! The probe runs on a job thread; the answer opens as a list of lines (Esc closes it). The account's host rules apply as for pages.
 
 use super::*;
+use super::browser_port::BrowserSettingsPort;
 
 impl SettingsApp {
-    pub(super) fn render_browser_cert(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, _cx: &AppCx) -> f32 {
+    pub(super) fn render_browser_cert(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, _p: &dyn BrowserSettingsPort) -> f32 {
         let rh = 56.0 * s;
         if y0 + rh > a.y + a.h - 4.0 * s {
             if y0 + 22.0 * s < a.y + a.h {
@@ -21,7 +22,7 @@ impl SettingsApp {
     }
 
     /// K of the Browser tab.
-    pub(super) fn handle_browser_cert(&mut self, k: &Key, _cx: &AppCx) -> bool {
+    pub(super) fn handle_browser_cert(&mut self, k: &Key, _p: &dyn BrowserSettingsPort) -> bool {
         if !matches!(k, Key::Char('K')) {
             return false;
         }
@@ -43,12 +44,12 @@ impl SettingsApp {
         Ok((host, port))
     }
 
-    pub(super) fn browser_cert_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
+    pub(super) fn browser_cert_submit(&mut self, p: &dyn BrowserSettingsPort, form: &Form) -> Result<String, String> {
         let (host, port) = Self::cert_target(&form.value(0))?;
-        if !cx.session.policy.allows_host(&host) {
+        if !p.acting_policy().allows_host(&host) {
             return Err(format!("Your account may not open pages from {host}."));
         }
-        cx.audit.record(&cx.session.user, "browser.certificate_view", &host);
+        p.audit("browser.certificate_view", &host);
         self.start("Reading the certificate", move || JobOut::Cert(crate::apps::chat_settings::cert_probe(&host, port).map(|v| v.text().lines().map(str::to_string).collect())));
         Ok("Asking the site for its certificate.".into())
     }

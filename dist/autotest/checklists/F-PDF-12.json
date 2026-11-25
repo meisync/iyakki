@@ -1,0 +1,47 @@
+{
+ "schema": 1,
+ "row": "F-PDF-12",
+ "feature_sha": "39c353152eb7889b",
+ "title": "assistant opens the PDF viewer at a page (manual until automated)",
+ "clauses": [
+  {
+   "id": "opens-page",
+   "text": "Asked in the chat to open a PDF at a page, the assistant asks first and shows the file and page on the card; after you agree the viewer opens at that page.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant: open a PDF you can read at page 3.",
+     "expect": "An approval card shows the file and page 3. After you agree, the PDF viewer opens on that file at page 3."
+    }
+   ]
+  },
+  {
+   "id": "bad-page",
+   "text": "A page past the end is refused before the card appears.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant to open the same file at a page past its last page.",
+     "expect": "The assistant says in words that the page does not exist. No card asks and the viewer does not open."
+    }
+   ]
+  },
+  {
+   "id": "own-person",
+   "text": "The request is for the person who asked only.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Sign in as a second person (needs a second account) and check that no viewer opens from the first person's request.",
+     "expect": "The second person's screen shows no PDF viewer opened by that request."
+    }
+   ]
+  }
+ ]
+}

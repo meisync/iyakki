@@ -1,0 +1,8 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha f226e6313ebcb480; honest subset only: everything not checked is under not-covered.
+row: F-ROUTER-40
+targets: qemu
+profile: ram
+feature-sha: f226e6313ebcb480
+doc: a tool that asks is put to the person as a card while the unattended step waits
+human: router-card | Run a model-router step that uses a tool that asks. Expect: A card appears on the screen naming the tool; the step waits and goes on only after the person answers.
+not-covered: a tool that asks is put to the person as a card while the unattended step waits

@@ -1,0 +1,27 @@
+[package]
+name = "iyakki-tile-flows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The FLOWS tile (the workflow IDE: canvas, runs, board, defaults, webhooks, the assistant beside it). Rule
+# (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit` and on the leaf crates named in tests/data/tile_crate_deps.allow
+# (`iyakki-flow`: the engine's model, `iyakki-flows-model`: the tile's data and the `FlowsPort` jobs, `iyakki-querybox`, `iyakki-clock`), never on
+# the agent, the agent API or the shared crate. Its tests run against a fake `FlowsPort`; the shell adapter is
+# `crates/iyakki-apps/src/apps/flows.rs`, the real port `flows_port.rs`.
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-flow = { workspace = true }
+iyakki-flows-model = { workspace = true }
+iyakki-querybox = { path = "../iyakki-querybox" }
+iyakki-clock = { workspace = true }
+serde_json = "1"
+tiny-skia = "0.11"
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }
+
+[features]
+# test seams the shell's own tests use; never on in a product build
+testing = []

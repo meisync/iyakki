@@ -1,0 +1,17 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 557eb2724981a6a8; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-LINWIN-06
+targets: qemu
+profile: ram
+feature-sha: 557eb2724981a6a8
+doc: The LINUX WINDOW tile opens and says what is missing without a sandbox (read only)
+clause: 1 The LINUX WINDOW tile opens from the Devices and System group for an administrator
+not-covered: the remote screen below a status strip, keys, pointer, right click and drag
+not-covered: a sandbox with the display server (none in a scratch guest)
+skip-unless-button group Devices & System
+click group Devices & System
+skip-unless-button LINUX WINDOW
+click LINUX WINDOW
+wait text="LINUX"
+shot page
+expect-not-blank
+expect-text LINUX

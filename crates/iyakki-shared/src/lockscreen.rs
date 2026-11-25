@@ -46,10 +46,8 @@ impl LockConfig {
 
     pub fn save(&self, dir: &Path, user: &str) -> Result<(), String> {
         let p = config_path(dir, user);
-        let tmp = p.with_extension("tmp");
         let bytes = serde_json::to_vec_pretty(&self.clone().normalized()).map_err(|e| e.to_string())?;
-        std::fs::write(&tmp, bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, &p).map_err(|e| format!("{}: {e}", p.display()))
+        iyakki_schema::write_atomic(&p, &bytes, 0o600)
     }
 
     /// "off" or "after 15 minutes", for the Settings page, the assistant and the audit log.
@@ -73,7 +71,7 @@ fn request_path(dir: &Path, user: &str) -> PathBuf {
 /// Ask the shell showing `user` to lock the screen now (Settings -> Lock now, the assistant's `lock_screen`). The shell and its
 /// callers share nothing but the data folder.
 pub fn request(dir: &Path, user: &str) {
-    let _ = std::fs::write(request_path(dir, user), b"lock\n");
+    let _ = iyakki_schema::write_atomic(&request_path(dir, user), b"lock\n", 0o600);
 }
 
 /// The shell of `user` takes its request; true once per request. Cheap: one `stat` while nothing is asked.

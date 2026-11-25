@@ -1,0 +1,9 @@
+# autotest pilot, batch A (2026-11-21); split into sub-row F-SDK-191a on 2026-11-21: this scenario covers the whole visible clause, the API clauses are F-SDK-191b.
+row: F-SDK-191a
+targets: qemu
+provided-by: program  # every clause is given by the iyakki program (core, shell, Settings, SAMPLE); the rootfs of alpha.8 and alpha.10 differ in no file this scenario reads (docs/development/AUTOTEST.md)
+profile: ram
+feature-sha: 3d64dad2720d461f
+doc: what waited while the app was closed arrives marked late in SAMPLE
+clause: 1 what waited while the app was closed arrives marked late in SAMPLE
+session-check: app_events_late_after_away

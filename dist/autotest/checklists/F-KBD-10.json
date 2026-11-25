@@ -1,0 +1,38 @@
+{
+ "schema": 1,
+ "row": "F-KBD-10",
+ "feature_sha": "2a1a51162e8304f6",
+ "title": "Apple SPI keyboard and trackpad on the older MacBooks",
+ "clauses": [
+  {
+   "id": "spi-keyboard",
+   "text": "the Apple SPI keyboard works and its Function keys mode choice applies",
+   "machines": [
+    "macbook-pro"
+   ],
+   "steps": [
+    {
+     "do": "On the MacBook, type in a text field, then open Settings, Keyboard and read the driver line.",
+     "expect": "The keys are typed and the page names the Apple SPI driver. Trackpad tap and Trackpad scroll are offered."
+    }
+   ]
+  },
+  {
+   "id": "spi-trackpad",
+   "text": "the trackpad moves the pointer and clicks as the Feature says",
+   "machines": [
+    "macbook-pro"
+   ],
+   "steps": [
+    {
+     "do": "Move one finger across the trackpad, then tap once with one finger, tap once with two fingers, and slide two fingers up and down.",
+     "expect": "The pointer moves with acceleration, one tap is a left click, a two-finger tap is a right click, and two fingers scroll."
+    },
+    {
+     "do": "Press the physical click, then press the physical click with two fingers down, then with a finger in the bottom right corner.",
+     "expect": "A plain press is a left click; two fingers or the bottom right corner give a right click."
+    }
+   ]
+  }
+ ]
+}

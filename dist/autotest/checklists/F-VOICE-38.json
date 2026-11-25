@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-38",
+  "feature_sha": "0292b32b506047d0",
+  "title": "My IYAKKI in cloud mode, audio",
+  "clauses": [
+    {
+      "id": "cloud-speak",
+      "text": "A question spoken on a device reaches the cloud machine and the answer is heard on the device",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "With this device connected to your cloud IYAKKI through the Connector, start My IYAKKI and speak a question.",
+          "expect": "The answer is heard on this device."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha b62349462b3510d6; honest subset only: everything not checked is under not-covered.
+row: F-NET-06
+targets: qemu real
+profile: ram
+feature-sha: b62349462b3510d6
+doc: the Network page of Settings shows the Ethernet and WiFi rows (read only)
+clause: 1 Settings > Network shows an Ethernet row and a WiFi row, a missing adapter as not found
+human: net-switch | Open Settings, Network. Switch Ethernet off and on, then WiFi off and on. Expect: Each row shows its state, address and speed while on, and not found when no adapter is present.
+not-covered: state, address and speed of each adapter
+not-covered: switching an adapter on and off (audited, changes the machine)
+not-covered: the Broadcom card with no driver named on the WiFi row (KI-094)
+not-covered: administrators only
+key s
+wait app=Settings
+skip-unless-button Network
+click-sidebar Network
+wait app=Settings page=Network
+shot page
+expect-not-blank
+expect-text Ethernet
+expect-text WiFi
+expect-page Network

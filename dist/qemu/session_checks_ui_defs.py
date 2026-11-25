@@ -1336,6 +1336,17 @@ def _heard(s, pattern, seconds=12, label="ev-heard"):
     raise AssertionError("SAMPLE's Heard log did not show %r: %s" % (pattern, tail(t, 400)))
 
 
+def _heard_new(s, pattern, before):
+    """A NEW matching line of the Heard log (heard_wait.py: counted looks, a line already there never counts)."""
+    import heard_wait
+    return heard_wait.wait_new(lambda: text(s), pattern, before, pause=lambda: time.sleep(1.0))
+
+
+def _heard_count(s, pattern):
+    import heard_wait
+    return heard_wait.count(text(s), pattern)
+
+
 def _monitor(s, line, wait=1.0):
     """One QEMU monitor command; a monitor that does not know the device or the bus makes the check a SKIP, not a failure."""
     out = s.guest._cmd(line, wait)
@@ -1361,6 +1372,7 @@ def check_app_events_volume(s):
     if r.returncode:
         raise __import__("session_lib").devui.Skip("the host has no mkfs.ext2 to make a small disk")
     _open_sample_events(s)
+    n_mounted, n_gone = _heard_count(s, r"volume \S*evvol\S* mounted[^\n]*"), _heard_count(s, r"volume \S*evvol\S* unmounted[^\n]*")
     try:
         _monitor(s, "drive_add 0 if=none,id=evvol,file=%s,format=raw" % img)
         _monitor(s, "device_add virtio-blk-pci,drive=evvol,id=evvol0")
@@ -1369,9 +1381,9 @@ def check_app_events_volume(s):
         if rc != 0 and "Permission denied" in out:
             raise __import__("session_lib").devui.Skip("the guest shell is an unprivileged account and cannot mount a disk (needs a root shell or an image that mounts a hot-plugged disk by itself): %s" % out[-120:].strip())
         need(rc == 0 and "mounted" in out, "the guest could not mount the new disk: %s" % out[-200:])
-        mounted = _heard(s, r"volume \S*evvol\S* mounted[^\n]*")
+        mounted = _heard_new(s, r"volume \S*evvol\S* mounted[^\n]*", n_mounted)
         s.sh("umount /mnt/evvol")
-        gone = _heard(s, r"volume \S*evvol\S* unmounted[^\n]*")
+        gone = _heard_new(s, r"volume \S*evvol\S* unmounted[^\n]*", n_gone)
     finally:
         try:
             s.guest._cmd("device_del evvol0", 1.0)
@@ -1386,10 +1398,177 @@ def check_app_events_volume(s):
 
 def check_app_events_usb(s):
     _open_sample_events(s)
-    _monitor(s, "device_add qemu-xhci,id=evxhci")   # the session guest has no USB controller of its own: plug one in first (PCI hot-plug)
-    time.sleep(3)
+    # the image kernel has no ACPI PCI hot-plug (a controller added at run time is never seen), so the `usb` boot profile starts the guest with the controller already there
+    n_added, n_removed = _heard_count(s, r"usb added [^\n]*"), _heard_count(s, r"usb removed [^\n]*")
     _monitor(s, "device_add usb-mouse,id=evusb,bus=evxhci.0")
-    added = _heard(s, r"usb added [^\n]*")
+    added = _heard_new(s, r"usb added [^\n]*", n_added)
     _monitor(s, "device_del evusb")
-    removed = _heard(s, r"usb removed [^\n]*")
+    removed = _heard_new(s, r"usb removed [^\n]*", n_removed)
     return "a USB mouse was plugged into the guest through the QEMU monitor: SAMPLE's Heard log (usb.device, scope events.devices) said '%s', then '%s' when it was taken out; no serial number appears" % (added, removed)
+
+
+# --------------------------------------------------------------------------------------------- The UI as its own program (F-SPLIT-03)
+# Profile `ui-process`: the guest is paired in the usual mode on a data volume and restarted with `iyakki.ui=process` (session_lib.Session.switch_to_ui_process).
+# What needs root (kill the program, the file modes, the socket switch) goes through `s.root`, which skips without $IYAKKI_QEMU_ROOT_KEY.
+
+def _ps(s, root=False):
+    """[(pid, ppid, user, args)] of the guest's processes."""
+    rc, out = (s.root if root else s.sh)("ps -o pid,ppid,user,args")
+    need(rc == 0, "ps failed: %s" % out[-200:])
+    rows = []
+    for line in out.splitlines():
+        m = re.match(r"\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$", line)
+        if m:
+            rows.append((int(m.group(1)), int(m.group(2)), m.group(3), m.group(4)))
+    return rows
+
+
+def _ui_program(s, root=False):
+    ui = [r for r in _ps(s, root) if "/usr/bin/iyakki-ui" in r[3]]
+    return ui[0] if ui else None
+
+
+def _audit(s, pattern):
+    return [l for l in s.serial().splitlines() if re.search(pattern, l)]
+
+
+def _sign_in_again(s):
+    """The program restarted: its session is gone, the person signs in again (the scratch account of this throw-away guest, by typing at the guest's keyboard)."""
+    import qemu_guest
+    for _try in range(3):
+        for _ in range(40):
+            try:
+                t = text(s)
+            except Exception:  # noqa: BLE001  (the program is between two lives: no screen to read)
+                t = ""
+            if re.search(r"Sign in", t):
+                break
+            time.sleep(1.0)
+        time.sleep(4.0)          # the program has just started: keys typed in its first seconds are lost
+        s.guest.vm.typ(qemu_guest.SCRATCH_PASSWORD)
+        s.guest._cmd("sendkey ret", 5.0)
+        try:
+            return wait_text(s, r"Ask & Create|Build|Media", 12)
+        except AssertionError:
+            continue
+    return None
+
+
+def check_ui_process_tree(s):
+    cmd = s.sh("cat /proc/cmdline")[1]
+    need("iyakki.ui=process" in cmd, "the guest was not started with iyakki.ui=process: %s" % cmd.strip())
+    rows = _ps(s)
+    init = [r for r in rows if r[0] == 1]
+    ui = [r for r in rows if "/usr/bin/iyakki-ui" in r[3]]
+    need(init and "init" in init[0][3], "no process 1: %r" % rows[:3])
+    need(len(ui) == 1, "expected one iyakki-ui process, found %d" % len(ui))
+    need(ui[0][1] == 1, "iyakki-ui is not a child of process 1 (the core): parent %d" % ui[0][1])
+    need("--socket /run/iyakki/ui/ui.sock" in ui[0][3], "the program was not given the core's socket: %s" % ui[0][3])
+    rc, thr = s.sh("cat /proc/1/task/*/comm 2>/dev/null | sort | uniq -c | sort -rn | head -40")
+    shell_thread = "iyakki-shell" in thr
+    need(not shell_thread, "the core still runs the shell as a thread (iyakki-shell) beside the program")
+    ser = s.serial()
+    need("boot: the UI runs as its own program (iyakki-ui), supervised" in ser, "the boot log lacks the core's line that the UI runs as its own program")
+    need(re.search(r"ui program: service\.start ui pid \d+ \(start 1\)", ser), "the audit has no service.start line for the program")
+    st = state(s)
+    need(st.app, "dev state shows no app: the program draws nothing the core can read")
+    need("splash: boot screen ends" in ser, "the core never ended the boot screen (it would draw over the program)")
+    return "cmdline: %s\nprocess 1: %s\niyakki-ui: pid %d, parent %d, user %s, args %s\nthreads of process 1 named iyakki-shell: none\naudit: %s\nscreen read through the core's `dev state`: app %s\nboot screen ended: %s" % (
+        cmd.strip(), init[0][3], ui[0][0], ui[0][1], ui[0][2], ui[0][3], _audit(s, r"service\.start ui")[0][-90:], st.app, _audit(s, r"splash: boot screen ends")[0][-100:])
+
+
+def check_ui_process_screen(s):
+    """The program draws and is driven by the guest's own keyboard (QEMU `sendkey`, the way a person types). `iyakki dev input` does NOT reach the program: the queue it fills is a
+    static of the core that only a shell inside the core empties (found by this check, 2026-11-24; KNOWN-ISSUES draft), so nothing here uses it. The screen is read with `dev state`."""
+    ev = []
+    for _ in range(3):
+        s.guest._cmd("sendkey f11", 1.0)
+    s.guest._cmd("sendkey n", 1.0)
+    st = state(s)
+    need(st.app.lower() == "home", "the program does not show Home (shows %s)" % st.app)
+    need(re.search(r"Ask & Create", text(s)), "the launcher groups are not drawn: %s" % tail(text(s)))
+    ev.append("Home drawn by the program: launcher groups present (read through `dev state`)")
+    s.guest._cmd("sendkey s", 2.5)
+    st = state(s)
+    need(st.app == "Settings", "a key typed at the guest's keyboard did not open Settings (shows %s)" % st.app)
+    s.guest._cmd("sendkey slash", 0.8); s.guest._cmd("sendkey ctrl-a", 0.3); s.guest.vm.typ("Account"); s.guest._cmd("sendkey down", 0.5); s.guest._cmd("sendkey ret", 2.5)
+    U.shot(s, "ui-process-settings-account")
+    need("Dark" in buttons(s) or "✓ Dark" in buttons(s), "the Settings Account page did not draw its theme buttons (screen: %s; buttons: %s)" % (tail(text(s), 300), buttons(s)))
+    ev.append("Settings opened with the key `s`, the Account page found through its search box: the theme buttons are drawn")
+    s.guest._cmd("sendkey slash", 0.8); s.guest._cmd("sendkey ctrl-a", 0.3); s.guest._cmd("sendkey delete", 0.5); s.guest._cmd("sendkey esc", 0.5)
+    for _ in range(3):
+        s.guest._cmd("sendkey f11", 1.0)
+    rc, out = s.dev("input", "key", "n")
+    ev.append("`iyakki dev input key n` answers: %s (it reaches the program only in the usual mode: not served over the socket)" % out.strip()[:80])
+    return "\n".join(ev)
+
+
+def check_ui_process_socket(s):
+    rc, out = s.root("ls -ldn /run/iyakki/ui /run/iyakki/ui/ui.sock")
+    need(rc == 0, "the socket is not there: %s" % out[-200:])
+    lines = {l.split()[-1]: l.split() for l in out.splitlines() if l.strip()}
+    d, k = lines["/run/iyakki/ui"], lines["/run/iyakki/ui/ui.sock"]
+    need(d[0] == "drwx------", "the folder is not 0700: %s" % d[0])
+    need(k[0] == "srw-------", "the socket is not 0600: %s" % k[0])
+    ui = _ui_program(s, True)
+    rc2, owner = s.root("ps -o user,args | grep '[i]yakki-ui' | head -1")
+    need(d[2] == "0" and k[2] == "0", "owner of the folder and the socket is not root (uid): %s %s" % (d[2], k[2]))
+    need(ui and ui[2] == "root", "the program does not run as the owner of the socket: %s" % (ui,))
+    # an unprivileged peer (the dev shell's account) cannot even reach the socket: the folder's mode is the first lock
+    rc, who = s.sh("id -u")
+    rc, denied = s.sh(": < /run/iyakki/ui/ui.sock")
+    need(rc != 0 and re.search(r"Permission denied", denied), "the unprivileged account was not refused at the folder: %r" % denied[-160:])
+    # the second lock: the kernel names the peer of every connection. Open the file modes (root, for this test only), let the unprivileged account connect with the
+    # program's own connect code, restore the modes; the core must close the connection (SO_PEERCRED: root and the owner only)
+    try:
+        s.root("chmod 0711 /run/iyakki/ui; chmod 0666 /run/iyakki/ui/ui.sock")
+        rc, said = s.sh("/usr/bin/iyakki-ui --socket /run/iyakki/ui/ui.sock --fb /dev/null 2>&1; echo exit=$?", 60)
+    finally:
+        s.root("chmod 0700 /run/iyakki/ui; chmod 0600 /run/iyakki/ui/ui.sock")
+    need(re.search(r"exit=[1-9]", said), "the peer that is not allowed was not refused: %r" % said[-300:])
+    need("Permission denied" not in said, "the refusal came from the file mode, not from the peer check (the modes were opened): %r" % said[-300:])
+    rc, modes = s.root("ls -ldn /run/iyakki/ui /run/iyakki/ui/ui.sock")
+    need("drwx------" in modes and "srw-------" in modes, "the modes were not restored: %s" % modes)
+    return "folder %s uid %s, socket %s uid %s, program user %s (pid %d)\nunprivileged peer at the closed folder: %s\nmodes opened for the test, unprivileged `iyakki-ui --socket`: %s\nmodes restored: %s" % (
+        d[0], d[2], k[0], k[2], ui[2], ui[0], denied.strip()[-100:], said.strip()[-200:], modes.strip().replace("\n", " | "))
+
+
+def check_ui_process_restart(s):
+    before = _ui_program(s, True)
+    need(before, "no iyakki-ui process to kill")
+    n0 = len(_audit(s, r"service\.start ui"))
+    s.root("kill -9 %d" % before[0])
+    after = None
+    for _ in range(40):
+        time.sleep(1.0)
+        after = _ui_program(s, True)
+        if after and after[0] != before[0]:
+            break
+    need(after and after[0] != before[0], "the core did not start the program again within 40 s")
+    need(after[1] == 1, "the new program is not a child of the core: parent %d" % after[1])
+    exits = _audit(s, r"service\.exit ui")
+    need(exits, "the audit has no service.exit line for the program")
+    need(re.search(r"signal: 9|killed|SIGKILL", exits[-1]), "the audit does not say the program was killed: %s" % exits[-1][-120:])
+    need(len(_audit(s, r"service\.start ui")) > n0, "the audit has no second service.start")
+    back = _sign_in_again(s)
+    need(back, "the screen did not come back after the restart")
+    return "killed pid %d; new pid %d (parent %d)\naudit: %s\naudit: %s\nthe screen returned to the sign-in screen and, after typing the scratch account's password, to Home" % (
+        before[0], after[0], after[1], exits[-1][-110:], _audit(s, r"service\.start ui")[-1][-90:])
+
+
+def check_ui_process_stays_up(s):
+    """The program keeps its one connection to the core for as long as the guest runs. Found by the first booted run (2026-11-24): the core closed a connection after 100,000 calls, the
+    program (several hundred calls a second) lost the core after about four minutes, ended with status 5 (CoreWatch) and the person was back at the sign-in screen, again every five minutes.
+    The check waits until the guest has been up 420 s (read from /proc/uptime) and looks at the audit: the program never ended by itself (an exit by a signal is the restart check's kill)."""
+    for _ in range(600):
+        rc, up = s.sh("cut -d' ' -f1 /proc/uptime")
+        if rc == 0 and float(up.strip().splitlines()[-1]) >= 420:
+            break
+        time.sleep(1.0)
+    starts, exits = _audit(s, r"service\.start ui"), _audit(s, r"service\.exit ui")
+    need(starts, "the audit has no service.start line for the program")
+    own = [l for l in exits if re.search(r"exit status: \d+", l)]
+    need(not own, "the program ended by itself (the core stopped answering it?): %s" % (own[0][-120:] if own else ""))
+    ui = _ui_program(s, False)
+    need(ui, "no iyakki-ui process after 420 s")
+    return "up %s s; audit: %d start(s), %d exit(s) of the program\n%s" % (up.strip().splitlines()[-1], len(starts), len(exits), "\n".join(l[-110:] for l in starts + exits))

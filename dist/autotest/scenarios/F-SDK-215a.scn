@@ -1,0 +1,16 @@
+# autotest alpha.10 batch F (lane Q8, 2026-11-24); split into sub-row F-SDK-215a on 2026-11-24 (lane SC2): this scenario covers the whole visible clause, the API and rule clauses are F-SDK-215b.
+row: F-SDK-215a
+targets: qemu
+profile: ram
+feature-sha: a00b4221fcb1c314
+doc: Settings, Apps access is a page of its own (read only, nothing is changed)
+clause: 1 Settings, Apps access is a page of its own
+key s
+wait app=Settings
+skip-unless-button Apps access
+click-sidebar Apps access
+wait app=Settings page="Apps access"
+shot page
+expect-not-blank
+expect-text Apps access
+expect-page Apps access

@@ -84,3 +84,63 @@ fn the_page_draws_at_six_sizes_with_both_switches_clickable() {
         }
     }
 }
+
+// ---- the page on a fake port (no AppCx for the page's own logic: the settings, the audit log and the administrator switch are in memory) ----
+
+mod on_a_fake_port {
+    use super::*;
+    use crate::apps::settings_port::{FakeSettingsPort, SettingsDataPort};
+    use std::sync::atomic::Ordering;
+
+    fn app() -> SettingsApp {
+        let cx = admin("rr-fake");
+        let mut a = SettingsApp::new(&cx);
+        a.go_to(Tab::Radio);
+        a
+    }
+
+    #[test]
+    fn the_choices_save_into_the_fake_settings_and_are_audited() {
+        let p = FakeSettingsPort::new(true);
+        let mut a = app();
+        a.handle_radio(&Key::Char('+'), &p);
+        assert_eq!(p.settings_get().radio.retries(), 3);
+        a.handle_radio(&Key::Char('a'), &p);
+        assert!(!p.settings_get().radio.auto_switch());
+        assert_eq!(p.audited(), vec![("settings.radio".to_string(), "retries=3".to_string()), ("settings.radio".to_string(), "auto_switch=false".to_string())]);
+        assert!(a.status().is_some_and(|s| s.1 && s.0 == "Saved."));
+    }
+
+    #[test]
+    fn a_person_who_is_not_an_administrator_changes_nothing_and_the_refusal_is_audited() {
+        let p = FakeSettingsPort::new(false);
+        let mut a = app();
+        a.handle_radio(&Key::Char('+'), &p);
+        assert_eq!(p.settings_get().radio.retries(), 2);
+        assert_eq!(p.audited(), vec![("settings.denied".to_string(), a.tab().label().to_string())]);
+        assert!(a.status().is_some_and(|s| !s.1 && s.0.contains("administrators")));
+    }
+
+    #[test]
+    fn busy_settings_are_told_and_nothing_is_audited() {
+        let p = FakeSettingsPort::new(true);
+        p.busy.store(true, Ordering::SeqCst);
+        let mut a = app();
+        a.handle_radio(&Key::Char('-'), &p);
+        assert!(a.status().is_some_and(|s| !s.1 && s.0.contains("busy")));
+        assert!(p.audited().is_empty());
+        assert_eq!(p.settings_get().radio.retries(), 2);
+    }
+
+    #[test]
+    fn the_page_draws_from_the_fake_settings() {
+        let p = FakeSettingsPort::new(true);
+        let mut a = app();
+        let mut g = Gfx::new(1280, 720);
+        g.clear(rgb(0, 0, 0));
+        a.render_radio(&mut g, R::new(0.0, 72.0, 1280.0, 648.0), 1.0, &p);
+        for k in ['r', 'a'] {
+            assert!(g.hits.iter().any(|h| h.ev == Event::Key(Key::Char(k))), "the switch for {k}");
+        }
+    }
+}

@@ -3,6 +3,7 @@
 //! texts that name the cluster, what Setup does when another cluster is active, and the AI profile's two lines on the tiles page
 //! (the machine facts, the hidden-tools sentence with the "Show all AI tools" link). Fakes only.
 use super::*;
+use crate::apps::store_port::CxPort;
 use crate::apps::store::{Section, StoreApp};
 use crate::apps::{App, AppCx};
 use iyakki_shared::clusters::{Kind};
@@ -31,7 +32,7 @@ fn rig(tag: &str, role: Role, machine: Machine, present: &[Item], extra_cluster:
     a.setup.launch = Some(qi::Launch { exe: "/usr/bin/true".into(), data: cx.data_dir().join("qi") });
     a.handle(&Event::Tab(4), &cx);
     assert!(a.section == Section::Setup);
-    a.setup.enter(&cx);
+    a.setup.enter(&CxPort(&cx));
     (a, cx)
 }
 
@@ -100,7 +101,7 @@ fn the_switcher_is_in_the_popup_of_the_cluster_items_only_at_every_size_and_stay
             if sw.len() == 1 {
                 a.handle(&Event::Tab(SWITCH), &cx);
                 let (g, area) = draw(&mut a, &cx, w, h);
-                assert!(g.hits.iter().any(|x| x.label == "Manage clusters..."), "{w}x{h} {item:?}: {:?} open={}", g.hits.iter().map(|x| (x.label.clone(), x.rect.x as i32, x.rect.y as i32, x.rect.w as i32, x.rect.h as i32)).collect::<Vec<_>>(), a.setup.host.as_ref().map(|h| h.sw.open).unwrap_or(false));
+                assert!(g.hits.iter().any(|x| x.label == "Manage clusters..."), "{w}x{h} {item:?}: {:?} open={}", g.hits.iter().map(|x| (x.label.clone(), x.rect.x as i32, x.rect.y as i32, x.rect.w as i32, x.rect.h as i32)).collect::<Vec<_>>(), a.setup.host.as_ref().map(|h| h.open()).unwrap_or(false));
                 for x in switch_hits(&g) {
                     let r = x.1;
                     assert!(r.x >= area.x - 0.5 && r.y >= area.y - 0.5 && r.x + r.w <= area.x + area.w + 0.5 && r.y + r.h <= area.y + area.h + 0.5, "{w}x{h} {item:?}: `{}` {r:?} outside", x.0);
@@ -128,7 +129,7 @@ fn choosing_a_cluster_in_the_popup_switches_it_names_it_and_setup_installs_only_
     assert!(t.starts_with("Deploy Lemonade to cluster \"gpu-box\" (remote)"), "{t}");
     // Setup's installers run in this machine's own cluster: another active cluster is refused, with the way out, and nothing starts
     let before = a.setup.jobs.len();
-    a.setup.press(Item::Lemonade, &cx);
+    a.setup.press(Item::Lemonade, &CxPort(&cx));
     let note = a.setup.note.clone().unwrap();
     assert!(!note.1 && note.0.contains("cluster \"gpu-box\" (remote)") && note.0.contains("\"This machine\""), "{note:?}");
     assert_eq!(a.setup.jobs.len(), before);
@@ -165,7 +166,7 @@ fn cpu_only_machine() -> Machine {
     std::fs::write(r.join("sys/class/dmi/id/product_name"), "PC").unwrap();
     let p = iyakki_agent::aiprofile::detect(&r);
     let _ = std::fs::remove_dir_all(&r);
-    Machine { ram_mb: 8_000, ai: Some(std::sync::Arc::new(p)), ..Default::default() }
+    Machine { ram_mb: 8_000, ai: Some(std::sync::Arc::new(crate::apps::store_port::AgentAi(std::sync::Arc::new(p)))), ..Default::default() }
 }
 
 #[test]

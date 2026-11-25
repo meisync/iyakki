@@ -2,6 +2,7 @@
 //! Store -> Setup and the data science toolkit: the popup says where the toolkit stands, and Verify and Upgrade appear only when they make
 //! sense, for an administrator. Fakes only: the self-test is refused for want of the Linux apps sandbox (nothing runs, nothing is fetched).
 use super::*;
+use crate::apps::store_port::CxPort;
 use crate::apps::store::{Section, StoreApp};
 use crate::apps::{App, AppCx};
 use iyakki_sec::policy::Role;
@@ -26,7 +27,7 @@ fn rig(tag: &str, role: Role, installed: bool) -> (StoreApp, AppCx) {
     }
     a.handle(&Event::Tab(4), &cx);
     assert!(a.section == Section::Setup);
-    a.setup.enter(&cx);
+    a.setup.enter(&CxPort(&cx));
     (a, cx)
 }
 
@@ -42,7 +43,7 @@ fn labels(a: &StoreApp) -> Vec<String> {
 fn verify_and_upgrade_are_offered_to_an_administrator_for_an_installed_toolkit_that_differs_from_the_pins() {
     let (mut a, cx) = rig("ds-buttons", Role::Admin, true);
     a.setup.open_popup(Item::DataScience);
-    a.setup.refresh_toolkit(&cx);
+    a.setup.refresh_toolkit(&CxPort(&cx));
     // the record has one file the table does not pin: behind this IYAKKI
     assert_eq!(a.setup.ds_state.as_ref().unwrap().0, "upgrade");
     let l = labels(&a);
@@ -50,14 +51,14 @@ fn verify_and_upgrade_are_offered_to_an_administrator_for_an_installed_toolkit_t
     // a standard user gets neither, and is told in words when it tries
     let (mut u, cxu) = rig("ds-user", Role::User, true);
     u.setup.open_popup(Item::DataScience);
-    u.setup.refresh_toolkit(&cxu);
+    u.setup.refresh_toolkit(&CxPort(&cxu));
     assert!(!labels(&u).iter().any(|x| x.starts_with("Verify") || x.starts_with("Upgrade")));
-    u.setup.verify_toolkit(&cxu);
+    u.setup.verify_toolkit(&CxPort(&cxu));
     assert!(u.setup.note.as_ref().is_some_and(|n| !n.1 && n.0.contains("administrator")));
     // not installed: neither
     let (mut m, cxm) = rig("ds-missing", Role::Admin, false);
     m.setup.open_popup(Item::DataScience);
-    m.setup.refresh_toolkit(&cxm);
+    m.setup.refresh_toolkit(&CxPort(&cxm));
     assert_eq!(m.setup.ds_state.as_ref().unwrap().0, "none");
     assert!(!labels(&m).iter().any(|x| x.starts_with("Verify") || x.starts_with("Upgrade")));
 }
@@ -66,7 +67,7 @@ fn verify_and_upgrade_are_offered_to_an_administrator_for_an_installed_toolkit_t
 fn verify_without_the_sandbox_says_why_and_is_audited_and_upgrade_needs_the_state_to_say_so() {
     let (mut a, cx) = rig("ds-verify", Role::Admin, true);
     a.setup.open_popup(Item::DataScience);
-    a.setup.refresh_toolkit(&cx);
+    a.setup.refresh_toolkit(&CxPort(&cx));
     a.handle(&Event::Tab(VERIFY + idx()), &cx);
     let note = a.setup.note.clone().unwrap();
     assert!(!note.1 && note.0.contains("Linux apps"), "{note:?}");

@@ -16,9 +16,19 @@ use iyakki_agent_api::{WakeHandle, WakeListenerBox};
 
 pub(super) type ListenerMaker = Arc<dyn Fn() -> WakeListenerBox + Send + Sync>;
 
+/// What the wake listener's end-of-session hook shares with the shell: whether a listener exists, and the request to close it (the shell
+/// drops the handle in `wake_apply_end`, right after the registry ran, because only the shell holds it).
 #[derive(Default)]
+pub(super) struct WakeEnd {
+    open: std::sync::atomic::AtomicBool,
+    end: std::sync::atomic::AtomicBool,
+}
+
 pub(super) struct WakeUi {
     handle: Option<Box<dyn WakeHandle>>,
+    /// This shell's own end-of-session hooks (the listener is closed by the shell that owns it).
+    pub ends: iyakki_shared::sessionend::SessionEnd,
+    shared: Arc<WakeEnd>,
     /// Tick of the last time a missing or damaged model file was looked at again.
     looked: u64,
     /// The microphone is open to the spotter (what the sign shows).
@@ -29,7 +39,34 @@ pub(super) struct WakeUi {
     pub note: String,
 }
 
+impl Default for WakeUi {
+    fn default() -> Self {
+        let shared = Arc::new(WakeEnd::default());
+        let ends = iyakki_shared::sessionend::SessionEnd::new();
+        let w = shared.clone();
+        // a lock only pauses the listener (it closes the device itself, `wake_tick`); a sign-out and a suspend drop it
+        ends.register("wake-listener", iyakki_shared::sessionend::Kind::Capture, move |c| {
+            let open = matches!(c.why, iyakki_shared::sessionend::Why::SignOut | iyakki_shared::sessionend::Why::Suspend) && w.open.load(std::sync::atomic::Ordering::SeqCst);
+            if open {
+                w.end.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            open
+        });
+        WakeUi { handle: None, ends, shared, looked: 0, sign: false, listener_maker: None, note: String::new() }
+    }
+}
+
 impl Shell {
+    /// After the end-of-session registry ran: close the listener (and its microphone) when its hook asked for it.
+    pub(super) fn wake_apply_end(&mut self) {
+        if self.wake.shared.end.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.wake.handle = None;
+            self.wake.sign = false;
+            self.wake.note.clear();
+            self.wake.shared.open.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     /// Called on every heartbeat: start or stop the listener to match the settings, tell it what the screen needs, collect a detection.
     pub(super) fn wake_tick(&mut self) {
         let eligible = match &self.session {
@@ -40,6 +77,7 @@ impl Shell {
             _ => false,
         };
         if !eligible {
+            self.wake.shared.open.store(false, std::sync::atomic::Ordering::SeqCst);
             if self.wake.handle.take().is_some() || self.wake.sign {
                 self.wake.sign = false;
                 self.wake.note.clear();
@@ -52,6 +90,7 @@ impl Shell {
             match self.env.services.wake_spawn(self.wake.listener_maker.as_ref().map(|m| m())) {
                 Ok(h) => {
                     self.wake.handle = Some(h);
+                    self.wake.shared.open.store(true, std::sync::atomic::Ordering::SeqCst);
                     self.wake.note.clear();
                 }
                 Err(text) => self.wake.note = text,
@@ -100,6 +139,7 @@ impl Shell {
             self.env.audit.record(&s.user, "voice.assistant", "wake-off");
         }
         self.wake.handle = None;
+        self.wake.shared.open.store(false, std::sync::atomic::Ordering::SeqCst);
         self.wake.sign = false;
         mark_stale!(self);
     }

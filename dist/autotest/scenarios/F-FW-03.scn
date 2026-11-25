@@ -1,0 +1,12 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 5fe796a9b7f5b295; honest subset only: everything not checked is under not-covered.
+row: F-FW-03
+targets: qemu
+profile: ram
+feature-sha: 5fe796a9b7f5b295
+doc: a firewall preset applied on the image kernel is confirmed (the in-house nf_tables writer)
+clause: 1 Apply of a changed preset on the image kernel is confirmed by the page ('Applied') and the rules file changes only then (the program's own nf_tables writer, no nft)
+not-covered: the counter read-out
+not-covered: one atomic batch that replaces or removes only our table (the table is not listed from outside)
+not-covered: kernel errors in plain words
+not-covered: 'Firewall not available in this kernel' (needs a kernel without nf_tables)
+session-check: firewall_presets

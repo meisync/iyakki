@@ -1,0 +1,24 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 1d46e6e35c9c0eb5; honest subset only: everything not checked is under not-covered.
+row: F-A11Y-05
+targets: qemu real
+profile: ram
+feature-sha: 1d46e6e35c9c0eb5
+doc: the Accessibility page of Settings offers the switches (read only, nothing is changed)
+clause: 1 the Accessibility page (everyone, no administrator) shows the switches Screen reader, High contrast, Reduce motion and Sticky keys
+human: a11y-look | Open Settings, Accessibility. Flip Reduce motion and Large pointer and look at the screen. Expect: Each switch changes at once, the page stays readable and the values are still set after sign-out and in again.
+not-covered: read-aloud notices, large pointer, big focus ring, slow keys (cycle), text size keys and the voice test are not read
+not-covered: kept per person (access-<name> file)
+not-covered: narrow windows under about 760 pixels
+not-covered: a chat run with the real backend
+key s
+wait app=Settings
+skip-unless-button Accessibility
+click-sidebar Accessibility
+wait app=Settings page=Accessibility
+shot page
+expect-not-blank
+expect-text Screen reader
+expect-text High contrast
+expect-text Reduce motion
+expect-text Sticky keys
+expect-page Accessibility

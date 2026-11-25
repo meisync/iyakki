@@ -7,37 +7,34 @@
 //! this file turns its views into forms and its answers back into values.
 
 use super::*;
+use super::system_port::UpdatesPort;
 use iyakki_shared::wizardrun::{State, View};
 use iyakki_shared::wizardtools::{screen, Backend};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-fn real_backend(cx: &AppCx) -> Arc<dyn Backend> {
-    let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-    cx.b3().wizard_backend(&cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d)))
-}
 
 impl SettingsApp {
     /// What the wizards run on: this machine's store and checks, or (in a test) a fake handed to the panel.
-    fn wiz_backend(&self, cx: &AppCx) -> Arc<dyn Backend> {
-        self.upd.wiz_be.clone().unwrap_or_else(|| real_backend(cx))
+    fn wiz_backend(&self, p: &dyn UpdatesPort) -> Arc<dyn Backend> {
+        self.upd.wiz_be.clone().unwrap_or_else(|| p.wizard_backend())
     }
 
     /// Is there anything for `w` to open: a setup waiting, or one that is open (started in the chat, say)?
-    pub(super) fn wiz_available(&self, cx: &AppCx) -> bool {
-        !self.upd_wizard_lines(cx).is_empty() || screen::shown(&*self.wiz_backend(cx)).is_some_and(|s| !matches!(s.view, View::Finished(_)))
+    pub(super) fn wiz_available(&self, p: &dyn UpdatesPort) -> bool {
+        !self.upd_wizard_lines(p).is_empty() || screen::shown(&*self.wiz_backend(p)).is_some_and(|s| !matches!(s.view, View::Finished(_)))
     }
 
     /// Key `w`: the first waiting wizard, or the one already open.
-    pub(super) fn wiz_start(&mut self, cx: &AppCx) {
-        let be = self.wiz_backend(cx);
+    pub(super) fn wiz_start(&mut self, p: &dyn UpdatesPort) {
+        let be = self.wiz_backend(p);
         let running = screen::shown(&*be).is_some_and(|s| !matches!(s.view, View::Finished(_)));
         if !running {
             // the waiting list (the file of the person; a fake backend answers it in a test)
             let first = if self.upd.wiz_be.is_some() {
                 be.pending().into_iter().next().map(|(app, wizard, _, _)| (app, wizard, None))
             } else {
-                cx.storeapi().pending_wizards(&cx.session.user).into_iter().next().map(|w| (w.pending.app, w.pending.wizard, w.pending.from_version))
+                p.store_api().pending_wizards(&p.user_name()).into_iter().next().map(|w| (w.pending.app, w.pending.wizard, w.pending.from_version))
             };
             let Some((app, wizard, from)) = first else {
                 self.ok("No setup is waiting.");
@@ -48,12 +45,12 @@ impl SettingsApp {
                 return;
             }
         }
-        self.modal = self.wiz_modal(cx);
+        self.modal = self.wiz_modal(p);
     }
 
     /// The modal for the step the run is at; `None` (with a message on the page) when the wizard is over.
-    pub(super) fn wiz_modal(&mut self, cx: &AppCx) -> Option<Modal> {
-        let be = self.wiz_backend(cx);
+    pub(super) fn wiz_modal(&mut self, p: &dyn UpdatesPort) -> Option<Modal> {
+        let be = self.wiz_backend(p);
         let shown = screen::shown(&*be)?;
         let app = shown.app.clone();
         match shown.view {
@@ -81,7 +78,7 @@ impl SettingsApp {
             }
             View::Summary { title, text } => Some(Modal::Confirm(ConfirmKind::WizardFinish, format!("{app}: {title}\n{text}\nPress y when you have read it."))),
             View::Finished(State::Done) => {
-                let more = if self.upd.wiz_be.is_some() { be.pending().len() } else { cx.storeapi().pending_wizards(&cx.session.user).len() };
+                let more = if self.upd.wiz_be.is_some() { be.pending().len() } else { p.store_api().pending_wizards(&p.user_name()).len() };
                 self.ok(format!("The setup of {app} is finished.{}", if more > 0 { format!(" {more} more waiting: press w.") } else { String::new() }));
                 None
             }
@@ -98,8 +95,8 @@ impl SettingsApp {
     }
 
     /// The form of a question step was submitted: hand the values to the engine. A refused field reopens the form with the reasons.
-    pub(super) fn wiz_submit(&mut self, cx: &AppCx, form: &mut Form) -> Option<Modal> {
-        let be = self.wiz_backend(cx);
+    pub(super) fn wiz_submit(&mut self, p: &dyn UpdatesPort, form: &mut Form) -> Option<Modal> {
+        let be = self.wiz_backend(p);
         let shown = screen::shown(&*be)?;
         let View::Form { fields, .. } = &shown.view else { return None };
         let mut values: BTreeMap<String, Value> = BTreeMap::new();
@@ -113,7 +110,7 @@ impl SettingsApp {
             values.insert(fl.id.clone(), v);
         }
         match screen::answer(&*be, &values) {
-            Ok(()) => self.wiz_modal(cx),
+            Ok(()) => self.wiz_modal(p),
             Err(errs) => {
                 let words: Vec<String> = errs
                     .iter()
@@ -129,39 +126,39 @@ impl SettingsApp {
     }
 
     /// Esc on a question: the run is cancelled (nothing it would have run was run).
-    pub(super) fn wiz_cancel(&mut self, cx: &AppCx) {
-        screen::cancel(&*self.wiz_backend(cx));
+    pub(super) fn wiz_cancel(&mut self, p: &dyn UpdatesPort) {
+        screen::cancel(&*self.wiz_backend(p));
         self.ok("The setup was cancelled. Nothing it would have checked or moved was run; it stays waiting.");
     }
 
     /// `y` on the "will now run" card (steps on a worker thread, so the page stays alive) or on the summary.
-    pub(super) fn wiz_confirm(&mut self, cx: &AppCx, kind: ConfirmKind) {
+    pub(super) fn wiz_confirm(&mut self, p: &dyn UpdatesPort, kind: ConfirmKind) {
         match kind {
             ConfirmKind::WizardRun => {
                 if self.job.is_some() {
                     self.fail("Another operation is still running. Press w again when it has finished.");
                     return;
                 }
-                let be = self.wiz_backend(cx);
+                let be = self.wiz_backend(p);
                 self.start("Running the setup steps", move || JobOut::Wizard(screen::run_steps(&*be).map(|_| ())));
             }
             ConfirmKind::WizardFinish => {
-                if let Err(e) = screen::finish(&*self.wiz_backend(cx)) {
+                if let Err(e) = screen::finish(&*self.wiz_backend(p)) {
                     self.fail(e);
                     return;
                 }
-                self.modal = self.wiz_modal(cx);
+                self.modal = self.wiz_modal(p);
             }
             _ => {}
         }
     }
 
     /// The worker thread came back: show what is next (a question, the summary, or how it ended).
-    pub(super) fn wiz_job_done(&mut self, cx: &AppCx, r: Result<(), String>) {
+    pub(super) fn wiz_job_done(&mut self, p: &dyn UpdatesPort, r: Result<(), String>) {
         if let Err(e) = r {
             self.fail(e);
             return;
         }
-        self.modal = self.wiz_modal(cx);
+        self.modal = self.wiz_modal(p);
     }
 }

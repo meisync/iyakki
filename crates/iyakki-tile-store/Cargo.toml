@@ -1,0 +1,17 @@
+[package]
+name = "iyakki-tile-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The STORE tile (the app store, quick install, the drivers, the publish flow). Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends
+# on the pure leaf crates named in tests/data/tile_crate_deps.allow and never on the agent API, the core API or the shared crate. The tile
+# talks to the store through `engine::StoreEngine` (plain answers and the store's own pure types); its tests run against `fake::FakeStoreEngine`.
+# The shell adapter is `crates/iyakki-apps/src/apps/store.rs`; the forwarding wrapper over the agent's `StoreApi` is in `store_port.rs`
+# (alpha.10 AP3, plan in ~/iyakki-work/briefs/ap2-continue.md).
+
+[dependencies]
+iyakki-store-model = { path = "../iyakki-store-model" }
+iyakki-sec = { workspace = true }
+iyakki-cluster-model = { path = "../iyakki-cluster-model" }
+iyakki-uikit = { path = "../iyakki-uikit" }

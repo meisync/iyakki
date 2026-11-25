@@ -284,6 +284,8 @@ pub fn scan_via(route: &dyn AudioRoute, mixer: &dyn Fn(u32) -> Option<String>) -
         let usb = route.asound_has(&format!("{dir}/usbid")) || low.contains("usb-audio") || low.contains("usb audio");
         let t2 = is_t2_card(&driver, &card_name);
         let bt = low.contains("bluetooth") || low.contains("bluealsa");
+        // the Raspberry Pi's HDMI cards (`vc4-hdmi-0`) name their one PCM `MAI PCM i2s-hifi-0`, so the card's own name says it is HDMI
+        let vc4_hdmi = low.contains("vc4-hdmi");
         let mut pcms: Vec<(u32, String, String)> = route
             .asound_dir(&dir)
             .into_iter()
@@ -300,12 +302,15 @@ pub fn scan_via(route: &dyn AudioRoute, mixer: &dyn Fn(u32) -> Option<String>) -
         let analog_jacks: Vec<bool> = ctl.jacks.iter().filter(|(n, _)| is_output_jack(n)).map(|(_, on)| *on).collect();
         let mut outs: Vec<Output> = Vec::new();
         let mut hdmi_no = 0;
+        // a card with one HDMI output and a plain `HDMI Jack` control (the Raspberry Pi's vc4-hdmi cards) says in that control whether a monitor is attached
+        let hdmi_pcms = pcms.iter().filter(|(_, id, name)| vc4_hdmi || is_hdmi(id, name)).count();
+        let plain_hdmi_jack = if hdmi_pcms == 1 { ctl.jacks.iter().find(|(n, _)| n == "HDMI Jack").map(|(_, on)| *on) } else { None };
         for (device, id, pcm_name) in pcms {
             let kind = if usb {
                 Kind::Usb
             } else if bt {
                 Kind::Bluetooth
-            } else if is_hdmi(&id, &pcm_name) {
+            } else if vc4_hdmi || is_hdmi(&id, &pcm_name) {
                 Kind::Hdmi
             } else if format!("{id} {pcm_name}").to_ascii_lowercase().contains("digital") || pcm_name.contains("IEC958") || pcm_name.contains("SPDIF") {
                 Kind::Digital
@@ -323,7 +328,7 @@ pub fn scan_via(route: &dyn AudioRoute, mixer: &dyn Fn(u32) -> Option<String>) -
                 Kind::Hdmi => {
                     hdmi_no += 1;
                     o.hdmi_no = hdmi_no;
-                    o.connected = ctl.jacks.iter().find(|(n, _)| n.contains(&format!("pcm={device} ")) || n.ends_with(&format!("pcm={device}"))).map(|(_, on)| *on);
+                    o.connected = ctl.jacks.iter().find(|(n, _)| n.contains(&format!("pcm={device} ")) || n.ends_with(&format!("pcm={device}"))).map(|(_, on)| *on).or(plain_hdmi_jack);
                     if let Some((name, sads)) = ctl.eld.iter().find(|(d, _)| *d == device).and_then(|(_, b)| eld_monitor(b)) {
                         o.monitor = Some(name).filter(|n| !n.is_empty());
                         o.speakers = Some(sads > 0);
@@ -1174,6 +1179,15 @@ impl Selector {
             self.recompute(&mut st)
         };
         self.tell(restored);
+    }
+
+    /// After the machine woke from sleep: the software volume was set to 0 before it slept (the quieting of the speakers), so the
+    /// level in the settings is written again. Nothing happens without the real front end.
+    pub fn after_resume(&self) {
+        if let Some(sv) = &self.softvol {
+            sv.forget_level();
+        }
+        self.refresh();
     }
 
     /// Look at the hardware now.
@@ -2320,6 +2334,10 @@ mod tests {
 #[cfg(test)]
 #[path = "audioout_macbook_tests.rs"]
 mod macbook_tests;
+
+#[cfg(test)]
+#[path = "audioout_pi5_tests.rs"]
+mod pi5_tests;
 
 #[cfg(test)]
 mod system_default_tests {

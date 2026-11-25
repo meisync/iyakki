@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-APPSTORE-08",
+ "feature_sha": "217abc66a1ce81c3",
+ "title": "the Buy button of a paid app is disabled (payments coming soon)",
+ "clauses": [
+  {
+   "id": "buy-disabled",
+   "text": "the Buy button of a paid app is disabled (payments coming soon)",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Open STORE, a paid app's details page.",
+     "expect": "The Buy button is disabled and says payments are coming soon; a licence file placed by hand is accepted or refused with a plain reason."
+    }
+   ]
+  }
+ ]
+}

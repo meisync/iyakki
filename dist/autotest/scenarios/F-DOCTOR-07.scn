@@ -1,0 +1,17 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 132079a678776ba6; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-DOCTOR-07
+targets: qemu
+profile: ram
+feature-sha: 132079a678776ba6
+doc: DOCTOR has a Manual tests tab (read only)
+clause: 1 The DOCTOR tile shows the Manual tests tab
+not-covered: the person picking which computer this is, from a list, once
+not-covered: the choice kept and never guessed
+skip-unless-button group Devices & System
+click group Devices & System
+skip-unless-button DOCTOR
+click DOCTOR
+wait text="Manual tests"
+shot page
+expect-not-blank
+expect-text Manual tests

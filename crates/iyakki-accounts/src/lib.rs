@@ -343,6 +343,21 @@ pub struct AuditLog {
 
 /// One writer at a time: reading the last hash and appending must be atomic, or two events in the same second share a `prev`.
 static AUDIT_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Lines lost per log file (a count that belongs to one file must not be paid out into another).
+static AUDIT_DROPPED: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
+
+fn dropped_add(p: &Path, n: u64) {
+    let mut v = AUDIT_DROPPED.lock().unwrap_or_else(|e| e.into_inner());
+    match v.iter_mut().find(|(q, _)| q == p) {
+        Some(e) => e.1 += n,
+        None => v.push((p.to_path_buf(), n)),
+    }
+}
+
+fn dropped_take(p: &Path) -> u64 {
+    let mut v = AUDIT_DROPPED.lock().unwrap_or_else(|e| e.into_inner());
+    v.iter_mut().find(|(q, _)| q == p).map_or(0, |e| std::mem::take(&mut e.1))
+}
 
 fn user_of_system() -> &'static str {
     "system"
@@ -408,6 +423,26 @@ impl AuditLog {
     /// advisory lock (`flock`) on the log file itself, so two processes (the shell, the core, the command line) cannot both take the
     /// same `prev`. The last line is read again under the lock, never remembered from before. The line format is unchanged.
     fn append(&self, user: &str, event: &str, detail: &str) {
+        // a line that could not be written (disk full, unwritable) is counted; the next line that does get written is followed by one
+        // saying how many were lost, so the chain never silently has a hole (LIFECYCLE-AUDIT L-09)
+        if self.append_one(user, event, detail) {
+            let lost = dropped_take(&self.path);
+            if lost > 0 {
+                self.append_one(user_of_system(), "audit.gap", &format!("{lost} event(s) could not be written (the disk was full or the log unwritable)"));
+            }
+        } else {
+            dropped_add(&self.path, 1);
+        }
+    }
+
+    /// The number of lines of this log lost since the last one that was written.
+    pub fn dropped(&self) -> u64 {
+        let n = dropped_take(&self.path);
+        dropped_add(&self.path, n);
+        n
+    }
+
+    fn append_one(&self, user: &str, event: &str, detail: &str) -> bool {
         use std::io::{Read, Seek, SeekFrom};
         use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::io::AsRawFd;
@@ -415,7 +450,7 @@ impl AuditLog {
             let _ = std::fs::create_dir_all(d);
         }
         let Ok(mut f) = std::fs::OpenOptions::new().create(true).read(true).append(true).mode(0o600).open(&self.path) else {
-            return;
+            return false;
         };
         // The lock goes when `f` is closed (or by LOCK_UN below). If locking is impossible (a file system without flock) the append
         // still happens: the in-process mutex of `record` keeps threads apart, as before.
@@ -433,11 +468,14 @@ impl AuditLog {
         let _ = f.seek(SeekFrom::Start(0));
         let _ = f.read_to_end(&mut raw);
         let text = String::from_utf8_lossy(&raw);
-        let prev = text.lines().filter_map(|l| serde_json::from_str::<AuditLine>(l).ok()).last().map_or_else(|| "0".repeat(64), |l| l.hash);
+        let last = text.lines().filter_map(|l| serde_json::from_str::<AuditLine>(l).ok()).last();
+        // the time never goes back inside the log: a clock set back (a wrong RTC corrected) must not make a later line look older
+        let last_ts = last.as_ref().map_or(0, |l| l.ts);
+        let prev = last.map_or_else(|| "0".repeat(64), |l| l.hash);
         // a line cut short by a power loss must not swallow this one
         let cut = !raw.is_empty() && raw.last() != Some(&b'\n');
         let mut l = AuditLine {
-            ts: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+            ts: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()).max(last_ts),
             user: user.into(),
             event: event.into(),
             detail: detail.chars().filter(|c| !c.is_control()).take(300).collect(),
@@ -447,13 +485,15 @@ impl AuditLog {
         l.hash = line_hash(&l);
         // one write call for the whole line, then to disk before the lock is let go
         let out = format!("{}{}\n", if cut { "\n" } else { "" }, serde_json::to_string(&l).unwrap_or_default());
-        if f.write_all(out.as_bytes()).is_ok() {
+        let wrote = f.write_all(out.as_bytes()).is_ok();
+        if wrote {
             let _ = f.sync_data();
         }
         if locked {
             // SAFETY: as above.
             unsafe { libc::flock(fd, libc::LOCK_UN) };
         }
+        wrote
     }
 
     /// Start a new log after the chain reads BROKEN: the old file is kept beside it as `audit.log.broken-<time>` (nothing is deleted)
@@ -611,6 +651,76 @@ mod tests {
 
     /// Not a test of its own: the child processes of `two_processes_and_two_threads_...` run this one (the test binary itself, told by
     /// the environment which log to append to). Without the variables it does nothing.
+    #[test]
+    fn a_line_that_cannot_be_written_is_counted_and_reported_by_the_next_one() {
+        let d = tmp("auditgap");
+        // the log's parent is a file: nothing can be opened
+        std::fs::write(d.join("blocked"), "x").unwrap();
+        let bad = AuditLog::new(&d.join("blocked").join("audit.log"));
+        bad.record("a", "one", "");
+        bad.record("a", "two", "");
+        assert_eq!(bad.dropped(), 2);
+        // the count belongs to the file that lost the lines
+        let good = AuditLog::new(&d.join("audit.log"));
+        good.record("a", "three", "");
+        assert_eq!(good.recent(5).iter().filter(|l| l.contains("audit.gap")).count(), 0);
+        // the unwritable log is writable again: the first line that gets in is followed by the gap line
+        std::fs::remove_file(d.join("blocked")).unwrap();
+        bad.record("a", "four", "");
+        assert_eq!(bad.dropped(), 0);
+        let lines = bad.recent(5);
+        assert!(lines.iter().any(|l| l.contains("audit.gap") && l.contains("2 event(s)")), "{lines:?}");
+        assert!(good.verify().is_ok());
+    }
+
+    #[test]
+    fn after_a_gap_the_log_still_verifies_the_gap_is_reported_once_and_a_second_outage_is_counted_afresh() {
+        let d = tmp("auditgap2");
+        let log_path = d.join("sub").join("audit.log");
+        let log = AuditLog::new(&log_path);
+        log.record("a", "before", "");
+        // the folder is replaced by a file: writes fail (a full or unwritable disk)
+        std::fs::rename(d.join("sub"), d.join("sub-away")).unwrap();
+        std::fs::write(d.join("sub"), "x").unwrap();
+        for e in ["lost1", "lost2", "lost3"] {
+            log.record("a", e, "");
+        }
+        assert_eq!(log.dropped(), 3);
+        std::fs::remove_file(d.join("sub")).unwrap();
+        std::fs::rename(d.join("sub-away"), d.join("sub")).unwrap();
+        log.record("a", "after", "");
+        let first = log.recent(10);
+        assert_eq!(first.iter().filter(|l| l.contains("audit.gap")).count(), 1, "{first:?}");
+        assert!(first.iter().any(|l| l.contains("3 event(s)")) && !first.iter().any(|l| l.contains("lost1")), "the lost lines are not invented");
+        assert!(log.verify().is_ok(), "the chain holds across the gap line");
+        // a second outage is counted from zero, and the first gap line is not repeated
+        std::fs::rename(d.join("sub"), d.join("sub-away")).unwrap();
+        std::fs::write(d.join("sub"), "x").unwrap();
+        log.record("a", "lost4", "");
+        assert_eq!(log.dropped(), 1);
+        std::fs::remove_file(d.join("sub")).unwrap();
+        std::fs::rename(d.join("sub-away"), d.join("sub")).unwrap();
+        log.record("a", "after2", "");
+        let all = log.recent(20);
+        assert_eq!(all.iter().filter(|l| l.contains("audit.gap")).count(), 2);
+        assert!(all.iter().any(|l| l.contains("1 event(s)")) && log.verify().is_ok());
+    }
+
+    #[test]
+    fn a_line_never_has_an_earlier_time_than_the_line_before_it() {
+        let d = tmp("auditts");
+        let path = d.join("audit.log");
+        let future = 4_000_000_000u64;
+        let mut l = AuditLine { ts: future, user: "a".into(), event: "old".into(), detail: String::new(), prev: "0".repeat(64), hash: String::new() };
+        l.hash = line_hash(&l);
+        std::fs::write(&path, format!("{}\n", serde_json::to_string(&l).unwrap())).unwrap();
+        let log = AuditLog::new(&path);
+        log.record("a", "new", "");
+        let lines: Vec<AuditLine> = std::fs::read_to_string(&path).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(lines[1].ts, future, "kept from going back");
+        assert!(log.verify().is_ok());
+    }
+
     #[test]
     fn audit_append_helper_process() {
         let (Ok(path), Ok(n), Ok(who)) = (std::env::var("IYAKKI_AUDIT_TEST_LOG"), std::env::var("IYAKKI_AUDIT_TEST_N"), std::env::var("IYAKKI_AUDIT_TEST_WHO")) else {

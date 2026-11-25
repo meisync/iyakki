@@ -3,11 +3,12 @@
 //! themselves are worked out in `browser_speed.rs` and applied by the browser.
 
 use super::*;
+use super::browser_port::BrowserSettingsPort;
 
 impl SettingsApp {
     /// The section; returns the height it used.
-    pub(super) fn render_browser_speed(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, cx: &AppCx) -> f32 {
-        let c = super::super::browser_config::load(cx);
+    pub(super) fn render_browser_speed(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, p: &dyn BrowserSettingsPort) -> f32 {
+        let c = super::super::browser_config::load(p);
         // the page does not scroll: when the whole section does not fit under the rows above it, say where the keys are instead of
         // drawing buttons outside the window
         let (lines_n, need) = (3.0, 28.0 + 66.0 + 3.0 * 50.0 + 8.0);
@@ -22,13 +23,13 @@ impl SettingsApp {
         let size = 15.0 * s;
         let btn_w = ["Change (k)", "Clear cache (x)"].iter().map(|l| g.text_width(size, l, Face::Bold) + size * 1.7).fold(0.0, f32::max);
         let info_w = (a.w - btn_w - 10.0 * s).max(120.0 * s);
-        let m = super::super::browser_speed::machine_os(&*cx.os, cx.data_dir());
+        let m = p.machine();
         let b = super::super::browser_speed::budget_for(c.cache, &m);
         let help = format!("The browser keeps pages, pictures, styles and scripts so the next visit is faster: up to {} in memory and {} on disk right now. It shrinks by itself when the computer is short of memory.", iyakki_web::net::human(b.mem), iyakki_web::net::human(b.disk));
         controls::info_row(g, R::new(a.x, y, info_w, 58.0 * s), s, &format!("Cache size: {}", c.cache.label()), &help);
         g.button(a.x + a.w - btn_w, y + 8.0 * s, size, "Change (k)", ACCENT, Event::Key(Key::Char('k')));
         y += 66.0 * s;
-        let stats = cx.web.cache_stats(&cx.session.user);
+        let stats = p.web_cache_stats();
         let lines = super::super::browser_speed::numbers(stats, iyakki_web::net::snapshot());
         for (title, text) in lines {
             controls::info_row(g, R::new(a.x, y, info_w, 44.0 * s), s, &title, &text);
@@ -40,25 +41,25 @@ impl SettingsApp {
     }
 
     /// `k` changes the cache size, `x` empties the person's cache. True when the key was one of these.
-    pub(super) fn handle_browser_speed(&mut self, k: &Key, cx: &AppCx) -> bool {
+    pub(super) fn handle_browser_speed(&mut self, k: &Key, p: &dyn BrowserSettingsPort) -> bool {
         match k {
             Key::Char('k') => {
-                let mut c = super::super::browser_config::load(cx);
+                let mut c = super::super::browser_config::load(p);
                 c.cache = match c.cache {
                     iyakki_web::net::CacheSize::Auto => iyakki_web::net::CacheSize::Large,
                     iyakki_web::net::CacheSize::Large => iyakki_web::net::CacheSize::Small,
                     iyakki_web::net::CacheSize::Small => iyakki_web::net::CacheSize::Auto,
                 };
-                super::super::browser_config::save(cx, &c);
+                super::super::browser_config::save(p, &c);
                 super::super::browser_speed::refresh_now();
                 let what = format!("Cache size: {}.", c.cache.label());
-                cx.audit.record(&cx.session.user, "settings.browser", &what);
+                p.audit("settings.browser", &what);
                 self.ok(what);
                 true
             }
             Key::Char('x') => {
-                cx.web.clear_cache(&cx.session.user);
-                cx.audit.record(&cx.session.user, "settings.browser", "Cleared the page cache");
+                p.web_cache_clear();
+                p.audit("settings.browser", "Cleared the page cache");
                 self.ok("The page cache is empty.".to_string());
                 true
             }

@@ -1,6 +1,9 @@
 //! The Developer tools page: the list, choosing a tool by click and by key, a button producing output, scrolling and the small sizes.
 
 use super::*;
+use crate::gfx::rgb;
+use crate::ui::{Event, Key};
+use iyakki_devtools_engine::tools::TOOLS;
 use crate::apps::tests::cx_with_admin_store;
 use crate::gfx::Gfx;
 use crate::ui::R;
@@ -126,6 +129,7 @@ fn a_button_click_and_the_keyboard_both_produce_output() {
 
 #[test]
 fn typing_goes_to_the_focused_box_and_paste_and_clear_work() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     let mut f = Fx::new(900, 600, 1.0);
     f.click(Event::Tab(T_TOOL + 7));
     f.key(Key::Tab);

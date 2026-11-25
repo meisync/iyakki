@@ -5,6 +5,7 @@
 use iyakki_fw::engine::Status;
 
 use super::*;
+use super::system_port::OverviewPort;
 use crate::fx::AMBER;
 
 /// One thing that needs attention.
@@ -31,7 +32,7 @@ pub(super) const COMMON: [(&str, Tab); 9] = [
 
 impl SettingsApp {
     /// What needs attention right now, most important first. Only pages this account has are mentioned.
-    pub(super) fn attention(&self, cx: &AppCx) -> Vec<Attn> {
+    pub(super) fn attention(&self, p: &dyn OverviewPort) -> Vec<Attn> {
         let has = |t: Tab| self.tabs.contains(&t);
         let mut out = Vec::new();
         if has(Tab::Firewall) && self.fw.writable {
@@ -41,7 +42,7 @@ impl SettingsApp {
                 Status::On | Status::Pending { .. } => {}
             }
         }
-        if has(Tab::Models) && cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.is_none() {
+        if has(Tab::Models) && !p.chat_chosen() {
             out.push(Attn { tab: Tab::Models, title: "No AI model is chosen".into(), why: "The assistant needs one to answer. Add a service or pick a model that runs here.".into() });
         }
         if has(Tab::Time) && iyakki_clock::looks_wrong(iyakki_clock::now_unix()) {
@@ -51,37 +52,37 @@ impl SettingsApp {
             out.push(Attn { tab: Tab::Bluetooth, title: "Bluetooth needs firmware".into(), why: "The adapter is found but cannot work until its firmware is installed.".into() });
         }
         if has(Tab::SessionLog) {
-            if let Some(u) = self.crash_note(cx) {
+            if let Some(u) = self.crash_note(p) {
                 out.push(Attn { tab: Tab::SessionLog, title: format!("The last session ended unexpectedly ({})", iyakki_core_api::memory::wall(u.started).split(' ').next().unwrap_or("")), why: "Open the log to see the last kernel messages before it stopped.".into() });
             }
         }
         if has(Tab::Updates) {
-            let waiting = cx.storeapi().pending_wizards(&cx.session.user).len();
+            let waiting = p.pending_wizard_count();
             if waiting > 0 {
                 out.push(Attn { tab: Tab::Updates, title: format!("{waiting} setup wizard{} waiting", if waiting == 1 { "" } else { "s" }), why: "An app you installed or updated brings setup steps. Open System update to see which; the assistant runs them with you.".into() });
             }
             let data = &self.storage.data_dir;
-            if let Some(t) = cx.agent.devmode().update_interrupted_text(data) {
+            if let Some(t) = p.update_interrupted_text(data) {
                 out.push(Attn { tab: Tab::Updates, title: "A system update did not finish".into(), why: t });
-            } else if cx.agent.devmode().update_fell_back(data) {
+            } else if p.update_fell_back(data) {
                 out.push(Attn { tab: Tab::Updates, title: "The last update did not start, the saved version runs".into(), why: "Open System update to see what happened and what to do.".into() });
             }
-            if let Some(b) = cx.storeapi().update_report().and_then(|r| r.badge()) {
+            if let Some(b) = p.update_badge() {
                 out.push(Attn { tab: Tab::Updates, title: format!("{b} available"), why: "The last check found newer versions. Open System update to see which; nothing is installed until you do it.".into() });
             }
         }
-        if has(Tab::Storage) && self.storage.virtual_disks.is_none() && cx.os.memory().data_place(&self.storage.data_dir) == iyakki_core_api::memory::DataPlace::Memory {
+        if has(Tab::Storage) && self.storage.virtual_disks.is_none() && p.data_in_memory(&self.storage.data_dir) {
             out.push(Attn { tab: Tab::Storage, title: "Your data is kept in memory only".into(), why: "Accounts, settings and files are forgotten at power-off. Choose a disk to keep them.".into() });
         }
         out
     }
 
-    pub(super) fn handle_overview(&mut self, k: &Key, cx: &AppCx) {
-        let list = self.attention(cx);
+    pub(super) fn handle_overview(&mut self, k: &Key, p: &dyn OverviewPort) {
+        let list = self.attention(p);
         match k {
             Key::Up => self.move_sel(-1, list.len()),
             Key::Down => self.move_sel(1, list.len()),
-            Key::Char('s') if cx.session.policy.allows_app(iyakki_sec::policy::App::Doctor) => self.hw.ask_open_item("doctor", "share"),
+            Key::Char('s') if p.allows_doctor() => self.hw.ask_open_item("doctor", "share"),
             Key::Enter => {
                 if let Some(a) = list.get(self.sel[self.tab].min(list.len().saturating_sub(1))) {
                     self.go_to(a.tab);
@@ -99,8 +100,8 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn render_overview(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let list = self.attention(cx);
+    pub(super) fn render_overview(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn OverviewPort) {
+        let list = self.attention(p);
         let bottom = a.y + a.h;
         let mut y = a.y;
         if list.is_empty() {
@@ -154,7 +155,7 @@ impl SettingsApp {
             bx += g.button(bx, by, 14.0 * s, label, TEXT, Event::Tab(ti)) + 8.0 * s;
         }
         // a support bundle, previewed in DOCTOR before anything is saved
-        if cx.session.policy.allows_app(iyakki_sec::policy::App::Doctor) {
+        if p.allows_doctor() {
             let label = "Share diagnostics";
             let bw = g.text_width(14.0 * s, label, Face::Bold) + 14.0 * s * 1.7;
             if bx > a.x && bx + bw > a.x + a.w {

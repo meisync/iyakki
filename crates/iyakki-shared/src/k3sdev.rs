@@ -59,7 +59,7 @@ pub enum Situation {
 }
 
 pub fn valid_id(id: &str) -> bool {
-    (2..=16).contains(&id.len()) && id != "local" && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') && !id.starts_with('-') && !id.ends_with('-')
+    iyakki_cluster_model::ids::valid_k3s_id(id)
 }
 
 // ---- moved from iyakki-agent (F-SPLIT-03) ----

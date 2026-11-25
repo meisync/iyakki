@@ -7,6 +7,7 @@
 //! engine's folders on the data volume, and it never restarts the computer: it says when to.
 
 use super::*;
+use super::system_port::UpdatesPort;
 use iyakki_agent_api::{UpdateCentre, UpdateFound, UpdatePreview, UpdateTrust, UpdateVersions};
 use iyakki_shared::store_updatecheck as chk;
 
@@ -122,27 +123,27 @@ impl SettingsApp {
     }
 
     pub(super) fn upd_folder_submit(&mut self, form: &Form) -> Result<String, String> {
-        let p = form.value(0).trim().to_string();
-        if !p.is_empty() && !std::path::Path::new(&p).is_dir() {
-            return Err(format!("{p} is not a folder"));
+        let pv = form.value(0).trim().to_string();
+        if !pv.is_empty() && !std::path::Path::new(&pv).is_dir() {
+            return Err(format!("{pv} is not a folder"));
         }
-        self.upd.folder = p;
+        self.upd.folder = pv;
         self.upd_load();
         Ok(format!("{} update(s) found.", self.upd.found.len()))
     }
 
     /// A signed update file (`.tgz` with its `.sig` next to it) is checked, unpacked where this page lists updates and selected.
-    pub(super) fn upd_bundle_submit(&mut self, form: &Form, cx: &AppCx) -> Result<String, String> {
-        if !cx.session.policy.manage_settings {
+    pub(super) fn upd_bundle_submit(&mut self, form: &Form, p: &dyn UpdatesPort) -> Result<String, String> {
+        if !p.policy().manage_settings {
             return Err("only an administrator can open a system update file".into());
         }
-        let p = form.value(0).trim().to_string();
-        if p.is_empty() {
+        let pv = form.value(0).trim().to_string();
+        if pv.is_empty() {
             return Err("give the path of the update file".into());
         }
         let c = self.upd_centre();
-        let staged = c.open_file(std::path::Path::new(&p))?;
-        cx.audit.record(&cx.session.user, "system.update.bundle", &format!("opened {}", staged.version));
+        let staged = c.open_file(std::path::Path::new(&pv))?;
+        p.audit("system.update.bundle", &format!("opened {}", staged.version));
         self.upd_load();
         if let Some(i) = self.upd.found.iter().position(|f| f.dir == staged.dir) {
             self.upd.sel = i;
@@ -154,8 +155,8 @@ impl SettingsApp {
 
     /// A signed update at an https channel address is downloaded with its signature, checked before anything is unpacked, listed and selected
     /// (the same as opening a file; nothing is installed). The address is the person's: the official channel address waits for the owner.
-    pub(super) fn upd_fetch_submit(&mut self, form: &Form, cx: &AppCx) -> Result<String, String> {
-        if !cx.session.policy.manage_settings {
+    pub(super) fn upd_fetch_submit(&mut self, form: &Form, p: &dyn UpdatesPort) -> Result<String, String> {
+        if !p.policy().manage_settings {
             return Err("only an administrator can download a system update".into());
         }
         let url = form.value(0).trim().to_string();
@@ -164,8 +165,8 @@ impl SettingsApp {
         }
         let host = url.trim_start_matches("https://").split('/').next().unwrap_or("").to_string();
         let c = self.upd_centre();
-        let staged = c.fetch_file(&url).inspect_err(|_| cx.audit.record(&cx.session.user, "system.update.fetch", &format!("refused from {host}")))?;
-        cx.audit.record(&cx.session.user, "system.update.fetch", &format!("opened {} from {host}", staged.version));
+        let staged = c.fetch_file(&url).inspect_err(|_| p.audit("system.update.fetch", &format!("refused from {host}")))?;
+        p.audit("system.update.fetch", &format!("opened {} from {host}", staged.version));
         self.upd_load();
         if let Some(i) = self.upd.found.iter().position(|f| f.dir == staged.dir) {
             self.upd.sel = i;
@@ -176,19 +177,19 @@ impl SettingsApp {
     }
 
     /// One line per setup wizard that an install or update of the person's apps queued, with what it asks and runs when the app is installed.
-    pub(super) fn upd_wizard_lines(&self, cx: &AppCx) -> Vec<String> {
-        cx.storeapi()
-            .pending_wizards(&cx.session.user)
+    pub(super) fn upd_wizard_lines(&self, p: &dyn UpdatesPort) -> Vec<String> {
+        p.store_api()
+            .pending_wizards(&p.user_name())
             .iter()
             .map(|w| {
-                let p = &w.pending;
+                let pv = &w.pending;
                 let what = if w.outline.is_empty() { String::new() } else { format!(": {}", w.outline) };
-                format!("{} - {} ({}){what}", p.app, if p.title.is_empty() { &p.wizard } else { &p.title }, p.trigger)
+                format!("{} - {} ({}){what}", pv.app, if pv.title.is_empty() { &pv.wizard } else { &pv.title }, pv.trigger)
             })
             .collect()
     }
 
-    pub(super) fn handle_updates(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_updates(&mut self, k: &Key, p: &dyn UpdatesPort) {
         if !self.upd.loaded {
             self.upd_load();
         }
@@ -206,10 +207,10 @@ impl SettingsApp {
                     self.upd_preview();
                 }
             }
-            Key::Char('w') if self.wiz_available(cx) => {
-                self.wiz_start(cx);
+            Key::Char('w') if self.wiz_available(p) => {
+                self.wiz_start(p);
             }
-            Key::Char('a') if !self.upd_wizard_lines(cx).is_empty() => {
+            Key::Char('a') if !self.upd_wizard_lines(p).is_empty() => {
                 self.hw.ask_open_item("chat", "");
             }
             Key::Char('s') => {
@@ -217,35 +218,35 @@ impl SettingsApp {
                 self.ok(format!("Looked again: {} update(s) found.", self.upd.found.len()));
             }
             Key::Char('f') => {
-                if !self.admin(cx) {
+                if !self.admin(p) {
                     return;
                 }
                 let f = Form::new("Folder with an update").path("Folder (a USB stick shows up under /media or /run/media)", &self.upd.folder, "the folder that holds update.json, or a folder with such folders in it", crate::filepicker::PathKind::Folder, &[]);
                 self.open_form(FormKind::UpdateFolder, f);
             }
             Key::Char('b') => {
-                if !self.admin(cx) {
+                if !self.admin(p) {
                     return;
                 }
                 let f = Form::new("Open a signed update file").path("Update file (.tgz; its .sig file must be next to it)", "", "a system update file from a USB stick or a folder; the signature is checked before anything is unpacked", crate::filepicker::PathKind::File, &["tgz"]);
                 self.open_form(FormKind::UpdateBundle, f);
             }
             Key::Char('d') => {
-                if !self.admin(cx) {
+                if !self.admin(p) {
                     return;
                 }
                 let f = Form::new("Download a signed update").text("Address (https, ends in .tgz)", "", "https://example.org/iyakki-x.tgz: the signature is fetched from the same address with .sig added and checked before anything is unpacked");
                 self.open_form(FormKind::UpdateFetch, f);
             }
-            Key::Char('c') | Key::Char('m') | Key::Char('u') | Key::Char('t') => self.upd_check_key(k, cx),
+            Key::Char('c') | Key::Char('m') | Key::Char('u') | Key::Char('t') => self.upd_check_key(k, p),
             Key::Char('g') => {
-                if self.admin(cx) {
-                    self.upd_channel_next(cx);
+                if self.admin(p) {
+                    self.upd_channel_next(p);
                 }
             }
             Key::Char('v') => {
-                if self.admin(cx) {
-                    self.upd_components_review(cx);
+                if self.admin(p) {
+                    self.upd_components_review(p);
                 }
             }
             Key::Char('n') => {
@@ -253,21 +254,21 @@ impl SettingsApp {
                 self.ok("Nothing was changed.");
             }
             Key::Char('i') | Key::Char('r') | Key::Char('y') => {
-                if !self.admin(cx) {
+                if !self.admin(p) {
                     return;
                 }
-                self.upd_act(k, cx);
+                self.upd_act(k, p);
             }
             _ => {}
         }
     }
 
-    fn upd_act(&mut self, k: &Key, cx: &AppCx) {
+    fn upd_act(&mut self, k: &Key, p: &dyn UpdatesPort) {
         if self.job.is_some() {
             return self.fail("An update is being written. Do not remove the drive or switch the computer off.");
         }
         let c = self.upd_centre();
-        let user = cx.session.user.clone();
+        let user = p.user_name();
         match (k, self.upd.ask) {
             (Key::Char('i'), _) => {
                 let Some(f) = self.upd.found.get(self.upd.sel) else { return self.fail("Choose an update first (f to pick a folder, s to look again).") };
@@ -284,9 +285,9 @@ impl SettingsApp {
             (Key::Char('r'), _) => {
                 let v = c.versions();
                 match v.previous {
-                    Some(p) => {
+                    Some(pv) => {
                         self.upd.ask = UpdAsk::Rollback;
-                        self.ok(format!("Roll back to IYAKKI {p}? The version on the boot partition ({}) is kept. Your files are not touched and nothing restarts by itself. Press y to do it, n to cancel.", v.on_disk));
+                        self.ok(format!("Roll back to IYAKKI {pv}? The version on the boot partition ({}) is kept. Your files are not touched and nothing restarts by itself. Press y to do it, n to cancel.", v.on_disk));
                     }
                     None => self.fail("No previous version is kept on this device, so there is nothing to roll back to."),
                 }
@@ -295,21 +296,21 @@ impl SettingsApp {
                 let Some(f) = self.upd.found.get(self.upd.sel).cloned() else { return };
                 self.upd.ask = UpdAsk::None;
                 self.upd.running = true;
-                cx.audit.record(&user, "system.update.install", &format!("{} from {}", f.version, f.dir.display()));
+                p.audit("system.update.install", &format!("{} from {}", f.version, f.dir.display()));
                 self.start("Installing the update", move || JobOut::Msg(c.install(&f, true, &user)));
             }
             (Key::Char('y'), UpdAsk::Rollback) => {
                 self.upd.ask = UpdAsk::None;
                 self.upd.running = true;
-                cx.audit.record(&user, "system.update.rollback", "to the previous version");
+                p.audit("system.update.rollback", "to the previous version");
                 self.start("Rolling back", move || JobOut::Msg(c.rollback(&user)));
             }
             (Key::Char('y'), UpdAsk::Components) => {
                 let Some(review) = self.upd.comp_review.lock().ok().and_then(|g| g.clone()) else { return self.fail("The review is not ready yet.") };
                 self.upd.ask = UpdAsk::None;
                 self.upd.running = true;
-                cx.audit.record(&user, "system.components.apply", &format!("{} ({} part(s), {} to download)", review.store, review.review.parts, iyakki_shared::store_compapply::human(review.review.download)));
-                let api = cx.storeapi().clone();
+                p.audit("system.components.apply", &format!("{} ({} part(s), {} to download)", review.store, review.review.parts, iyakki_shared::store_compapply::human(review.review.download)));
+                let api = p.store_api().clone();
                 self.upd.comp_result = None;
                 self.start("Installing system components", move || {
                     // pressing y is the approval of exactly this review; the result (applied, refused with the reason, or failed and rolled back)
@@ -331,7 +332,7 @@ impl SettingsApp {
         v
     }
 
-    pub(super) fn render_updates(&mut self, g: &mut Gfx, a: R, s: f32, _cx: &AppCx) {
+    pub(super) fn render_updates(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn UpdatesPort) {
         if !self.upd.loaded || (self.upd.running && self.job.is_none()) {
             self.upd.running = false;
             self.upd_load();
@@ -353,7 +354,7 @@ impl SettingsApp {
                 line(g, &mut y, 13.0, crate::fx::AMBER, Face::Sans, &format!("Running now: {}. Restart to use {}; the computer does not restart by itself.", v.running, v.on_disk));
             }
             line(g, &mut y, 13.0, MUTED, Face::Sans, &match &v.previous {
-                Some(p) => format!("Kept before it: IYAKKI {p} (Roll back puts it back; the boot menu also lists it as \"IYAKKI (previous version)\")."),
+                Some(pv) => format!("Kept before it: IYAKKI {pv} (Roll back puts it back; the boot menu also lists it as \"IYAKKI (previous version)\")."),
                 None => "No previous version is kept yet. The first update keeps the one you have now.".to_string(),
             });
             if let Some(t) = &v.interrupted {
@@ -367,17 +368,17 @@ impl SettingsApp {
             line(g, &mut y, 14.0, crate::fx::AMBER, Face::Bold, "Writing the update. Do not remove the drive or switch the computer off.");
         }
         y += 6.0 * s;
-        for (text, col, face) in self.upd_check_lines(_cx) {
+        for (text, col, face) in self.upd_check_lines(p) {
             line(g, &mut y, 13.0, col, face, &text);
         }
         y += 6.0 * s;
         // the compat report in short (F-CORE-19): which versions meet here; the full lines are in `iyakki dev info` and the support bundle
-        for text in self.upd_compat_lines(_cx) {
+        for text in self.upd_compat_lines(p) {
             line(g, &mut y, 12.0, DIM, Face::Sans, &text);
         }
         y += 6.0 * s;
         // setup steps that an installed or updated app brought (F-CORE-24): a plain list; the assistant runs them with the person
-        let waiting = self.upd_wizard_lines(_cx);
+        let waiting = self.upd_wizard_lines(p);
         if !waiting.is_empty() {
             line(g, &mut y, 14.0, TEXT, Face::Bold, "Setup steps waiting");
             for text in &waiting {
@@ -420,8 +421,8 @@ impl SettingsApp {
 
 impl SettingsApp {
     /// Two lines of the compat report: the versions, and the peers and deprecated names (administrators see the peers by name in `dev info`).
-    pub(super) fn upd_compat_lines(&self, cx: &AppCx) -> Vec<String> {
-        let l = crate::apps::doctor_facts::compat_lines(cx);
+    pub(super) fn upd_compat_lines(&self, p: &dyn UpdatesPort) -> Vec<String> {
+        let l = p.compat_lines();
         let mut v = vec![format!("Compatibility: {}", l.first().cloned().unwrap_or_default())];
         let peers = l.iter().filter(|x| x.starts_with("peer ")).count();
         let dep = l.iter().find(|x| x.starts_with("deprecated names:")).cloned().unwrap_or_else(|| format!("{} deprecated name(s) announced", l.iter().filter(|x| x.starts_with("deprecated ")).count()));
@@ -433,34 +434,34 @@ impl SettingsApp {
 // -------------------------------------------------------------------------------------------- the update check (F-UPD-04)
 
 impl SettingsApp {
-    fn upd_report(&mut self, cx: &AppCx) -> Option<chk::Report> {
+    fn upd_report(&mut self, p: &dyn UpdatesPort) -> Option<chk::Report> {
         if let Some((at, r)) = &self.upd.check {
             if at.elapsed() < std::time::Duration::from_secs(2) {
                 return r.clone();
             }
         }
-        let r = cx.storeapi().update_report();
+        let r = p.store_api().update_report();
         self.upd.check = Some((std::time::Instant::now(), r.clone()));
         r
     }
 
-    fn upd_check_settings(cx: &AppCx) -> chk::CheckSettings {
-        cx.settings().lock().map(|s| s.get().update_check.clone()).unwrap_or_default()
+    fn upd_check_settings(p: &dyn UpdatesPort) -> chk::CheckSettings {
+        p.settings_get().update_check
     }
 
-    fn upd_check_save(&mut self, cx: &AppCx, what: &str, f: impl FnOnce(&mut chk::CheckSettings)) -> bool {
-        let r = cx.settings().lock().map(|mut s| s.update(|s| f(&mut s.update_check)));
-        match r {
-            Ok(Ok(_)) => {
-                cx.audit.record(&cx.session.user, "settings.update_check", what);
+    fn upd_check_save(&mut self, p: &dyn UpdatesPort, what: &str, f: impl FnOnce(&mut chk::CheckSettings)) -> bool {
+        let mut f = Some(f);
+        match p.settings_update(&mut |s| {
+            if let Some(f) = f.take() {
+                f(&mut s.update_check)
+            }
+        }) {
+            Ok(()) => {
+                p.audit("settings.update_check", what);
                 true
             }
-            Ok(Err(e)) => {
-                self.fail(e.to_string());
-                false
-            }
-            Err(_) => {
-                self.fail("The settings are busy; try again.");
+            Err(e) => {
+                self.fail(e.message());
                 false
             }
         }
@@ -468,13 +469,13 @@ impl SettingsApp {
 
     /// `v`: read the signed component list of the pinned store, show the review (what changes, sizes, restart, what is kept) and wait for
     /// `y`. Nothing is downloaded or written until then.
-    fn upd_components_review(&mut self, cx: &AppCx) {
+    fn upd_components_review(&mut self, p: &dyn UpdatesPort) {
         if self.job.is_some() {
             return self.fail("Another operation is still running.");
         }
         self.upd.ask = UpdAsk::Components;
         *self.upd.comp_review.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        let (api, slot) = (cx.storeapi().clone(), self.upd.comp_review.clone());
+        let (api, slot) = (p.store_api().clone(), self.upd.comp_review.clone());
         let channel = api.components_channel();
         self.start("Reading the component list", move || match api.components_review(&channel) {
             Ok(rev) => {
@@ -487,12 +488,12 @@ impl SettingsApp {
     }
 
     /// `g`: the next channel (stable, beta, nightly), kept for this computer; check, review and install use it.
-    fn upd_channel_next(&mut self, cx: &AppCx) {
+    fn upd_channel_next(&mut self, p: &dyn UpdatesPort) {
         use iyakki_shared::store_compapply as ca;
-        let next = ca::next_channel(&cx.storeapi().components_channel());
-        match cx.storeapi().components_set_channel(next) {
+        let next = ca::next_channel(&p.store_api().components_channel());
+        match p.store_api().components_set_channel(next) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.components_channel", next);
+                p.audit("settings.components_channel", next);
                 // what was reviewed or counted belonged to the other channel
                 self.upd.ask = UpdAsk::None;
                 *self.upd.comp_review.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -504,32 +505,32 @@ impl SettingsApp {
     }
 
     /// (name, announcement address) of every enabled store that was added with its key checked.
-    fn upd_stores(cx: &AppCx) -> Vec<(String, String)> {
-        cx.storeapi().update_announce_stores()
+    fn upd_stores(p: &dyn UpdatesPort) -> Vec<(String, String)> {
+        p.store_api().update_announce_stores()
     }
 
     /// `c` check now, `m` how often, `u` the address of the system update list. Administrators only.
-    pub(super) fn upd_check_key(&mut self, k: &Key, cx: &AppCx) {
-        if !self.admin(cx) {
+    pub(super) fn upd_check_key(&mut self, k: &Key, p: &dyn UpdatesPort) {
+        if !self.admin(p) {
             return;
         }
-        let cur = Self::upd_check_settings(cx);
+        let cur = Self::upd_check_settings(p);
         match k {
             Key::Char('m') => {
                 let mode = cur.mode.next();
-                if self.upd_check_save(cx, &format!("mode={mode:?}"), |s| s.mode = mode) {
+                if self.upd_check_save(p, &format!("mode={mode:?}"), |s| s.mode = mode) {
                     self.ok(format!("Checking for updates: {}.", mode.label()));
                 }
             }
             Key::Char('t') => {
                 // the stores added with their key checked: each announces IYAKKI at <store>/v1/system.json, signed with that key
-                let stores = Self::upd_stores(cx);
+                let stores = Self::upd_stores(p);
                 if stores.is_empty() {
                     return self.fail("No store with a checked key is added yet. Add your private store in the STORE (Settings) first.");
                 }
                 let at = stores.iter().position(|(_, url)| *url == cur.system_url).map_or(0, |i| (i + 1) % stores.len());
                 let (name, url) = stores[at].clone();
-                if self.upd_check_save(cx, &format!("system_url={url} (store {name})"), |s| s.system_url = url.clone()) {
+                if self.upd_check_save(p, &format!("system_url={url} (store {name})"), |s| s.system_url = url.clone()) {
                     self.upd.check = None;
                     self.ok(format!("The update list is now {name}'s announcement{}. Press Check for updates to try it. Nothing is downloaded from it.", if stores.len() > 1 { " (press Use a store again for the next store)" } else { "" }));
                 }
@@ -543,8 +544,8 @@ impl SettingsApp {
                     return self.fail("Checking for updates is off. Press m to turn it on.");
                 }
                 let v = self.upd.versions.clone().unwrap_or_else(|| self.upd_centre().versions());
-                let (api, policy, user) = (cx.storeapi().clone(), cx.session.policy.clone(), cx.session.user.clone());
-                cx.audit.record(&user, "system.update.check", "now");
+                let (api, policy, user) = (p.store_api().clone(), p.policy(), p.user_name());
+                p.audit("system.update.check", "now");
                 self.upd.check = None;
                 self.start("Checking for updates", move || {
                     let rep = api.update_check_run(&policy, &user, &cur, &v.running, &v.variant);
@@ -561,12 +562,12 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn upd_source_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
-        if !self.admin(cx) {
+    pub(super) fn upd_source_submit(&mut self, p: &dyn UpdatesPort, form: &Form) -> Result<String, String> {
+        if !self.admin(p) {
             return Ok(String::new());
         }
         let url = chk::check_url(&form.value(0))?;
-        if self.upd_check_save(cx, "system_url", |s| s.system_url = url.clone()) {
+        if self.upd_check_save(p, "system_url", |s| s.system_url = url.clone()) {
             Ok(if url.is_empty() { "No system update list: only apps are checked.".to_string() } else { "Address saved. Press Check for updates to try it.".to_string() })
         } else {
             Err("Could not save.".into())
@@ -574,21 +575,21 @@ impl SettingsApp {
     }
 
     /// The lines under the versions: how often, when it last looked, what it found, and what it does not do.
-    pub(super) fn upd_check_lines(&mut self, cx: &AppCx) -> Vec<(String, [u8; 4], Face)> {
-        let cfg = Self::upd_check_settings(cx);
+    pub(super) fn upd_check_lines(&mut self, p: &dyn UpdatesPort) -> Vec<(String, [u8; 4], Face)> {
+        let cfg = Self::upd_check_settings(p);
         let mut out = vec![(format!("Checking for updates: {}.{}", cfg.mode.label(), if cfg.system_url.is_empty() { " Apps in your store sources are checked; no system update list is set." } else { " Your apps and the system update list are checked." }), TEXT, Face::Bold)];
-        if let Some((name, _)) = Self::upd_stores(cx).into_iter().find(|(_, url)| *url == cfg.system_url) {
+        if let Some((name, _)) = Self::upd_stores(p).into_iter().find(|(_, url)| *url == cfg.system_url) {
             out.push((format!("The update list is the announcement of {name} (signed with the key you confirmed)."), MUTED, Face::Sans));
         }
         if cfg.mode == chk::Mode::Daily {
             out.push(("This computer cannot tell a metered connection yet, so a daily check also runs on one.".into(), MUTED, Face::Sans));
         }
-        out.push((iyakki_shared::store_compapply::channel_sentence(&cx.storeapi().components_channel()), MUTED, Face::Sans));
+        out.push((iyakki_shared::store_compapply::channel_sentence(&p.store_api().components_channel()), MUTED, Face::Sans));
         // the last install's result stays until the next action
         let res = match &self.upd.comp_result {
             Some((at, r)) if at.elapsed() < std::time::Duration::from_secs(2) => r.clone(),
             _ => {
-                let r = cx.storeapi().components_last_result();
+                let r = p.store_api().components_last_result();
                 self.upd.comp_result = Some((std::time::Instant::now(), r.clone()));
                 r
             }
@@ -605,7 +606,7 @@ impl SettingsApp {
         }
         let cached = self.upd.comp_lines.as_ref().filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(2)).map(|(_, l)| l.clone());
         let comp = cached.unwrap_or_else(|| {
-            let l: Vec<String> = cx.storeapi().components_check_lines();
+            let l: Vec<String> = p.store_api().components_check_lines();
             self.upd.comp_lines = Some((std::time::Instant::now(), l.clone()));
             l
         });
@@ -619,7 +620,7 @@ impl SettingsApp {
                 out.push(("Press y to approve this and install, n to cancel. Nothing is downloaded until you do.".into(), crate::fx::AMBER, Face::Bold));
             }
         }
-        match self.upd_report(cx) {
+        match self.upd_report(p) {
             None => out.push(("Not checked yet. Press Check for updates.".into(), MUTED, Face::Sans)),
             Some(r) => {
                 let when = iyakki_shared::store_compapply::ago_text(iyakki_clock::now_unix().saturating_sub(r.checked_at));

@@ -1,0 +1,64 @@
+{
+ "schema": 1,
+ "row": "F-CAM-19",
+ "feature_sha": "1d94b7cad98d91d5",
+ "title": "camera recorder shares the live connection; H.264 playback (manual until automated)",
+ "clauses": [
+  {
+   "id": "shared-connection",
+   "text": "A camera that allows one connection shows the live view and records at the same time.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Open the live view of a camera that allows a single connection, then start its recording.",
+     "expect": "The picture keeps showing and the recording starts without an error."
+    }
+   ]
+  },
+  {
+   "id": "live-then-record",
+   "text": "A live view opened before the recording lets the recorder keep the connection when the live view closes.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Start the live view, then start recording, then close the live view.",
+     "expect": "The recording carries on with no error."
+    }
+   ]
+  },
+  {
+   "id": "ledger",
+   "text": "A deleted or cut recording ledger is noticed, and its second copy gives the lost lines back.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "On a test camera only, delete or cut its recording ledger file, then run the recording check. If you cannot find how to run the check, mark cannot-test and say so in the note.",
+     "expect": "The check says in words that the ledger was deleted or lost some lines, and still reports any cut or missing files."
+    }
+   ]
+  },
+  {
+   "id": "h264-playback",
+   "text": "H.264 recordings play through the video add-on decoder, starting at a picture.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "With the video add-on installed, play an H.264 recording.",
+     "expect": "It plays from a picture at once. Without the add-on, it says the video add-on is needed."
+    }
+   ]
+  }
+ ]
+}

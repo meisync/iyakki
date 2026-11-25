@@ -1,0 +1,10 @@
+[package]
+name = "iyakki-chat-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The plain chat types (Message, Role, ToolCall, ToolSpec, ModelTurn, the ChatBackend trait, Unconfigured, trim_history), no network and no shell. iyakki_shared::chat re-exports every item under the old path (alpha.9 P6, D-S2-01)."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

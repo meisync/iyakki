@@ -31,6 +31,46 @@ impl Limits {
     pub const DOWNLOAD: Limits = Limits { start: Duration::from_secs(30), first_byte: Duration::from_secs(60), stall: Duration::from_secs(60) };
 }
 
+/// The longest a chat answer may go quiet in the middle (F-LIFE-19, audit P-13): a model that is working on its next words still sends a
+/// byte now and then (or a keep-alive), so two minutes of nothing is a dead connection, not a slow model.
+pub const CHAT_STALL: Duration = Duration::from_secs(120);
+
+/// A transport whose bodies end with a plain "network problem" error when the connection goes quiet for `stall` (ureq's own body timeout
+/// is a total one, not an idle one). Unlike [`Guarded`] it also watches `post` (the chat requests are POSTs) and leaves the time to the
+/// first byte to the transport's own response timeout, so a local model that needs minutes to load is not cut off.
+pub struct IdleGuard<S: Streamer + 'static> {
+    inner: S,
+    first_byte: Duration,
+    stall: Duration,
+}
+
+impl<S: Streamer + 'static> IdleGuard<S> {
+    /// `first_byte`: how long the start of the answer may take (also bounded by `inner`); `stall`: the longest quiet in the middle.
+    pub fn new(inner: S, first_byte: Duration, stall: Duration) -> IdleGuard<S> {
+        IdleGuard { inner, first_byte, stall }
+    }
+
+    fn watch(&self, url: &str, head: StreamHead) -> StreamHead {
+        let limits = Limits { start: Duration::ZERO, first_byte: self.first_byte, stall: self.stall };
+        StreamHead { status: head.status, headers: head.headers, body: Box::new(Watched::new(head.body, host_of(url), limits)) }
+    }
+}
+
+impl<S: Streamer + 'static> Streamer for IdleGuard<S> {
+    fn open(&self, url: &str, headers: &[(String, String)]) -> Result<StreamHead, String> {
+        self.inner.open(url, headers).map(|h| self.watch(url, h))
+    }
+    fn post(&self, url: &str, headers: &[(String, String)], body: &[u8]) -> Result<StreamHead, String> {
+        self.inner.post(url, headers, body).map(|h| self.watch(url, h))
+    }
+    fn open_tls(&self, url: &str, headers: &[(String, String)], mode: &TlsMode) -> Result<StreamHead, String> {
+        self.inner.open_tls(url, headers, mode).map(|h| self.watch(url, h))
+    }
+    fn peer_chain(&self, host: &str, port: u16) -> Result<Vec<Vec<u8>>, String> {
+        self.inner.peer_chain(host, port)
+    }
+}
+
 pub struct Guarded<S: Streamer + 'static> {
     inner: std::sync::Arc<S>,
     limits: Limits,
@@ -460,5 +500,53 @@ mod tests {
         assert_eq!(v.len(), 10);
         drop(l); // now closed, but the answer is remembered for a few seconds
         assert!(p.check(&format!("http://127.0.0.1:{port}/y")).is_ok());
+    }
+
+    /// A transport whose `post` answers with a body from `body` (`open` is not used).
+    struct Poster(Mutex<Option<Box<dyn Read + Send>>>);
+    impl Streamer for Poster {
+        fn open(&self, _: &str, _: &[(String, String)]) -> Result<StreamHead, String> {
+            Err("not used".into())
+        }
+        fn post(&self, _: &str, _: &[(String, String)], _: &[u8]) -> Result<StreamHead, String> {
+            Ok(StreamHead { status: 200, headers: vec![], body: self.0.lock().unwrap().take().unwrap() })
+        }
+    }
+
+    #[test]
+    fn a_chat_answer_that_goes_quiet_in_the_middle_ends_with_a_plain_network_problem() {
+        let (tx, p) = pipe();
+        let g = IdleGuard::new(Poster(Mutex::new(Some(Box::new(p)))), Duration::from_secs(60), Duration::from_millis(300));
+        let mut h = g.post("https://models.example.org/v1/chat", &[], b"{}").unwrap();
+        tx.send(b"data: one\n\n".to_vec()).unwrap();
+        let mut buf = [0u8; 64];
+        let n = h.body.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"data: one\n\n");
+        // the sender stays alive and says nothing more: the idle limit ends the read, with words a person can read
+        let e = h.body.read(&mut buf).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+        assert!(e.to_string().contains("network problem: no data from models.example.org"), "{e}");
+        drop(tx);
+    }
+
+    #[test]
+    fn a_chat_answer_that_keeps_coming_is_read_whole_however_long_it_takes_in_total() {
+        let (tx, p) = pipe();
+        let g = IdleGuard::new(Poster(Mutex::new(Some(Box::new(p)))), Duration::from_secs(60), Duration::from_secs(60));
+        let mut h = g.post("https://models.example.org/v1/chat", &[], b"{}").unwrap();
+        for i in 0..20u8 {
+            tx.send(vec![i; 100]).unwrap();
+        }
+        drop(tx);
+        let mut all = Vec::new();
+        h.body.read_to_end(&mut all).unwrap();
+        assert_eq!(all.len(), 2000);
+    }
+
+    #[test]
+    fn the_idle_guard_passes_the_status_and_the_headers_on() {
+        let g = IdleGuard::new(Poster(Mutex::new(Some(Box::new(std::io::Cursor::new(b"ok".to_vec()))))), Duration::from_secs(60), Duration::from_secs(60));
+        let h = g.post("https://models.example.org/x", &[], b"").unwrap();
+        assert_eq!(h.status, 200);
     }
 }

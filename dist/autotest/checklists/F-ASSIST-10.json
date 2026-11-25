@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-10",
+  "feature_sha": "d7474b760d04415d",
+  "title": "robust replies and tool calls",
+  "clauses": [
+    {
+      "id": "lookup-no-refusal",
+      "text": "A lookup question is answered with the tool, without a refusal or a permission question",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "In the chat, ask what sound output is in use (the assistant has a tool for it).",
+          "expect": "The answer uses the tool. It does not say it cannot do it or ask permission to look."
+        }
+      ]
+    },
+    {
+      "id": "stop-answers",
+      "text": "Stop answers at once during a slow task",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Ask for a slow task and press Stop.",
+          "expect": "The run stops at once with no stuck spinner."
+        }
+      ]
+    }
+  ]
+}

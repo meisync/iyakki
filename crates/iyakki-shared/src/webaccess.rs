@@ -94,11 +94,8 @@ impl Status {
 }
 
 pub fn write_status(dir: &Path, s: &Status) {
-    let tmp = dir.join(format!("{STATUS_FILE}.tmp"));
     if let Ok(t) = serde_json::to_string(s) {
-        if std::fs::write(&tmp, t).and_then(|_| std::fs::rename(&tmp, dir.join(STATUS_FILE))).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
+        let _ = iyakki_schema::write_atomic(&dir.join(STATUS_FILE), t.as_bytes(), 0o644);
     }
 }
 

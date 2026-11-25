@@ -44,6 +44,14 @@ fn the_flows_tile_runs_over_the_real_cores_socket_make_publish_run_approve_and_t
 
     // the program's six objects for the signed-in account, on a connection of their own
     let rpc = Rpc::new(Connection::unix(on.path(), Duration::from_secs(10)).unwrap());
+    // the core binds a connection to the account that signed in on it (SEC3): this one signs in as the same person first
+    match rpc.root("AccountsApi") {
+        Some(iyakki_ui_rpc::RemoteAny::AccountsApi(a)) => {
+            use iyakki_agent_api::AccountsApi as _;
+            a.authenticate("root", "rootpass12").expect("the account signs in on this connection");
+        }
+        _ => panic!("AccountsApi root"),
+    }
     let remote = RemoteServicesHandle::new(rpc);
     let jobs = remote.flows_jobs("root", &iyakki_sec::policy::Role::Admin.template()).expect("the core serves the flows objects to a socket with the program's scopes");
     let spec = serde_json::json!({"name": "Gate", "nodes": [{"id": "ok", "kind": "approval", "config": {"message": "Go on?"}}, {"id": "done", "kind": "notify", "config": {"title": "done"}}], "edges": [{"from": "start", "to": "ok"}, {"from": "ok", "to": "done", "port": "approved"}]});

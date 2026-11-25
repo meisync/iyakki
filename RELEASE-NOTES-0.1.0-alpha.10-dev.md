@@ -1,0 +1,3 @@
+# IYAKKI 0.1.0-alpha.10 (development notes)
+
+Draft. This file is renamed and finished at the alpha.10 cut. **Alpha.9 was not cut on its own (owner order 2026-11-21: combine alpha.9 with alpha.10):** its scope (medium apps on tile crates, the acting-person binding for the UI socket, the eight row splits, the Raspberry Pi 5 and Kria KV260 images, the autotest scenarios) is part of this release, together with the large-app ports, the K8s port-forward and pod terminal, the update fault-injection work, and the beta documents. See [ALPHA-8-TO-12-SCHEDULE](docs/development/ALPHA-8-TO-12-SCHEDULE.md).

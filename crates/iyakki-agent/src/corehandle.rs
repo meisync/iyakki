@@ -63,7 +63,7 @@ impl AgentCore {
         // the sources look on a clock of the core's own, so what happens while an app is closed waits for it
         let events = Arc::new(crate::appevent_sources::SourcedEvents::new(services.app_events.clone(), crate::appevent_sources::real_inputs(&services)));
         crate::appevent_sources::SourcedEvents::spawn_ticker(&events);
-        AgentCore { app_actions: crate::appactions_real::AgentActions::new(services.clone()), app_events: events, cameras: None, media: None, embedded: crate::embedbrowser::for_dir(services.dir()), assistant: None, ui_state: iyakki_core_local::uistate::LocalUiState::new(services.dir()), settings, vault: crate::contract_local::CoreVault::new(services.clone()), terminals: Arc::new(crate::terminalfacet::Terminals::new(services.clone())), file_book: Default::default(), services }
+        AgentCore { app_actions: crate::appactions_real::AgentActions::new(services.clone()), app_events: events, cameras: None, media: None, embedded: crate::embedbrowser::for_dir(services.dir()), assistant: None, ui_state: iyakki_core_local::uistate::LocalUiState::new(services.dir()), settings, vault: crate::contract_local::CoreVault::new(services.clone()), terminals: crate::terminalfacet::Terminals::shared(services.clone()), file_book: Default::default(), services }
     }
 
     /// The core's app events as one shared handle (the web service gives them to WASM tiles, F-SDK-202).
@@ -526,11 +526,17 @@ impl SessionResume for AgentCore {
     }
     fn remember(&self, user: &str) {
         let r = iyakki_core_local::resume::Resume::new(self.services.dir());
+        let now = crate::clock::now_unix() as u64;
         if self.allowed() {
-            let _ = r.remember(user, crate::clock::now_unix() as u64);
+            let _ = r.remember(user, now);
         } else {
             r.forget();
         }
+        // the marker that lets the next screen say it ended unexpectedly (F-LIFE-16): for everybody, no name in it
+        let _ = r.note_open(now);
+    }
+    fn take_unexpected_end(&self) -> bool {
+        iyakki_core_local::resume::Resume::new(self.services.dir()).take_unexpected_end()
     }
     fn who(&self) -> Option<String> {
         if !self.allowed() {
@@ -1101,6 +1107,13 @@ mod tests {
         assert!(t.pty_open("nobody", "app", 80, 24).unwrap_err().contains("no terminal"));
         assert!(t.pty_open("guest", "app", 80, 24).unwrap_err().contains("disabled"));
         assert!(t.pty_open("admin", "app", 0, 24).is_err());
+        let pod = iyakki_core_api::terminal::PtyExec { namespace: "shop".into(), pod: "web-1".into(), ..Default::default() };
+        assert!(t.pty_open_exec("nobody", "app", 80, 24, &pod).unwrap_err().contains("no terminal"));
+        assert!(t.pty_open_exec("guest", "app", 80, 24, &pod).unwrap_err().contains("disabled"));
+        assert!(t.pty_open_exec("admin", "app", 80, 24, &iyakki_core_api::terminal::PtyExec { pod: "A b".into(), ..pod.clone() }).is_err());
+        let e = t.pty_open_exec("admin", "app", 80, 24, &pod).unwrap();
+        assert!(e.approval.summary.contains("pod web-1"), "the question names the pod");
+        t.pty_decide("admin", &e.id, &e.approval.call, false).unwrap();
         let o = t.pty_open("admin", "app", 80, 24).unwrap();
         assert!(t.pty_key("admin", &o.id, PtyKey::Enter, PtyMods::default()).is_err(), "nothing before the yes");
         assert!(t.pty_decide("guest", &o.id, &o.approval.call, true).is_err());
@@ -1108,7 +1121,7 @@ mod tests {
         assert!(t.pty_frame("admin", &o.id).is_err());
         t.pty_close("admin", &o.id);
         let log = lines.lock().unwrap().join("\n");
-        assert!(log.contains("admin terminal.embedded.pty.asked app") && log.contains("terminal.embedded.pty.denied app"), "{log}");
+        assert!(log.contains("admin terminal.embedded.pty.asked app exec shop/web-1") && log.contains("admin terminal.embedded.pty.asked app") && log.contains("terminal.embedded.pty.denied app"), "{log}");
         let _ = std::fs::remove_dir_all(&d);
     }
 

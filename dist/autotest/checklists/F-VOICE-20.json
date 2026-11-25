@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-20",
+  "feature_sha": "5cbd09f44ce32480",
+  "title": "verification of the VOICE tile and system sounds on real hardware",
+  "clauses": [
+    {
+      "id": "long-text-record",
+      "text": "A long read-aloud and a five-minute recording work with a real microphone and speakers",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "With a USB microphone and speakers, READ ALOUD a long text (several pages). Then record five minutes of yourself speaking in RECORD and play it back next to the radio.",
+          "expect": "The long text is read through without breaks. The five-minute recording is clear, and the cue levels sound about right next to the radio."
+        }
+      ]
+    }
+  ]
+}

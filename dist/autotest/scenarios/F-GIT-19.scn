@@ -1,0 +1,8 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 2f7418ec9483f76f; honest subset only: everything not checked is under not-covered.
+row: F-GIT-19
+targets: qemu
+profile: ram
+feature-sha: 2f7418ec9483f76f
+doc: git_clone_repo asks every time on a card naming the connection and git_clones_list is read only
+human: clone-card | Ask the assistant to clone a repository, then to list the clones. Expect: The clone asks on a card that names the connection and its method but never a token, also in Auto mode; the list does not ask.
+not-covered: git_clone_repo asks every time on a card naming the connection and git_clones_list is read only

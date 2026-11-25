@@ -1,0 +1,12 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 1f046cd074618493; honest subset only: everything not checked is under not-covered.
+row: F-SDK-192
+targets: qemu
+profile: ram
+feature-sha: 1f046cd074618493
+doc: Settings, App events lists the registration and its switch stops the events
+clause: 1 Settings > App events lists the registration of the app with what it lets the app hear
+clause: 2 switching the registration off stops the events reaching the app
+not-covered: how many events wait is not asserted here
+not-covered: audited by names (not read)
+not-covered: every registration of every app of the person (only SAMPLE is looked at)
+session-check: app_events_settings_switch

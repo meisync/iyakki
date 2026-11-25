@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-flows-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The data of FLOWS the tile needs, as a leaf crate with no agent, no shared crate and no network: the failure book, the webhook store and view, the flow spec builder, the program allow list, the outside-message policy types and the jobs the tile asks of its environment (FlowsPort)."
+
+[dependencies]
+iyakki-flow = { workspace = true }
+iyakki-sec = { workspace = true }
+iyakki-credguard = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+log = { workspace = true }

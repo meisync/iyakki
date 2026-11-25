@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-tile-scan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The NET SCAN tile. Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit` and
+# `iyakki-tile-api` only, never on the agent or the shared crate; the shell hands it the scanner, the device watch, the settings writes and the audit log through `ScanPort` (a fake in tests).
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-tile-api = { path = "../iyakki-tile-api" }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

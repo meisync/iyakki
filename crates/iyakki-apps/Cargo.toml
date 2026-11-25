@@ -9,18 +9,23 @@ iyakki-testkit = { path = "../iyakki-testkit" }
 iyakki-agent = { path = "../iyakki-agent" }
 iyakki-core-fake = { workspace = true }
 iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }
+iyakki-chatview = { workspace = true, features = ["testing"] }
+iyakki-tile-dash = { path = "../iyakki-tile-dash", features = ["testing"] }
+iyakki-tile-flows = { path = "../iyakki-tile-flows", features = ["testing"] }
+iyakki-tile-git = { path = "../iyakki-tile-git", features = ["testing"] }
 iyakki-proxy = { path = "../iyakki-proxy", features = ["testcerts"] }
 iyakki-rtsp = { path = "../iyakki-rtsp" }
 
 [features]
 # Test seams the shell's own tests use (the `tests` helper modules, test-only trait methods). Never on in a product build.
-testing = ["dep:iyakki-core-fake", "iyakki-uikit/testing"]
+testing = ["dep:iyakki-core-fake", "iyakki-uikit/testing", "iyakki-tile-dash/testing", "iyakki-tile-k8s/testing", "iyakki-tile-devtools/testing", "iyakki-tile-flows/testing", "iyakki-tile-git/testing", "iyakki-tile-tales/testing", "iyakki-tile-voice/testing"]
 
 [dependencies]
 iyakki-clock.workspace = true
 iyakki-camdetect.workspace = true
 iyakki-cloudmode.workspace = true
 iyakki-shared.workspace = true
+iyakki-store-model = { path = "../iyakki-store-model" }
 iyakki-dash.workspace = true
 iyakki-agent-api.workspace = true
 zeroize = "1"
@@ -36,16 +41,50 @@ iyakki-core-api = { workspace = true }
 iyakki-core-local = { workspace = true }
 iyakki-vt = { path = "../iyakki-vt" }
 iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-ide-model = { workspace = true }
+iyakki-chatview = { workspace = true }
 iyakki-tile-api = { path = "../iyakki-tile-api" }
 iyakki-tile-abi = { path = "../iyakki-tile-abi" }
 iyakki-tile-host = { path = "../iyakki-tile-host" }
 iyakki-tile-usage = { path = "../iyakki-tile-usage" }
+iyakki-tile-checkup = { path = "../iyakki-tile-checkup" }
+iyakki-tile-doctor = { path = "../iyakki-tile-doctor" }
+iyakki-tile-runlog = { path = "../iyakki-tile-runlog" }
+iyakki-tile-mesh = { path = "../iyakki-tile-mesh" }
+iyakki-tile-scan = { path = "../iyakki-tile-scan" }
+iyakki-tile-linuxwin = { path = "../iyakki-tile-linuxwin" }
+iyakki-tile-rag = { path = "../iyakki-tile-rag" }
 iyakki-tile-board = { path = "../iyakki-tile-board" }
+iyakki-tile-learn = { path = "../iyakki-tile-learn" }
+iyakki-tile-lab = { path = "../iyakki-tile-lab" }
+iyakki-tile-tales = { path = "../iyakki-tile-tales" }
+iyakki-tile-voice = { path = "../iyakki-tile-voice" }
+iyakki-tile-store = { path = "../iyakki-tile-store" }
+iyakki-tile-inbox = { path = "../iyakki-tile-inbox" }
+iyakki-tile-system = { path = "../iyakki-tile-system" }
+iyakki-sysinfo-model = { workspace = true }
+iyakki-chat-model = { workspace = true }
+iyakki-story-kit = { workspace = true }
+iyakki-story-model = { workspace = true }
+iyakki-provider-kind = { workspace = true }
+iyakki-voice-model = { workspace = true }
+iyakki-scene = { workspace = true }
+iyakki-piclog = { workspace = true }
+iyakki-tile-dash = { path = "../iyakki-tile-dash" }
+iyakki-tile-k8s = { path = "../iyakki-tile-k8s" }
+iyakki-tile-devtools = { path = "../iyakki-tile-devtools" }
+iyakki-k8s-model = { workspace = true }
+iyakki-cluster-model = { workspace = true }
+iyakki-tile-flows = { path = "../iyakki-tile-flows" }
+iyakki-tile-git = { path = "../iyakki-tile-git" }
+iyakki-git-model = { workspace = true }
+iyakki-flows-model = { workspace = true }
 iyakki-tile-radio = { path = "../iyakki-tile-radio" }
 iyakki-tile-calendar = { path = "../iyakki-tile-calendar" }
 iyakki-tile-remotefiles = { path = "../iyakki-tile-remotefiles" }
 iyakki-tile-cameras = { path = "../iyakki-tile-cameras" }
 iyakki-tile-pdf = { path = "../iyakki-tile-pdf" }
+iyakki-tile-disks = { path = "../iyakki-tile-disks" }
 iyakki-tile-firewall = { path = "../iyakki-tile-firewall" }
 iyakki-site-apps = { path = "../iyakki-site-apps" }
 iyakki-tile-hostfiles = { path = "../iyakki-tile-hostfiles" }

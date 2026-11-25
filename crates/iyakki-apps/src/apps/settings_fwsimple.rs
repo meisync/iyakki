@@ -11,6 +11,7 @@ use iyakki_fw::ruleset::{local_networks, Addr};
 
 use super::firewall_page::*;
 use super::*;
+use crate::apps::settings::network_port::NetworkSettingsPort;
 use crate::ui::{CARD, CARD_HOVER, CARD_SEL};
 
 /// What a firewall change that needs a question first is about.
@@ -259,13 +260,13 @@ impl SettingsApp {
 
     /// Apply `c` at once. A change that only lets more in is kept at once (it cannot lock anyone out); anything that tightens makes the engine ask
     /// "Keep these settings?" for 60 seconds. A failure leaves it as a draft so the person sees it and can discard it.
-    pub(super) fn fw_commit(&mut self, cx: &AppCx, c: Config, audit: &str, done: &str) {
-        let user = cx.session.user.clone();
+    pub(super) fn fw_commit(&mut self, p: &dyn NetworkSettingsPort, c: Config, audit: &str, done: &str) {
+        let user = p.acting_user().to_string();
         let (r, kept) = self.propose_and_keep_if_only_opening(c.clone(), &user);
         match r {
             Ok(()) => {
                 self.fw.draft = None;
-                cx.audit.record(&user, if kept { "firewall.keep" } else { "firewall.apply" }, audit);
+                p.audit(if kept { "firewall.keep" } else { "firewall.apply" }, audit);
                 let pending = matches!(self.fw.handle.lock().status(), Status::Pending { .. });
                 self.ok(if pending { format!("{done} Choose Keep within 60 seconds, or Undo. If you do nothing it is undone.") } else { done.to_string() });
             }
@@ -277,7 +278,7 @@ impl SettingsApp {
     }
 
     /// A key in the simple view. Returns whether it was used.
-    pub(super) fn handle_fw_simple(&mut self, k: &Key, cx: &AppCx) -> bool {
+    pub(super) fn handle_fw_simple(&mut self, k: &Key, p: &dyn NetworkSettingsPort) -> bool {
         let n = self.fw_items().len();
         let sel = self.sel[self.tab].min(n.saturating_sub(1));
         match k {
@@ -297,7 +298,7 @@ impl SettingsApp {
             }
             _ => return false,
         }
-        if !self.admin(cx) {
+        if !self.admin(p) {
             return true;
         }
         if !self.fw.writable {
@@ -317,7 +318,7 @@ impl SettingsApp {
                         let what = it.title.clone();
                         self.modal = Some(Modal::Confirm(ConfirmKind::Fw(FwAct::Remove(it.preset, it.rules)), format!("Stop allowing {what}? If you are using this computer through {what} right now, you will lose the connection. The change is undone by itself after 60 seconds unless you choose Keep, so you can get back in.")));
                     } else {
-                        self.fw_remove(cx, it.preset, &it.rules);
+                        self.fw_remove(p, it.preset, &it.rules);
                     }
                 }
             },
@@ -327,7 +328,7 @@ impl SettingsApp {
                 } else {
                     let mut c = cfg;
                     c.enabled = true;
-                    self.fw_commit(cx, c, "mode standard", "Standard is on.");
+                    self.fw_commit(p, c, "mode standard", "Standard is on.");
                 }
             }
             Key::Char('2') => {
@@ -343,7 +344,7 @@ impl SettingsApp {
         true
     }
 
-    pub(super) fn fw_remove(&mut self, cx: &AppCx, preset: Option<Preset>, rules: &[u32]) {
+    pub(super) fn fw_remove(&mut self, p: &dyn NetworkSettingsPort, preset: Option<Preset>, rules: &[u32]) {
         let mut c = self.fw_cfg();
         if let Some(p) = preset {
             c.set_preset(p, false);
@@ -352,36 +353,36 @@ impl SettingsApp {
             c.remove(*id);
         }
         let what = preset.map_or_else(|| "rule".to_string(), |p| preset_words(p).0.to_string());
-        self.fw_commit(cx, c, &format!("removed {what} from Settings"), "Removed.");
+        self.fw_commit(p, c, &format!("removed {what} from Settings"), "Removed.");
         let n = self.fw_items().len();
         self.sel[self.tab] = self.sel[self.tab].min(n.saturating_sub(1));
     }
 
-    pub(super) fn fw_confirm(&mut self, cx: &AppCx, act: FwAct) {
-        if !self.admin(cx) || !self.fw.writable {
+    pub(super) fn fw_confirm(&mut self, p: &dyn NetworkSettingsPort, act: FwAct) {
+        if !self.admin(p) || !self.fw.writable {
             return;
         }
         match act {
             FwAct::Open => {
                 let mut c = self.fw_cfg();
                 c.enabled = false;
-                self.fw_commit(cx, c, "mode open", "The firewall is Open.");
+                self.fw_commit(p, c, "mode open", "The firewall is Open.");
             }
-            FwAct::Remove(p, ids) => self.fw_remove(cx, p, &ids),
+            FwAct::Remove(preset, ids) => self.fw_remove(p, preset, &ids),
         }
     }
 
     /// A line of the Add list was chosen.
-    pub(super) fn fw_service_pick(&mut self, cx: &AppCx, item: &str) {
+    pub(super) fn fw_service_pick(&mut self, p: &dyn NetworkSettingsPort, item: &str) {
         let Some(i) = SERVICES.iter().position(|s| s.0 == item) else { return };
         match SERVICES[i].1 {
-            Some(p) => {
+            Some(preset) => {
                 let mut c = self.fw_cfg();
-                if c.has(p) {
-                    return self.ok(format!("{} is already allowed.", preset_words(p).0));
+                if c.has(preset) {
+                    return self.ok(format!("{} is already allowed.", preset_words(preset).0));
                 }
-                c.set_preset(p, true);
-                self.fw_commit(cx, c, &format!("allowed {} from Settings", preset_words(p).0), &format!("{} is now allowed from your local network.", preset_words(p).0));
+                c.set_preset(preset, true);
+                self.fw_commit(p, c, &format!("allowed {} from Settings", preset_words(preset).0), &format!("{} is now allowed from your local network.", preset_words(preset).0));
             }
             None if i == 5 => self.open_form(FormKind::Fw(FwForm::Port), port_form()),
             None => self.open_form(FormKind::Fw(FwForm::Address), address_form()),
@@ -389,7 +390,7 @@ impl SettingsApp {
     }
 
     /// A custom port or address form was submitted: apply at once.
-    pub(super) fn fw_simple_submit(&mut self, cx: &AppCx, kind: &FwForm, form: &Form) -> Result<String, String> {
+    pub(super) fn fw_simple_submit(&mut self, p: &dyn NetworkSettingsPort, kind: &FwForm, form: &Form) -> Result<String, String> {
         let mut c = self.fw_cfg();
         let (audit, done) = match kind {
             FwForm::Port => {
@@ -410,7 +411,7 @@ impl SettingsApp {
         if c.rules.len() > iyakki_fw::model::MAX_RULES {
             return Err(format!("At most {} rules.", iyakki_fw::model::MAX_RULES));
         }
-        self.fw_commit(cx, c, &audit, &done);
+        self.fw_commit(p, c, &audit, &done);
         Ok(self.status.as_ref().map(|s| s.0.clone()).unwrap_or(done))
     }
 
@@ -423,8 +424,8 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn render_firewall_simple(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let vpn_line = self.fw_vpn_line(cx);
+    pub(super) fn render_firewall_simple(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn NetworkSettingsPort) {
+        let vpn_line = self.fw_vpn_line(p);
         let v = self.fw.handle.lock().view();
         let base = self.fw_base();
         let cfg = self.fw_cfg();

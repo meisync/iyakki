@@ -118,6 +118,10 @@ pub fn run() -> Result<ExitCode, String> {
     if args.first().is_some_and(|a| a.starts_with("--sb-")) {
         return Ok(ExitCode::from(iyakki_usb::sbenroll_cli::run(&args).clamp(0, 255) as u8));
     }
+    // the Raspberry Pi boot volume: generated text files, the card's table, the vendor firmware packs (F-ARM-10, F-ARM-14)
+    if args.first().is_some_and(|a| a == "rpi") {
+        return iyakki_usb::rpifirmware::run_rpi(&args[1..]).map(|_| ExitCode::SUCCESS);
+    }
     // replace the boot files of an installed stick without mounting it (F-UPG-05)
     if args.iter().any(|a| a == "--update") {
         return Ok(ExitCode::from(iyakki_usb::stickupdate::run(&args).clamp(0, 255) as u8));

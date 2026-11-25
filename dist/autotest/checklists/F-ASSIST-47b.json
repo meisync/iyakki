@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-47b",
+  "feature_sha": "015a10bada7b5a12",
+  "title": "history rules (API part)",
+  "clauses": [
+    {
+      "id": "history-off",
+      "text": "The history switch turns the memory off and on",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Turn the history switch off in Settings, Assistant, then on again.",
+          "expect": "While off the assistant keeps no new workspace memory. On again it resumes."
+        }
+      ]
+    }
+  ]
+}

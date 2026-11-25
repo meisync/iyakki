@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-46b",
+  "feature_sha": "4bf4f736f2ff7705",
+  "title": "stall limits rule (API part)",
+  "clauses": [
+    {
+      "id": "provider-limit",
+      "text": "A provider's own limit is used, and the machine-wide one otherwise",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "As an administrator, set the think limit for one provider. Chat with that provider, then with another.",
+          "expect": "The chat with the set provider uses its own limit. The other uses the machine-wide value."
+        }
+      ]
+    }
+  ]
+}

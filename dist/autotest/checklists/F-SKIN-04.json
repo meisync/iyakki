@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-SKIN-04",
+ "feature_sha": "e143aa8c837a6165",
+ "title": "type choices in the SDK tiles",
+ "clauses": [
+  {
+   "id": "type-tiles",
+   "text": "the font family, line height, letter spacing and tabular figures chosen by the person change the text of the SDK tiles at once",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Appearance and change the line height (key l), then the letter spacing (key m), then the tabular figures (key u). Open an SDK tile to read the text.",
+     "expect": "The text of the SDK tile follows each choice at once; digits line up in a column when tabular figures are on."
+    }
+   ]
+  }
+ ]
+}

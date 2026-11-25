@@ -1,0 +1,106 @@
+{
+ "schema": 1,
+ "row": "F-CAM-16",
+ "feature_sha": "8eca09d9267feba3",
+ "title": "camera sources, vault passwords and per-person access (manual until automated)",
+ "clauses": [
+  {
+   "id": "password-vault",
+   "text": "A network camera's password is kept in the owner's vault, not in its address, and editing never shows it.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Add an RTSP or HTTP camera with its password, save it, then edit it.",
+     "expect": "The edit form shows the clean address and no password."
+    }
+   ]
+  },
+  {
+   "id": "credentials-split",
+   "text": "An address typed as user:password@ is split on save, and the password goes to the vault.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Add a camera with its address typed as user:password@host and save it.",
+     "expect": "The saved address and the camera list show no password."
+    }
+   ]
+  },
+  {
+   "id": "needs-password",
+   "text": "A shared camera shows Needs password when the owner's vault is not open.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "With the owner signed out, sign in as a listed person and open the CAMERAS tile.",
+     "expect": "The shared camera shows Needs password."
+    }
+   ]
+  },
+  {
+   "id": "who-sees",
+   "text": "The owner and listed people watch; administrators manage without watching; others do not see the camera.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Sign in as a listed person, then as an administrator who is not on the list, then as someone else.",
+     "expect": "The listed person sees and watches the camera. The administrator can manage it but not see its picture. The other person does not see it."
+    }
+   ]
+  },
+  {
+   "id": "h264-addon",
+   "text": "An H.264 camera shows Needs video add-on until the add-on is installed.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Look at the tile of an H.264 camera before the video add-on is installed.",
+     "expect": "The camera shows Needs video add-on."
+    }
+   ]
+  },
+  {
+   "id": "retry",
+   "text": "A dropped camera is tried again after a pause that grows.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Unplug a network camera's cable for half a minute, plug it back in, and watch its tile.",
+     "expect": "The tile shows lost with the reason, then tries again and goes live. The pauses between tries grow."
+    }
+   ]
+  },
+  {
+   "id": "stop-idle",
+   "text": "A stream stops when nobody looks at it (about 8 seconds after the last look).",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Look at a network camera, then leave the tile.",
+     "expect": "The tile stops drawing the camera, and the stream stops within a few seconds."
+    }
+   ]
+  }
+ ]
+}

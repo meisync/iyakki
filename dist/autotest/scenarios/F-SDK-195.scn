@@ -1,0 +1,11 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 6fc039a47da85830; honest subset only: everything not checked is under not-covered.
+row: F-SDK-195
+targets: qemu
+profile: ram
+feature-sha: 6fc039a47da85830
+doc: a link down and up through the QEMU monitor reaches SAMPLE as connectivity.changed
+clause: 1 connectivity.changed (offline, then online) reaches the app's Events pane after the link is taken down and up through the QEMU monitor
+not-covered: looked at once a second by the core's own tick while any app has a registration, open or closed
+not-covered: the first look only remembers (not separated from the later ones)
+not-covered: looked at when an app starts or polls
+session-check: app_events_connectivity

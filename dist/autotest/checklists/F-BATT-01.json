@@ -1,0 +1,27 @@
+{
+ "schema": 1,
+ "row": "F-BATT-01",
+ "feature_sha": "cb601c5752ebbd65",
+ "title": "laptop battery reading and time left",
+ "clauses": [
+  {
+   "id": "battery-read",
+   "text": "the battery's percent, status, adapter state, health, cycles and time left or until full are shown, and a desktop or Mac mini shows no battery",
+   "machines": [
+    "lenovo",
+    "hp",
+    "macbook-pro"
+   ],
+   "steps": [
+    {
+     "do": "On the laptop on battery, open the Devices popover (F8) and read the battery facts.",
+     "expect": "The percent, the status in plain words, the adapter state and the health are shown, and the time left is only shown when it looks believable."
+    },
+    {
+     "do": "Plug the adapter in and read the facts again.",
+     "expect": "The adapter state shows the adapter, and the status changes to charging or full."
+    }
+   ]
+  }
+ ]
+}

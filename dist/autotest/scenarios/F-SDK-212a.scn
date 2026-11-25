@@ -1,0 +1,9 @@
+# autotest pilot, batch A (2026-11-21); split into sub-row F-SDK-212a on 2026-11-21: this scenario covers the whole visible clause, the API clauses are F-SDK-212b.
+row: F-SDK-212a
+targets: qemu
+provided-by: program  # every clause is given by the iyakki program (core, shell, Settings, SAMPLE); the rootfs of alpha.8 and alpha.10 differ in no file this scenario reads (docs/development/AUTOTEST.md)
+profile: ram
+feature-sha: b1e41a89f9a00d03
+doc: foreground and background are announced to an app that listens (SAMPLE Heard log)
+clause: 1 foreground and background are announced to an app that listens (SAMPLE Heard log)
+session-check: app_events_foreground

@@ -1,0 +1,19 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha c960a3e2e565e4ff; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-LOOK-01
+targets: qemu
+profile: ram
+feature-sha: c960a3e2e565e4ff
+doc: Settings, Appearance offers the parts of the Look (read only)
+clause: 1 Settings, Appearance offers the parts a Look is made of: wallpaper, icon style, shape and size, names and the launcher layout
+not-covered: the home widgets and motion
+not-covered: the default Look being equal to today's behaviour
+not-covered: a Look file round trip
+key s
+wait app=Settings
+skip-unless-button Appearance
+click-sidebar Appearance
+wait app=Settings page="Appearance"
+shot page
+expect-not-blank
+expect-text Wallpaper
+expect-page Appearance

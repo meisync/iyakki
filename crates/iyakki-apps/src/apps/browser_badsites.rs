@@ -11,30 +11,30 @@ use std::sync::{Arc, Mutex};
 use iyakki_web::badsites::{BadSites, Guard, Parsed, MAX_BYTES};
 use iyakki_web::blocker_lists::ListSource;
 
-use super::AppCx;
+use super::chat_port::UserData;
 
-fn who(cx: &AppCx) -> String {
+fn who(cx: &dyn UserData) -> String {
     super::browser_config::who(cx)
 }
 
-pub fn list_path(cx: &AppCx) -> PathBuf {
-    cx.data_dir().join(format!("browser-badsites-{}.txt", who(cx)))
+pub fn list_path(cx: &dyn UserData) -> PathBuf {
+    cx.data_root().join(format!("browser-badsites-{}.txt", who(cx)))
 }
 
-fn config_path(cx: &AppCx) -> PathBuf {
-    cx.data_dir().join(format!("browser-badsites-{}.json", who(cx)))
+fn config_path(cx: &dyn UserData) -> PathBuf {
+    cx.data_root().join(format!("browser-badsites-{}.json", who(cx)))
 }
 
-pub fn enabled(cx: &AppCx) -> bool {
+pub fn enabled(cx: &dyn UserData) -> bool {
     super::browser_config::read_checked("known-bad site settings", &config_path(cx)).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).and_then(|v| v["enabled"].as_bool()).unwrap_or(true)
 }
 
-pub fn set_enabled(cx: &AppCx, on: bool) {
+pub fn set_enabled(cx: &dyn UserData, on: bool) {
     super::browser_config::write_checked("known-bad site settings", &config_path(cx), &serde_json::json!({ "enabled": on }).to_string());
     apply(cx);
 }
 
-pub fn load_list(cx: &AppCx) -> BadSites {
+pub fn load_list(cx: &dyn UserData) -> BadSites {
     let mut b = BadSites::default();
     if let Ok(text) = std::fs::read_to_string(list_path(cx)) {
         if text.len() <= MAX_BYTES {
@@ -44,7 +44,7 @@ pub fn load_list(cx: &AppCx) -> BadSites {
     b
 }
 
-pub fn save_list(cx: &AppCx, b: &BadSites) {
+pub fn save_list(cx: &dyn UserData, b: &BadSites) {
     let p = list_path(cx);
     let tmp = p.with_extension("tmp");
     if std::fs::write(&tmp, b.to_text()).is_ok() {
@@ -60,7 +60,7 @@ fn stamp(p: &std::path::Path) -> (u64, u64) {
 }
 
 /// Put this person's list and switch into the shared guard. Cheap when nothing changed.
-pub fn apply(cx: &AppCx) {
+pub fn apply(cx: &dyn UserData) {
     #[cfg(any(test, feature = "testing"))]
     {
         // a test that looks at the shared guard pins it to its own list; other tests browsing meanwhile leave it alone
@@ -85,7 +85,7 @@ pub fn forget_loaded() {
     }
 }
 
-pub fn add(cx: &AppCx, host: &str, reason: &str) -> Result<String, String> {
+pub fn add(cx: &dyn UserData, host: &str, reason: &str) -> Result<String, String> {
     let mut b = load_list(cx);
     let h = b.add(host, reason)?;
     save_list(cx, &b);
@@ -94,7 +94,7 @@ pub fn add(cx: &AppCx, host: &str, reason: &str) -> Result<String, String> {
     Ok(h)
 }
 
-pub fn remove(cx: &AppCx, host: &str) -> bool {
+pub fn remove(cx: &dyn UserData, host: &str) -> bool {
     let mut b = load_list(cx);
     let gone = b.remove(host);
     if gone {
@@ -105,7 +105,7 @@ pub fn remove(cx: &AppCx, host: &str) -> bool {
     gone
 }
 
-pub fn clear(cx: &AppCx) -> usize {
+pub fn clear(cx: &dyn UserData) -> usize {
     let n = load_list(cx).len();
     let _ = std::fs::remove_file(list_path(cx));
     forget_loaded();
@@ -164,7 +164,7 @@ pub fn start_download(path: PathBuf, src: Arc<dyn ListSource>, url: String) -> b
     true
 }
 
-pub fn source(cx: &AppCx) -> Arc<dyn ListSource> {
+pub fn source(cx: &dyn UserData) -> Arc<dyn ListSource> {
     super::browser_block::source(cx)
 }
 
@@ -181,7 +181,7 @@ pub(crate) struct Pin;
 
 #[cfg(any(test, feature = "testing"))]
 impl Pin {
-    pub(crate) fn to(cx: &AppCx) -> Pin {
+    pub(crate) fn to(cx: &dyn UserData) -> Pin {
         if let Ok(mut p) = PIN.lock() {
             *p = Some(list_path(cx));
         }

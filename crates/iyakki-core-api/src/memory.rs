@@ -49,3 +49,60 @@ pub trait Memory: Send + Sync {
     /// Free bytes where the data lives, for the experimental compressed-memory plan; `None` when unknown.
     fn data_free(&self, dir: &Path) -> Option<u64>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// A machine whose only fact is where the data folder lives; every other call answers with nothing.
+    struct Place(DataPlace);
+
+    impl Memory for Place {
+        fn stats(&self) -> MemStats {
+            MemStats::default()
+        }
+        fn conf_path(&self) -> PathBuf {
+            PathBuf::new()
+        }
+        fn read_conf(&self) -> String {
+            String::new()
+        }
+        fn save_conf(&self, _cfg: &config::Config) -> Result<(), String> {
+            Ok(())
+        }
+        fn set_conf_key(&self, _key: &str, _value: Option<&str>) -> Result<(), String> {
+            Ok(())
+        }
+        fn reconfigure(&self, _cfg: &config::Config, _ram: u64) -> Result<Vec<Step>, String> {
+            Ok(Vec::new())
+        }
+        fn apply_swapfile(&self, _bytes: Option<u64>, _on_disk: bool) -> Vec<Step> {
+            Vec::new()
+        }
+        fn data_place(&self, _dir: &Path) -> DataPlace {
+            self.0
+        }
+        fn data_free(&self, _dir: &Path) -> Option<u64> {
+            None
+        }
+    }
+
+    #[test]
+    fn data_on_a_disk_volume_survives_power_off_so_it_counts_as_on_disk() {
+        assert!(Place(DataPlace::Disk).data_on_disk(Path::new("/var/lib/iyakki")));
+    }
+
+    #[test]
+    fn data_held_in_ram_or_on_another_kind_of_volume_does_not_count_as_on_disk() {
+        assert!(!Place(DataPlace::Memory).data_on_disk(Path::new("/var/lib/iyakki")), "a live session loses its data at power-off");
+        assert!(!Place(DataPlace::Other).data_on_disk(Path::new("/var/lib/iyakki")), "a container volume or share is not a disk volume");
+    }
+
+    #[test]
+    fn the_data_place_is_passed_through_unchanged_for_every_folder() {
+        let p = Place(DataPlace::Memory);
+        assert_eq!(p.data_place(Path::new("/a")), DataPlace::Memory);
+        assert_eq!(p.data_place(Path::new("/b")), DataPlace::Memory);
+    }
+}

@@ -1,0 +1,25 @@
+{
+ "schema": 1,
+ "row": "F-NET-06",
+ "feature_sha": "b62349462b3510d6",
+ "title": "the Network page of Settings shows the Ethernet and WiFi rows (read on",
+ "clauses": [
+  {
+   "id": "net-switch",
+   "text": "the Network page of Settings shows the Ethernet and WiFi rows (read only)",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018",
+    "macbook-pro",
+    "hp"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Network. Switch Ethernet off and on, then WiFi off and on.",
+     "expect": "Each row shows its state, address and speed while on, and not found when no adapter is present.",
+     "runner_did": "Checked the page text first (when run through the runner)"
+    }
+   ]
+  }
+ ]
+}

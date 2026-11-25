@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-TCFG-07",
+ "feature_sha": "fd7ef715bfb22e15",
+ "title": "browser media policy from the tenant",
+ "clauses": [
+  {
+   "id": "media-deny",
+   "text": "a camera or microphone that the tenant denies is refused in a browser session",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "In a cloud tenant whose media policy denies a device, start a browser session and try to use that device on a web page.",
+     "expect": "The browser refuses the device for the session, and the allowed devices still work."
+    }
+   ]
+  }
+ ]
+}

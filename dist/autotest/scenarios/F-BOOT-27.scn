@@ -1,0 +1,11 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 3f60820af1c54d95; honest subset only: everything not checked is under not-covered.
+row: F-BOOT-27
+targets: qemu
+profile: ram
+feature-sha: 3f60820af1c54d95
+doc: the boot log shows the repeated coldplug pass loading aliases that appeared after the first drivers
+clause: 1 the real boot log shows the repeated coldplug pass loading aliases that appeared after the first batch of drivers, in at most 3 extra passes
+not-covered: devices created by drivers get their drivers (Intel LPSS and MFD cells need real hardware)
+not-covered: a quiet machine costs one directory walk and no modprobe
+not-covered: the 3 s and 80 ms limits (not timed)
+session-check: coldplug_extra_pass

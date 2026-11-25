@@ -1,0 +1,16 @@
+# autotest alpha.10 batch F (lane Q8, 2026-11-24); split into sub-row F-SND-10a on 2026-11-24 (lane SC2): this scenario covers the whole visible clause, the API and rule clauses are F-SND-10b.
+row: F-SND-10a
+targets: qemu
+profile: ram
+feature-sha: 9ea258ea9bdd885b
+doc: Settings, Sound shows the switch Mix sounds from several apps (the sound.mixer setting) (read only, nothing is changed)
+clause: 1 Settings, Sound shows the switch Mix sounds from several apps (the sound.mixer setting)
+key s
+wait app=Settings
+skip-unless-button Sound
+click-sidebar Sound
+wait app=Settings page="Sound"
+shot page
+expect-not-blank
+expect-text Mix sounds
+expect-page Sound

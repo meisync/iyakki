@@ -57,6 +57,32 @@ impl Terminals {
         Terminals { services, policies: Mutex::new(None), sessions: Mutex::new(HashMap::new()), next: std::sync::atomic::AtomicU64::new(1), pty }
     }
 
+    /// A set of terminals the end-of-session hook `terminals` reaches: every [`Terminals`] made by [`Terminals::shared`] is in it (weakly).
+    pub fn live() -> &'static iyakki_shared::sessionend::LiveSet<Terminals> {
+        static LIVE: iyakki_shared::sessionend::LiveSet<Terminals> = iyakki_shared::sessionend::LiveSet::new();
+        &LIVE
+    }
+
+    /// [`Terminals::new`] in an `Arc`, listed for the end of a session.
+    pub fn shared(services: Arc<Services>) -> Arc<Terminals> {
+        let t = Arc::new(Terminals::new(services));
+        Terminals::live().add(&t);
+        t
+    }
+
+    /// The end of a person's session (D-SESSION-END): their command-line sessions and full terminals are closed. Returns how many.
+    pub fn end_session(&self, user: &str) -> usize {
+        let mine: Vec<(String, String, String)> = lk(&self.sessions).iter().filter(|((u, _), _)| u == user).map(|((u, id), s)| (u.clone(), id.clone(), s.app.clone())).collect();
+        let mut n = 0;
+        for (u, id, app) in mine {
+            if lk(&self.sessions).remove(&(u, id)).is_some() {
+                self.audit(user, "close", &app);
+                n += 1;
+            }
+        }
+        n + self.pty.close_user(user, &self.pty_audit(user))
+    }
+
     pub fn set_policies(&self, p: Arc<dyn PolicySource>) {
         *lk(&self.policies) = Some(p);
     }
@@ -151,6 +177,16 @@ impl Terminal for Terminals {
             iyakki_sec::policy::CliLevel::Full => {}
         }
         self.pty.open(user, app, cols, rows, &self.pty_audit(user))
+    }
+
+    fn pty_open_exec(&self, user: &str, app: &str, cols: usize, rows: usize, exec: &t::PtyExec) -> Result<t::PtyOpen, String> {
+        let policy = lk(&self.policies).as_ref().and_then(|p| p.policy_of(user)).ok_or("this account has no terminal here")?;
+        match policy.cli {
+            iyakki_sec::policy::CliLevel::Off => return Err("The terminal is disabled for your account.".into()),
+            iyakki_sec::policy::CliLevel::Restricted => return Err("Your account's terminal is limited to checked lines; a shell in a pod needs the full level.".into()),
+            iyakki_sec::policy::CliLevel::Full => {}
+        }
+        self.pty.open_exec(user, app, cols, rows, exec, &self.pty_audit(user))
     }
 
     fn pty_decide(&self, user: &str, session: &str, call: &str, approve: bool) -> Result<(), String> {

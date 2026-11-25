@@ -1,0 +1,59 @@
+{
+ "schema": 1,
+ "row": "F-RADIO-11",
+ "feature_sha": "6e86b347b323fdb7",
+ "title": "Ogg Vorbis radio stations play (manual until automated)",
+ "clauses": [
+  {
+   "id": "vorbis-plays",
+   "text": "A live Ogg Vorbis station plays through the helper iyakki-audiodec at the right speed and pitch.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Open Radio and play a live station whose stream is Ogg Vorbis.",
+     "expect": "The station plays clearly through the speakers for several minutes, at normal pitch and speed."
+    }
+   ]
+  },
+  {
+   "id": "stereo",
+   "text": "A stereo station plays both channels.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Play a stereo Ogg Vorbis station and listen left and right.",
+     "expect": "Both sides carry sound. Neither is silent or swapped."
+    }
+   ]
+  },
+  {
+   "id": "refused-words",
+   "text": "A stream that cannot be played, such as FLAC or MP4, is refused in words.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Try a FLAC or MP4 station, if you have one.",
+     "expect": "The radio says in words that it cannot play that kind of stream. It does not stay silent."
+    }
+   ]
+  }
+ ]
+}

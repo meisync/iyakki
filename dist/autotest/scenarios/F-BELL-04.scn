@@ -1,0 +1,9 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 22508f900106c585; honest subset only: everything not checked is under not-covered.
+row: F-BELL-04
+targets: real
+profile: ram
+feature-sha: 22508f900106c585
+doc: the first NET SCAN is the baseline; later scans report only strangers as one grouped row and one toast
+human: net-scan | Run NET SCAN on a fresh install, then plug in a new device and scan again. Expect: The first scan raises no new-device notes; the second raises one grouped row and one toast for the stranger.
+not-covered: the first NET SCAN is the baseline; later scans report only strangers as one grouped row and one toast
+needs-hw: a network with a second device

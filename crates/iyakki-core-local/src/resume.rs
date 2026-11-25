@@ -17,6 +17,9 @@ const FILE: &str = "resume-session.json";
 /// The most apps a ticket holds (the one held aside and the one on the screen, with room for panes).
 pub const MAX_APPS: usize = 8;
 const SWITCH: &str = "resume-after-crash.enabled";
+/// The marker "somebody is signed in" (F-LIFE-16): no name, no app, nothing to restore; it only lets the next shell say that the screen
+/// ended unexpectedly. Written for everybody (also when no ticket may be written), removed at every sign-out.
+const OPEN: &str = "session-open.json";
 
 /// The kernel's id of this boot (empty when it cannot be read).
 pub fn boot_id() -> String {
@@ -169,6 +172,41 @@ impl Resume {
 
     pub fn forget(&self) {
         let _ = std::fs::remove_file(self.file());
+        let _ = std::fs::remove_file(self.dir.join(OPEN));
+    }
+
+    /// Say that somebody is signed in (called again every few seconds with the ticket; no name, nothing to restore).
+    pub fn note_open(&self, now: u64) -> Result<(), String> {
+        if self.boot.is_empty() {
+            return Err("the boot id is unknown".into());
+        }
+        let v = serde_json::json!({"boot": self.boot, "seen": now});
+        let (p, tmp) = (self.dir.join(OPEN), self.dir.join(format!("{OPEN}.tmp")));
+        let res = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(v.to_string().as_bytes())?;
+            f.sync_all()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+            }
+            std::fs::rename(&tmp, &p)
+        })();
+        if res.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        res.map_err(|e| e.to_string())
+    }
+
+    /// Did the shell end while somebody was signed in, without a sign-out, in this boot? Takes the marker: true once, then false.
+    /// (A marker of an earlier boot is removed and says nothing: the machine was restarted, not the screen.)
+    pub fn take_unexpected_end(&self) -> bool {
+        let p = self.dir.join(OPEN);
+        let v = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+        let _ = std::fs::remove_file(&p);
+        v.and_then(|v| v["boot"].as_str().map(|b| !self.boot.is_empty() && b == self.boot)).unwrap_or(false)
     }
 }
 
@@ -278,5 +316,31 @@ mod tests {
         if cfg!(target_os = "linux") {
             assert!(!id.is_empty());
         }
+    }
+
+    #[test]
+    fn a_marker_of_a_signed_in_person_is_taken_once_after_the_shell_ended_and_a_sign_out_removes_it() {
+        let d = tmp("open-marker");
+        let r = Resume::with_boot(&d, "boot-1");
+        assert!(!r.take_unexpected_end(), "nobody was signed in");
+        r.note_open(100).unwrap();
+        let text = std::fs::read_to_string(d.join("session-open.json")).unwrap();
+        assert!(!text.contains("alice") && text.contains("boot-1"), "no name in it: {text}");
+        assert!(r.take_unexpected_end(), "the shell ended without a sign-out");
+        assert!(!r.take_unexpected_end(), "taken once");
+        r.note_open(200).unwrap();
+        r.forget();
+        assert!(!r.take_unexpected_end(), "a sign-out is not a crash");
+        assert!(!d.join("session-open.json.tmp").exists());
+    }
+
+    #[test]
+    fn a_marker_of_an_earlier_boot_says_nothing_and_is_removed() {
+        let d = tmp("open-marker-boot");
+        Resume::with_boot(&d, "boot-1").note_open(100).unwrap();
+        let later = Resume::with_boot(&d, "boot-2");
+        assert!(!later.take_unexpected_end(), "the machine was restarted, not the screen");
+        assert!(!d.join("session-open.json").exists());
+        assert!(Resume::with_boot(&d, "").note_open(1).is_err(), "an unknown boot id writes nothing");
     }
 }

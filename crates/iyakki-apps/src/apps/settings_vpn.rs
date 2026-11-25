@@ -15,6 +15,7 @@ use iyakki_vpn::filter::FilterSet;
 use iyakki_vpn::profile::{Mode, Settings};
 
 use super::*;
+use crate::apps::settings::network_port::NetworkSettingsPort;
 
 /// What the page keeps between frames.
 #[derive(Default)]
@@ -48,16 +49,15 @@ impl SettingsApp {
         self.vpn.now.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()))
     }
 
-    pub(super) fn vpn_mgr(&self, cx: &AppCx) -> Arc<dyn VpnManager> {
+    pub(super) fn vpn_mgr(&self, p: &dyn NetworkSettingsPort) -> Arc<dyn VpnManager> {
         if let Some(m) = &self.vpn.mgr {
             return m.clone();
         }
-        let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-        cx.b3().vpn_manager(&cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d)))
+        p.vpn_manager()
     }
 
-    pub(super) fn vpn_len(&self, cx: &AppCx) -> usize {
-        self.vpn_mgr(cx).profiles().len()
+    pub(super) fn vpn_len(&self, p: &dyn NetworkSettingsPort) -> usize {
+        self.vpn_mgr(p).profiles().len()
     }
 
     pub(super) fn vpn_buttons(&self) -> Vec<Btn> {
@@ -65,22 +65,22 @@ impl SettingsApp {
     }
 
     /// The heartbeat: while the page is open the profiles are looked at every two seconds.
-    pub(super) fn vpn_tick(&mut self, cx: &AppCx) {
+    pub(super) fn vpn_tick(&mut self, p: &dyn NetworkSettingsPort) {
         if self.tab() == Tab::Vpn && self.ticks % 20 == 0 {
-            self.vpn_mgr(cx).tick(self.vpn_now());
+            self.vpn_mgr(p).tick(self.vpn_now());
         }
     }
 
-    fn vpn_row(&self, cx: &AppCx) -> Option<Row> {
-        let rows = self.vpn_mgr(cx).rows();
+    fn vpn_row(&self, p: &dyn NetworkSettingsPort) -> Option<Row> {
+        let rows = self.vpn_mgr(p).rows();
         let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
         rows.into_iter().nth(sel)
     }
 
-    pub(super) fn handle_vpn(&mut self, k: &Key, cx: &AppCx) {
-        let mgr = self.vpn_mgr(cx);
+    pub(super) fn handle_vpn(&mut self, k: &Key, p: &dyn NetworkSettingsPort) {
+        let mgr = self.vpn_mgr(p);
         let len = mgr.profiles().len();
-        let row = self.vpn_row(cx);
+        let row = self.vpn_row(p);
         let none = "Choose a VPN profile first (Up/Down).";
         match k {
             Key::Up => self.move_sel(-1, len),
@@ -164,8 +164,8 @@ impl SettingsApp {
         self.open_form(FormKind::Vpn(VpnForm::Mode(r.profile.id.clone())), f);
     }
 
-    pub(super) fn vpn_submit(&mut self, cx: &AppCx, kind: &VpnForm, form: &mut Form) -> Result<String, String> {
-        let mgr = self.vpn_mgr(cx);
+    pub(super) fn vpn_submit(&mut self, p: &dyn NetworkSettingsPort, kind: &VpnForm, form: &mut Form) -> Result<String, String> {
+        let mgr = self.vpn_mgr(p);
         match kind {
             VpnForm::ImportFile => {
                 let path = form.value(1);
@@ -216,11 +216,11 @@ impl SettingsApp {
         Ok(said)
     }
 
-    pub(super) fn vpn_delete(&mut self, cx: &AppCx, id: &str) {
-        match self.vpn_mgr(cx).remove(id) {
+    pub(super) fn vpn_delete(&mut self, p: &dyn NetworkSettingsPort, id: &str) {
+        match self.vpn_mgr(p).remove(id) {
             Ok(done) => {
                 self.ok(format!("Deleted {}.", done.join(", ")));
-                let len = self.vpn_len(cx);
+                let len = self.vpn_len(p);
                 self.sel[self.tab] = self.sel[self.tab].min(len.saturating_sub(1));
             }
             Err(e) => self.fail(e),
@@ -229,8 +229,8 @@ impl SettingsApp {
 
     // ------------------------------------------------------------------------------------------------ drawing
 
-    pub(super) fn render_vpn(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let mgr = self.vpn_mgr(cx);
+    pub(super) fn render_vpn(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn NetworkSettingsPort) {
+        let mgr = self.vpn_mgr(p);
         let rows = mgr.rows();
         let now = self.vpn_now();
         let mut y = a.y;

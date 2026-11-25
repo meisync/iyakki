@@ -496,11 +496,19 @@ mod linux {
     /// there is something to write or remove. A failure to do either is silent (the log is the only thing that must never stop the boot).
     const LEAN_FAILED: &str = "/s/boot/boot/grub/iyakki-lean-failed";
 
+    /// On a Raspberry Pi boot volume (it has `iyakki-boot.txt` at its root and no GRUB) the marker lives at the root and a failure also rewrites
+    /// `iyakki-boot.txt` to the full RAM disk when the volume has one (`pi_boot_txt_after_failure`), because the firmware reads that file, not
+    /// a menu. The rewrite is a temporary file and a rename, so the file is never half written.
+    const PI_BOOT_FILE: &str = "/s/boot/iyakki-boot.txt";
+    const PI_MARKER: &str = "/s/boot/iyakki-lean-failed";
+
     fn lean_marker(failed_because: Option<&str>) {
         if !BOOT_UP.load(Ordering::SeqCst) {
             return;
         }
-        let exists = Path::new(LEAN_FAILED).exists();
+        let pi = Path::new(PI_BOOT_FILE).exists();
+        let marker = if pi { PI_MARKER } else { LEAN_FAILED };
+        let exists = Path::new(marker).exists();
         if failed_because.is_none() && !exists {
             return;
         }
@@ -508,15 +516,31 @@ mod linux {
         let _ = mnt("", "/s/boot", None, libc::MS_REMOUNT | rw, "");
         match failed_because {
             Some(why) => {
-                let _ = std::fs::write(LEAN_FAILED, format!("{why}\n"));
+                let _ = std::fs::write(marker, format!("{why}\n"));
+                if pi {
+                    let current = std::fs::read_to_string(PI_BOOT_FILE).unwrap_or_default();
+                    if let Some(text) = pi_boot_txt_after_failure(&current, Path::new("/s/boot/initrd").exists()) {
+                        let tmp = format!("{PI_BOOT_FILE}.tmp");
+                        if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, PI_BOOT_FILE).is_ok() {
+                            say("Raspberry Pi: the next start reads the full RAM disk (iyakki-boot.txt rewritten)");
+                        }
+                    }
+                }
             }
             None => {
-                let _ = std::fs::remove_file(LEAN_FAILED);
+                let _ = std::fs::remove_file(marker);
             }
         }
         // SAFETY: sync takes no pointers.
         unsafe { libc::sync() };
         let _ = mnt("", "/s/boot", None, libc::MS_REMOUNT | libc::MS_RDONLY | rw, "");
+    }
+
+    /// A boot volume made for one Pi must not start on another (`board_check`): the volume's `board` file against the device tree's model.
+    fn board_gate() -> Result<(), String> {
+        let file = std::fs::read_to_string("/s/boot/board").ok();
+        let model = std::fs::read("/proc/device-tree/model").ok().map(|b| String::from_utf8_lossy(&b).into_owned());
+        board_check(file.as_deref(), model.as_deref())
     }
 
     /// A failure the person can read: says what is wrong and how to get the normal boot back, then restarts after a pause (the marker file makes
@@ -741,6 +765,13 @@ mod linux {
                     boot_ok = true;
                     BOOT_UP.store(true, Ordering::SeqCst);
                     say("boot volume mounted");
+                    if let Err(why) = board_gate() {
+                        say(&why);
+                        if opts.shell {
+                            shell(&why);
+                        }
+                        fail(&why);
+                    }
                     // the log goes onto the stick as soon as it can: if anything below hangs, this much is readable afterwards
                     note(&format!("cmdline: {}", std::fs::read_to_string("/proc/cmdline").unwrap_or_default().trim()));
                     flush_log();

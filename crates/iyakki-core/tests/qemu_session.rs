@@ -406,3 +406,33 @@ fn app_events_survive_restart() {
 fn browser_data_protection() {
     status_of("browser_data_protection");
 }
+
+#[test]
+#[ignore = "reads a QEMU session run (IYAKKI_QEMU_RESULTS)"]
+fn ui_process_tree() {
+    status_of("ui_process_tree");
+}
+
+#[test]
+#[ignore = "reads a QEMU session run (IYAKKI_QEMU_RESULTS)"]
+fn ui_process_screen() {
+    status_of("ui_process_screen");
+}
+
+#[test]
+#[ignore = "reads a QEMU session run (IYAKKI_QEMU_RESULTS)"]
+fn ui_process_socket() {
+    status_of("ui_process_socket");
+}
+
+#[test]
+#[ignore = "reads a QEMU session run (IYAKKI_QEMU_RESULTS)"]
+fn ui_process_restart() {
+    status_of("ui_process_restart");
+}
+
+#[test]
+#[ignore = "reads a QEMU session run (IYAKKI_QEMU_RESULTS)"]
+fn ui_process_stays_up() {
+    status_of("ui_process_stays_up");
+}

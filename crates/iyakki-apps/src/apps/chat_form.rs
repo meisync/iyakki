@@ -4,6 +4,7 @@
 //! reaches the transcript, the audit line or the log.
 
 use iyakki_flowsx::askform::{FormSpec, Kind, CANCELLED};
+use crate::apps::chat_port::CxChat;
 
 use crate::apps::widgets::{FieldKind, Form, FormEvent};
 use super::{AppCx, ChatApp};
@@ -107,9 +108,9 @@ impl ChatApp {
                 for (i, f) in spec.fields.iter().enumerate() {
                     if f.kind == Kind::Secret && !vals[i].is_empty() {
                         let n = spec.secret_name(i);
-                        match cx.vault().user_set(&cx.session.user, &n, &vals[i]) {
+                        match CxChat(cx).vault().user_set(CxChat(cx).user(), &n, &vals[i]) {
                             Ok(_) => {
-                                cx.audit.record(&cx.session.user, "vault.user.set", &n);
+                                CxChat(cx).audit("vault.user.set", &n);
                                 names[i] = Some(n);
                             }
                             Err(iyakki_shared::vault::VaultError::Locked) => {
@@ -126,7 +127,7 @@ impl ChatApp {
                     }
                 }
                 let text = spec.answer_text(&vals, &names);
-                cx.audit.record(&cx.session.user, "chat.form.submitted", &format!("{} fields", spec.fields.len()));
+                CxChat(cx).audit("chat.form.submitted", &format!("{} fields", spec.fields.len()));
                 self.askform = None;
                 self.send_form_answer(cx, text);
             }

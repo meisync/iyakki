@@ -286,11 +286,14 @@ fn repeated_failures_of_the_same_step_make_one_request_and_one_note() {
     let mut r = rig("perm-dedupe");
     let flow = r.flow("g");
     let run = r.run(&flow, "manual");
+    // the first stop has to have happened before the step can be retried (a step that is still running refuses a retry)
+    r.wait(&run, |x| x.nodes["shot"].state == iyakki_flow::NodeState::Failed && x.status == iyakki_flow::RunStatus::Blocked);
     // the step is retried by hand twice and stops each time
     for _ in 0..2 {
+        // each retry makes one more attempt: wait for THAT attempt to stop, not for the state the step already had before the retry took hold
+        let before = r.env.engine.get_run(&run).unwrap().nodes["shot"].attempts.len();
         r.env.engine.retry_node(&run, "shot").unwrap();
-        r.wait(&run, |x| x.nodes["shot"].state == iyakki_flow::NodeState::Failed && x.status == iyakki_flow::RunStatus::Blocked);
-        std::thread::sleep(Duration::from_millis(150));
+        r.wait(&run, |x| x.nodes["shot"].attempts.len() > before && x.nodes["shot"].state == iyakki_flow::NodeState::Failed && x.status == iyakki_flow::RunStatus::Blocked);
     }
     r.tick();
     assert_eq!(r.pending().len(), 1, "one request");

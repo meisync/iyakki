@@ -1,0 +1,12 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 4150cd56cd718eb4; honest subset only: everything not checked is under not-covered.
+row: F-WEB-47
+targets: browser
+feature-sha: 4150cd56cd718eb4
+doc: schedule routes seen through the Schedules page: list, pause and resume on the real web service
+clause: 1 `GET /api/v1/schedules` lists the schedule and pause and resume change its paused state (called by the page on the real web service)
+not-covered: POST create or change with the editor role, 422 with reasons, 429 over the limit, 400 for a bad expression
+not-covered: DELETE
+not-covered: preview and status routes
+not-covered: run now and history
+not-covered: every change audited in the service log and the tenant audit file
+suite: run_pages.py --only more,functions

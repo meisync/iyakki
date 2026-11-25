@@ -1,0 +1,12 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 6929c0fe9eac4a83; honest subset only: everything not checked is under not-covered.
+row: F-WEB-33
+targets: browser
+feature-sha: 6929c0fe9eac4a83
+doc: web pages Flows and Runs: run states, approval cards decided by the person's own click, Stop
+clause: 1 a run shows its state and a Stop button and ends in a final state; an approval card names the tool and the risk and says only the person's own click answers; approving and denying let the run go on
+clause: 2 pressing Run on the Flows page starts a run of the flow on the service
+not-covered: flows listed with the definition shown read-only and secrets hidden
+not-covered: runs of the flow newest first and paged
+not-covered: one answer per question
+not-covered: the Flows page has no approval button (absence not asserted)
+suite: run_pages.py --only more,functions

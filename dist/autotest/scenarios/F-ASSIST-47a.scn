@@ -1,0 +1,17 @@
+# autotest alpha.10 batch F (lane Q8, 2026-11-24); split into sub-row F-ASSIST-47a on 2026-11-24 (lane SC2): this scenario covers the whole visible clause, the API and rule clauses are F-ASSIST-47b.
+row: F-ASSIST-47a
+targets: qemu
+profile: ram
+feature-sha: 31e9227c96e39241
+doc: Settings, Assistant shows the history switch (read only, nothing is changed)
+clause: 1 Settings, Assistant shows the history switch
+key s
+wait app=Settings
+skip-unless-button Assistant
+click-sidebar Assistant
+wait app=Settings page="Assistant"
+skip-unless-button Remember on/off
+shot page
+expect-not-blank
+expect-text Remember
+expect-page Assistant

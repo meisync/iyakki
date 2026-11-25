@@ -9,6 +9,7 @@
 //! that opens the same form here (`ench_tick`).
 
 use super::*;
+use super::account_port::EncHomePort;
 use iyakki_enchome::form::{self as ef, Ctx, Flow, Purpose, Request};
 use iyakki_enchome::{migrate, EncHome, State};
 use std::sync::Mutex;
@@ -37,14 +38,14 @@ const EXPLAIN_NOT: &str = "Not protected: a computer that is signed in and unloc
 const EXPLAIN_RECOVERY: &str = "The recovery key is shown once. Without the password AND the recovery key the files cannot be opened by anyone, ever: there is no backdoor and no copy. Keep the key away from this computer.";
 
 impl SettingsApp {
-    fn ench_status(cx: &AppCx) -> iyakki_enchome::Status {
-        EncHome::for_status(cx.data_dir()).status(&cx.session.user)
+    fn ench_status(p: &dyn EncHomePort) -> iyakki_enchome::Status {
+        EncHome::for_status(&p.data_dir()).status(&p.user_name())
     }
 
-    fn ench_run<R>(&mut self, cx: &AppCx, f: impl FnOnce(&mut ef::Form, &Ctx) -> R) -> R {
-        let env = EncHome::real(cx.data_dir());
-        let user = cx.session.user.clone();
-        let verify = |p: &str| cx.store.lock().map(|mut s| s.authenticate(&user, p).is_ok()).unwrap_or(false);
+    fn ench_run<R>(&mut self, p: &dyn EncHomePort, f: impl FnOnce(&mut ef::Form, &Ctx) -> R) -> R {
+        let env = EncHome::real(&p.data_dir());
+        let user = p.user_name();
+        let verify = |pw: &str| p.verify_sign_in(&user, pw);
         let ctx = Ctx { env: &env, user: &user, verify_signin: &verify };
         f(&mut self.ench.flow, &ctx)
     }
@@ -98,15 +99,14 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn ench_start(&mut self, cx: &AppCx, p: Purpose) {
-        self.ench_run(cx, |f, c| f.start(p, c));
-        let user = cx.session.user.clone();
-        cx.audit.record(&user, "enchome.form", &format!("{p:?}"));
+    pub(super) fn ench_start(&mut self, p: &dyn EncHomePort, purpose: Purpose) {
+        self.ench_run(p, |f, c| f.start(purpose, c));
+        p.audit("enchome.form", &format!("{purpose:?}"));
         self.modal = self.ench_next();
     }
 
     /// A form step was submitted. Returns the form to keep open when the step failed.
-    pub(super) fn ench_submit(&mut self, cx: &AppCx, form: &mut Form) -> Option<Modal> {
+    pub(super) fn ench_submit(&mut self, p: &dyn EncHomePort, form: &mut Form) -> Option<Modal> {
         match &self.ench.flow.flow {
             Flow::Ask { purpose: Purpose::AdminSlot { enable: true }, stage: 1, .. } if form.raw(0) != form.raw(1) || form.raw(0).is_empty() => {
                 form.error = Some("The two passwords are not the same (or empty).".into());
@@ -121,45 +121,45 @@ impl SettingsApp {
         }
         self.ench.flow.type_owned(form.raw(0));
         if self.ench.flow.needs_background() {
-            self.ench_spawn(cx);
+            self.ench_spawn(p);
             return None;
         }
         // typing the recovery key back is quick: it stays on the screen's thread
-        self.ench_run(cx, |f, c| f.submit(c));
-        self.ench_audit(cx, false);
+        self.ench_run(p, |f, c| f.submit(c));
+        self.ench_audit(p, false);
         self.ench_next()
     }
 
-    fn ench_audit(&self, cx: &AppCx, was_move: bool) {
-        let user = cx.session.user.clone();
+    fn ench_audit(&self, p: &dyn EncHomePort, was_move: bool) {
+        let user = p.user_name();
         // what failed goes to the audit log and the log in words (cut at 300 characters): these sentences never hold a password or a key
         let why: String = self.ench.flow.notice.as_deref().filter(|_| self.ench.flow.failed).unwrap_or_default().chars().take(300).collect();
         if self.ench.flow.failed {
             log::warn!("encrypted home: a step failed for {user}: {why}");
         }
         if was_move {
-            cx.audit.record(&user, "enchome.move", &if self.ench.flow.failed { format!("failed: {why}") } else { "done".to_string() });
+            p.audit("enchome.move", &if self.ench.flow.failed { format!("failed: {why}") } else { "done".to_string() });
         } else if !self.ench.flow.failed {
             let what = match &self.ench.flow.flow {
                 Flow::ShowRecovery { .. } => "recovery key shown",
                 Flow::Done => "done",
                 _ => "step",
             };
-            cx.audit.record(&user, "enchome.step", what);
+            p.audit("enchome.step", what);
         } else {
-            cx.audit.record(&user, "enchome.step.failed", &why);
+            p.audit("enchome.step.failed", &why);
         }
     }
 
     /// Hand the form to the settings job: Argon2id (about a second, 256 MiB), the container and the copy run off the screen's thread.
     /// The form goes into the thread whole (its passwords are zeroized when it ends) and comes back in `ench_finished`.
-    fn ench_spawn(&mut self, cx: &AppCx) {
+    fn ench_spawn(&mut self, p: &dyn EncHomePort) {
         let is_move = self.ench.flow.is_move();
         let mut form = std::mem::take(&mut self.ench.flow);
         let factory = self.ench.env.clone();
-        let dir = cx.data_dir().to_path_buf();
-        let store = cx.store.clone();
-        let user = cx.session.user.clone();
+        let dir = p.data_dir();
+        let verifier = p.verifier();
+        let user = p.user_name();
         let progress = self.ench.progress.clone();
         self.ench.cancel.store(false, std::sync::atomic::Ordering::SeqCst);
         let cancel = self.ench.cancel.clone();
@@ -175,7 +175,7 @@ impl SettingsApp {
                     Some(f) => f(),
                     None => EncHome::real(&dir),
                 };
-                let verify = |p: &str| store.lock().map(|mut s| s.authenticate(&user, p).is_ok()).unwrap_or(false);
+                let verify = |pw: &str| verifier(&user, pw);
                 let ctx = Ctx { env: &env, user: &user, verify_signin: &verify };
                 form.submit_with_cancel(&ctx, &mut |st| {
                     if let Ok(mut p) = progress.lock() {
@@ -194,11 +194,11 @@ impl SettingsApp {
     }
 
     /// The job ended: the form comes back with its next step or its outcome in plain words.
-    pub(super) fn ench_finished(&mut self, cx: &AppCx, form: ef::Form) {
+    pub(super) fn ench_finished(&mut self, p: &dyn EncHomePort, form: ef::Form) {
         self.ench.flow = form;
         self.ench.working = None;
         let was_move = std::mem::take(&mut self.ench.working_move);
-        self.ench_audit(cx, was_move);
+        self.ench_audit(p, was_move);
         self.modal = self.ench_next();
         if self.modal.is_some() {
             // a form to answer (the recovery key, a wrong password): bring the person back to the page it belongs to
@@ -210,8 +210,8 @@ impl SettingsApp {
     }
 
     /// `y` on the migration plan, or on removing the old plain copy.
-    pub(super) fn ench_confirm(&mut self, cx: &AppCx, kind: ConfirmKind) {
-        let user = cx.session.user.clone();
+    pub(super) fn ench_confirm(&mut self, p: &dyn EncHomePort, kind: ConfirmKind) {
+        let user = p.user_name();
         match kind {
             ConfirmKind::EncMove => {
                 if self.job.is_some() {
@@ -219,13 +219,13 @@ impl SettingsApp {
                     self.modal = self.ench_next();
                     return;
                 }
-                self.ench_spawn(cx);
+                self.ench_spawn(p);
             }
             ConfirmKind::EncRemovePlain => {
-                let env = EncHome::real(cx.data_dir());
+                let env = EncHome::real(&p.data_dir());
                 match migrate::remove_plain_copy(&env, &user) {
                     Ok(m) => {
-                        cx.audit.record(&user, "enchome.plain.removed", "");
+                        p.audit("enchome.plain.removed", "");
                         self.ok(m)
                     }
                     Err(e) => self.fail(e.to_string()),
@@ -236,16 +236,16 @@ impl SettingsApp {
     }
 
     /// Every heartbeat: a request the assistant left (one word) opens the matching form here.
-    pub(super) fn ench_tick(&mut self, cx: &AppCx) {
+    pub(super) fn ench_tick(&mut self, p: &dyn EncHomePort) {
         if self.modal.is_some() || self.job.is_some() || self.ticks % 10 != 0 {
             return;
         }
-        let Some(r) = ef::take_request(cx.data_dir(), &cx.session.user) else { return };
+        let Some(r) = ef::take_request(&p.data_dir(), &p.user_name()) else { return };
         if let Some(i) = self.tabs.iter().position(|t| *t == Tab::EncHome) {
             self.tab = i;
             self.show_list = false;
         }
-        let p = match r {
+        let purpose = match r {
             Request::Create => Purpose::Create,
             Request::Unlock => Purpose::Unlock,
             Request::ChangeRecovery => Purpose::ChangeRecovery,
@@ -254,15 +254,15 @@ impl SettingsApp {
             Request::Migrate => Purpose::Migrate,
             Request::Export => Purpose::Export,
         };
-        self.ench_start(cx, p);
+        self.ench_start(p, purpose);
     }
 
-    pub(super) fn handle_ench(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_ench(&mut self, k: &Key, p: &dyn EncHomePort) {
         let Key::Char(c) = k else { return };
         if *c == 'c' && self.ench.working_move && self.ench.working.is_some() {
             // Cancel the move: asked between files and before the switch; the new folder is then deleted and the files stay where they were
             self.ench.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-            cx.audit.record(&cx.session.user, "enchome.move.cancel", "");
+            p.audit("enchome.move.cancel", "");
             self.ok("Cancelling the move: it stops at the next file, the new encrypted folder is deleted and your files stay as they are. If it is already switching over it finishes first.");
             return;
         }
@@ -270,32 +270,32 @@ impl SettingsApp {
             self.fail("Another operation is still running. Wait for it to finish.");
             return;
         }
-        let st = Self::ench_status(cx);
+        let st = Self::ench_status(p);
         match (*c, st.state) {
-            ('c', State::NotSetUp) => self.ench_start(cx, Purpose::Create),
-            ('m', State::NotSetUp) => self.ench_start(cx, Purpose::Migrate),
-            ('x', State::Locked) => self.ench_start(cx, Purpose::Export),
-            ('u', State::Locked) => self.ench_start(cx, Purpose::Unlock),
-            ('r', State::Locked) => self.ench_start(cx, Purpose::UnlockWithRecovery),
+            ('c', State::NotSetUp) => self.ench_start(p, Purpose::Create),
+            ('m', State::NotSetUp) => self.ench_start(p, Purpose::Migrate),
+            ('x', State::Locked) => self.ench_start(p, Purpose::Export),
+            ('u', State::Locked) => self.ench_start(p, Purpose::Unlock),
+            ('r', State::Locked) => self.ench_start(p, Purpose::UnlockWithRecovery),
             ('l', State::Open) => {
-                let env = EncHome::real(cx.data_dir());
-                let user = cx.session.user.clone();
+                let env = EncHome::real(&p.data_dir());
+                let user = p.user_name();
                 match env.lock(&user) {
                     Ok(()) => {
-                        cx.audit.record(&user, "enchome.lock", "");
+                        p.audit("enchome.lock", "");
                         self.ok("The encrypted home is locked. It opens again at your next sign-in, or with Open.")
                     }
                     Err(e) => self.fail(e.to_string()),
                 }
             }
-            ('k', State::Locked | State::Open) => self.ench_start(cx, Purpose::ChangeRecovery),
-            ('a', State::Locked | State::Open) => self.ench_start(cx, Purpose::AdminSlot { enable: !st.has_admin_slot() }),
+            ('k', State::Locked | State::Open) => self.ench_start(p, Purpose::ChangeRecovery),
+            ('a', State::Locked | State::Open) => self.ench_start(p, Purpose::AdminSlot { enable: !st.has_admin_slot() }),
             ('s', State::Locked | State::Open) => {
-                let env = EncHome::for_status(cx.data_dir());
+                let env = EncHome::for_status(&p.data_dir());
                 let on = !st.meta.lock_with_screen;
-                match env.set_lock_with_screen(&cx.session.user, on) {
+                match env.set_lock_with_screen(&p.user_name(), on) {
                     Ok(()) => {
-                        cx.audit.record(&cx.session.user, "enchome.lock_with_screen", if on { "on" } else { "off" });
+                        p.audit("enchome.lock_with_screen", if on { "on" } else { "off" });
                         self.ok(if on { "The folder now closes when the screen locks; the lock screen password opens it again." } else { "The folder stays open when the screen locks (it closes at sign-out)." })
                     }
                     Err(e) => self.fail(e.to_string()),
@@ -328,10 +328,10 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn render_ench(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let st = Self::ench_status(cx);
+    pub(super) fn render_ench(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn EncHomePort) {
+        let st = Self::ench_status(p);
         self.ench.shown = Some((st.state, st.has_admin_slot(), st.plain_copy.is_some()));
-        let open = EncHome::for_status(cx.data_dir()).is_open(&cx.session.user);
+        let open = EncHome::for_status(&p.data_dir()).is_open(&p.user_name());
         let mut lines: Vec<(String, [u8; 4], bool)> = vec![];
         let (head, col) = match st.state {
             State::NotSetUp => ("Not encrypted".to_string(), TEXT),
@@ -341,12 +341,12 @@ impl SettingsApp {
         };
         if let Some(w) = self.ench.working {
             lines.push((format!("{w}…"), ACCENT, true));
-            let p = self.ench.progress.lock().map(|p| p.clone()).unwrap_or_default();
-            lines.push((if p.is_empty() { "This takes a few seconds. You can leave this page; the work goes on and the result is shown here.".to_string() } else { format!("{p}. You can leave this page; the work goes on and the result is shown here.") }, TEXT, false));
+            let prog = self.ench.progress.lock().map(|p| p.clone()).unwrap_or_default();
+            lines.push((if prog.is_empty() { "This takes a few seconds. You can leave this page; the work goes on and the result is shown here.".to_string() } else { format!("{prog}. You can leave this page; the work goes on and the result is shown here.") }, TEXT, false));
         }
         lines.push((head, col, true));
         lines.push((iyakki_enchome::describe_status(&st, open), TEXT, false));
-        if let Some(b) = iyakki_enchome::take_banner(&cx.session.user) {
+        if let Some(b) = iyakki_enchome::take_banner(&p.user_name()) {
             lines.push((b, ERR, false));
         }
         if let Some(sz) = st.size_bytes {

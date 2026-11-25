@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "row": "F-SND-06",
+  "feature_sha": "b4da9895f9249ecc",
+  "title": "browser sound on the T2 Mac is clear",
+  "clauses": [
+    {
+      "id": "web-clarity",
+      "text": "Video sound played through the web engine on a T2 Mac is clear, with no crackle or stutter",
+      "machines": [
+        "macbook-pro",
+        "mac-mini-2018"
+      ],
+      "steps": [
+        {
+          "do": "Play a YouTube playlist in the built-in browser pane for about five minutes at a comfortable volume.",
+          "expect": "Speech and music are clear. Say so if you hear crackle, stutter or cut-outs."
+        }
+      ]
+    }
+  ]
+}

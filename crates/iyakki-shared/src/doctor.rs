@@ -137,6 +137,8 @@ pub struct Facts {
     pub network_time_on: bool,
     /// The clock is ahead of the network time and was left alone until the person agrees (seconds).
     pub clock_ahead_secs: Option<u64>,
+    /// The clock looks wrong for the device-key sign-in and the firewall expiry (F-LIFE-19, `clockskew::judge`); the agent fills it.
+    pub clock_skew: Option<crate::clockskew::Skew>,
     // exposure (the dev cluster's own scan writes the audit line; DOCTOR only reads it)
     /// The detail of the newest `devcluster.exposure.unexpected` audit line that no later exposure line cleared.
     pub exposure_unexpected: Option<String>,
@@ -329,6 +331,12 @@ pub fn disk_nearly_full(f: &Facts) -> Option<Finding> {
     }
 }
 
+/// The clock looks wrong for the device-key sign-in and the firewall expiry: a warning that says what breaks (P-15).
+pub fn time_skew(f: &Facts) -> Option<Finding> {
+    let text = crate::clockskew::text(f.clock_skew?)?;
+    Some(finding("time-skew", Severity::Warning, "The clock looks wrong.", text, open("Open Time", "tab:time")))
+}
+
 /// The clock was never set from the network although the network is up, or it is ahead and waits for the person.
 pub fn time_not_synchronised(f: &Facts) -> Option<Finding> {
     if let Some(ahead) = f.clock_ahead_secs {
@@ -449,7 +457,7 @@ pub fn failed_services(f: &Facts) -> Vec<Finding> {
 
 /// Every rule, in the order they are listed.
 pub fn diagnose(f: &Facts) -> Vec<Finding> {
-    let single: [fn(&Facts) -> Option<Finding>; 23] = [
+    let single: [fn(&Facts) -> Option<Finding>; 24] = [
         cluster_stopped,
         node_ip_missing,
         unexpected_exposure,
@@ -463,6 +471,7 @@ pub fn diagnose(f: &Facts) -> Vec<Finding> {
         no_sound,
         disk_nearly_full,
         time_not_synchronised,
+        time_skew,
         model_server_unreachable,
         connection,
         developer_port_silent,

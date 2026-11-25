@@ -1,0 +1,9 @@
+# autotest alpha.10, lane B1 (2026-11-24): the UI as its own program on a booted image. Written against the Feature text with sha cdfe282a641b4e83; honest subset only: everything not checked is under not-covered.
+row: F-SPLIT-03
+targets: qemu
+profile: ui_process
+feature-sha: cdfe282a641b4e83
+doc: the UI socket is private to the program's user
+clause: 3 the socket is 0600 in a 0700 folder owned by the program's user; an unprivileged peer is refused at the folder and, with the modes opened, by the core's peer check
+not-covered: real hardware (a real display, a touch screen, a GPU), the tiles that need a live object of the core (FLOWS, TALES, LAB, STORE, RADIO, MEDIA: they say so in the program), the apps-only push of a ui layer to a device
+session-check: ui_process_socket

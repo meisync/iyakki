@@ -21,73 +21,7 @@ const VERSION: u32 = 1;
 pub const MAX_HELD: usize = 50;
 /// Watched messages kept at most.
 pub const MAX_WATCHED: usize = 50;
-/// The longest escalation time that can be set (one week).
-pub const MAX_ESCALATE_SECS: u64 = 7 * 24 * 3600;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct Policy {
-    /// Quiet hours as minutes after local midnight (start, end); `None`: none.
-    pub quiet: Option<(u32, u32)>,
-    /// Minutes east of UTC for the quiet hours.
-    pub offset_min: i32,
-    /// Ask again in `escalate_room` after this many seconds without an acknowledgement.
-    pub escalate_after_secs: Option<u64>,
-    /// A saved room (empty: the main room).
-    pub escalate_room: String,
-}
-
-impl Policy {
-    pub fn rules(&self) -> Rules {
-        Rules { quiet: self.quiet.map(|(s, e)| Quiet { start_min: s, end_min: e }), offset_min: self.offset_min, ..Rules::default() }
-    }
-
-    pub fn cleaned(mut self) -> Result<Policy, String> {
-        if let Some((s, e)) = self.quiet {
-            if s >= 1440 || e >= 1440 {
-                return Err("quiet hours are minutes after midnight, below 1440".into());
-            }
-            if s == e {
-                self.quiet = None;
-            }
-        }
-        self.offset_min = self.offset_min.clamp(-840, 840);
-        if let Some(n) = self.escalate_after_secs {
-            if n < 60 {
-                return Err("escalate after at least a minute".into());
-            }
-            self.escalate_after_secs = Some(n.min(MAX_ESCALATE_SECS));
-        }
-        self.escalate_room = self.escalate_room.trim().chars().filter(|c| !c.is_control()).take(80).collect();
-        Ok(self)
-    }
-
-    pub fn summary(&self) -> String {
-        let hm = |m: u32| format!("{:02}:{:02}", m / 60, m % 60);
-        let q = self.quiet.map_or("no quiet hours".to_string(), |(s, e)| format!("quiet hours {} to {} (errors still come through)", hm(s), hm(e)));
-        let e = self.escalate_after_secs.map_or("no escalation".to_string(), |n| format!("escalates to {} after {} min without an acknowledgement", if self.escalate_room.is_empty() { "the main room" } else { &self.escalate_room }, n / 60));
-        format!("{q}; {e}")
-    }
-}
-
-/// A message held for the end of the quiet hours.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Held {
-    pub flow: String,
-    pub room: String,
-    pub text: String,
-    pub key: String,
-    pub until: u64,
-}
-
-/// A message that needs the person, watched for an acknowledgement.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Watch {
-    pub flow: String,
-    pub text: String,
-    pub key: String,
-    pub since: u64,
-}
+pub use iyakki_flows_model::channel::{Held, Policy, Watch, MAX_ESCALATE_SECS};
 
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -104,6 +38,11 @@ pub enum Decision {
     Send,
     /// Hold it until this time (unix seconds).
     HoldUntil(u64),
+}
+
+/// The routing rules a policy stands for.
+pub fn rules_of(p: &Policy) -> Rules {
+    Rules { quiet: p.quiet.map(|(s, e)| Quiet { start_min: s, end_min: e }), offset_min: p.offset_min, ..Rules::default() }
 }
 
 /// The severity of a notice: an error passes quiet hours, a thing that needs the person is high, the rest normal.
@@ -167,7 +106,7 @@ impl PolicyBook {
 
     /// Send now, or hold until the quiet hours end.
     pub fn decide(&self, level: &str, needs_you: bool, now: u64) -> Decision {
-        match self.policy().rules().route(severity_of(level, needs_you), Severity::Low, now) {
+        match rules_of(&self.policy()).route(severity_of(level, needs_you), Severity::Low, now) {
             Route::Send(t) if t > now => Decision::HoldUntil(t),
             _ => Decision::Send,
         }

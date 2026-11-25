@@ -60,7 +60,8 @@ def main():
     os.makedirs(out, exist_ok=True)
     import session_lib, session_checks_defs as defs0, session_checks_ui_defs as defs1
     import devui
-    PROFILES = {"ram": {}, "data": {"data_disk": True}, "idle": {}, "full": {"data_disk": True, "ram": 6144, "disk_gb": 16}, "clock": {"extra_qemu": ["-rtc", "base=2024-01-01T00:00:00"], "append": "no-kvmclock"}}
+    PROFILES = {"ram": {}, "data": {"data_disk": True}, "idle": {}, "full": {"data_disk": True, "ram": 6144, "disk_gb": 16}, "clock": {"extra_qemu": ["-rtc", "base=2024-01-01T00:00:00"], "append": "no-kvmclock"},
+            "usb": {"extra_qemu": ["-device", "qemu-xhci,id=evxhci"]}, "ui_process": {"ui_process": True}}
     results, bad, boot_failed = [], 0, False
     serial = []
     for prof in [p for p in PROFILES if any(c[3] == p for c in checks)]:

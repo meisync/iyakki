@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-43",
+  "feature_sha": "bdd1d8ff478bbdad",
+  "title": "Alexa voice (owner product)",
+  "clauses": [
+    {
+      "id": "alexa-speak",
+      "text": "A request spoken to Alexa gets a spoken reply",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "With the owner's Amazon product set up (Settings, Alexa; key C for the yes), speak a request to Alexa.",
+          "expect": "Alexa hears you and speaks the reply. Remaining: needs the owner's registered product; otherwise cannot-test."
+        }
+      ]
+    }
+  ]
+}

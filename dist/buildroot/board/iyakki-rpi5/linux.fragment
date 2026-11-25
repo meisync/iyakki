@@ -1,0 +1,87 @@
+# IYAKKI kernel config fragment for the Raspberry Pi 5 (BCM2712). Applied on top of the Raspberry Pi tree's own bcm2712_defconfig, AFTER
+# board/iyakki-aarch64/linux.fragment (zram, cgroups, nftables, WireGuard, USB, the drivers the aarch64 image needs). Kernel source: the Raspberry
+# Pi tree (GPL-2.0), fetched at build time at the tag pinned in dist/rpi/kernel.pin; never kept in this repository.
+# verify-pi-kernel-config.sh (dist/rpi) checks that every option below survives kconfig resolution unchanged.
+
+# ---- 4 KiB pages -------------------------------------------------------------------------------------------------------------
+# bcm2712_defconfig selects 16 KiB pages (Raspberry Pi OS's kernel_2712.img). k3s, container tooling and some allocators break on 16 KiB pages.
+# CONFIG_ARM64_16K_PAGES is not set
+CONFIG_ARM64_4K_PAGES=y
+
+# ---- the lean start: the first stage mounts boot/root.sfs and an overlay BEFORE any module can load, so these are built in -------
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_RD_ZSTD=y
+CONFIG_RD_GZIP=y
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_ZSTD=y
+CONFIG_SQUASHFS_FILE_DIRECT=y
+CONFIG_SQUASHFS_COMPILE_DECOMP_MULTI_PERCPU=y
+CONFIG_OVERLAY_FS=y
+CONFIG_BLK_DEV_LOOP=y
+CONFIG_EXT4_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_FAT_FS=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y
+CONFIG_NLS_UTF8=y
+CONFIG_TMPFS=y
+CONFIG_DEVTMPFS=y
+
+# ---- the card, USB and NVMe the root can be on (all built in: no module is loaded before the root is found) --------------------
+CONFIG_MMC=y
+CONFIG_MMC_BLOCK=y
+CONFIG_MMC_SDHCI=y
+CONFIG_MMC_SDHCI_PLTFM=y
+CONFIG_MMC_SDHCI_IPROC=y
+CONFIG_BLK_DEV_SD=y
+CONFIG_USB_STORAGE=y
+CONFIG_USB_UAS=y
+CONFIG_BLK_DEV_NVME=y
+
+# ---- the Pi 5's own chips: RP1 south bridge (USB, Ethernet, GPIO) behind the PCIe lane, built in so a keyboard and a cable work at once ----
+CONFIG_PCI=y
+CONFIG_PCIE_BRCMSTB=y
+CONFIG_MFD_RP1=y
+CONFIG_USB_XHCI_HCD=y
+CONFIG_USB_XHCI_PCI=y
+CONFIG_USB_HID=y
+CONFIG_HID_GENERIC=y
+CONFIG_MACB=y
+CONFIG_BROADCOM_PHY=y
+CONFIG_INPUT_EVDEV=y
+
+# ---- the display: vc4 (HDMI) and v3d (GPU) built in, so the framebuffer exists before the shell starts -----------------------------
+CONFIG_DRM=y
+# vc4 depends on the sound core and the firmware mailbox being built in too (not modules), or kconfig drops it to a module
+CONFIG_SND=y
+CONFIG_SND_SOC=y
+CONFIG_RASPBERRYPI_FIRMWARE=y
+CONFIG_DRM_VC4=y
+CONFIG_DRM_V3D=y
+CONFIG_DRM_FBDEV_EMULATION=y
+CONFIG_FB=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_DRM_SIMPLEDRM=y
+
+# ---- the serial console: the Pi 5's debug UART (ttyAMA10) and QEMU's virt PL011 are the same driver ---------------------------------
+CONFIG_SERIAL_AMBA_PL011=y
+CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
+CONFIG_SERIAL_8250=y
+
+# ---- the same kernel also boots in QEMU's `virt` machine: that is how the stage-1 start, the data volume and the agent are proven without a board --
+CONFIG_PCI_HOST_GENERIC=y
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_PCI=y
+CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_VIRTIO_NET=y
+CONFIG_VIRTIO_CONSOLE=y
+CONFIG_HW_RANDOM_VIRTIO=y
+CONFIG_VIRTIO_INPUT=y
+CONFIG_DRM_VIRTIO_GPU=y
+
+# ---- sensors the SYSTEM tile reads (temperature and throttling) -------------------------------------------------------------------
+CONFIG_BCM2835_THERMAL=y
+CONFIG_SENSORS_RP1_ADC=m
+
+CONFIG_LOCALVERSION="-iyakki-rpi5"

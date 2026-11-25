@@ -17,6 +17,10 @@ use iyakki_vt::{Key, Link, Mods, Terminal as VtTerminal};
 /// Starts the program of a session. The real one is [`SystemShell`]; tests give a scripted link.
 pub trait ShellSpawner: Send + Sync {
     fn spawn(&self, user: &str, cols: usize, rows: usize) -> Result<Box<dyn Link + Send>, String>;
+    /// `kubectl exec -it` into a pod (F-K8S-26), as the person's system user, with the arguments the core built from a checked [`t::PtyExec`].
+    fn spawn_exec(&self, _user: &str, _cols: usize, _rows: usize, _argv: &[String]) -> Result<Box<dyn Link + Send>, String> {
+        Err("a pod terminal is not available here".into())
+    }
 }
 
 /// The person's own shell on a pseudo-terminal, as their system user, in their home folder, with a clean environment.
@@ -24,9 +28,10 @@ pub struct SystemShell {
     pub data_dir: PathBuf,
 }
 
-impl ShellSpawner for SystemShell {
+impl SystemShell {
+    /// The person's system user, their folder and a clean environment (`TERM` set), and the program started on a pseudo-terminal there. Never as root.
     #[cfg(unix)]
-    fn spawn(&self, user: &str, cols: usize, rows: usize) -> Result<Box<dyn Link + Send>, String> {
+    fn start(&self, user: &str, cols: usize, rows: usize, program: &str, args: &[String], what: &str) -> Result<Box<dyn Link + Send>, String> {
         use crate::devmode::shellexec as sx;
         use iyakki_vt::pty::SpawnOpts;
         use std::os::unix::fs::MetadataExt;
@@ -45,10 +50,22 @@ impl ShellSpawner for SystemShell {
         env.push(("TERM", "xterm-256color".to_string()));
         let env: Vec<(String, String)> = env.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
         let opts = SpawnOpts { cwd: Some(dir), uid: ident.uid, gid: ident.gid };
-        let link = iyakki_vt::session::PtyLink::spawn_with("/bin/sh", &["-i".to_string()], &env, cols, rows, &opts).map_err(|e| format!("could not start the terminal: {e}"))?;
-        // the shell is the person's in SYSTEM's "My processes" for as long as the session lives (KI-131)
+        let link = iyakki_vt::session::PtyLink::spawn_with(program, args, &env, cols, rows, &opts).map_err(|e| format!("could not start the terminal: {e}"))?;
+        // the program is the person's in SYSTEM's "My processes" for as long as the session lives (KI-131)
         let pid = link.pid();
-        Ok(claimed(Box::new(link), pid, user, "terminal"))
+        Ok(claimed(Box::new(link), pid, user, what))
+    }
+}
+
+impl ShellSpawner for SystemShell {
+    #[cfg(unix)]
+    fn spawn(&self, user: &str, cols: usize, rows: usize) -> Result<Box<dyn Link + Send>, String> {
+        self.start(user, cols, rows, "/bin/sh", &["-i".to_string()], "terminal")
+    }
+
+    #[cfg(unix)]
+    fn spawn_exec(&self, user: &str, cols: usize, rows: usize, argv: &[String]) -> Result<Box<dyn Link + Send>, String> {
+        self.start(user, cols, rows, "kubectl", argv, "kubectl exec")
     }
 
     #[cfg(not(unix))]
@@ -87,7 +104,7 @@ impl Link for ClaimedLink {
 
 enum State {
     /// Asked, no answer yet: nothing runs.
-    Asking { call: String, cols: usize, rows: usize },
+    Asking { call: String, cols: usize, rows: usize, exec: Option<Box<t::PtyExec>> },
     Live(Box<VtTerminal<Box<dyn Link + Send>>>),
 }
 
@@ -161,18 +178,36 @@ impl PtyBook {
         let n = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (id, call) = (format!("p{n}"), format!("pc{n}"));
         let app: String = app.chars().take(40).collect();
-        g.insert((user.to_string(), id.clone()), Session { app: app.clone(), state: State::Asking { call: call.clone(), cols, rows } });
+        g.insert((user.to_string(), id.clone()), Session { app: app.clone(), state: State::Asking { call: call.clone(), cols, rows, exec: None } });
         drop(g);
         audit("pty.asked", &app);
         Ok(PtyOpen { id, approval: TermApproval { call, summary: t::PTY_QUESTION.to_string() } })
+    }
+
+    /// Ask for a session in a pod (`kubectl exec -it`); the question names the pod. The audit holds the ask, the answer and the close, with the
+    /// namespace and pod name, never what is typed.
+    pub fn open_exec(&self, user: &str, app: &str, cols: usize, rows: usize, exec: &t::PtyExec, audit: &dyn Fn(&str, &str)) -> Result<PtyOpen, String> {
+        exec.check()?;
+        t::check_size(cols, rows)?;
+        let mut g = lk(&self.sessions);
+        if g.keys().filter(|(u, _)| u == user).count() >= t::PTY_MAX_SESSIONS {
+            return Err(format!("at most {} full terminals can be open at once", t::PTY_MAX_SESSIONS));
+        }
+        let n = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (id, call) = (format!("p{n}"), format!("pc{n}"));
+        let app: String = app.chars().take(40).collect();
+        g.insert((user.to_string(), id.clone()), Session { app: app.clone(), state: State::Asking { call: call.clone(), cols, rows, exec: Some(Box::new(exec.clone())) } });
+        drop(g);
+        audit("pty.asked", &format!("{app} exec {}/{}", exec.namespace, exec.pod));
+        Ok(PtyOpen { id, approval: TermApproval { call, summary: exec.question() } })
     }
 
     pub fn decide(&self, user: &str, session: &str, call: &str, approve: bool, audit: &dyn Fn(&str, &str)) -> Result<(), String> {
         let mut g = lk(&self.sessions);
         let key = (user.to_string(), session.to_string());
         let Some(s) = g.get_mut(&key) else { return Err("that terminal is not open".into()) };
-        let (cols, rows) = match &s.state {
-            State::Asking { call: c, cols, rows } if c == call => (*cols, *rows),
+        let (cols, rows, exec) = match &s.state {
+            State::Asking { call: c, cols, rows, exec } if c == call => (*cols, *rows, exec.clone()),
             _ => return Err("there is no such question waiting".into()),
         };
         let app = s.app.clone();
@@ -183,7 +218,11 @@ impl PtyBook {
             return Ok(());
         }
         let spawner = lk(&self.spawner).clone();
-        match spawner.spawn(user, cols, rows) {
+        let started = match &exec {
+            Some(e) => e.argv().and_then(|argv| spawner.spawn_exec(user, cols, rows, &argv)),
+            None => spawner.spawn(user, cols, rows),
+        };
+        match started {
             Ok(link) => {
                 if let Some(s) = g.get_mut(&key) {
                     s.state = State::Live(Box::new(VtTerminal::new(link, cols, rows)));
@@ -241,6 +280,16 @@ impl PtyBook {
             // the view and its history change the picture too, so they are part of the sequence
             PtyFrame { seq: s.generation.wrapping_mul(1024).wrapping_add(back as u64), cols: s.cols(), rows: s.rows(), cells, cursor: (s.x, s.y), cursor_visible: s.cursor_visible && back == 0, title: s.title.chars().take(120).collect(), back, history: s.scrollback_len(), exited }
         })
+    }
+
+    /// The end of a person's session (D-SESSION-END): every full terminal of `user` is closed (a live shell is hung up, a question still
+    /// waiting is dropped) and audited like a close by hand. Returns how many.
+    pub fn close_user(&self, user: &str, audit: &dyn Fn(&str, &str)) -> usize {
+        let ids: Vec<String> = lk(&self.sessions).keys().filter(|(u, _)| u == user).map(|(_, id)| id.clone()).collect();
+        for id in &ids {
+            self.close(user, id, audit);
+        }
+        ids.len()
     }
 
     pub fn close(&self, user: &str, session: &str, audit: &dyn Fn(&str, &str)) {
@@ -350,9 +399,20 @@ mod tests {
         size: Arc<Mutex<(u16, u16)>>,
         done: Arc<Mutex<Option<i32>>>,
         fail: bool,
+        /// The arguments of every pod session started.
+        execs: Mutex<Vec<Vec<String>>>,
     }
 
     impl ShellSpawner for Spawns {
+        fn spawn_exec(&self, _user: &str, cols: usize, rows: usize, argv: &[String]) -> Result<Box<dyn Link + Send>, String> {
+            if self.fail {
+                return Err("no kubectl here".into());
+            }
+            lk(&self.execs).push(argv.to_vec());
+            *lk(&self.size) = (cols as u16, rows as u16);
+            Ok(Box::new(Script { out: self.out.clone(), sent: self.sent.clone(), size: self.size.clone(), done: self.done.clone() }))
+        }
+
         fn spawn(&self, _user: &str, cols: usize, rows: usize) -> Result<Box<dyn Link + Send>, String> {
             if self.fail {
                 return Err("no shell here".into());
@@ -370,6 +430,74 @@ mod tests {
     }
 
     fn quiet(_: &str, _: &str) {}
+
+    fn pod() -> t::PtyExec {
+        t::PtyExec { kubeconfig: String::new(), context: "dev".into(), namespace: "shop".into(), pod: "web-1".into(), container: String::new(), shell: String::new() }
+    }
+
+    #[test]
+    fn a_pod_session_asks_naming_the_pod_starts_kubectl_exec_only_after_the_yes_and_is_audited_without_what_was_typed() {
+        let sp = Arc::new(Spawns::default());
+        let b = book(sp.clone());
+        let log = Mutex::new(Vec::<String>::new());
+        let au = |w: &str, word: &str| lk(&log).push(format!("{w} {word}"));
+        let o = b.open_exec("alice", "k8s", 80, 24, &pod(), &au).unwrap();
+        assert!(o.approval.summary.contains("pod web-1") && o.approval.summary.contains("cluster dev"), "{}", o.approval.summary);
+        assert!(lk(&sp.execs).is_empty(), "nothing before the yes");
+        assert!(b.frame("alice", &o.id).unwrap_err().contains("waits for your yes"));
+        b.decide("alice", &o.id, &o.approval.call, true, &au).unwrap();
+        assert_eq!(lk(&sp.execs).as_slice(), [vec!["--context=dev", "exec", "-it", "--namespace=shop", "web-1", "--", "sh"]]);
+        assert_eq!(sp.count.load(Ordering::SeqCst), 0, "not the person's own shell");
+        b.text("alice", &o.id, "ls\n").unwrap();
+        b.close("alice", &o.id, &au);
+        let l = lk(&log).join("|");
+        assert_eq!(l, "pty.asked k8s exec shop/web-1|pty.approved k8s|pty.close k8s");
+        assert!(!l.contains("ls"));
+        // a no starts nothing; a bad pod is refused before anything is asked; a failed start says why and leaves no session
+        let o2 = b.open_exec("alice", "k8s", 80, 24, &pod(), &au).unwrap();
+        b.decide("alice", &o2.id, &o2.approval.call, false, &au).unwrap();
+        assert_eq!(lk(&sp.execs).len(), 1);
+        assert!(b.open_exec("alice", "k8s", 80, 24, &t::PtyExec { pod: "a b".into(), ..pod() }, &au).is_err());
+        assert!(b.open_exec("alice", "k8s", 0, 24, &pod(), &au).is_err());
+        let b2 = book(Arc::new(Spawns { fail: true, ..Spawns::default() }));
+        let o3 = b2.open_exec("alice", "k8s", 80, 24, &pod(), &au).unwrap();
+        assert!(b2.decide("alice", &o3.id, &o3.approval.call, true, &au).unwrap_err().contains("no kubectl"));
+        assert!(b2.frame("alice", &o3.id).unwrap_err().contains("not open"));
+        // the same limit of sessions as every full terminal
+        let b3 = book(Arc::new(Spawns::default()));
+        for _ in 0..t::PTY_MAX_SESSIONS {
+            b3.open_exec("alice", "k8s", 80, 24, &pod(), &au).unwrap();
+        }
+        assert!(b3.open_exec("alice", "k8s", 80, 24, &pod(), &au).unwrap_err().contains("at most"));
+    }
+
+    #[test]
+    fn the_end_of_a_session_closes_every_terminal_of_that_person_and_no_one_elses_and_audits_each() {
+        let sp = Arc::new(Spawns::default());
+        let b = book(sp.clone());
+        let log = Mutex::new(Vec::<String>::new());
+        let au = |w: &str, word: &str| lk(&log).push(format!("{w} {word}"));
+        let live = b.open("alice", "sample", 40, 10, &quiet).unwrap();
+        b.decide("alice", &live.id, &live.approval.call, true, &quiet).unwrap();
+        let asking = b.open("alice", "sample", 40, 10, &quiet).unwrap();
+        let theirs = b.open("bob", "sample", 40, 10, &quiet).unwrap();
+        b.decide("bob", &theirs.id, &theirs.approval.call, true, &quiet).unwrap();
+        assert_eq!(b.close_user("alice", &au), 2, "the live shell and the question still waiting");
+        assert!(b.frame("alice", &live.id).unwrap_err().contains("not open") && b.decide("alice", &asking.id, &asking.approval.call, true, &quiet).is_err());
+        assert!(b.frame("bob", &theirs.id).is_ok(), "another person's terminal stays");
+        assert!(*lk(&sp.done) == Some(129), "the live shell was hung up");
+        assert_eq!(lk(&log).iter().filter(|l| l.as_str() == "pty.close sample").count(), 2);
+        assert_eq!(b.close_user("alice", &au), 0, "nothing left");
+    }
+
+    #[test]
+    fn a_session_that_is_not_a_pod_session_never_gets_kubectl_even_by_a_stale_call() {
+        let sp = Arc::new(Spawns::default());
+        let b = book(sp.clone());
+        let o = b.open("alice", "sample", 40, 10, &quiet).unwrap();
+        b.decide("alice", &o.id, &o.approval.call, true, &quiet).unwrap();
+        assert_eq!((sp.count.load(Ordering::SeqCst), lk(&sp.execs).len()), (1, 0));
+    }
 
     #[test]
     fn nothing_starts_before_the_yes_and_a_no_drops_the_session() {

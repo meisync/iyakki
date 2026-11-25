@@ -15,3 +15,6 @@ iyakki-zram.workspace = true
 libc = "0.2"
 sha2 = "0.10"
 ed25519-dalek = "3"
+
+[dev-dependencies]
+iyakki-stage1 = { path = "../iyakki-stage1" }

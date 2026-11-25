@@ -5,6 +5,7 @@
 //! forgets one. The form is the person's own act, so there is no second card; the chat tools ask first.
 
 use super::*;
+use crate::apps::settings::network_port::NetworkSettingsPort;
 use iyakki_flowsx::machines::{vault_name, Machine, Machines, MAX_MACHINES};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -14,9 +15,9 @@ pub(crate) enum MachineForm {
 }
 
 /// The saved machines of this person: `<data>/flows/<user>/remote-machines.json`, the file the assistant's tools and the flow step use.
-pub(crate) fn machines_of(cx: &AppCx) -> Machines {
-    let user = if iyakki_sec::policy::valid_username(&cx.session.user) { cx.session.user.as_str() } else { "user" };
-    Machines::new(&cx.data_dir().join("flows").join(user))
+pub(crate) fn machines_of(p: &dyn NetworkSettingsPort) -> Machines {
+    let user = if iyakki_sec::policy::valid_username(p.acting_user()) { p.acting_user() } else { "user" };
+    Machines::new(&p.data_root().join("flows").join(user))
 }
 
 /// A certificate pasted into a one-line field comes back as the PEM the machines file wants: the lines of a pasted block run together
@@ -53,9 +54,9 @@ impl SettingsApp {
         vec![("Add a machine for flows", TEXT, 'M'), ("Forget a machine", TEXT, 'X')]
     }
 
-    pub(crate) fn machine_lines(&self, cx: &AppCx, lines: &mut Vec<(String, f32, [u8; 4], Face)>) {
+    pub(crate) fn machine_lines(&self, p: &dyn NetworkSettingsPort, lines: &mut Vec<(String, f32, [u8; 4], Face)>) {
         lines.push(("Machines for flows".into(), 14.0, TEXT, Face::Bold));
-        let list: Vec<Machine> = machines_of(cx).list();
+        let list: Vec<Machine> = machines_of(p).list();
         if list.is_empty() {
             lines.push(("No machine is saved. M adds one: a flow step \"Run on another IYAKKI\" names a saved machine, never an address.".into(), 13.0, MUTED, Face::Sans));
         }
@@ -67,7 +68,7 @@ impl SettingsApp {
     }
 
     /// Keys of the machines part; true when the key was one of ours.
-    pub(super) fn machine_key(&mut self, k: &Key, cx: &AppCx) -> bool {
+    pub(super) fn machine_key(&mut self, k: &Key, p: &dyn NetworkSettingsPort) -> bool {
         let Key::Char(c) = k else { return false };
         match c {
             'M' => {
@@ -79,7 +80,7 @@ impl SettingsApp {
                 true
             }
             'X' => {
-                let first = machines_of(cx).list().first().map(|m| m.name.clone()).unwrap_or_default();
+                let first = machines_of(p).list().first().map(|m| m.name.clone()).unwrap_or_default();
                 self.open_form(FormKind::Machine(MachineForm::Forget), Form::new("Forget a machine").text("Name", &first, "flows that name it fail until it is saved again"));
                 true
             }
@@ -87,8 +88,8 @@ impl SettingsApp {
         }
     }
 
-    pub(in crate::apps) fn machine_submit(&mut self, cx: &AppCx, k: &MachineForm, form: &mut Form) -> Result<String, String> {
-        let machines = machines_of(cx);
+    pub(in crate::apps) fn machine_submit(&mut self, p: &dyn NetworkSettingsPort, k: &MachineForm, form: &mut Form) -> Result<String, String> {
+        let machines = machines_of(p);
         match k {
             MachineForm::Add => {
                 let (name, url, token) = (form.value(0).trim().to_string(), form.value(1).trim().to_string(), form.value(2));
@@ -97,13 +98,13 @@ impl SettingsApp {
                 }
                 let ca = pem_from_pasted(&form.value(3))?;
                 let m = machines.add_with_ca(&name, &url, &token, &ca)?;
-                cx.audit.record(&cx.session.user, "flow.remote_machine", &format!("saved {} {}{}", m.name, m.url, if m.ca.is_empty() { "" } else { " (private CA)" }));
+                p.audit("flow.remote_machine", &format!("saved {} {}{}", m.name, m.url, if m.ca.is_empty() { "" } else { " (private CA)" }));
                 Ok(format!("Saved the machine {} at {}{}.", m.name, m.url, if m.ca.is_empty() { "" } else { " with its private authority's certificate" }))
             }
             MachineForm::Forget => {
                 let name = form.value(0).trim().to_string();
                 if machines.remove(&name)? {
-                    cx.audit.record(&cx.session.user, "flow.remote_machine", &format!("removed {name}"));
+                    p.audit("flow.remote_machine", &format!("removed {name}"));
                     Ok(format!("Forgot the machine {name}."))
                 } else {
                     Err("No machine has that name.".into())

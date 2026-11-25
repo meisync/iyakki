@@ -1,0 +1,12 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha f390e3f959916682; honest subset only: everything not checked is under not-covered.
+row: F-WEB-42
+targets: browser
+feature-sha: f390e3f959916682
+doc: web UI tenant control: the bar shows the tenant, the drop-down switches and redraws the page
+clause: 1 with two tenants the top bar offers a switch with both names, choosing the second shows that tenant's own data and switching back restores the first
+not-covered: the tab caches under iyakki.cache. are cleared and the token kept
+not-covered: pages registered with iyakkiTenant.onChange are told
+not-covered: a refused switch changes nothing
+not-covered: a tenant at another address is opened there (https only)
+not-covered: the role badge
+suite: run_pages.py --only more

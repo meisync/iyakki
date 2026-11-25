@@ -7,6 +7,7 @@
 //! pull over local changes asks, and removing a folder needs its name typed.
 
 use std::collections::HashMap;
+use crate::apps::ide_port::CxIde;
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
@@ -156,13 +157,11 @@ impl IdeApp {
     // ------------------------------------------------------------------------------------------------ the pieces
 
     pub fn git_keys(&self, cx: &AppCx) -> Arc<GitKeys> {
-        let audit = cx.audit.clone();
-        let user = cx.session.user.clone();
-        Arc::new(cx.services.git_keys(&cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d)), self.git.session.clone()))
+        Arc::new(cx.services.git_keys(CxIde(cx).user(), CxIde(cx).audit_sink(), self.git.session.clone()))
     }
 
     pub fn git_check(&self, cx: &AppCx) -> GitCheck {
-        cx.git_kit().check_git(&cx.clis().search_path())
+        CxIde(cx).git_kit().check_git(&CxIde(cx).clis().search_path())
     }
 
     /// Said once per start of the shell when git is missing (the libre image): the AI IDE still works, cloning does not.
@@ -178,11 +177,11 @@ impl IdeApp {
 
     fn git_ctx(&self, i: usize, cx: &AppCx) -> Result<gitjobs::Ctx, String> {
         let w = self.ws.get(i).ok_or("Open a workspace first")?;
-        let search = cx.clis().search_path();
-        let tools = cx.git_kit().detect_tools(&search)?;
-        let user = cx.session.user.clone();
+        let search = CxIde(cx).clis().search_path();
+        let tools = CxIde(cx).git_kit().detect_tools(&search)?;
+        let user = CxIde(cx).user().to_string();
         let safe: String = user.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')).collect();
-        let policy = cx.session.policy.clone();
+        let policy = CxIde(cx).policy().clone();
         let u2 = user.clone();
         Ok(gitjobs::Ctx {
             keys: self.git_keys(cx),
@@ -192,8 +191,8 @@ impl IdeApp {
             root: std::fs::canonicalize(w.root()).unwrap_or_else(|_| w.root()),
             ws_keys: w.cfg.git_keys.clone(),
             who: Who::Person,
-            run_dir: cx.data_dir().join("git-run").join(safe),
-            probe: self.git.probe.clone().unwrap_or_else(|| cx.git_kit().real_probe(&search)),
+            run_dir: CxIde(cx).data_dir().join("git-run").join(safe),
+            probe: self.git.probe.clone().unwrap_or_else(|| CxIde(cx).git_kit().real_probe(&search)),
             scope: Arc::new(move |p: &Path| crate::file_scope().check_write(&policy, &u2, p)),
         })
     }
@@ -220,8 +219,8 @@ impl IdeApp {
             _ => (None, Default::default()),
         };
         let keys = self.git_keys(cx);
-        let (dir, user) = (cx.data_dir().to_path_buf(), cx.session.user.clone());
-        let kit = cx.git_kit();
+        let (dir, user) = (CxIde(cx).data_dir().to_path_buf(), CxIde(cx).user().to_string());
+        let kit = CxIde(cx).git_kit();
         let d = CloneDialog::new(keys, ws_keys, name, &git, "").with_instances(Arc::new(move |t| kit.expand_instance(&dir, &user, t)));
         self.modal = Some(Modal::Git(Box::new(GitModal::Clone(Box::new(d)))));
     }
@@ -329,7 +328,7 @@ impl IdeApp {
             if let Some(v) = &r.via {
                 if let Some(vault) = &v.token_vault {
                     match keys.adopt_token(&v.host, "git", vault) {
-                        Ok(true) => cx.audit.record(&cx.session.user, "git.token.adopt", &format!("{} from {}", v.host, v.instance)),
+                        Ok(true) => CxIde(cx).audit("git.token.adopt", &format!("{} from {}", v.host, v.instance)),
                         Ok(false) => {}
                         Err(e) => {
                             d.error = Some(format!("The token of {} could not be used: {e}", v.instance));
@@ -370,10 +369,10 @@ impl IdeApp {
             return Err("Repositories are still being cloned, fetched or pulled in this workspace; wait for them to finish or stop them from the installer indicator.".into());
         }
         let ctx = self.git_ctx(i, cx)?;
-        match cx.git_kit().plan_clone(ctx, specs) {
+        match CxIde(cx).git_kit().plan_clone(ctx, specs) {
             Err(errs) => Err(errs.iter().take(4).map(|(n, e)| if *n == 0 { e.clone() } else { format!("line {n}: {e}") }).collect::<Vec<_>>().join("   ")),
             Ok(b) => {
-                cx.audit.record(&cx.session.user, "git.clone.start", &format!("{} repositories into {}", b.items().len(), self.ws[i].meta.name));
+                CxIde(cx).audit("git.clone.start", &format!("{} repositories into {}", b.items().len(), self.ws[i].meta.name));
                 self.git.batches.insert(id, b);
                 self.git.note.clear();
                 self.open_repos_panel(cx);
@@ -393,9 +392,9 @@ impl IdeApp {
             self.git.note = "There is nothing to do: no repository in this workspace.".into();
             return;
         }
-        match self.git_ctx(i, cx).and_then(|c| cx.git_kit().plan_update(c, &repos, op).map_err(|e| e.into_iter().map(|x| x.1).collect::<Vec<_>>().join("; "))) {
+        match self.git_ctx(i, cx).and_then(|c| CxIde(cx).git_kit().plan_update(c, &repos, op).map_err(|e| e.into_iter().map(|x| x.1).collect::<Vec<_>>().join("; "))) {
             Ok(b) => {
-                cx.audit.record(&cx.session.user, &format!("git.{}.start", op.verb()), &format!("{} repositories in {}", b.items().len(), self.ws[i].meta.name));
+                CxIde(cx).audit(&format!("git.{}.start", op.verb()), &format!("{} repositories in {}", b.items().len(), self.ws[i].meta.name));
                 self.git.batches.insert(id, b);
                 self.git.note.clear();
             }
@@ -466,8 +465,8 @@ impl IdeApp {
             ReposAct::Remove(k) => {
                 if let Some(r) = map.get(k).and_then(|m| m.0).and_then(|ri| self.ws[i].cfg.repos.get(ri).cloned()) {
                     let dir = self.ws[i].root().join(&r.path);
-                    let risks = match cx.git_kit().detect_tools(&cx.clis().search_path()) {
-                        Ok(t) => cx.git_kit().removal_risks(&t.git, &dir),
+                    let risks = match CxIde(cx).git_kit().detect_tools(&CxIde(cx).clis().search_path()) {
+                        Ok(t) => CxIde(cx).git_kit().removal_risks(&t.git, &dir),
                         Err(_) => "git is not available to check what would be lost.".to_string(),
                     };
                     let card = Card::new(&format!("Remove {}/ ?", r.path), BADC)
@@ -518,7 +517,7 @@ impl IdeApp {
                 match gitconn::remove_origin(&*self.git_runner(), &root) {
                     Ok(()) => {
                         let what = origin.and_then(|o| iyakki_shared::gitsite::parse(&o, Default::default()).ok()).map(|u| format!("{} {}", u.host, u.short())).unwrap_or_default();
-                        cx.audit.record(&cx.session.user, "git.disconnect", &what);
+                        CxIde(cx).audit("git.disconnect", &what);
                         self.git.note = "Disconnected: origin was removed. The connection stays in Settings, Git.".into();
                         self.git_mark_head_stale(i);
                     }
@@ -558,9 +557,9 @@ impl IdeApp {
                     Err(e) => fail(self, g, f, e),
                 }
             }
-            GitForm::RemoveType(folder) => match cx.git_kit().remove_repo(&self.ws[i].root(), &folder, &f.value(0)) {
+            GitForm::RemoveType(folder) => match CxIde(cx).git_kit().remove_repo(&self.ws[i].root(), &folder, &f.value(0)) {
                 Ok(()) => {
-                    cx.audit.record(&cx.session.user, "git.remove", &format!("{folder} from {}", self.ws[i].meta.name));
+                    CxIde(cx).audit("git.remove", &format!("{folder} from {}", self.ws[i].meta.name));
                     self.reload_repos(i);
                     self.ws[i].tree.refresh();
                     self.git.note = format!("Removed {folder}/.");
@@ -586,7 +585,7 @@ impl IdeApp {
                         match c.save(&root) {
                             Ok(()) => {
                                 self.ws[i].cfg.git_keys = c.git_keys.clone();
-                                cx.audit.record(&cx.session.user, "git.workspace.key", &format!("{host} in {}", self.ws[i].meta.name));
+                                CxIde(cx).audit("git.workspace.key", &format!("{host} in {}", self.ws[i].meta.name));
                                 self.git.note = if idx == 0 { format!("{host} uses your default key again in this workspace.") } else { format!("{host} uses the key {} in this workspace.", ids[idx - 1]) };
                                 self.open_repos_panel(cx);
                             }
@@ -695,8 +694,8 @@ impl IdeApp {
         if !due {
             return;
         }
-        let kit = cx.git_kit();
-        let Ok(tools) = kit.detect_tools(&cx.clis().search_path()) else { return };
+        let kit = CxIde(cx).git_kit();
+        let Ok(tools) = kit.detect_tools(&CxIde(cx).clis().search_path()) else { return };
         board.stale = false;
         let root = self.ws[i].root();
         let (tx, rx) = channel();
@@ -728,8 +727,7 @@ impl IdeApp {
 
     fn platform_ctx(&self, cx: &AppCx) -> Arc<dyn PlatformApi> {
         self.git.platform.clone().unwrap_or_else(|| {
-            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-            cx.services.platform_real(&cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d)))
+            cx.services.platform_real(CxIde(cx).user(), CxIde(cx).audit_sink())
         })
     }
 
@@ -848,9 +846,9 @@ impl IdeApp {
             self.show_repos(cx);
             return;
         }
-        match self.git_ctx(i, cx).and_then(|c| cx.git_kit().plan_push(c, remote, ".", branch).map_err(|e| e.into_iter().map(|x| x.1).collect::<Vec<_>>().join("; "))) {
+        match self.git_ctx(i, cx).and_then(|c| CxIde(cx).git_kit().plan_push(c, remote, ".", branch).map_err(|e| e.into_iter().map(|x| x.1).collect::<Vec<_>>().join("; "))) {
             Ok(b) => {
-                cx.audit.record(&cx.session.user, "git.push", &format!("{host} {repo}"));
+                CxIde(cx).audit("git.push", &format!("{host} {repo}"));
                 self.git.batches.insert(id, b);
                 self.git.note.clear();
             }

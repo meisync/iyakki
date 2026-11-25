@@ -10,10 +10,11 @@ use std::sync::Arc;
 use iyakki_shared::gitconn::{Method};
 use iyakki_shared::gitconn::{self, Connection, GitHttp, TestReport};
 use iyakki_shared::gitkeys::{HostRule, KeyInfo};
-use iyakki_shared::gitkeys::{shared_session, GitKeys};
+use iyakki_shared::gitkeys::GitKeys;
 
 use crate::apps::git_wizard::{dot_color, GitWizard, WizEnv, WizOut};
 use super::*;
+use super::super::settings_device_port::GitPort;
 
 /// What the page keeps between frames.
 #[derive(Default)]
@@ -62,14 +63,12 @@ fn split_pattern(p: &str) -> (String, u16) {
 }
 
 impl SettingsApp {
-    pub(super) fn git_keys(cx: &AppCx) -> GitKeys {
-        let audit = cx.audit.clone();
-        let user = cx.session.user.clone();
-        cx.services.git_keys(&cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d)), shared_session())
+    pub(super) fn git_keys(p: &dyn GitPort) -> GitKeys {
+        p.git_keys()
     }
 
-    pub(super) fn git_rows(cx: &AppCx) -> Vec<GRow> {
-        let g = Self::git_keys(cx);
+    pub(super) fn git_rows(p: &dyn GitPort) -> Vec<GRow> {
+        let g = Self::git_keys(p);
         let mut rows: Vec<GRow> = g.conns().list().into_iter().map(GRow::Conn).collect();
         rows.extend(g.keys().into_iter().map(GRow::Key));
         rows.extend(g.table().hosts.into_iter().map(|(h, r)| GRow::Host(h, r)));
@@ -84,19 +83,19 @@ impl SettingsApp {
         rows
     }
 
-    pub(super) fn git_len(cx: &AppCx) -> usize {
-        Self::git_rows(cx).len()
+    pub(super) fn git_len(p: &dyn GitPort) -> usize {
+        Self::git_rows(p).len()
     }
 
     pub(super) fn git_buttons(&self) -> Vec<Btn> {
         vec![("Add connection", ACCENT, 'a'), ("Test", TEXT, 'T'), ("Edit", TEXT, 'e'), ("Make default", TEXT, 'm'), ("Remove connection", ERR, 'R'), ("Generate key", TEXT, 'n'), ("Import key", TEXT, 'i'), ("Copy public key", TEXT, 'c'), ("Unlock", TEXT, 'u'), ("Delete key", ERR, 'd'), ("Host → key", ACCENT, 'h'), ("Token", TEXT, 't'), ("Remove rule", ERR, 'x'), ("Forget host", ERR, 'f')]
     }
 
-    pub(super) fn handle_git(&mut self, k: &Key, cx: &AppCx) {
-        let rows = Self::git_rows(cx);
+    pub(super) fn handle_git(&mut self, k: &Key, p: &dyn GitPort) {
+        let rows = Self::git_rows(p);
         let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
-        let user = cx.session.user.clone();
-        if self.handle_conn(k, rows.get(sel), cx) {
+        let user = p.user();
+        if self.handle_conn(k, rows.get(sel), p) {
             return;
         }
         match k {
@@ -137,7 +136,7 @@ impl SettingsApp {
                 _ => self.fail("Choose a key first (Up/Down)."),
             },
             Key::Char('h') => {
-                let g = Self::git_keys(cx);
+                let g = Self::git_keys(p);
                 let ids: Vec<String> = g.keys().into_iter().map(|k| k.id).collect();
                 if ids.is_empty() {
                     self.fail("Make or import a key first (n or i).");
@@ -162,7 +161,7 @@ impl SettingsApp {
             }
             Key::Char('x') => match rows.get(sel) {
                 Some(GRow::Host(h, r)) => {
-                    let g = Self::git_keys(cx);
+                    let g = Self::git_keys(p);
                     let mut done = vec![];
                     if !r.key.is_empty() {
                         if g.set_host_key(h, "").is_ok() {
@@ -177,9 +176,9 @@ impl SettingsApp {
                 _ => self.fail("Choose a host rule first (Up/Down)."),
             },
             Key::Char('f') => match rows.get(sel) {
-                Some(GRow::Known(h, p, ..)) => match Self::git_keys(cx).known_hosts().forget(h, *p) {
+                Some(GRow::Known(h, port, ..)) => match Self::git_keys(p).known_hosts().forget(h, *port) {
                     Ok(n) => {
-                        cx.audit.record(&user, "git.host.forget", &format!("{h}:{p}"));
+                        p.audit("git.host.forget", &format!("{h}:{port}"));
                         self.ok(format!("Forgot {n} key(s) of {h}. The next connection shows its fingerprint again and asks."));
                     }
                     Err(e) => self.fail(e),
@@ -190,8 +189,8 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn git_submit(&mut self, cx: &AppCx, kind: &GitSetting, form: &mut Form) -> Result<String, String> {
-        let g = Self::git_keys(cx);
+    pub(super) fn git_submit(&mut self, p: &dyn GitPort, kind: &GitSetting, form: &mut Form) -> Result<String, String> {
+        let g = Self::git_keys(p);
         match kind {
             GitSetting::NewKey => {
                 let info = g.generate(form.value(0).trim(), form.value(1).trim())?;
@@ -200,11 +199,11 @@ impl SettingsApp {
             GitSetting::ImportKey => {
                 let given = form.raw(1);
                 let text = if given.trim_start().starts_with('/') {
-                    let p = given.trim();
-                    if !cx.session.policy.allows_read(&cx.session.user, p) {
+                    let path = given.trim();
+                    if !p.may_read(path) {
                         return Err("That file is outside the folders your account may read.".into());
                     }
-                    let bytes = std::fs::read(p).map_err(|e| format!("could not read {p}: {e}"))?;
+                    let bytes = std::fs::read(path).map_err(|e| format!("could not read {path}: {e}"))?;
                     if bytes.len() > 16 * 1024 {
                         return Err("That file is too large to be a key.".into());
                     }
@@ -251,8 +250,8 @@ impl SettingsApp {
 
     // ------------------------------------------------------------------------------------------------ connections
 
-    fn wiz_env(&self, cx: &AppCx) -> WizEnv {
-        WizEnv::real(cx, Arc::new(Self::git_keys(cx)), self.git.http.clone())
+    fn wiz_env(&self, p: &dyn GitPort) -> WizEnv {
+        p.wizard_env(Arc::new(Self::git_keys(p)), self.git.http.clone())
     }
 
     pub(super) fn git_wizard_open(&self) -> bool {
@@ -260,8 +259,8 @@ impl SettingsApp {
     }
 
     /// Opens "Connect Git or Gitea" (add) or the same wizard on one connection (edit).
-    pub(super) fn git_open_wizard(&mut self, cx: &AppCx, edit: Option<Connection>) {
-        let env = self.wiz_env(cx);
+    pub(super) fn git_open_wizard(&mut self, p: &dyn GitPort, edit: Option<Connection>) {
+        let env = self.wiz_env(p);
         self.git.wiz = Some(Box::new(match edit {
             Some(c) => GitWizard::edit(env, c),
             None => GitWizard::new(env),
@@ -269,7 +268,7 @@ impl SettingsApp {
     }
 
     /// Keys of the wizard (it takes everything while open). True when the event was for it.
-    pub(super) fn git_wizard_event(&mut self, ev: &Event, cx: &AppCx) -> bool {
+    pub(super) fn git_wizard_event(&mut self, ev: &Event, p: &dyn GitPort) -> bool {
         let Some(w) = self.git.wiz.as_mut() else { return false };
         let out = w.event(ev);
         match out {
@@ -282,21 +281,21 @@ impl SettingsApp {
                 self.git.wiz = None;
                 if let Some(i) = self.tabs.iter().position(|t| *t == Tab::DevCluster) {
                     self.tab = i;
-                    self.dc_open_platform(cx, None);
+                    self.dc_open_platform(p, None);
                 } else {
                     self.fail("Platform services are in Settings > Dev cluster, which this account does not have.");
                 }
             }
             WizOut::QuickInstallGitea => {
                 self.git.wiz = None;
-                match crate::apps::git_wizard::start_quick_install_gitea(cx) {
+                match p.quick_install_gitea() {
                     Ok(m) => self.ok(m),
                     Err(e) => self.fail(e),
                 }
             }
             WizOut::Done(c) => {
                 self.git.wiz = None;
-                let r = Self::git_rows(cx).iter().position(|r| matches!(r, GRow::Conn(x) if x.id == c.id));
+                let r = Self::git_rows(p).iter().position(|r| matches!(r, GRow::Conn(x) if x.id == c.id));
                 if let Some(i) = r {
                     self.sel[self.tab] = i;
                 }
@@ -313,12 +312,12 @@ impl SettingsApp {
     }
 
     /// The heartbeat: collects the answer of a connection test.
-    pub(super) fn git_tick(&mut self, cx: &AppCx) {
+    pub(super) fn git_tick(&mut self, p: &dyn GitPort) {
         let Some((id, rx)) = &self.git.testing else { return };
         let Ok(r) = rx.try_recv() else { return };
         let id = id.clone();
         self.git.testing = None;
-        let g = Self::git_keys(cx);
+        let g = Self::git_keys(p);
         let conns = g.conns();
         let name = conns.get(&id).map(|c| c.name).unwrap_or_default();
         let _ = conns.record_test(&id, &r);
@@ -332,20 +331,20 @@ impl SettingsApp {
     }
 
     /// Starts the test of a connection in the background (the host's own API, with the stored token).
-    pub(super) fn git_test_conn(&mut self, cx: &AppCx, c: &Connection) {
+    pub(super) fn git_test_conn(&mut self, p: &dyn GitPort, c: &Connection) {
         if self.git.testing.is_some() {
             self.fail("A test is still running.");
             return;
         }
         if !c.cluster.is_empty() {
             // inside the cluster the policy of the host list does not apply
-        } else if !cx.session.policy.allows_host(&c.host()) {
+        } else if !p.may_reach(&c.host()) {
             let r = TestReport { error: Some(format!("Your account may not reach {} (the network policy of this account).", c.host())), ..TestReport::blank(c) };
-            let _ = Self::git_keys(cx).conns().record_test(&c.id, &r);
+            let _ = Self::git_keys(p).conns().record_test(&c.id, &r);
             self.fail(format!("{}: {}", c.name, r.summary()));
             return;
         }
-        let conns = Self::git_keys(cx).conns();
+        let conns = Self::git_keys(p).conns();
         let token = match conns.token(c) {
             Ok(t) => t.to_string(),
             Err(e) if c.kind.has_api() => {
@@ -354,7 +353,7 @@ impl SettingsApp {
             }
             Err(_) => String::new(),
         };
-        let http: Arc<dyn GitHttp> = self.wiz_env(cx).http;
+        let http: Arc<dyn GitHttp> = self.wiz_env(p).http;
         let cert = conns.pinned_cert(c);
         let c2 = c.clone();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -362,29 +361,29 @@ impl SettingsApp {
             let r = if token.is_empty() { TestReport { ok: true, notes: vec!["No token to ask the host's API with: the first fetch or push shows if the key works.".into()], ..TestReport::blank(&c2) } } else { gitconn::test_connection(&*http, &c2, &token, cert.as_ref()) };
             let _ = tx.send(r);
         });
-        cx.audit.record(&cx.session.user, "git.connect.test.start", &format!("{} {}", c.name, c.host()));
+        p.audit("git.connect.test.start", &format!("{} {}", c.name, c.host()));
         self.git.testing = Some((c.id.clone(), rx));
         self.ok(format!("Testing {}…", c.name));
     }
 
     /// Keys of the connection rows. True when the key was taken.
-    fn handle_conn(&mut self, k: &Key, row: Option<&GRow>, cx: &AppCx) -> bool {
+    fn handle_conn(&mut self, k: &Key, row: Option<&GRow>, p: &dyn GitPort) -> bool {
         match (k, row) {
             (Key::Char('a'), _) => {
-                self.git_open_wizard(cx, None);
+                self.git_open_wizard(p, None);
                 true
             }
             (Key::Char('T'), Some(GRow::Conn(c))) => {
                 let c = c.clone();
-                self.git_test_conn(cx, &c);
+                self.git_test_conn(p, &c);
                 true
             }
             (Key::Char('e'), Some(GRow::Conn(c))) => {
-                self.git_open_wizard(cx, Some(c.clone()));
+                self.git_open_wizard(p, Some(c.clone()));
                 true
             }
             (Key::Char('m'), Some(GRow::Conn(c))) => {
-                match Self::git_keys(cx).conns().set_default(&c.id) {
+                match Self::git_keys(p).conns().set_default(&c.id) {
                     Ok(()) => self.ok(format!("{} is now the default for new workspaces.", c.name)),
                     Err(e) => self.fail(e),
                 }
@@ -403,9 +402,9 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn render_git(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let rows = Self::git_rows(cx);
-        let keys = Self::git_keys(cx);
+    pub(super) fn render_git(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn GitPort) {
+        let rows = Self::git_rows(p);
+        let keys = Self::git_keys(p);
         let mut y = a.y;
         for l in [
             "Connections: a git host you use (GitHub, GitLab, a Gitea or Forgejo server, any other) with how you sign in, tested against the host's own API. The AI IDE offers the same list to connect a project. Press a to add one; tokens live in your vault and are never shown again.",

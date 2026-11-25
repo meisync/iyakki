@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-RAG-08",
+ "feature_sha": "45d65254eb9f7ac2",
+ "title": "rag_sources_add_folder asks every time and shows the folder and file c",
+ "clauses": [
+  {
+   "id": "rag-folder-card",
+   "text": "rag_sources_add_folder asks every time and shows the folder and file count",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant to add a folder to the knowledge base.",
+     "expect": "A card shows the folder and the file count and asks every time, also in Auto mode; searching and reading ask nothing."
+    }
+   ]
+  }
+ ]
+}

@@ -108,6 +108,9 @@ fn machine_scoped(tag: &str, quick: Arc<dyn iyakki_proxy::Upstream>, slow: Arc<d
     let cfg = UiSocketConfig { enabled: true, scopes: scopes.iter().map(|s| s.to_string()).collect(), account: "ui".into(), admin: false, rpc: true };
     let on = start_with(&core, &cfg, "iyakki-test", &d.join("on.sock"), &facets).unwrap();
     let rpc = Rpc::new(Connection::unix(on.path(), Duration::from_secs(10)).unwrap());
+    // the person signs in over the socket: calls that name an account are held to the one signed in (alpha.8 SEC3)
+    let session: serde_json::Value = rpc.call("AccountsApi", 0, "authenticate", serde_json::json!(["ann", "annpass12345"])).unwrap();
+    assert!(session.get("Ok").is_some(), "{session}");
     let remote: Arc<dyn ServicesHandle> = Arc::new(RemoteServicesHandle::new(rpc.clone()));
     Machine { svc, remote, rpc, notes, users, _on: on, dir: d }
 }

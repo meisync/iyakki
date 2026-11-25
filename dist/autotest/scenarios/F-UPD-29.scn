@@ -1,0 +1,11 @@
+# autotest alpha.9 (2026-11-21), lane U1. Written against the Feature text with sha 773a80491b9e7cd0; honest subset only.
+row: F-UPD-29
+targets: qemu
+profile: ram
+feature-sha: 773a80491b9e7cd0
+doc: upgrade from the old pack to the newest by the signed path, then a rollback, on real packs
+clause: 1 the update centre installs the newest pack signed with a throw-away key over the old pack, keeps the old version whole, arms and marks the counter, and a rollback restores the old kernel and initramfs
+not-covered: the release key
+not-covered: a network transfer
+not-covered: hardware
+host-script: dist/qemu/upgrade-test.py

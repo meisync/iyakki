@@ -1,5 +1,5 @@
 //! The "Your rating" row on a package's page (Discover and Installed): five stars and a short private comment, kept per account in
-//! the data folder (`iyakki_shared::store_ratings`). It reaches nobody: there is no network code in this file or in the store it
+//! the data folder (`iyakki_store_model::store_ratings`). It reaches nobody: there is no network code in this file or in the store it
 //! uses. Mouse and touch: click a star, "Comment" or "Forget my rating". Keyboard: 1 to 5 set the stars (the same number again takes
 //! them away), w writes the comment, f forgets the rating. A comment that holds a credential is refused with a plain sentence.
 
@@ -22,7 +22,7 @@ impl StoreApp {
         if self.section == Section::Discover {
             let it = self.current()?;
             let e = &it.entry;
-            return Some(Subject { key: iyakki_shared::store_organize::item_key(&e.kind, &e.name), name: e.name.clone(), title: it.title().to_string(), version: e.version.clone() });
+            return Some(Subject { key: iyakki_store_model::store_organize::item_key(&e.kind, &e.name), name: e.name.clone(), title: it.title().to_string(), version: e.version.clone() });
         }
         let e = self.iselected()?;
         Some(Subject { key: Self::okey(&e), name: e.name.clone(), title: self.shown_title(&e).to_string(), version: e.version.clone() })
@@ -89,7 +89,7 @@ impl StoreApp {
     }
 
     /// Clicks and keys of the row; true when the event was for it. Only on a package's page.
-    pub(super) fn rating_event(&mut self, ev: &Event, cx: &AppCx) -> bool {
+    pub(super) fn rating_event(&mut self, ev: &Event, cx: &dyn StorePort) -> bool {
         let on_page = if self.section == Section::Discover { self.detail.is_some() } else { self.section == Section::Installed && self.idetail.is_some() };
         if !on_page {
             return false;
@@ -104,13 +104,13 @@ impl StoreApp {
         true
     }
 
-    fn set_my_stars(&mut self, n: u8, cx: &AppCx) {
+    fn set_my_stars(&mut self, n: u8, cx: &dyn StorePort) {
         let Some(sub) = self.rating_subject() else { return };
         let now = self.rate.get(&sub.key).map_or(0, |r| r.stars);
         let to = if now == n { 0 } else { n };
         match self.rate.set_stars(&sub.key, to, &sub.version) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "store.rate", &sub.name);
+                cx.record("store.rate", &sub.name);
                 self.org_rev += 1;
                 self.say(if to == 0 { format!("Your stars for “{}” are taken away.", sub.title) } else { format!("You gave “{}” {to} star{}.", sub.title, if to == 1 { "" } else { "s" }) }, true);
             }
@@ -130,11 +130,11 @@ impl StoreApp {
     }
 
     /// Enter in the comment dialog.
-    pub(super) fn save_comment(&mut self, key: &str, text: &str, cx: &AppCx) {
+    pub(super) fn save_comment(&mut self, key: &str, text: &str, cx: &dyn StorePort) {
         let Some(sub) = self.rating_subject().filter(|s| s.key == key) else { return };
         match self.rate.set_comment(key, text, &sub.version) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "store.rate-comment", &sub.name);
+                cx.record("store.rate-comment", &sub.name);
                 self.org_rev += 1;
                 self.say(if text.is_empty() { "Your comment is removed." } else { "Your comment is saved on this computer." }, true);
             }
@@ -142,11 +142,11 @@ impl StoreApp {
         }
     }
 
-    fn forget_rating(&mut self, cx: &AppCx) {
+    fn forget_rating(&mut self, cx: &dyn StorePort) {
         let Some(sub) = self.rating_subject() else { return };
         match self.rate.forget(&sub.key) {
             Ok(true) => {
-                cx.audit.record(&cx.session.user, "store.rate-forget", &sub.name);
+                cx.record("store.rate-forget", &sub.name);
                 self.org_rev += 1;
                 self.say(format!("Your rating and comment for “{}” are forgotten.", sub.title), true);
             }

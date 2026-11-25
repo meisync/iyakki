@@ -4,13 +4,14 @@
 //! `o` cycles off and lexical, `O` names a reranking model (empty: off), `g` switches Graph RAG.
 
 use super::*;
+use super::apps_port::UserPort;
 use iyakki_shared::ragraph;
 use iyakki_shared::ragrerank::Mode;
 
 impl SettingsApp {
     /// The two rows under the sliders; returns their height (with the gaps) so the rows below move down.
-    pub(super) fn render_rag_order(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx, can: bool, two: bool) -> f32 {
-        let dir = cx.data_dir();
+    pub(super) fn render_rag_order(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn UserPort, can: bool, two: bool) -> f32 {
+        let dir = &p.data_dir();
         let (mode, graph) = (Mode::load(dir), ragraph::is_on(dir));
         let gap = 10.0 * s;
         let rh = 76.0 * s;
@@ -40,15 +41,14 @@ impl SettingsApp {
         if two { rh + gap } else { 2.0 * (rh + gap) }
     }
 
-    pub(super) fn handle_rag_order(&mut self, k: &Key, cx: &AppCx) {
-        let dir = cx.data_dir();
-        let user = &cx.session.user;
+    pub(super) fn handle_rag_order(&mut self, k: &Key, p: &dyn UserPort) {
+        let dir = &p.data_dir();
         match k {
             Key::Char('g') => {
                 let on = !ragraph::is_on(dir);
                 match ragraph::set_on(dir, on) {
                     Ok(()) => {
-                        cx.audit.record(user, "settings.rag", &format!("graph {}", if on { "on" } else { "off" }));
+                        p.audit("settings.rag", &format!("graph {}", if on { "on" } else { "off" }));
                         self.ok(format!("Graph RAG {}.", if on { "on: searches add passages found through links" } else { "off" }));
                     }
                     Err(e) => self.fail(e),
@@ -56,7 +56,7 @@ impl SettingsApp {
             }
             Key::Char('o') => {
                 let next = if Mode::load(dir) == Mode::Lexical { Mode::Off } else { Mode::Lexical };
-                self.save_rerank(next, cx);
+                self.save_rerank(next, p);
             }
             Key::Char('O') => {
                 let pre = match Mode::load(dir) {
@@ -69,21 +69,21 @@ impl SettingsApp {
         }
     }
 
-    fn save_rerank(&mut self, m: Mode, cx: &AppCx) {
-        match m.save(cx.data_dir()) {
+    fn save_rerank(&mut self, m: Mode, p: &dyn UserPort) {
+        match m.save(&p.data_dir()) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.rag", &format!("rerank {}", m.text()));
+                p.audit("settings.rag", &format!("rerank {}", m.text()));
                 self.ok(format!("Found passages are ordered by: {}.", m.text()));
             }
             Err(e) => self.fail(e),
         }
     }
 
-    pub(super) fn rag_rerank_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
+    pub(super) fn rag_rerank_submit(&mut self, p: &dyn UserPort, form: &Form) -> Result<String, String> {
         let name = form.value(0).trim().to_string();
         let m = if name.is_empty() { Mode::Off } else { Mode::parse("model", &name)? };
-        m.save(cx.data_dir())?;
-        cx.audit.record(&cx.session.user, "settings.rag", &format!("rerank {}", m.text()));
+        m.save(&p.data_dir())?;
+        p.audit("settings.rag", &format!("rerank {}", m.text()));
         Ok(format!("Found passages are ordered by: {}.", m.text()))
     }
 }

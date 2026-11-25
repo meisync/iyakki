@@ -533,6 +533,12 @@ impl Softvol {
     /// Bring the file and the control in line with `plan` (None: no output, or a sound server decides: IYAKKI's file is
     /// removed) and the volume `level` (0 to 100, 0 when muted). Cheap when nothing changed; a level that could not be set
     /// yet (no `amixer`, the device busy) is tried again on the next call.
+    /// Forget the level that was set last, so the next [`sync`](Self::sync) sets it again: something else (the silence before a sleep or a
+    /// shutdown, a card reset) may have moved the control behind IYAKKI's back (LIFECYCLE-AUDIT L-01).
+    pub fn forget_level(&self) {
+        self.lock().level = None;
+    }
+
     pub fn sync(&self, plan: Option<&Plan>, level: u32) -> Synced {
         let mut st = self.lock();
         let existing = std::fs::read_to_string(&self.path).ok();
@@ -775,6 +781,19 @@ mod tests {
         assert!(fake.calls.lock().unwrap().is_empty(), "nothing changed, nothing run");
         sv.sync(Some(&plan), 55);
         assert_eq!(*fake.calls.lock().unwrap(), ["amixer -q -c 1 sset IYAKKI 55%"], "a new level is set without priming again");
+    }
+
+    #[test]
+    fn a_forgotten_level_is_set_again_so_a_volume_silenced_before_sleep_comes_back() {
+        let d = dir("forget");
+        let fake = Fake::default();
+        let sv = Softvol::new(d.0.join("asound.conf"), fake.clone());
+        let plan = Plan::Soft { card: 1, device: 0 };
+        sv.sync(Some(&plan), 40);
+        fake.calls.lock().unwrap().clear();
+        sv.forget_level();
+        sv.sync(Some(&plan), 40);
+        assert_eq!(*fake.calls.lock().unwrap(), ["amixer -q -c 1 sset IYAKKI 40%"], "the same level is written again, without priming");
     }
 
     #[test]

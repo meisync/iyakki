@@ -466,3 +466,119 @@ F-QA-16 2026-11-21 new partial row: test automation runner and evidence-rule enf
 F-DOCTOR-04 2026-11-21 new partial row: Manual tests tab, Impl 90, Test 50
 F-DOCTOR-05 2026-11-21 new partial row: manual test chat tools, Impl 100, Test 50
 F-DOCTOR-06 2026-11-21 new partial row: first 30 human checklists, Impl 100, Test 50
+F-CORE-29a 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-CORE-29b 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-CORE-20a 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-CORE-20b 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-SDK-189a 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-SDK-189b 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-SDK-191a 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-SDK-191b 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-SDK-212a 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-SDK-212b 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-SDK-213a 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-SDK-213b 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-SDK-214a 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-SDK-214b 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-SKIN-07a 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-SKIN-07b 2026-11-21 new partial row: sub-row of the pilot split (lane SPLIT1), Impl 100, Test 50
+F-DOCTOR-07 2026-11-21 new partial row: Manual tests machine pick, Impl 100, Test 50
+
+F-SPLIT-09 2026-11-21 new partial row: acting person bound to the UI socket login and one-time approval ticket, Impl 100, Test 50
+
+F-RPI-01 2026-11-21 new partial row: Pi 5 boot volume files, Impl 100, Test 50
+F-RPI-02 2026-11-21 new partial row: stage 1 on a Pi volume, Impl 100, Test 50
+F-RPI-03 2026-11-21 new partial row: Pi firmware by button, Impl 100, Test 50
+F-RPI-04 2026-11-21 new partial row: Pi 5 kernel and image recipe, Impl 100, Test 50
+F-RPI-05 2026-11-21 new partial row: Pi 5 QEMU start proof, Impl 100, Test 50
+F-RPI-08 2026-11-21 new partial row: Pi 5 first boot guide and checklist, Impl 100, Test 0
+
+F-KV260-01 2026-11-21 new partial row: KV260 SD image recipe and kernel fragment, Impl 100, Test 50
+F-KV260-02 2026-11-21 new partial row: KV260 SD writer, Impl 100, Test 50
+F-KV260-03 2026-11-21 new partial row: KV260 userspace in QEMU zcu102, Impl 100, Test 0
+F-KV260-04 2026-11-21 new partial row: KV260 first-boot guide and checklist, Impl 100, Test 0
+F-UPD-27 2026-11-21 new partial row: update fault injection on the real engine and fakes with a model of the next starts, Impl 100, Test 50
+F-UPD-28 2026-11-21 new partial row: QEMU fault injection by the real GRUB (written, not run), Impl 100, Test 0
+F-UPD-29 2026-11-21 new partial row: upgrade from the old pack to the newest by the signed path, then rollback, on real packs (written, not run), Impl 100, Test 0
+F-UPD-30 2026-11-21 new partial row: hardware power-cut checklist for the update steps, Impl 100, Test 0
+F-QA-17 2026-11-21 new partial row: beta documents (install guide, recovery guide, known limits), Impl 100, Test 50
+F-LIFE-01 2026-11-24 new partial row: volume set again after wake, Impl 100, Test 50
+F-LIFE-02 2026-11-24 new partial row: atomic story and run saves, Impl 100, Test 50
+F-LIFE-03 2026-11-24 new partial row: backup time in the future, Impl 100, Test 50
+F-LIFE-04 2026-11-24 new partial row: audit gap line, Impl 100, Test 50
+F-LIFE-05 2026-11-24 new partial row: clock set back and triggers, Impl 100, Test 50
+F-LIFE-06 2026-11-24 new partial row: browser session idle by wall clock, Impl 100, Test 50
+F-LIFE-07 2026-11-24 new partial row: temp file sweep, Impl 100, Test 50
+F-LIFE-08 2026-11-24 new partial row: bounded health check connect, Impl 100, Test 50
+F-LIFE-09 2026-11-24 new partial row: online needs a default route, Impl 100, Test 50
+F-LIFE-10 2026-11-24 new partial row: audit time never goes back, Impl 100, Test 50
+F-LIFE-21 2026-11-24 new partial row: Power page words read in QEMU (scenario written, not run), Impl 100, Test 70
+F-LIFE-20 2026-11-24 planned -> partial: code written and unit-tested on fakes, Impl 100, Test 30; real hardware run still to do
+F-LIFE-11 2026-11-24 planned -> partial: code written and unit-tested on fakes, Impl 100, Test 30; real hardware run still to do
+F-LIFE-14 2026-11-24 planned -> partial: code written and unit-tested on fakes, Impl 90, Test 30; real hardware run still to do
+F-LIFE-16 2026-11-24 planned -> partial: code written and unit-tested on fakes, Impl 100, Test 30; real hardware run still to do
+F-LIFE-17 2026-11-24 planned -> partial: code written and unit-tested on fakes, Impl 100, Test 30; real hardware run still to do
+F-LIFE-15 2026-11-24 planned -> partial: code written and unit-tested on fakes, Impl 100, Test 30; real hardware run still to do
+F-LIFE-12 2026-11-24 planned -> partial: code written and unit-tested on fakes, Impl 100, Test 30; real hardware run still to do
+F-LIFE-19 2026-11-24 planned -> partial: code written and unit-tested on fakes, Impl 80, Test 30; real hardware run still to do
+
+F-SESS-01 2026-11-24 new partial row: session end registry, sound and capture owners registered, process resources left to SO2, Impl 70, Test 50
+F-LIFE-13 2026-11-24 planned row written and fixed in code (lane SO2): lock and suspend stop capture, Impl 100, Test 50, real lock and sleep run needed
+F-NET-07a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 0
+F-NET-07b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-DISP-14a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 0
+F-DISP-14b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-A11Y-02a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 0
+F-A11Y-02b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-ASSIST-46a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-ASSIST-46b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-ASSIST-47a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-ASSIST-47b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-WEB-15a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-WEB-15b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-FLEET-14a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-FLEET-14b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-FLEET-15a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-FLEET-15b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-FLEET-09a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-FLEET-09b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-DEV-11a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-DEV-11b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-BROX-25a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 0
+F-BROX-25b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-FILE-06a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-FILE-06b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-SDK-215a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 0
+F-SDK-215b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-SKIN-06a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-SKIN-06b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-SND-10a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-SND-10b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-SND-15a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-SND-15b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-BROW-79a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-BROW-79b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-BROW-92a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-BROW-92b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-GEMVOICE-13a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-GEMVOICE-13b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-VPN-12a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-VPN-12b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-HOTSPOT-12a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-HOTSPOT-12b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-LAUNCH-06a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 0
+F-LAUNCH-06b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-LAUNCH-12a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 0
+F-LAUNCH-12b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-LAUNCH-20a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 0
+F-LAUNCH-20b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-LAUNCH-13a 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+F-LAUNCH-13b 2026-11-24 new partial row: sub-row of the batch F split (lane SC2), Impl 100, Test 50
+
+F-BOOTARM-01 2026-11-24 new partial row: iyakki-boot builds and passes its QEMU tests for aarch64 (real kernel under the loader), boards not tried, Impl 100, Test 50
+F-BOOTARM-02 2026-11-24 new partial row: board table and generator crate with byte-for-byte golden tests, baseline builds not switched yet, Impl 100, Test 50
+F-BOOTARM-03 2026-11-24 new partial row: KV260 loader variant card and QEMU card test, board needed, Impl 100, Test 50
+F-BOOTARM-04 2026-11-24 new partial row: Pi 5 loader variant card with pinned U-Boot download, button not written, board needed, Impl 70, Test 50
+F-BOOTARM-05 2026-11-24 new partial row: first-boot guides and checklists for the two loader variants, nothing run on a board, Impl 100, Test 0
+F-UPD-31 2026-11-24 new partial row: update fault injection on the loader's layout (QEMU script, unit sweep, two retry bugs fixed), Impl 100, Test 50
+F-BOOT-46 2026-11-25 planned to partial: KV260 loader through the board's U-Boot ran on the real board, Impl 100, Test 70

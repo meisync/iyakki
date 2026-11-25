@@ -420,6 +420,82 @@ pub fn pick_data(boot: Option<&str>, candidates: &[String], choice: Option<&str>
     }
 }
 
+// ---- Raspberry Pi boot volumes (F-ARM-11; docs/development/RASPBERRY-PI-PLAN.md section 1.3) -----------------------------------
+// A Pi has no GRUB. The firmware reads `config.txt` from the boot volume, which ends by including `iyakki-boot.txt`; that one line names
+// the RAM disk. When a fast start fails the first stage rewrites it to the full RAM disk (what GRUB's `iyakki-lean-failed` check does on a
+// PC), so the next start takes the fallback by itself. The `board` file says which Pi the volume was made for.
+
+/// The file the Pi firmware includes: which RAM disk the next start reads.
+pub const PI_BOOT_TXT: &str = "iyakki-boot.txt";
+/// The marker of a failed fast start on a Pi boot volume (at the root: there is no `boot/grub` there).
+pub const PI_LEAN_FAILED: &str = "iyakki-lean-failed";
+/// The `board` file text of a Raspberry Pi 5 boot volume.
+pub const PI5_BOARD: &str = "rpi5";
+
+/// The text of `iyakki-boot.txt` for the lean (`true`) or the full RAM disk. `iyakki_usb::rpiboot::iyakki_boot_txt` writes the same text when
+/// the volume is made (a test there compares the two).
+pub fn pi_boot_txt(lean: bool) -> String {
+    format!(
+        "# IYAKKI: which RAM disk the next start reads (written by the first stage after a failed fast start and by the running system when the fast tree is ready)\ninitramfs {} followkernel\n",
+        if lean { "initrd-lean" } else { "initrd" }
+    )
+}
+
+/// Which RAM disk an `iyakki-boot.txt` names: `Some(true)` lean, `Some(false)` full, `None` anything else.
+pub fn pi_boot_txt_is_lean(text: &str) -> Option<bool> {
+    let line = text.lines().map(str::trim).find(|l| l.starts_with("initramfs "))?;
+    match line.split_whitespace().nth(1)? {
+        "initrd-lean" => Some(true),
+        "initrd" => Some(false),
+        _ => None,
+    }
+}
+
+/// The new text of `iyakki-boot.txt` after a failed fast start: the full RAM disk, but only when one exists on the volume (without it the
+/// lean files stay: there is nothing to fall back to, and a start that cannot find its RAM disk would be worse). `None` leaves the file alone
+/// (already full, unreadable, or no fallback). Lines other than the `initramfs` line are kept.
+pub fn pi_boot_txt_after_failure(current: &str, full_present: bool) -> Option<String> {
+    if !full_present || pi_boot_txt_is_lean(current) != Some(true) {
+        return None;
+    }
+    let mut out: Vec<String> = current.lines().map(|l| if l.trim_start().starts_with("initramfs ") { "initramfs initrd followkernel".to_string() } else { l.to_string() }).collect();
+    out.push(String::new());
+    Some(out.join("\n"))
+}
+
+/// The board a device-tree model string names (`/proc/device-tree/model`, a NUL-terminated text): `rpi5` for the Pi 5, Pi 500 and Compute
+/// Module 5 (all BCM2712), `rpi4` for Pi 4, 400 and CM4, `rpi3` for Pi 3 and Zero 2 W, `rpi-other` for any other Raspberry Pi, `None` when it
+/// is not a Raspberry Pi at all (QEMU's virt machine, a PC).
+pub fn board_of_model(model: &str) -> Option<&'static str> {
+    let m = model.trim_matches(|c: char| c == '\0' || c.is_whitespace());
+    let rest = m.strip_prefix("Raspberry Pi")?.trim_start();
+    Some(if rest.starts_with("5 ") || rest.starts_with("500") || rest.starts_with("Compute Module 5") {
+        "rpi5"
+    } else if rest.starts_with("4 ") || rest.starts_with("400") || rest.starts_with("Compute Module 4") {
+        "rpi4"
+    } else if rest.starts_with("3 ") || rest.starts_with("Zero 2") {
+        "rpi3"
+    } else {
+        "rpi-other"
+    })
+}
+
+/// A volume made for one board must not start on another (plan 1.5, safeguard 5): `Err(message)` when the boot volume's `board` file and the
+/// running Raspberry Pi differ. A volume without a `board` file (every PC image) and a machine that is not a Pi (QEMU, which is how the same
+/// userspace is tested) are accepted.
+pub fn board_check(board_file: Option<&str>, model: Option<&str>) -> Result<(), String> {
+    let want = match board_file.map(str::trim).filter(|b| !b.is_empty()) {
+        Some(b) => b,
+        None => return Ok(()),
+    };
+    let Some(have) = model.and_then(board_of_model) else { return Ok(()) };
+    if have == want {
+        return Ok(());
+    }
+    let name = model.unwrap_or("").trim_matches(|c: char| c == '\0' || c.is_whitespace());
+    Err(format!("this drive was made for a {want} board, and this computer is a {name} ({have}). Use the drive made for this board; nothing was changed"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,5 +743,48 @@ mod tests {
         assert!(g.guard && g.layers.is_empty() && g.skipped.len() == 1);
         assert!(go(99).guard);
         assert_eq!((parse_count("2\n"), parse_count("x"), parse_count("")), (2, 0, 0));
+    }
+
+    #[test]
+    fn a_failed_fast_start_on_a_pi_switches_the_ram_disk_file_to_the_full_one_only_when_there_is_one() {
+        let lean = pi_boot_txt(true);
+        assert_eq!(pi_boot_txt_is_lean(&lean), Some(true));
+        assert_eq!(pi_boot_txt_is_lean(&pi_boot_txt(false)), Some(false));
+        assert_eq!(pi_boot_txt_is_lean("# nothing\n"), None);
+        assert_eq!(pi_boot_txt_is_lean("initramfs other followkernel\n"), None);
+        let after = pi_boot_txt_after_failure(&lean, true).expect("a fallback exists");
+        assert_eq!(pi_boot_txt_is_lean(&after), Some(false));
+        assert!(after.starts_with("# IYAKKI"), "the comment line is kept");
+        assert_eq!(after.matches("initramfs").count(), 1, "one directive");
+        assert_eq!(pi_boot_txt_after_failure(&lean, false), None, "no full RAM disk on the volume: keep the lean one");
+        assert_eq!(pi_boot_txt_after_failure(&after, true), None, "already full: nothing to write (no write on every start)");
+        assert_eq!(pi_boot_txt_after_failure("garbage", true), None, "an unreadable file is left alone");
+        // a person's extra line survives
+        let extra = format!("{lean}arm_boost=1\n");
+        let r = pi_boot_txt_after_failure(&extra, true).unwrap();
+        assert!(r.contains("arm_boost=1") && r.contains("initramfs initrd followkernel"));
+    }
+
+    #[test]
+    fn the_board_is_read_from_the_device_tree_model_and_a_volume_for_another_pi_is_refused() {
+        assert_eq!(board_of_model("Raspberry Pi 5 Model B Rev 1.0\0"), Some("rpi5"));
+        assert_eq!(board_of_model("Raspberry Pi 500 Rev 1.0"), Some("rpi5"));
+        assert_eq!(board_of_model("Raspberry Pi Compute Module 5 Rev 1.0"), Some("rpi5"));
+        assert_eq!(board_of_model("Raspberry Pi 4 Model B Rev 1.5"), Some("rpi4"));
+        assert_eq!(board_of_model("Raspberry Pi 3 Model B Plus Rev 1.3"), Some("rpi3"));
+        assert_eq!(board_of_model("Raspberry Pi Zero 2 W Rev 1.0"), Some("rpi3"));
+        assert_eq!(board_of_model("Raspberry Pi Model B Rev 2"), Some("rpi-other"));
+        assert_eq!(board_of_model("linux,dummy-virt"), None, "QEMU's virt machine is not a Pi");
+        assert_eq!(board_of_model(""), None);
+        let pi5 = Some("Raspberry Pi 5 Model B Rev 1.0\0");
+        assert_eq!(board_check(Some("rpi5\n"), pi5), Ok(()));
+        assert_eq!(board_check(None, pi5), Ok(()), "a PC image has no board file");
+        assert_eq!(board_check(Some("rpi5"), Some("linux,dummy-virt")), Ok(()), "the same userspace boots in QEMU");
+        assert_eq!(board_check(Some("rpi5"), None), Ok(()), "no model readable: do not refuse");
+        assert_eq!(board_check(Some(""), pi5), Ok(()));
+        let e = board_check(Some("rpi3"), pi5).unwrap_err();
+        assert!(e.contains("made for a rpi3 board") && e.contains("Raspberry Pi 5 Model B") && e.contains("nothing was changed"), "{e}");
+        assert!(!e.contains('\0'), "the NUL of the device tree text is not shown");
+        assert_eq!(PI5_BOARD, "rpi5");
     }
 }

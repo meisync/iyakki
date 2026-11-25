@@ -251,7 +251,7 @@ pub fn create(run: &Arc<dyn Runner>, http: &dyn RegistryHttp, t: &Target, o: &Op
     }
     std::fs::create_dir_all(&o.work_dir).map_err(|e| format!("{}: {e}", o.work_dir.display()))?;
     let file = o.work_dir.join("iyakki-registry.yaml");
-    std::fs::write(&file, &lint.text).map_err(|e| format!("{}: {e}", file.display()))?;
+    iyakki_schema::write_atomic(&file, lint.text.as_bytes(), 0o600)?;
     say("[3/6] applying the registry objects (volume, Deployment, Service)");
     let kube = |args: &[&str]| {
         let o = k.kubectl(args, 10, 30);
@@ -262,7 +262,7 @@ pub fn create(run: &Arc<dyn Runner>, http: &dyn RegistryHttp, t: &Target, o: &Op
         say(&format!("      {n}"));
     }
     if g.manifest.trim() != lint.text.trim() {
-        std::fs::write(&file, &g.manifest).map_err(|e| format!("{}: {e}", file.display()))?;
+        iyakki_schema::write_atomic(&file, g.manifest.as_bytes(), 0o600)?;
     }
     let a = k.kubectl(&["apply", "-f", &file.display().to_string(), "-n", IN_NS], 20, 90);
     if !a.ok() {

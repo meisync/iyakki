@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-46a",
+  "feature_sha": "52f70dcdceed761a",
+  "title": "stall limits page (visible part)",
+  "clauses": [
+    {
+      "id": "stall-page",
+      "text": "Settings, Assistant shows Stall limits",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Open Settings, Assistant.",
+          "expect": "A Stall limits section is shown and readable."
+        }
+      ]
+    }
+  ]
+}

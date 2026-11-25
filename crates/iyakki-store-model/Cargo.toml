@@ -1,0 +1,27 @@
+[package]
+name = "iyakki-store-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The pure STORE model a tile may name, with no agent and no shell: packages, skills, the catalog, trust and revocation, the installed list, the lifecycle, organize, ratings, licences and the update check, re-exported by iyakki_shared under the old paths (alpha.10 AP2, D-S2-01 option a)."
+
+[features]
+# exposes the test helpers of the catalog (`store_catalog::tests::{catalog, entry}`) to the tests of iyakki-shared
+testing = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+ed25519-dalek = "3"
+iyakki-vfs = { workspace = true }
+iyakki-clock = { workspace = true }
+iyakki-serde-static = { workspace = true }
+iyakki-k8s-model = { workspace = true }
+iyakki-credguard = { workspace = true }
+iyakki-schema = { workspace = true }
+iyakki-sec = { workspace = true }
+log.workspace = true
+thiserror.workspace = true
+iyakki-core-api = { workspace = true }
+iyakki-proxy = { path = "../iyakki-proxy" }

@@ -206,6 +206,79 @@ pub struct PtyOpen {
     pub approval: TermApproval,
 }
 
+
+/// A whole session whose program is `kubectl exec -it` into a pod (F-K8S-26): the K8S tile asks the Terminal view for it. The core, not the app,
+/// builds the command line from these checked parts, so no word of it is ever a shell command line of the app's making; `kubeconfig` and
+/// `context` are the cluster's (empty: kubectl's defaults), `container` may be empty (the pod's default).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PtyExec {
+    pub kubeconfig: String,
+    pub context: String,
+    pub namespace: String,
+    pub pod: String,
+    pub container: String,
+    /// The shell to start in the pod: `sh` (the default), `bash`, `ash` or `zsh`.
+    pub shell: String,
+}
+
+/// The shells a pod session may start.
+pub const EXEC_SHELLS: &[&str] = &["sh", "bash", "ash", "zsh"];
+
+fn dns_name(s: &str, max: usize, dots: bool) -> bool {
+    !s.is_empty() && s.len() <= max && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || (dots && c == '.')) && !s.starts_with(['-', '.']) && !s.ends_with(['-', '.'])
+}
+
+impl PtyExec {
+    /// Every part checked: names are DNS names, the cluster values are not options or control characters, the shell is one of [`EXEC_SHELLS`].
+    pub fn check(&self) -> Result<(), String> {
+        if !dns_name(&self.namespace, 63, false) {
+            return Err(format!("`{}` is not a namespace name", self.namespace));
+        }
+        if !dns_name(&self.pod, 253, true) {
+            return Err(format!("`{}` is not a pod name", self.pod));
+        }
+        if !self.container.is_empty() && !dns_name(&self.container, 63, false) {
+            return Err(format!("`{}` is not a container name", self.container));
+        }
+        for (what, v) in [("kubeconfig", &self.kubeconfig), ("context", &self.context)] {
+            if v.starts_with('-') || v.chars().any(char::is_control) || v.len() > 4096 {
+                return Err(format!("the {what} value is not usable"));
+            }
+        }
+        if !self.shell.is_empty() && !EXEC_SHELLS.contains(&self.shell.as_str()) {
+            return Err(format!("the shell is one of {}", EXEC_SHELLS.join(", ")));
+        }
+        Ok(())
+    }
+
+    /// The arguments of `kubectl`, after [`PtyExec::check`].
+    pub fn argv(&self) -> Result<Vec<String>, String> {
+        self.check()?;
+        let mut a = Vec::new();
+        if !self.kubeconfig.is_empty() {
+            a.push(format!("--kubeconfig={}", self.kubeconfig));
+        }
+        if !self.context.is_empty() {
+            a.push(format!("--context={}", self.context));
+        }
+        a.extend(["exec".to_string(), "-it".to_string(), format!("--namespace={}", self.namespace), self.pod.clone()]);
+        if !self.container.is_empty() {
+            a.push("-c".into());
+            a.push(self.container.clone());
+        }
+        a.push("--".into());
+        a.push(if self.shell.is_empty() { "sh".into() } else { self.shell.clone() });
+        Ok(a)
+    }
+
+    /// What the person is asked before the session starts.
+    pub fn question(&self) -> String {
+        let c = if self.container.is_empty() { String::new() } else { format!(", container {}", self.container) };
+        let on = if self.context.is_empty() { String::new() } else { format!(" on cluster {}", self.context) };
+        format!("Open a shell inside pod {} (namespace {}{c}){on}? It runs with the cluster account of your kubeconfig, is not checked line by line, and what you type is not recorded.", self.pod, self.namespace)
+    }
+}
+
 /// A size that fits: 1 to [`PTY_MAX_COLS`] by 1 to [`PTY_MAX_ROWS`].
 pub fn check_size(cols: usize, rows: usize) -> Result<(), String> {
     if (1..=PTY_MAX_COLS).contains(&cols) && (1..=PTY_MAX_ROWS).contains(&rows) {
@@ -268,6 +341,12 @@ pub trait Terminal: Send + Sync {
         Err(NO_TERMINAL.into())
     }
     fn pty_close(&self, _user: &str, _session: &str) {}
+
+    /// Ask for a whole session whose program is `kubectl exec -it` into a pod ([`PtyExec`]). Like [`Terminal::pty_open`]: nothing runs, the answer carries
+    /// the question (naming the pod), and the session waits for [`Terminal::pty_decide`]; the rest of the calls are the same.
+    fn pty_open_exec(&self, _user: &str, _app: &str, _cols: usize, _rows: usize, _exec: &PtyExec) -> Result<PtyOpen, String> {
+        Err(NO_TERMINAL.into())
+    }
 }
 
 pub struct NoTerminal;
@@ -292,5 +371,22 @@ mod tests {
         assert!(cut && t.len() <= MAX_OUTPUT && t.is_char_boundary(t.len()));
         assert_eq!(cap_output("short"), ("short".to_string(), false));
         assert!(NoTerminal.open("u", "a").unwrap_err().contains("no terminal"));
+    }
+
+    fn exec() -> PtyExec {
+        PtyExec { kubeconfig: "/k/c.yaml".into(), context: "dev".into(), namespace: "shop".into(), pod: "web-7d9.abc".into(), container: "app".into(), shell: String::new() }
+    }
+
+    #[test]
+    fn a_pod_session_is_a_checked_kubectl_exec_and_the_question_names_the_pod() {
+        assert_eq!(exec().argv().unwrap(), ["--kubeconfig=/k/c.yaml", "--context=dev", "exec", "-it", "--namespace=shop", "web-7d9.abc", "-c", "app", "--", "sh"]);
+        let bare = PtyExec { kubeconfig: String::new(), context: String::new(), container: String::new(), shell: "bash".into(), ..exec() };
+        assert_eq!(bare.argv().unwrap(), ["exec", "-it", "--namespace=shop", "web-7d9.abc", "--", "bash"]);
+        let q = exec().question();
+        assert!(q.contains("web-7d9.abc") && q.contains("namespace shop") && q.contains("container app") && q.contains("cluster dev") && q.contains("not recorded"), "{q}");
+        for bad in [PtyExec { namespace: "Shop".into(), ..exec() }, PtyExec { pod: "a b".into(), ..exec() }, PtyExec { pod: "-x".into(), ..exec() }, PtyExec { pod: "a;rm".into(), ..exec() }, PtyExec { container: "A".into(), ..exec() }, PtyExec { context: "--insecure".into(), ..exec() }, PtyExec { kubeconfig: "a\nb".into(), ..exec() }, PtyExec { shell: "rm -rf /".into(), ..exec() }, PtyExec { namespace: String::new(), ..exec() }] {
+            assert!(bad.argv().is_err(), "{bad:?}");
+        }
+        assert!(NoTerminal.pty_open_exec("u", "a", 80, 24, &exec()).unwrap_err().contains("no terminal"));
     }
 }

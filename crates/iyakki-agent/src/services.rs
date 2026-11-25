@@ -254,6 +254,7 @@ impl Services {
             }
         });
         let t_build = t0.elapsed();
+        crate::sessionend_hooks::register(&svc, iyakki_shared::sessionend::global());
         svc.wire_agent_installs();
         svc.unlock_with_keyfile();
         let t_unlock = t0.elapsed();
@@ -1411,6 +1412,12 @@ impl Services {
             *slot = Some(Arc::new(crate::cloudvoice::CloudListener::start(&format!("{}:{port}", if port == 0 { "127.0.0.1" } else { "0.0.0.0" }), if port == 0 { "" } else { adv }, &crate::devname::label(self.dir()), on)?));
         }
         slot.as_ref().map(|l| l.offer()).unwrap_or_else(|| Err("not listening".into()))
+    }
+
+    /// The end of a session (sign-out, lock, suspend): the cloud audio listener stops taking the device's microphone. True when one listened.
+    pub fn end_cloud_voice(&self) -> bool {
+        let l = self.cloud_voice.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        l.map(|l| l.end()).is_some()
     }
 
     /// The listener of a cloud session, when one was started by an offer and the switch is on.

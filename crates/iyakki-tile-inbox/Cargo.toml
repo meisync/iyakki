@@ -1,0 +1,19 @@
+[package]
+name = "iyakki-tile-inbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The INBOX tile (notifications, tasks, approvals). Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit`,
+# `iyakki-tile-api` and the model crates named in tests/data/tile_crate_deps.allow, never on the agent or the shared crate; its tests run against a
+# fake `InboxPort`. The shell adapter is `crates/iyakki-apps/src/apps/inbox.rs`, the real port `inbox_port.rs`.
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-tile-api = { path = "../iyakki-tile-api" }
+iyakki-inbox-model = { workspace = true }
+iyakki-clock = { workspace = true }
+tiny-skia = "0.11"
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

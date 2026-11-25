@@ -40,6 +40,7 @@ pub mod startupdisk;
 pub mod braille_link;
 pub mod btaudio;
 pub mod outputstate;
+pub mod portforward;
 pub mod screenfacts;
 pub mod starters;
 pub mod starters_launch;
@@ -86,6 +87,7 @@ pub use drivers::LocalDrivers;
 pub use startupdisk::LocalStartupDisk;
 pub use btaudio::LocalBtAudio;
 pub use screenfacts::LocalScreenFacts;
+pub use portforward::LocalPortForwards;
 pub use audioroute::LocalAudioRoute;
 pub use installer::LocalInstaller;
 pub use disktools::LocalDiskTools;
@@ -232,6 +234,10 @@ impl Os for LocalOs {
     }
     fn router(&self) -> std::sync::Arc<dyn iyakki_core_api::router::Router> {
         std::sync::Arc::new(LocalRouter)
+    }
+    fn port_forwards(&self) -> std::sync::Arc<dyn iyakki_core_api::portforward::PortForwards> {
+        // a made-up machine has no cluster to reach: the real list is only on this computer
+        if self.proc == Path::new("/proc") { LocalPortForwards::shared() } else { std::sync::Arc::new(iyakki_core_api::portforward::NoPortForwards) }
     }
     fn fleet(&self) -> std::sync::Arc<dyn iyakki_core_api::fleet::Fleet> {
         std::sync::Arc::new(LocalFleet)

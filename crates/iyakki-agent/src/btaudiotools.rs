@@ -283,6 +283,10 @@ pub fn do_remote_with(svc: &crate::services::Services, player: &crate::media::Me
 /// While somebody is signed in, the keys of a connected phone or headset act on the player and the volume (the phone's remote channel is
 /// answered at all times; without a session nothing is changed). `audit` gets one line per key that did something.
 pub fn install_remote(svc: &std::sync::Arc<crate::services::Services>, user: &str, audit: impl Fn(&str, &str) + Send + Sync + 'static) {
+    let audit = std::sync::Arc::new(audit);
+    crate::btroute::global().on_lost("radio", route_lost_pauser(svc, user, audit.clone()));
+    crate::btroute::global().on_lost("video-tile", crate::routepause::pauser(crate::routepause::global(), user, audit.clone()));
+    crate::btroute::global().on_lost("media-player", media_route_lost_pauser(&crate::media::shared(), user, audit.clone()));
     let (weak, user) = (std::sync::Arc::downgrade(svc), user.to_string());
     iyakki_core_local::devctl::a2dp_sys::set_remote_handler(move |act| {
         if let Some(s) = weak.upgrade() {
@@ -294,8 +298,37 @@ pub fn install_remote(svc: &std::sync::Arc<crate::services::Services>, user: &st
     });
 }
 
+/// What pauses the radio (and the music the radio plays) when the Bluetooth headphones leave (F-LIFE-14): playback does not move to the
+/// room speakers. One audit line when something was paused.
+pub fn route_lost_pauser(svc: &std::sync::Arc<crate::services::Services>, user: &str, audit: std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>) -> crate::btroute::Pauser {
+    let (weak, user) = (std::sync::Arc::downgrade(svc), user.to_string());
+    std::sync::Arc::new(move || {
+        let did = weak.upgrade().is_some_and(|s| s.radio.pause());
+        if did {
+            audit(&user, "bluetooth.route_lost paused the radio");
+        }
+        did
+    })
+}
+
+/// What stops the external music player when the Bluetooth headphones leave (F-LIFE-14): the program cannot be paused, so it is stopped and
+/// its queue and place are kept (press play to carry on on the speakers). One audit line when something was stopped.
+pub fn media_route_lost_pauser(player: &std::sync::Arc<crate::media::MediaPlayer>, user: &str, audit: std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>) -> crate::btroute::Pauser {
+    let (player, user) = (player.clone(), user.to_string());
+    std::sync::Arc::new(move || {
+        let did = player.pause_for_route_lost();
+        if did {
+            audit(&user, "bluetooth.route_lost stopped the music player (the queue is kept)");
+        }
+        did
+    })
+}
+
 /// Sign-out: the keys change nothing until somebody signs in again.
 pub fn clear_remote() {
+    crate::btroute::global().forget_pauser("radio");
+    crate::btroute::global().forget_pauser("video-tile");
+    crate::btroute::global().forget_pauser("media-player");
     iyakki_core_local::devctl::a2dp_sys::clear_remote_handler();
 }
 

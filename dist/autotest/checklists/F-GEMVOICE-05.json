@@ -1,0 +1,93 @@
+{
+ "schema": 1,
+ "row": "F-GEMVOICE-05",
+ "feature_sha": "6bd4b4315d128b68",
+ "title": "Gemini voice limits: session, quiet time, daily cap, fallback (manual until automated)",
+ "clauses": [
+  {
+   "id": "defaults-shown",
+   "text": "The session length (default 600 seconds), the quiet time (30 seconds) and the daily microphone cap (1800 seconds) are set and shown.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Gemini voice (experimental) and read the values and the status row.",
+     "expect": "They show the defaults: session length 600 seconds, closing after 30 seconds of quiet, and a daily microphone cap of 1800 seconds with a meter for the day."
+    }
+   ]
+  },
+  {
+   "id": "idle-close",
+   "text": "An open session closes after 30 seconds of quiet.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "With the yes given and a session open, stay quiet for 30 seconds.",
+     "expect": "The session closes and the red band goes out."
+    }
+   ]
+  },
+  {
+   "id": "hard-stop",
+   "text": "Stop now ends every open session at once.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Start a session, then press x (Stop now) on the page.",
+     "expect": "The session ends and the microphone closes at once. Nothing more is sent."
+    }
+   ]
+  },
+  {
+   "id": "google-limit",
+   "text": "When Google's limit is reached, the message says plainly that the free limit is reached.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Only if Google's limit is reached during use, read the message on the page. If it never happens, mark this clause cannot-test.",
+     "expect": "The message says plainly that the free limit is reached."
+    }
+   ]
+  },
+  {
+   "id": "fallback",
+   "text": "With no key, no yes, no network or a refusal, the local voice answers and a one-line reason is given.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "With the yes not given, ask the voice assistant a question.",
+     "expect": "The local voice answers, and a one-line reason for not using Gemini is shown."
+    }
+   ]
+  }
+ ]
+}

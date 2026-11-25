@@ -1,14 +1,14 @@
 # Risky flaky-test patterns allowed per crate (the ratchet test flaky_pattern_ratchet): `crate category count`. Numbers only shrink: after a fix run
 # python3 dist/scripts/flaky-patterns.py --write-ratchet. See docs/development/FLAKY-TESTS.md.
 iyakki-agent sleep 138
-iyakki-agent elapsed 60
+iyakki-agent elapsed 59
 iyakki-agent port 9
 iyakki-agent env 6
 iyakki-agent static 32
 iyakki-agent tmpname 1
 iyakki-agent stubsleep 18
 iyakki-agent attempts 15
-iyakki-apps sleep 140
+iyakki-apps sleep 138
 iyakki-apps elapsed 9
 iyakki-apps port 2
 iyakki-apps static 15
@@ -41,6 +41,7 @@ iyakki-flow sleep 2
 iyakki-flow elapsed 3
 iyakki-fw sleep 6
 iyakki-js sleep 1
+iyakki-k8s-model sleep 6
 iyakki-link elapsed 1
 iyakki-link port 1
 iyakki-macrecovery elapsed 2
@@ -60,10 +61,10 @@ iyakki-remote static 3
 iyakki-remote stubsleep 1
 iyakki-rfb sleep 1
 iyakki-sdk-tile static 1
-iyakki-shared sleep 13
+iyakki-shared sleep 7
 iyakki-shared elapsed 1
 iyakki-shared port 1
-iyakki-shell sleep 29
+iyakki-shell sleep 28
 iyakki-shell elapsed 4
 iyakki-shell static 11
 iyakki-shell stubsleep 1

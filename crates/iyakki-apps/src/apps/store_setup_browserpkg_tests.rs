@@ -3,6 +3,7 @@
 //! starts, and nothing is started until the confirm button. Fakes only: no store, no download.
 use iyakki_agent::facets_h::RealServices as _;
 use super::*;
+use crate::apps::store_port::CxPort;
 use iyakki_agent::quickinstall as qi;
 use crate::apps::store::{Section, StoreApp};
 use crate::apps::{App, AppCx};
@@ -17,10 +18,10 @@ fn rig(tag: &str, role: Role) -> (StoreApp, AppCx) {
     let mut a = StoreApp::new(&cx);
     a.setup.set_machine(Machine { ram_mb: 16_000, ..Default::default() });
     a.setup.set_facts(f);
-    a.setup.launch = Some(qi::Launch { exe: "/usr/bin/true".into(), data: cx.data_dir().join("qi") });
+    a.setup.launch = Some(iyakki_tile_api::store_qi::Launch { exe: "/usr/bin/true".into(), data: cx.data_dir().join("qi") });
     a.handle(&Event::Tab(4), &cx);
     assert!(a.section == Section::Setup);
-    a.setup.enter(&cx);
+    a.setup.enter(&CxPort(&cx));
     (a, cx)
 }
 
@@ -41,6 +42,7 @@ fn install_shows_the_card_first_and_nothing_starts_before_the_confirm_button() {
 
 #[test]
 fn the_item_has_a_name_an_id_a_licence_line_and_belongs_to_a_group() {
+    crate::apps::store_port::install_table();
     let i = Item::BrowserPackage;
     assert_eq!(Item::parse("browser-package"), Some(i));
     assert!(!i.title().is_empty() && !i.licence().is_empty() && !i.about().is_empty());
@@ -76,7 +78,7 @@ fn the_card_shows_the_version_and_size_read_from_the_pinned_store_off_the_screen
     // the card opens at once with the reading line; the screen is not held by the network
     assert_eq!(a.setup.confirm.as_ref().unwrap().review[0], PKG_CARD_READING);
     while a.setup.confirm.as_ref().unwrap().review[0] == PKG_CARD_READING {
-        a.setup.tick(&cx);
+        a.setup.tick(&CxPort(&cx));
         std::thread::yield_now();
     }
     let first = a.setup.confirm.as_ref().unwrap().review[0].clone();
@@ -89,7 +91,7 @@ fn the_card_shows_the_version_and_size_read_from_the_pinned_store_off_the_screen
     a.setup.open_popup(Item::BrowserPackage);
     a.handle(&Event::Tab(PRIMARY + idx), &cx);
     while a.setup.confirm.as_ref().unwrap().review[0] == PKG_CARD_READING {
-        a.setup.tick(&cx);
+        a.setup.tick(&CxPort(&cx));
         std::thread::yield_now();
     }
     let first = a.setup.confirm.as_ref().unwrap().review[0].clone();

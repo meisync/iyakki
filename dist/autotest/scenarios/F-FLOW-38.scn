@@ -1,0 +1,18 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 82b9464364479d9c; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-FLOW-38
+targets: qemu
+profile: ram
+feature-sha: 82b9464364479d9c
+doc: Settings, Models shows the Vision model line (read only)
+clause: 1 Settings, Models shows the Vision model line that says where pictures shown to a model go
+not-covered: the resolver order (the step's own model, the Settings choice, the chat model if it can see, one picked from the providers)
+not-covered: a flow step that shows a picture and the camera pre-flight
+key s
+wait app=Settings
+skip-unless-button Models
+click-sidebar Models
+wait app=Settings page="Models"
+shot page
+expect-not-blank
+expect-text Vision model
+expect-page Models

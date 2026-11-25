@@ -12,6 +12,8 @@ struct State {
     users: Vec<(u32, String)>,
     calls: Vec<String>,
     signout: Option<String>,
+    /// What `after_unplug` says once (a drive pulled out while it was open).
+    unplug: Option<String>,
     /// The key that opens each encrypted partition (`set_key`).
     keys: Vec<(String, String)>,
     programs: Option<String>,
@@ -43,6 +45,10 @@ impl FakeDiskEngine {
     /// What `at_sign_out` says.
     pub fn set_signout(&self, s: Option<String>) {
         self.state.lock().unwrap().signout = s;
+    }
+    /// What the next `after_unplug` says (once).
+    pub fn set_unplug(&self, s: Option<String>) {
+        self.state.lock().unwrap().unplug = s;
     }
     /// The key that opens the encrypted partition `part` (any other key is a wrong key).
     pub fn set_key(&self, part: &str, key: &str) {
@@ -153,6 +159,14 @@ impl DiskEngine for FakeDiskEngine {
         let d = s.snap.disks.remove(i);
         audit("disks.eject", &d.audit_id());
         Ok(format!("{} can be taken out.", d.title()))
+    }
+    fn after_unplug(&self, who: &Actor, audit: AuditFn) -> Option<String> {
+        self.rec(format!("after_unplug({})", who.user));
+        let s = self.state.lock().unwrap().unplug.take();
+        if s.is_some() {
+            audit("disks.unplugged", &format!("user={}", who.user));
+        }
+        s
     }
     fn at_sign_out(&self, who: &Actor, audit: AuditFn) -> Option<String> {
         self.rec(format!("at_sign_out({})", who.user));

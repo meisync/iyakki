@@ -357,7 +357,7 @@ impl StoryReader for crate::storykit::Reader {
 
 impl StoryFacet for RealB1 {
     fn new_reader(&self) -> Arc<dyn StoryReader> {
-        Arc::new(crate::storykit::Reader::new())
+        Arc::new(crate::storykit::shared_readers().reader())
     }
 }
 

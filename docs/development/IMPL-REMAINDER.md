@@ -58,7 +58,7 @@ Items with no decision id yet that an owner has to supply (a new id will be writ
 | Item | Ask | Rows |
 |---|---|---|
 | Relay service | Address (and TLS certificate) of your relay for the machine's outgoing connection; KI-725 | F-CORE-33 (+15), F-FLEET-10 (+10) |
-| Official store | Root key (made offline, two copies), run `iyakki pkg root-pin`, host the folder, set `OFFICIAL_STORE_URL` (empty in `iyakki-shared/src/store_catalog.rs`), review first Verified publishers | F-APPSTORE-14 (+15) |
+| Official store | Root key (made offline, two copies), run `iyakki pkg root-pin`, host the folder, set `OFFICIAL_STORE_URL` (empty in `iyakki-store-model/src/store_catalog.rs`), review first Verified publishers | F-APPSTORE-14 (+15) |
 | Payment provider | Choose from docs/STORE.md section 10 | F-APPSTORE-13 (+8) |
 | Update channel | Official release key and channel address for update bundles | F-UPD-01 (+10) |
 | Google AI key | One real key for a single call (KI-460) | F-ASSIST-52 (+30), F-GEMVOICE-08 |

@@ -74,8 +74,7 @@ fn rand_bytes<const N: usize>() -> Result<[u8; N], VaultError> {
 }
 
 pub fn valid_secret_name(n: &str) -> bool {
-    let mut c = n.chars();
-    c.next().is_some_and(|f| f.is_ascii_lowercase() || f.is_ascii_digit()) && n.len() <= 64 && c.all(|x| x.is_ascii_lowercase() || x.is_ascii_digit() || matches!(x, '.' | '_' | '-'))
+    iyakki_cluster_model::ids::valid_secret_name(n)
 }
 
 #[derive(Serialize, Deserialize, Clone)]

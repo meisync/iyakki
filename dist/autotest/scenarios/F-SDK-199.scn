@@ -1,0 +1,12 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 3397d6d376175662; honest subset only: everything not checked is under not-covered.
+row: F-SDK-199
+targets: qemu
+profile: ram
+feature-sha: 3397d6d376175662
+doc: a setting changed through dev config shows in SAMPLE's settings line
+clause: 1 settings.changed reaches the app after a setting is changed through dev config
+not-covered: flows.run finished or failed for each person who listens
+not-covered: app.installed for installed, updated and removed apps
+not-covered: updates.changed applied for an applied update
+not-covered: the dotted name only, never the value (not read)
+session-check: app_events_flow_and_settings

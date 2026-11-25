@@ -250,42 +250,7 @@ pub trait FlowsFacet: Send + Sync {
 
 impl FlowsFacet for NoS6B {}
 
-/// The voice desk over the person's settings and providers: the voices to read with, the engine that listens, where text and sound go,
-/// and the reading itself.
-pub trait VoiceDeskFacet: Send + Sync {
-    /// The reading voices that can be used now.
-    fn read_voices(&self) -> Vec<iyakki_shared::voicedesk::ReadVoice> {
-        Vec::new()
-    }
-    /// The engine that turns the microphone's sound into text (None: none is set).
-    fn stt_engine(&self) -> Option<iyakki_shared::voice::SpeechEngine> {
-        None
-    }
-    /// The line that says where the text or sound goes.
-    fn where_text(&self, _engine: &iyakki_shared::voice::SpeechEngine, _what: &str) -> String {
-        String::new()
-    }
-    /// The card shown before text or sound goes to a machine the person has not agreed to yet (None: nothing to ask).
-    fn consent_text(&self, _engine: &iyakki_shared::voice::SpeechEngine, _listening: bool) -> Option<(iyakki_shared::voicedesk::Dest, String)> {
-        None
-    }
-    /// Sound to text with the engine.
-    fn transcribe(&self, _engine: &iyakki_shared::voice::SpeechEngine, _pcm: &[i16]) -> Result<String, String> {
-        Err("unavailable: this core does not serve this call".into())
-    }
-    /// The pieces to read: one per sentence.
-    fn pieces(&self, _text: &str) -> Vec<iyakki_shared::story::Chunk> {
-        Vec::new()
-    }
-    /// Plays the sound of the pieces with the play command (a child process per piece).
-    fn command_sink(&self, _play_cmd: String) -> Option<Arc<dyn iyakki_shared::story::Sink>> {
-        None
-    }
-    /// Makes the sound of one piece with the chosen voice and speed.
-    fn choice_synth(&self, _engine: iyakki_shared::voice::SpeechEngine, _opts: iyakki_shared::voice::SpeakOpts) -> Option<Arc<dyn iyakki_shared::story::Synth>> {
-        None
-    }
-}
+pub use iyakki_shared::facets::VoiceDeskFacet;
 
 impl VoiceDeskFacet for NoS6B {}
 

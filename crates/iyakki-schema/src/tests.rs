@@ -237,3 +237,46 @@ fn a_plain_file_a_newer_release_reshaped_is_left_alone_not_set_aside() {
     assert_eq!(read_plain::<Vec<String>>("radio stations", &p, 10), None);
     assert!(d.join("stations.json.corrupt-10").exists());
 }
+
+#[test]
+fn leftover_temp_files_of_dead_processes_are_swept_and_everything_else_is_kept() {
+    let d = std::env::temp_dir().join(format!("iyakki-sweep-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(d.join("runs/r1")).unwrap();
+    for f in ["settings.json", "settings.json.tmp4242-0", "settings.json.tmp77-3", "runs/r1/run.json.tmp4242-9", "runs/r1/run.json", "notes.tmpfile", "x.tmp12-"] {
+        fs::write(d.join(f), "x").unwrap();
+    }
+    assert_eq!(stale_tmp_pid("a.json.tmp4242-17"), Some(4242));
+    assert_eq!(stale_tmp_pid("a.json.tmp-1"), None);
+    assert_eq!(stale_tmp_pid("a.tmpfile"), None);
+    let mut gone: Vec<String> = sweep_stale_tmp(&d, 3, &|pid| pid == 77).iter().map(|p| p.strip_prefix(&d).unwrap().display().to_string()).collect();
+    gone.sort();
+    assert_eq!(gone, ["runs/r1/run.json.tmp4242-9", "settings.json.tmp4242-0"], "pid 77 is alive: its file is its own");
+    assert!(d.join("settings.json").exists() && d.join("settings.json.tmp77-3").exists() && d.join("notes.tmpfile").exists() && d.join("runs/r1/run.json").exists());
+    let none: Vec<_> = sweep_stale_tmp(&d, 0, &|_| false);
+    assert_eq!(none.len(), 1, "depth 0 looks only at the top folder (the pid 77 file)");
+    let _ = fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_write_that_cannot_finish_leaves_the_old_content_and_no_temp_file_whoever_runs_the_test() {
+    // not permission based (root ignores modes): the rename onto a folder fails after the temp file was written
+    let d = std::env::temp_dir().join(format!("iyakki-atomic-fail-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(d.join("blocked/inside")).unwrap();
+    let err = write_atomic(&d.join("blocked"), b"new", 0o600).unwrap_err();
+    assert!(err.contains("blocked"), "{err}");
+    assert!(d.join("blocked/inside").is_dir(), "what was there is untouched");
+    let names: Vec<String> = fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, ["blocked"], "no temp file is left beside it: {names:?}");
+    // a good write replaces by a new file: a hard link to the old one still holds the old bytes
+    let f = d.join("state.json");
+    write_atomic(&f, b"old", 0o640).unwrap();
+    fs::hard_link(&f, d.join("old-link")).unwrap();
+    write_atomic(&f, b"newer", 0o600).unwrap();
+    assert_eq!(fs::read(d.join("old-link")).unwrap(), b"old");
+    assert_eq!(fs::read(&f).unwrap(), b"newer");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o640, "an existing file keeps its mode");
+    let _ = fs::remove_dir_all(&d);
+}

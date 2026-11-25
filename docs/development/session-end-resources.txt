@@ -1,0 +1,51 @@
+# Every non-test `pub struct` named *Player, *Reader, *Recorder, *Listener, *Capture or *Speaker (and the plural Players/Recorders) and what a sign-out does to it
+# (D-SESSION-END; the ratchet is crates/iyakki-core/tests/session_end_registered.rs; the table with the reasons is docs/development/SESSION-END-AUDIT.md).
+# Format: path name status [note]. Status is one of:
+#   registered:<hook>  a hook of that name ends it (hooks live in iyakki-agent/src/sessionend_hooks.rs, iyakki-shell/src/soundowner.rs, iyakki-shell/src/shell_wake.rs)
+#   drop-stops         it ends when its owner (an app or a session object) is dropped, which sign-out does
+#   continue           it continues on purpose (the person set it up to run on its own)
+#   not-per-person     a parser, a null object, an infrastructure listener or a test helper: no person's session owns it
+#   open               not stopped by sign-out yet: listed in the audit, lane SO2 or later. The count may only fall: see `# open-max`.
+# open-max 0
+crates/iyakki-agent-api/src/facets_b1.rs NoSpeaker not-per-person null object
+crates/iyakki-agent/src/camrec.rs Recorder continue recordings the person scheduled
+crates/iyakki-agent/src/cloudlisten.rs Listener continue the domain listener of Settings -> Domains: a machine service the administrator set up that serves their domains for other people; it is not the signed-in person's session
+crates/iyakki-agent/src/cloudlisten_vault.rs Reader not-per-person reads a stored list
+crates/iyakki-agent/src/cloudvoice.rs CloudListener registered:cloud-audio-listener cloud audio stream listener, ends at sign-out, lock and suspend
+crates/iyakki-agent/src/cloudvoice.rs CloudSpeaker registered:cloud-speaker cloud session's mouth
+crates/iyakki-agent/src/hls.rs HlsReader registered:radio
+crates/iyakki-agent/src/media.rs MediaPlayer registered:media-player
+crates/iyakki-agent/src/player.rs Player drop-stops video playback of the MEDIA app, decoders stop on drop
+crates/iyakki-agent/src/radio.rs IcyReader registered:radio
+crates/iyakki-agent/src/radio.rs RadioPlayer registered:radio
+crates/iyakki-agent/src/routepause.rs Players drop-stops weak references to the video tile's players, kept only so that the headphones leaving pause them (F-LIFE-14); it owns nothing, a player ends when its app is dropped (player.rs Player)
+crates/iyakki-agent/src/router.rs GatedListener not-per-person model router gate
+crates/iyakki-agent/src/store/sdkv2_listen_real.rs RecorderCapture registered:voice-recorders SDK listen capture, its microphone is a voice::Recorder
+crates/iyakki-agent/src/storykit.rs Reader registered:story-readers
+crates/iyakki-agent/src/story.rs Reader not-per-person older duplicate used by tests only
+crates/iyakki-agent/src/voiceassist_ports.rs SystemSpeaker registered:voice-assistant-speaker voice assistant speaker thread
+crates/iyakki-agent/src/voicedesk.rs SystemPlayers registered:voice-players voice desk, its players are voice::Player
+crates/iyakki-agent/src/voicedesk.rs SystemRecorders registered:voice-recorders voice desk, dictation and the voice recorder, their microphone is a voice::Recorder
+crates/iyakki-agent/src/voice.rs Player registered:voice-players speaker child process
+crates/iyakki-agent/src/voice.rs Recorder registered:voice-recorders microphone child process
+crates/iyakki-agent/src/wakelisten.rs Listener registered:wake-listener
+crates/iyakki-agent/src/webservice/runs.rs RunReader not-per-person
+crates/iyakki-apps/src/camera/browsercam.rs BrowserCapture registered:browser-capture browser session's camera
+crates/iyakki-apps/src/camera/v4l2.rs V4l2Capture registered:camera-device the CAMERA tile's device, cut even when the tile is alive
+crates/iyakki-apps/src/lib.rs NoPlayers not-per-person null object
+crates/iyakki-apps/src/lib.rs NoRecorders not-per-person null object
+crates/iyakki-audiolink/src/device.rs AnswerPlayer not-per-person a buffer of received frames with no thread and no device; the program that plays it (iyakki-connect) runs on the person's own computer, outside this machine's sessions, and its sound goes through the person's own system
+crates/iyakki-core/src/bootprefetch.rs Recorder not-per-person boot read recorder
+crates/iyakki-devctl/src/bthid_sys.rs Listener not-per-person system service
+crates/iyakki-drivers/src/run.rs Recorder not-per-person
+crates/iyakki-link/src/cloudclient.rs FrameReader not-per-person parser
+crates/iyakki-remote/src/relay.rs LazyListener not-per-person relay infrastructure
+crates/iyakki-remote/src/relay.rs OwnListener not-per-person relay infrastructure
+crates/iyakki-rtsp/src/msg.rs Reader not-per-person parser
+crates/iyakki-shared/src/browsersource.rs BrowserRecorders registered:browser-capture browser session's microphone
+crates/iyakki-shared/src/screencap.rs ScreenCapture registered:screen-grant
+crates/iyakki-sshfs/src/sshkey.rs Reader not-per-person parser
+crates/iyakki-tile-abi/src/codec.rs Reader not-per-person parser
+crates/iyakki-uikit/src/access.rs Reader not-per-person parser
+
+crates/iyakki-story-model/src/reading_api.rs NoReader not-per-person null object

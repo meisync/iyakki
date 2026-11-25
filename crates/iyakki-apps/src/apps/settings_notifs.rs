@@ -6,86 +6,85 @@
 use iyakki_shared::inbox::Level;
 
 use super::*;
+use super::system_port::NotifsPort;
 
 impl SettingsApp {
     /// `v`: switch the one-sentence description of camera alerts (the picture then goes to the chat model); asks nothing here because the
     /// switch is the person's own and says where the picture goes, the same as `camera_vision_set` (which asks a card in the chat).
-    pub(super) fn camera_vision_toggle(&mut self, cx: &AppCx) {
-        let user = &cx.session.user;
-        let on = !iyakki_shared::camvision::Setting::load(cx.data_dir(), user).on;
-        match (iyakki_shared::camvision::Setting { on }).save(cx.data_dir(), user) {
+    pub(super) fn camera_vision_toggle(&mut self, p: &dyn NotifsPort) {
+        let on = !p.camvision_on();
+        match p.camvision_set(on) {
             Ok(()) => {
-                cx.audit.record(user, "settings.cameras.vision", if on { "on" } else { "off" });
+                p.audit("settings.cameras.vision", if on { "on" } else { "off" });
                 self.ok(if on { "Camera alerts are now described: the picture of each single motion event goes to your chat model." } else { "Camera alerts are no longer described; no picture goes to a model." }.to_string());
             }
             Err(e) => self.fail(e),
         }
     }
 
-    fn notif_rows(cx: &AppCx) -> Vec<(String, String)> {
-        cx.inbox().sources(&cx.session.user)
+    fn notif_rows(p: &dyn NotifsPort) -> Vec<(String, String)> {
+        p.notif_sources()
     }
 
-    pub(super) fn notif_len(cx: &AppCx) -> usize {
-        Self::notif_rows(cx).len()
+    pub(super) fn notif_len(p: &dyn NotifsPort) -> usize {
+        Self::notif_rows(p).len()
     }
 
     pub(super) fn notifs_buttons(&self) -> Vec<Btn> {
         vec![("Show", OK, 's'), ("Quiet (panel only)", ACCENT, 'q'), ("Off", ERR, 'o'), ("Next level", TEXT, 'e'), ("Matrix account...", ACCENT, 'a'), ("Test message", TEXT, 't'), ("Copy messages to INBOX", TEXT, 'm'), ("Room in or out of the copy", TEXT, 'r'), ("Remove Matrix account", ERR, 'x')]
     }
 
-    pub(super) fn handle_notifs(&mut self, k: &Key, cx: &AppCx) {
-        let rows = Self::notif_rows(cx);
+    pub(super) fn handle_notifs(&mut self, k: &Key, p: &dyn NotifsPort) {
+        let rows = Self::notif_rows(p);
         match k {
             Key::Up => self.move_sel(-1, rows.len()),
             Key::Down => self.move_sel(1, rows.len()),
-            Key::Char('v') => self.camera_vision_toggle(cx),
+            Key::Char('v') => self.camera_vision_toggle(p),
             Key::Char('a') => self.matrix_open_form(""),
-            Key::Char('t') => self.matrix_test_send(cx),
-            Key::Char('m') => self.matrix_mirror_toggle(cx),
-            Key::Char('r') => self.matrix_room_toggle(cx),
-            Key::Char('x') => self.matrix_remove(cx),
-            Key::Char('s') => self.notif_set(self.sel(), Some(Level::Show), cx),
-            Key::Char('q') => self.notif_set(self.sel(), Some(Level::Quiet), cx),
-            Key::Char('o') => self.notif_set(self.sel(), Some(Level::Off), cx),
-            Key::Enter | Key::Char(' ' | 'e') | Key::Right => self.notif_set(self.sel(), None, cx),
+            Key::Char('t') => self.matrix_test_send(p),
+            Key::Char('m') => self.matrix_mirror_toggle(p),
+            Key::Char('r') => self.matrix_room_toggle(p),
+            Key::Char('x') => self.matrix_remove(p),
+            Key::Char('s') => self.notif_set(self.sel(), Some(Level::Show), p),
+            Key::Char('q') => self.notif_set(self.sel(), Some(Level::Quiet), p),
+            Key::Char('o') => self.notif_set(self.sel(), Some(Level::Off), p),
+            Key::Enter | Key::Char(' ' | 'e') | Key::Right => self.notif_set(self.sel(), None, p),
             _ => {}
         }
     }
 
     /// A chip on a row: `s`, `q` or `o`.
-    pub(super) fn notif_sub(&mut self, row: usize, c: char, cx: &AppCx) {
+    pub(super) fn notif_sub(&mut self, row: usize, c: char, p: &dyn NotifsPort) {
         let level = match c {
             's' => Some(Level::Show),
             'q' => Some(Level::Quiet),
             'o' => Some(Level::Off),
             _ => None,
         };
-        self.notif_set(row, level, cx);
+        self.notif_set(row, level, p);
     }
 
     /// `None`: the next level.
-    fn notif_set(&mut self, row: usize, level: Option<Level>, cx: &AppCx) {
-        let rows = Self::notif_rows(cx);
+    fn notif_set(&mut self, row: usize, level: Option<Level>, p: &dyn NotifsPort) {
+        let rows = Self::notif_rows(p);
         let Some((src, label)) = rows.get(row).cloned() else { return };
         self.sel[self.tab] = row;
-        let (_svc, user) = (Self::svc(cx), &cx.session.user);
-        let level = level.unwrap_or_else(|| cx.inbox().level(user, &src).next());
-        match cx.inbox().set_level(user, &src, level) {
+        let level = level.unwrap_or_else(|| p.notif_level(&src).next());
+        match p.notif_set_level(&src, level) {
             Ok(()) => {
-                cx.audit.record(user, "settings.notifications", &format!("{src} {}", level.name()));
+                p.audit("settings.notifications", &format!("{src} {}", level.name()));
                 self.ok(format!("{label}: {}.", level.label()));
             }
             Err(e) => self.fail(e),
         }
     }
 
-    pub(super) fn render_notifs(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let rows = Self::notif_rows(cx);
-        let levels = cx.inbox().levels(&cx.session.user);
+    pub(super) fn render_notifs(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn NotifsPort) {
+        let rows = Self::notif_rows(p);
+        let levels = p.notif_levels();
         let sel = self.sel().min(rows.len().saturating_sub(1));
         let row_h = 44.0 * s;
-        let reach = Self::matrix_reach_line(cx);
+        let reach = Self::matrix_reach_line(p);
         let reach_lines = g.wrap(12.5 * s, &reach, Face::Sans, a.w);
         let reach_h = reach_lines.iter().take(2).count() as f32 * 16.0 * s + 8.0 * s;
         let cam_h = 80.0 * s;
@@ -129,7 +128,7 @@ impl SettingsApp {
             y += row_h;
         }
         // the camera alert descriptions: one switch row between the list and the lines below (F-CAM-18)
-        let cam_on = iyakki_shared::camvision::Setting::load(cx.data_dir(), &cx.session.user).on;
+        let cam_on = p.camvision_on();
         let cam_y = (a.y + rows.len().saturating_sub(start).min(room) as f32 * row_h).max(low);
         controls::switch_row(g, R::new(a.x, cam_y, a.w, cam_h - 4.0 * s), s, "Describe camera alerts", "The picture of a single motion event goes to your chat model, which adds one sentence to the notice.", cam_on, true, Event::Key(Key::Char('v')), ACCENT);
         // the lines under the list start below the last row, and only as many as the page has room for are drawn (a small window or a large

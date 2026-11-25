@@ -1,0 +1,24 @@
+{
+ "schema": 1,
+ "row": "F-PWR-01",
+ "feature_sha": "eeb6790bb114b7da",
+ "title": "the Power page of Settings offers the three power profiles and the sle",
+ "clauses": [
+  {
+   "id": "sleep-wake",
+   "text": "the Power page of Settings offers the three power profiles and the sleep switch (read only)",
+   "machines": [
+    "macbook-pro",
+    "lenovo",
+    "hp"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Power. Set Sleep after idle to a short time, leave the machine idle, then press a key.",
+     "expect": "The machine sleeps and wakes with the session intact; the chosen profile is still shown.",
+     "runner_did": "Checked the page text first (when run through the runner)"
+    }
+   ]
+  }
+ ]
+}

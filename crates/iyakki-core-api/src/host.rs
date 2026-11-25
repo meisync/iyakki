@@ -55,3 +55,70 @@ pub trait HostApi: Send + Sync {
     /// Suspend the machine. Returns after it wakes. The caller locks the session first.
     fn sleep(&self) {}
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iyakki_sec::policy::Role;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// A host that only says what it can do: it counts the runs it is asked for and leaves every default alone.
+    #[derive(Default)]
+    struct Stub {
+        runs: AtomicUsize,
+    }
+
+    impl HostApi for Stub {
+        fn detect_env(&self) -> String {
+            String::new()
+        }
+        fn net_status(&self) -> String {
+            String::new()
+        }
+        fn run_wasm(&self, _user: &str, _policy: &Policy, _wasm: &[u8], _entry: &str) -> Result<String, String> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            Ok("ran".into())
+        }
+        fn power_off(&self) {}
+        fn reboot(&self) {}
+    }
+
+    #[test]
+    fn a_stop_flag_already_set_refuses_the_run_before_the_module_starts() {
+        let stub = Stub::default();
+        let io = WasmIo { stdin: vec![], cancel: Arc::new(AtomicBool::new(true)) };
+        let policy = Role::User.template();
+        let r = stub.run_wasm_io("amy", &policy, b"\0asm", "main", &io);
+        assert_eq!(r, Err("stopped before it started".to_string()));
+        assert_eq!(stub.runs.load(Ordering::SeqCst), 0, "the module never ran");
+    }
+
+    #[test]
+    fn with_the_stop_flag_clear_the_run_is_handed_to_run_wasm_and_its_answer_comes_back() {
+        let stub = Stub::default();
+        let io = WasmIo { stdin: vec![1, 2, 3], cancel: Arc::new(AtomicBool::new(false)) };
+        let policy = Role::Guest.template();
+        assert_eq!(stub.run_wasm_io("amy", &policy, b"\0asm", "main", &io), Ok("ran".to_string()));
+        assert_eq!(stub.runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_stop_flag_set_by_the_default_io_is_seen_by_every_copy_of_the_handle() {
+        let io = WasmIo::default();
+        let other = io.cancel.clone();
+        assert!(!other.load(Ordering::SeqCst), "a new run is not stopped");
+        io.cancel.store(true, Ordering::SeqCst);
+        assert!(other.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_host_that_does_not_say_otherwise_can_power_off_lists_no_tasks_and_cannot_sleep() {
+        let stub = Stub::default();
+        assert!(stub.can_power());
+        assert!(!stub.can_sleep());
+        assert!(stub.wasm_tasks().is_empty());
+        stub.sleep();
+        assert_eq!(stub.runs.load(Ordering::SeqCst), 0, "sleep runs no module");
+    }
+}

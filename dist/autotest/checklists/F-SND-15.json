@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-SND-15",
+  "feature_sha": "36415d2ed42edd53",
+  "title": "browser sound through the mixer (experimental switch)",
+  "clauses": [
+    {
+      "id": "radio-video",
+      "text": "Radio and a web video play together through the mixer, and lip-sync looks right",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "Turn on Browser sound through the mixer (experimental) in Settings, Sound (key W). Play the radio and a TikTok video together.",
+          "expect": "Both are heard without a break. The lips of the video look in step with the sound, not clearly ahead or behind."
+        }
+      ]
+    }
+  ]
+}

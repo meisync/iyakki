@@ -1,0 +1,18 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 4083f6d76cf01547; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-VAULT-08
+targets: qemu
+profile: ram
+feature-sha: 4083f6d76cf01547
+doc: Settings, Browser shows the Protect browser data line (read only)
+clause: 1 Settings, Browser shows the line Protect browser data with its state
+not-covered: the lock-screen option that seals and removes the decrypted profile when the screen locks
+not-covered: opening it again at unlock
+key s
+wait app=Settings
+skip-unless-button Browser
+click-sidebar Browser
+wait app=Settings page="Browser"
+shot page
+expect-not-blank
+expect-text Protect browser data
+expect-page Browser

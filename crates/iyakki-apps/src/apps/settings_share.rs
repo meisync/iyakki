@@ -9,6 +9,7 @@
 
 use crate::safeclamp::SafeClamp;
 use super::*;
+use crate::apps::settings::network_port::NetworkSettingsPort;
 use iyakki_shared::sharing::control::{self, Backend};
 use iyakki_shared::sharing::plan::{apply_policy, make_plan};
 use iyakki_shared::sharing::policy::Who;
@@ -80,14 +81,14 @@ impl Backend for NotServedBackend {
 }
 
 impl SharePanel {
-    fn backend(&mut self, cx: &AppCx) -> Arc<dyn Backend> {
-        self.backend.get_or_insert_with(|| crate::agent().host_probe().sharing_backend(cx.data_dir()).unwrap_or_else(|| Arc::new(NotServedBackend))).clone()
+    fn backend(&mut self, p: &dyn NetworkSettingsPort) -> Arc<dyn Backend> {
+        self.backend.get_or_insert_with(|| crate::agent().host_probe().sharing_backend(p.data_root()).unwrap_or_else(|| Arc::new(NotServedBackend))).clone()
     }
 
-    fn look(&mut self, cx: &AppCx) -> (Vec<IfaceInfo>, bool, Status) {
+    fn look(&mut self, p: &dyn NetworkSettingsPort) -> (Vec<IfaceInfo>, bool, Status) {
         let fresh = self.seen.as_ref().is_some_and(|(t, ..)| t.elapsed().as_millis() < self.ttl_ms);
         if !fresh {
-            let b = self.backend(cx);
+            let b = self.backend(p);
             let wifi = b.wifi_ap();
             self.wifi_why = if wifi { None } else { b.wifi_ap_why() };
             self.nap_why = b.nap_why();
@@ -97,13 +98,13 @@ impl SharePanel {
         (i, w, s)
     }
 
-    pub(super) fn choices(&mut self, cx: &AppCx) -> Choices {
-        let (i, w, _) = self.look(cx);
+    pub(super) fn choices(&mut self, p: &dyn NetworkSettingsPort) -> Choices {
+        let (i, w, _) = self.look(p);
         choices_full(&i, w, self.wifi_why.as_deref(), self.nap_why.as_deref())
     }
 
-    pub(super) fn status(&mut self, cx: &AppCx) -> Status {
-        self.look(cx).2
+    pub(super) fn status(&mut self, p: &dyn NetworkSettingsPort) -> Status {
+        self.look(p).2
     }
 
     fn forget(&mut self) {
@@ -118,28 +119,28 @@ impl SharePanel {
 
 impl SettingsApp {
     /// The form of key n: a new hotspot name and, when typed, a new password. The password is never audited or shown again here.
-    pub(super) fn hotspot_wifi_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
-        if !self.admin(cx) {
+    pub(super) fn hotspot_wifi_submit(&mut self, p: &dyn NetworkSettingsPort, form: &Form) -> Result<String, String> {
+        if !self.admin(p) {
             return Err("Only administrators can change the hotspot.".into());
         }
-        let b = self.share.backend(cx);
+        let b = self.share.backend(p);
         let (old_ssid, old_pass) = b.hotspot().ok_or("The hotspot's name and password cannot be read on this computer.")?;
         let ssid = form.value(0).trim().to_string();
         let typed = form.raw(1);
         let pass = if typed.is_empty() { old_pass } else { typed };
         b.set_hotspot(&ssid, &pass)?;
-        cx.audit.record(&cx.session.user, "settings.share.wifi", &format!("name {old_ssid} -> {ssid}; password {}", if form.raw(1).is_empty() { "kept" } else { "changed" }));
+        p.audit("settings.share.wifi", &format!("name {old_ssid} -> {ssid}; password {}", if form.raw(1).is_empty() { "kept" } else { "changed" }));
         self.share.forget();
         Ok("Saved. The new Wi-Fi name and password apply the next time sharing starts.".into())
     }
 
-    pub(super) fn hotspot_country_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
-        if !self.admin(cx) {
+    pub(super) fn hotspot_country_submit(&mut self, p: &dyn NetworkSettingsPort, form: &Form) -> Result<String, String> {
+        if !self.admin(p) {
             return Err("Only administrators can change the hotspot.".into());
         }
         let c = form.value(0).trim().to_ascii_uppercase();
-        self.share.backend(cx).set_hotspot_country(&c)?;
-        cx.audit.record(&cx.session.user, "settings.share.country", if c.is_empty() { "none" } else { &c });
+        self.share.backend(p).set_hotspot_country(&c)?;
+        p.audit("settings.share.country", if c.is_empty() { "none" } else { &c });
         Ok(if c.is_empty() { "Saved. The hotspot uses the card's own rules.".into() } else { format!("Saved. The hotspot asks the radio for the rules of {c} the next time sharing starts.") })
     }
 
@@ -162,12 +163,12 @@ impl SettingsApp {
         self.share.armed = false;
     }
 
-    pub(super) fn share_open(&mut self, cx: &AppCx) {
+    pub(super) fn share_open(&mut self, p: &dyn NetworkSettingsPort) {
         self.share.open = true;
         self.share.armed = false;
         self.share.forget();
-        let b = self.share.backend(cx);
-        self.share.can_start = b.policy().may_start_any(cx.session.policy.manage_settings);
+        let b = self.share.backend(p);
+        self.share.can_start = b.policy().may_start_any(p.is_admin());
         let req = b.request();
         if req.on {
             self.share.hours = req.idle_hours;
@@ -177,20 +178,20 @@ impl SettingsApp {
     }
 
     /// Start or stop. The first key press of Start explains and asks again; a click or tap starts at once.
-    pub(super) fn share_toggle(&mut self, cx: &AppCx) {
-        let is_admin = cx.session.policy.manage_settings;
-        let b = self.share.backend(cx);
+    pub(super) fn share_toggle(&mut self, p: &dyn NetworkSettingsPort) {
+        let is_admin = p.is_admin();
+        let b = self.share.backend(p);
         let st = b.status();
         let prev = b.request();
         let policy = b.policy();
         if st.state == State::On || prev.on && st.state != State::Failed && st.request_id != prev.id {
-            if !is_admin && prev.by != cx.session.user {
+            if !is_admin && prev.by != p.acting_user() {
                 return self.fail("Only an administrator or the person who started sharing can stop it.");
             }
-            let r = control::stop_request(&prev, &cx.session.user);
+            let r = control::stop_request(&prev, p.acting_user());
             match b.submit(&r) {
                 Ok(()) => {
-                    cx.audit.record(&cx.session.user, "settings.share", "stop");
+                    p.audit("settings.share", "stop");
                     self.share.forget();
                     self.share.armed = false;
                     self.ok("Sharing is being switched off.");
@@ -202,7 +203,7 @@ impl SettingsApp {
         if !policy.may_start_any(is_admin) {
             return self.fail(policy.may_start(iyakki_shared::sharing::LinkKind::Ethernet, is_admin).err().map(|e| e.line()).unwrap_or_else(|| iyakki_shared::sharing::policy::BLOCKED_LINE.into()));
         }
-        let c = self.share.choices(cx);
+        let c = self.share.choices(p);
         self.share.clamp(&c);
         if !c.uplinks.iter().any(|u| u.usable) {
             return self.fail(iyakki_shared::sharing::ShareError::NoDefaultRoute.line());
@@ -219,8 +220,8 @@ impl SettingsApp {
         if !down.usable {
             return self.fail(format!("{} cannot be used: {}.", down.name, down.why));
         }
-        let r = control::start_request(&prev, Some(up.name.clone()), Some(down.name.clone()), self.share.hours, self.share.isolate, self.share.allow_lan, &cx.session.user, is_admin);
-        let (ifs, ap, _) = self.share.look(cx);
+        let r = control::start_request(&prev, Some(up.name.clone()), Some(down.name.clone()), self.share.hours, self.share.isolate, self.share.allow_lan, p.acting_user(), is_admin);
+        let (ifs, ap, _) = self.share.look(p);
         if let Err(e) = make_plan(&ifs, &r, ap, &[]).and_then(|mut p| apply_policy(&mut p, &policy, &r)) {
             self.share.armed = false;
             return self.fail(e.line());
@@ -234,7 +235,7 @@ impl SettingsApp {
         self.share.armed = false;
         match b.submit(&r) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.share", &format!("start {} -> {}, isolation {}, {} h", up.name, down.name, if r.isolate { "on" } else { "off" }, r.idle_hours));
+                p.audit("settings.share", &format!("start {} -> {}, isolation {}, {} h", up.name, down.name, if r.isolate { "on" } else { "off" }, r.idle_hours));
                 self.share.forget();
                 self.ok(format!("Starting to share {} through {}. The list of devices fills in as they connect.", up.name, down.name));
             }
@@ -242,8 +243,8 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn handle_share(&mut self, k: &Key, cx: &AppCx) {
-        let c = self.share.choices(cx);
+    pub(super) fn handle_share(&mut self, k: &Key, p: &dyn NetworkSettingsPort) {
+        let c = self.share.choices(p);
         self.share.clamp(&c);
         let was_armed = self.share.armed;
         match k {
@@ -262,12 +263,12 @@ impl SettingsApp {
             Key::PageUp => self.share.scroll = (self.share.scroll - 300.0).max(0.0),
             Key::PageDown => self.share.scroll = (self.share.scroll + 300.0).min(self.share.max),
             Key::Char('s') | Key::Enter => {
-                self.share_toggle(cx);
+                self.share_toggle(p);
                 return;
             }
             Key::Char('w') => {
-                if self.admin(cx) {
-                    let b = self.share.backend(cx);
+                if self.admin(p) {
+                    let b = self.share.backend(p);
                     let next = match b.hotspot_band().as_str() {
                         "auto" => "2.4",
                         "2.4" => "5",
@@ -280,8 +281,8 @@ impl SettingsApp {
                 }
             }
             Key::Char('e') => {
-                if self.admin(cx) {
-                    let b = self.share.backend(cx);
+                if self.admin(p) {
+                    let b = self.share.backend(p);
                     let next = match b.hotspot_security().as_str() {
                         "wpa2" => "transition",
                         "transition" => "wpa3",
@@ -289,7 +290,7 @@ impl SettingsApp {
                     };
                     match b.set_hotspot_security(next) {
                         Ok(()) => {
-                            cx.audit.record(&cx.session.user, "settings.share.security", next);
+                            p.audit("settings.share.security", next);
                             self.ok(format!("Hotspot security: {}. It applies the next time sharing starts; a card that cannot do WPA3 itself keeps WPA2.", hotspot_security_text(next)));
                         }
                         Err(e) => self.fail(e),
@@ -297,8 +298,8 @@ impl SettingsApp {
                 }
             }
             Key::Char('c') => {
-                if self.admin(cx) {
-                    let now = self.share.backend(cx).hotspot_country();
+                if self.admin(p) {
+                    let now = self.share.backend(p).hotspot_country();
                     let f = Form::new("Hotspot country")
                         .with_note("The country sets the Wi-Fi channels and power the law allows there, and unlocks 5 GHz channels on many cards. Leave empty to use the card's own rules.")
                         .text("Country code", &now, "two capital letters, for example DE or US");
@@ -306,8 +307,8 @@ impl SettingsApp {
                 }
             }
             Key::Char('n') => {
-                if self.admin(cx) {
-                    let (ssid, _) = self.share.backend(cx).hotspot().unwrap_or_default();
+                if self.admin(p) {
+                    let (ssid, _) = self.share.backend(p).hotspot().unwrap_or_default();
                     let f = Form::new("Wi-Fi hotspot name and password")
                         .with_note("Phones and laptops join this network. The change applies the next time sharing starts; a running hotspot keeps its old name and password until then.")
                         .text("Network name", &ssid, "1 to 32 characters")
@@ -316,18 +317,18 @@ impl SettingsApp {
                 }
             }
             Key::Char('p') => {
-                if self.admin(cx) {
-                    let b = self.share.backend(cx);
-                    let mut p = b.policy();
-                    p.wired = match p.wired {
+                if self.admin(p) {
+                    let b = self.share.backend(p);
+                    let mut pol = b.policy();
+                    pol.wired = match pol.wired {
                         Who::Admins => Who::Users,
                         Who::Users => Who::Nobody,
                         Who::Nobody => Who::Admins,
                     };
-                    let w = p.wired.word();
-                    match b.set_policy(&p, &cx.session.user, true) {
+                    let w = pol.wired.word();
+                    match b.set_policy(&pol, p.acting_user(), true) {
                         Ok(line) => {
-                            cx.audit.record(&cx.session.user, "settings.share.policy", &line);
+                            p.audit("settings.share.policy", &line);
                             self.share.forget();
                             self.share.can_start = true;
                             self.ok(format!("Wired and USB sharing may now be started by: {w}. A running session that this no longer allows stops within seconds."));
@@ -337,24 +338,24 @@ impl SettingsApp {
                 }
             }
             Key::Char('+') | Key::Char('=') => {
-                if self.admin(cx) {
+                if self.admin(p) {
                     self.share.hours = (self.share.hours + 1).min(MAX_IDLE_HOURS);
                 }
             }
             Key::Char('-') => {
-                if self.admin(cx) {
+                if self.admin(p) {
                     self.share.hours = self.share.hours.saturating_sub(1).max(1);
                 }
             }
             Key::Char('o') => {
-                if self.admin(cx) {
+                if self.admin(p) {
                     self.share.isolate = !self.share.isolate;
                     let m = if self.share.isolate { "Devices on the cable cannot reach each other." } else { "Devices on the cable can now reach each other (takes effect at the next start)." };
                     self.ok(m);
                 }
             }
             Key::Char('l') => {
-                if self.admin(cx) {
+                if self.admin(p) {
                     self.share.allow_lan = !self.share.allow_lan;
                     let m = if self.share.allow_lan { "Devices may reach this computer's local network (takes effect at the next start)." } else { "Devices cannot reach this computer's local network." };
                     self.ok(m);
@@ -367,13 +368,13 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn render_share(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let c = self.share.choices(cx);
+    pub(super) fn render_share(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn NetworkSettingsPort) {
+        let c = self.share.choices(p);
         self.share.clamp(&c);
-        let st = self.share.status(cx);
+        let st = self.share.status(p);
         let on = st.state == State::On;
-        let admin = cx.session.policy.manage_settings;
-        let policy = self.share.backend(cx).policy();
+        let admin = p.is_admin();
+        let policy = self.share.backend(p).policy();
         self.share.can_start = policy.may_start_any(admin);
         let mut lines: Vec<(String, f32, [u8; 4], Face)> = Vec::new();
         // lines that can be clicked or touched: the choices of the two lists (the keys u/d and Up/Down do the same)
@@ -417,7 +418,7 @@ impl SettingsApp {
         }
         let mut qr_at: Option<(usize, iyakki_qr::qr::Qr)> = None;
         if admin && c.downs.get(self.share.down_sel).is_some_and(|d| d.name == iyakki_shared::wifi_ap::AP_IFACE) {
-            if let Some((ssid, pass)) = self.share.backend(cx).hotspot() {
+            if let Some((ssid, pass)) = self.share.backend(p).hotspot() {
                 if let Some(q) = iyakki_qr::qr::encode(iyakki_qr::qr::wifi_payload(&ssid, &pass).as_bytes()) {
                     qr_at = Some((lines.len() + 3, q));
                 }
@@ -425,7 +426,7 @@ impl SettingsApp {
                 line_hits.insert(lines.len(), Event::Key(Key::Char('n')));
                 lines.push((format!("Network name: {ssid}   (n or a click changes the name and password)"), 13.0, TEXT, Face::Mono));
                 lines.push((format!("Password: {pass}"), 13.0, TEXT, Face::Mono));
-                let band = match self.share.backend(cx).hotspot_band().as_str() {
+                let band = match self.share.backend(p).hotspot_band().as_str() {
                     "2.4" => "2.4 GHz (longer range)",
                     "5" => "5 GHz (faster)",
                     _ => "Auto (the band of this computer's own Wi-Fi)",
@@ -436,10 +437,10 @@ impl SettingsApp {
                 line_hits.insert(lines.len(), Event::Key(Key::Char('w')));
                 lines.push((format!("Band: {band}  (w or a click changes it; takes effect when sharing starts)"), 13.0, TEXT, Face::Sans));
                 line_hits.insert(lines.len(), Event::Key(Key::Char('c')));
-                let country = self.share.backend(cx).hotspot_country();
+                let country = self.share.backend(p).hotspot_country();
                 lines.push((format!("Country: {}  (c or a click changes it; takes effect when sharing starts)", if country.is_empty() { "the card's own rules".to_string() } else { country }), 13.0, TEXT, Face::Sans));
                 line_hits.insert(lines.len(), Event::Key(Key::Char('e')));
-                lines.push((format!("Security: {}  (e or a click changes it; a card that cannot do WPA3 itself keeps WPA2)", hotspot_security_text(&self.share.backend(cx).hotspot_security())), 13.0, TEXT, Face::Sans));
+                lines.push((format!("Security: {}  (e or a click changes it; a card that cannot do WPA3 itself keeps WPA2)", hotspot_security_text(&self.share.backend(p).hotspot_security())), 13.0, TEXT, Face::Sans));
                 lines.push(("It uses this computer's own Wi-Fi card next to its connection to your router. The internet comes from the source above; devices that join get the same protection as on a cable (isolated from each other unless you turn that off). Change the name or password with n (or: iyakki share wifi-set NAME PASSWORD).".into(), 12.0, DIM, Face::Sans));
             }
         }

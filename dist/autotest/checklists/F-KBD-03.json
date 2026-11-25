@@ -1,0 +1,51 @@
+{
+ "schema": 1,
+ "row": "F-KBD-03",
+ "feature_sha": "2bf6fef158b68ab3",
+ "title": "brightness keys and the keyboard light key",
+ "clauses": [
+  {
+   "id": "brightness",
+   "text": "the brightness keys change the panel in small even steps and never go fully dark",
+   "machines": [
+    "macbook-pro",
+    "lenovo",
+    "hp"
+   ],
+   "steps": [
+    {
+     "do": "Press the brightness-down key until it stops, then press brightness-up.",
+     "expect": "Each press is one visible step, and the screen never goes black at the bottom."
+    }
+   ]
+  },
+  {
+   "id": "kbd-light",
+   "text": "the keyboard light key turns the light off and on again, and the toggle remembers",
+   "machines": [
+    "macbook-pro",
+    "lenovo",
+    "hp"
+   ],
+   "steps": [
+    {
+     "do": "On a keyboard with a keyboard light, press the keyboard light key, then press it again.",
+     "expect": "The keyboard light goes off on the first press and comes on again on the second."
+    }
+   ]
+  },
+  {
+   "id": "no-control",
+   "text": "a display with no brightness control says so instead of dimming in software",
+   "machines": [
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "On the Mac mini, with the external monitor only, press the brightness keys.",
+     "expect": "The message 'No brightness control on this display' is shown and the picture is not dimmed."
+    }
+   ]
+  }
+ ]
+}

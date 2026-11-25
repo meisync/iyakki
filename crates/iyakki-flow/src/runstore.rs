@@ -89,11 +89,9 @@ impl RunStore {
     pub fn save(&self, run: &Run) -> Result<(), String> {
         let dir = self.dir(&run.id).ok_or("bad run id")?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let tmp = dir.join(format!("run.json.tmp{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+        // written, flushed and renamed (a power cut leaves the old run.json or the new one, never an empty file)
         let text = serde_json::to_string(run).map_err(|e| e.to_string())?;
-        std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, dir.join("run.json")).map_err(|e| e.to_string())
+        iyakki_schema::write_atomic(&dir.join("run.json"), text.as_bytes(), 0o600)
     }
 
     pub fn load(&self, id: &str) -> Option<Run> {
@@ -175,6 +173,31 @@ mod tests {
         s.append_log("../evil", "x");
         assert!(!d.join("evil").exists() && !d.join("runs/../evil").exists());
         assert!(s.load("../x").is_none());
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_run_is_saved_whole_and_a_failed_save_leaves_the_old_one_and_no_temp_file() {
+        let d = tmp("atomic");
+        let s = RunStore::new(&d);
+        let mut f = Flow::new("f", "f");
+        f.nodes.push(Node::new("s", "start", serde_json::json!({})));
+        let mut r = crate::graph::test_run(f);
+        r.id = "r9".into();
+        s.save(&r).unwrap();
+        assert!(s.load("r9").is_some());
+        // the run folder is made read-only: the save fails, the saved run stays readable, nothing is left beside it
+        use std::os::unix::fs::PermissionsExt;
+        let dir = d.join("runs/r9");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let writable = std::fs::File::create(dir.join("probe")).is_ok(); // root ignores the mode
+        if !writable {
+            r.ended_ms = 5;
+            assert!(s.save(&r).is_err());
+            assert_eq!(s.load("r9").unwrap().ended_ms, 0, "the old run.json is intact");
+            assert!(std::fs::read_dir(&dir).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains(".tmp")));
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         let _ = std::fs::remove_dir_all(d);
     }
 

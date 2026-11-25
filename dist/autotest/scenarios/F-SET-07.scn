@@ -1,0 +1,18 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha e6ef5035b7f65825; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-SET-07
+targets: qemu
+profile: ram
+feature-sha: e6ef5035b7f65825
+doc: Settings, Network, Share internet shows the two lists to choose from (read only)
+clause: 1 Settings, Network, key i shows the two lists, where the internet comes from and Share it through
+not-covered: a click or a touch on a row of either list
+not-covered: the row height for a finger
+key s
+wait app=Settings
+skip-unless-button Network
+click-sidebar Network
+wait app=Settings page="Network"
+key i
+shot page
+expect-not-blank
+expect-text Share it through

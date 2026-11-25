@@ -35,7 +35,7 @@ fn the_status_is_free_the_switch_asks_and_it_needs_developer_mode_to_be_active()
     let log = Arc::new(Mutex::new(Vec::new()));
     let l2 = log.clone();
     let env = Env { dir, user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| l2.lock().unwrap().push(format!("{a} {d}"))) };
-    let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+    let t = SettingsTools::new(Arc::new(NoTools), true, entries(&crate::apps::chat_port::CxChat(&cx), &env));
     let defs = t.defs();
     let risk = |n: &str| defs.iter().find(|d| d.spec.name == n).unwrap_or_else(|| panic!("{n}")).risk;
     assert_eq!((risk("session_resume_status"), risk("session_resume_set")), (Risk::Safe, Risk::Ask));

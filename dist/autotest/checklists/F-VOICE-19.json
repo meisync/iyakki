@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-19",
+  "feature_sha": "fa36c003ff70c3d0",
+  "title": "system sounds feel right",
+  "clauses": [
+    {
+      "id": "cues-feel",
+      "text": "The sign-in, sign-out, notification and job-done cues sound soft and pleasant",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "Settings, System sounds (administrator): press Preview on each cue.",
+          "expect": "Login is two soft rising notes and logout two soft falling notes. All cues are soft and pleasant, not harsh, and not loud next to the radio. Say which cue you dislike, if any."
+        },
+        {
+          "do": "Sign out, then sign in again with your password (you type the password).",
+          "expect": "The login sound plays after sign-in. The logout sound is heard and sign-out is not held up."
+        }
+      ]
+    }
+  ]
+}

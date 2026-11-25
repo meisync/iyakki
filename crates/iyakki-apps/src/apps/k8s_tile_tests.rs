@@ -2,11 +2,13 @@
 //! `FakeKube`, the managed cluster's state is a value the test sets, and the audit log is a temp file.
 
 use super::*;
+use iyakki_k8s_model::k8sexp::Action;
+use iyakki_tile_k8s::tile::clock;
 use crate::apps::tests::cx_with_admin_store;
 use crate::gfx::{rgb, Gfx};
 use crate::ui::{Event, Key, R};
-use iyakki_shared::k8s::FakeKube;
-use iyakki_shared::k8sexp::{Kind, Scope};
+use iyakki_k8s_model::k8s::FakeKube;
+use iyakki_k8s_model::k8sexp::{Kind, Scope};
 use iyakki_sec::policy::{Policy, Role};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -133,6 +135,7 @@ fn rig_for(kube: Arc<FakeKube>, managed: Arc<Mutex<Managed>>, starts: Arc<Atomic
             starts.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }),
+        local_kubeconfig: Arc::new(|dir, e| iyakki_shared::clusters::ClusterEntryExt::kubeconfig_for(e, dir)),
     }
 }
 
@@ -212,7 +215,7 @@ impl Fx {
         self.code(T_RES_ROW + i);
         self.wait("the details", |f| f.app.det.obj.ready().is_some());
     }
-    fn rows(&mut self) -> Vec<iyakki_shared::k8sexp::Row> {
+    fn rows(&mut self) -> Vec<iyakki_k8s_model::k8sexp::Row> {
         let l = self.app.listing();
         match l {
             Some(l) => self.app.order().to_vec().iter().map(|&i| l.rows[i].clone()).collect(),
@@ -267,7 +270,7 @@ fn a_stopped_cluster_says_so_with_a_start_button_that_starts_it() {
     f.wait("the message", |f| f.app.status.as_ref().is_some_and(|s| s.0.contains("Starting the dev cluster")));
     // up: the tile fills in by itself
     *f.managed.lock().unwrap() = Managed::Running;
-    f.wait("the list after the cluster came up", |f| f.app.listing().is_some_and(|l| l.cluster == iyakki_shared::k8s::Cluster::Ok));
+    f.wait("the list after the cluster came up", |f| f.app.listing().is_some_and(|l| l.cluster == iyakki_k8s_model::k8s::Cluster::Ok));
     assert!(!f.has_hit("Start"));
 }
 
@@ -420,7 +423,7 @@ fn every_kind_has_a_table_with_the_right_columns() {
         f.wait(kind.label(), |f| f.app.listing().is_some());
         let rows = f.rows();
         assert!(!rows.is_empty(), "{kind:?}");
-        let cols = iyakki_shared::k8sexp::columns(kind, false);
+        let cols = iyakki_k8s_model::k8sexp::columns(kind, false);
         assert_eq!(rows[0].cells.len(), cols.len(), "{kind:?}");
         // the list and the drawing agree: the header of every shown column is clickable for sorting
         assert!(f.has_hit("Name") || kind == Kind::Events, "{kind:?}: {:?}", f.g.hits.iter().map(|h| h.label.clone()).collect::<Vec<_>>());
@@ -451,7 +454,7 @@ fn the_header_counts_pods_and_the_ones_not_ready() {
     f.app.choose_scope(Scope::Ns("shop".into()));
     f.list_loaded();
     let l = f.app.listing().unwrap();
-    let line = iyakki_shared::k8sexp::count_line(Kind::Pods, &l.rows, l.total);
+    let line = iyakki_k8s_model::k8sexp::count_line(Kind::Pods, &l.rows, l.total);
     assert_eq!(line, "6 pods \u{b7} 4 not ready");
 }
 
@@ -487,10 +490,10 @@ fn a_huge_list_shows_the_first_five_hundred_rows_and_says_how_many_more() {
     f.kube.answer("-n shop get pods -o json", &list(items));
     f.app.choose_scope(Scope::Ns("shop".into()));
     f.wait("the big list", |f| f.app.listing().is_some_and(|l| l.total == 3000));
-    assert_eq!(f.app.shown_rows(), iyakki_shared::k8sexp::MAX_SHOWN);
+    assert_eq!(f.app.shown_rows(), iyakki_k8s_model::k8sexp::MAX_SHOWN);
     assert_eq!(f.app.order().len(), 3000, "the filter and the order cover everything that is kept");
     f.press(Key::End);
-    assert_eq!(f.app.res.sel, iyakki_shared::k8sexp::MAX_SHOWN - 1, "the cursor stops at the last row shown");
+    assert_eq!(f.app.res.sel, iyakki_k8s_model::k8sexp::MAX_SHOWN - 1, "the cursor stops at the last row shown");
     f.key('/');
     for c in "p0299".chars() {
         f.key(c);
@@ -541,10 +544,10 @@ fn secret_values_never_appear_until_they_are_revealed_after_asking() {
         }
     }
     f.key('y');
-    assert!(f.view_text().contains(iyakki_shared::k8sexp::MASK), "{}", f.view_text());
+    assert!(f.view_text().contains(iyakki_k8s_model::k8sexp::MASK), "{}", f.view_text());
     // copy while masked
     f.key('c');
-    assert!(f.clipboard().contains(iyakki_shared::k8sexp::MASK) && !f.clipboard().contains("hunter2"));
+    assert!(f.clipboard().contains(iyakki_k8s_model::k8sexp::MASK) && !f.clipboard().contains("hunter2"));
     // the rendered hits, status and audit never hold a value either
     assert!(!f.audit_text().contains("hunter2"));
     // reveal asks first
@@ -644,8 +647,8 @@ fn follow_mode_adds_only_new_lines_and_stays_inside_the_buffer() {
     f.kube.answer("logs web-crash", &flood);
     f.click("Resume");
     f.app.det.logs.polled = Some(Instant::now() - Duration::from_secs(5));
-    f.wait("the flood", |f| f.app.det.logs.buf.lines.len() >= iyakki_shared::k8sexp::LOG_CAP);
-    assert_eq!(f.app.det.logs.buf.lines.len(), iyakki_shared::k8sexp::LOG_CAP, "bounded at 5000 lines");
+    f.wait("the flood", |f| f.app.det.logs.buf.lines.len() >= iyakki_k8s_model::k8sexp::LOG_CAP);
+    assert_eq!(f.app.det.logs.buf.lines.len(), iyakki_k8s_model::k8sexp::LOG_CAP, "bounded at 5000 lines");
     assert!(f.app.det.logs.buf.dropped > 0);
 }
 
@@ -1233,7 +1236,7 @@ fn a_production_looking_cluster_stays_read_only_in_the_tile_whatever_the_switche
 
 // ------------------------------------------------------------------------------------------------ transient failures
 
-use iyakki_shared::k8sretry::{FakeTimer, Retry, QUICK_RETRY_MS};
+use iyakki_k8s_model::k8sretry::{FakeTimer, Retry, QUICK_RETRY_MS};
 
 /// A tile whose feed runs on a fake clock: waits between retries cost nothing and the test moves time.
 fn flaky() -> (Fx, Arc<FakeTimer>) {
@@ -1275,7 +1278,7 @@ fn a_transient_failure_keeps_the_list_on_screen_with_a_dim_updating_line() {
     assert!(line.contains("Updating") && line.contains("the cluster did not answer, retrying") && line.contains("s old"), "{line}");
     // the table is still there and no banner replaced it
     assert_eq!(f.rows().len(), rows);
-    assert!(f.app.listing().is_some_and(|l| l.cluster == iyakki_shared::k8s::Cluster::Ok));
+    assert!(f.app.listing().is_some_and(|l| l.cluster == iyakki_k8s_model::k8s::Cluster::Ok));
     assert!(f.app.state_text().0 == "Reading from the cluster\u{2026}", "no banner: {:?}", f.app.state_text().0);
     assert!(f.has_hit("Refresh"));
 }
@@ -1308,7 +1311,7 @@ fn after_the_window_the_banner_says_when_it_last_worked_and_the_log_has_the_erro
     // the cluster comes back: the banner goes away by itself
     works_again(&f);
     more_fetches(&mut f, &t, 1);
-    f.wait("the data", |f| f.app.state_text().0 == "Reading from the cluster\u{2026}" && f.app.listing().is_some_and(|l| l.cluster == iyakki_shared::k8s::Cluster::Ok));
+    f.wait("the data", |f| f.app.state_text().0 == "Reading from the cluster\u{2026}" && f.app.listing().is_some_and(|l| l.cluster == iyakki_k8s_model::k8s::Cluster::Ok));
     assert!(f.app.stale_text().is_none() && !f.rows().is_empty());
 }
 

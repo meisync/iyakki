@@ -3,15 +3,29 @@
 //! push is looked at as the plan the jobs would carry out. The audit log is a temp file.
 
 use super::*;
+use crate::apps::Flow;
+#[allow(unused_imports)]
+use {
+    iyakki_git_model::gitbrowse::{self as gb, BrowseErr, Browser, Egress, LocalClone, LocalRepo, Page, RepoItem},
+    iyakki_git_model::gitconn::{self, Conns, Connection, GitHttp, Placement},
+    iyakki_git_model::gitjobs::{self, CloneSpec, ItemState, Op, Phase, RepoStatus, Tools},
+    iyakki_git_model::keys::Who,
+    iyakki_k8s_model::k8sretry::{background_delay, SystemTimer, Timer, Tracker},
+    iyakki_k8s_model::wsexec::Runner,
+    iyakki_uikit::tilekit::{Job, ListState},
+    std::collections::{HashMap, VecDeque},
+    std::path::PathBuf,
+    std::sync::Arc,
+};
 use crate::apps::git_tile_repo::{Shown, Tab};
 use crate::apps::git_tile_ui::{FIRST_RUN_HINT, FIRST_RUN_TITLE};
 use crate::apps::tests::cx_with_admin_store;
 use crate::gfx::{rgb, Gfx};
 use crate::ui::{Event, Key, R};
-use iyakki_shared::gitbrowse::EntryKind;
-use iyakki_shared::gitconn::{FakeGitHttp, Kind, NetErr, Req, Resp};
-use iyakki_shared::k8sretry::FakeTimer;
-use iyakki_shared::wsexec::FakeRunner;
+use iyakki_git_model::gitbrowse::EntryKind;
+use iyakki_git_model::gitconn::{FakeGitHttp, Kind, NetErr, Req, Resp};
+use iyakki_k8s_model::k8sretry::FakeTimer;
+use iyakki_k8s_model::wsexec::FakeRunner;
 use iyakki_sec::policy::{Policy, Role};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -578,7 +592,8 @@ fn nothing_is_asked_while_the_tile_is_not_on_screen() {
     let c = f.conn(Kind::Gitea, "Home", "https://git.example.org");
     let w = f.wall();
     f.net.set(gitea_host(w));
-    f.app.select_source(f.app.srcs.iter().position(|s| s.key() == c.id).unwrap());
+    let at = f.app.srcs.iter().position(|s| s.key() == c.id).unwrap();
+    f.app.select_source(at);
     // never drawn: heartbeats alone ask nothing
     for _ in 0..20 {
         f.app.handle(&Event::Tick, &f.cx);
@@ -921,7 +936,7 @@ fn a_connection_that_signs_in_with_ssh_copies_the_ssh_address() {
     f.wait("list", |f| f.app.board().loaded);
     f.key('y');
     assert_eq!(f.clipboard(), "git@git.example.org:dev/tools.git", "the first row by update time");
-    assert_eq!(GitApp::clone_url(&c, "dev/tools"), "git@git.example.org:dev/tools.git");
+    assert_eq!(iyakki_tile_git::GitApp::clone_url(&c, "dev/tools"), "git@git.example.org:dev/tools.git");
 }
 
 #[test]
@@ -1094,7 +1109,7 @@ fn clone_shows_a_review_first_and_then_plans_the_clone_into_the_repositories_fol
     let run = f.app.run.as_ref().expect("the clone is planned");
     let it = &run.batch.items()[0];
     assert_eq!((it.op, it.url.url.as_str(), it.folder.as_str(), it.state.clone()), (Op::Clone, "https://git.example.org/ops/infra.git", "infra", ItemState::Queued));
-    assert_eq!(it.url.url, GitApp::clone_url(&c, "ops/infra"));
+    assert_eq!(it.url.url, iyakki_tile_git::GitApp::clone_url(&c, "ops/infra"));
     assert!(f.root.join(".iyakki/project.json").is_file(), "the folder is set up as the jobs expect");
     assert!(f.audit_text().contains("git.clone.start"), "{}", f.audit_text());
     assert!(!f.audit_text().contains(TOK));
@@ -1385,7 +1400,7 @@ fn a_first_time_ssh_host_waits_for_the_persons_decision_showing_its_fingerprint(
     f.wait("the host card again", |f| matches!(f.app.card.as_ref().map(|c| &c.act), Some(Act::Host { .. })));
     f.click("Trust this host");
     assert!(f.app.card.is_none());
-    assert!(f.app.keys(&f.cx).known_hosts().for_host("git.example.org", 22).iter().any(|k| k.b64 == key.b64), "the key is recorded");
+    assert!(super::super::git_port::keys_of(&f.cx).known_hosts().for_host("git.example.org", 22).iter().any(|k| k.b64 == key.b64), "the key is recorded");
     f.wait("past the decision", |f| f.app.status.as_ref().is_some_and(|s| s.0.contains("failed")));
     assert!(f.app.status.as_ref().unwrap().0.contains("no ssh in tests"), "the job went on to start: {:?}", f.app.status);
 }

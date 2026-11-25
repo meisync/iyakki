@@ -172,3 +172,38 @@ fn a_schedule_to_a_share_mounts_it_for_the_run_only_and_never_keeps_the_password
     let e = run_with(&l, &mut s2, 1_800_000_000 + DAY, &Progress::default(), &bad, &work).unwrap_err();
     assert!(e.contains("could not be mounted") && s2.last_result.starts_with("failed:") && s2.last_run == 1_800_000_000 + DAY);
 }
+
+#[test]
+fn a_last_run_written_under_a_wrong_clock_does_not_hold_backups_back_for_years() {
+    let z = Zone::utc();
+    let mut s = sched(Path::new("/media/stick"));
+    // the clock said 2030 when the last run was saved; the real time is now
+    s.last_run = NOON + 4 * 365 * DAY;
+    // never-run rule: due at once when the hour has passed
+    assert!(s.due(&z, NOON), "a last run in the future counts as never run");
+    assert!(s.next_slot(&z, NOON) <= NOON, "the slot is today's hour, not years away");
+}
+
+#[test]
+fn a_schedule_saved_under_a_wrong_clock_runs_once_when_due_then_waits_for_its_real_next_slot() {
+    // end to end: the file on disk, the load, the due check, the run, the saved result, the next slot
+    let root = tmp("wrongclock");
+    let l = layout(&root, "amy");
+    let dest = root.join("stick");
+    fs::create_dir_all(&dest).unwrap();
+    let z = Zone::utc();
+    let mut s = sched(&dest);
+    s.last_run = NOON + 4 * 365 * DAY; // written when the clock said 2030
+    s.save(&l.data, "amy").unwrap();
+    let mut s = Schedule::load(&l.data, "amy");
+    assert_eq!(s.last_run, NOON + 4 * 365 * DAY, "the stale value survives the file");
+    assert!(s.due(&z, NOON), "due at once, not in four years");
+    run(&l, &mut s, NOON, &Progress::default()).unwrap();
+    assert_eq!(s.last_run, NOON, "the run replaces the wrong value with the real time");
+    s.save(&l.data, "amy").unwrap();
+    let again = Schedule::load(&l.data, "amy");
+    let slot = again.next_slot(&z, NOON);
+    assert!(slot > NOON && slot <= NOON + 2 * DAY, "the next slot is two days on, not years");
+    assert!(!again.due(&z, NOON + 1) && again.due(&z, slot));
+    assert_eq!(fs::read_dir(&dest).unwrap().count(), 1, "one file, written once");
+}

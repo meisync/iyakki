@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-48",
+  "feature_sha": "637559dd4afb7899",
+  "title": "forget memory from the IDE project settings",
+  "clauses": [
+    {
+      "id": "ide-forget",
+      "text": "The IDE project settings offer to forget the assistant's memory of the workspace",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Open a workspace the assistant remembers, open its project settings (the gear, Ctrl+R) and read the memory choice at the end.",
+          "expect": "A choice offers keep, forget all, or forget what one chat left. Saving applies it."
+        }
+      ]
+    }
+  ]
+}

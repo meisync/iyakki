@@ -113,6 +113,13 @@ impl DiskEnv for RealEnv {
         if e.raw_os_error() == Some(libc::EBUSY) { Err("device is busy".into()) } else { Err(e.to_string()) }
     }
 
+    fn umount_detach(&self, target: &str) -> Result<(), String> {
+        let t = cstr(target)?;
+        // SAFETY: a valid NUL-terminated path; MNT_DETACH (2) lets go of a mount whose drive is gone, once nothing uses it any more.
+        let rc = unsafe { crate::oscompat::umount2(t.as_ptr(), 2) };
+        if rc == 0 { Ok(()) } else { Err(std::io::Error::last_os_error().to_string()) }
+    }
+
     fn make_dir(&self, path: &str) -> Result<(), String> {
         std::fs::create_dir_all(path).map_err(|e| e.to_string())
     }

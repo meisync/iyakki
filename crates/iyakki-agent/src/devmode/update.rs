@@ -679,12 +679,15 @@ pub fn interrupted_text(data: &Path) -> Option<String> {
     interrupted(data).map(|m| format!("A system update from {} to {} did not finish. Choose \"{PREV_TITLE}\" in the boot menu, then run `iyakki dev update` again.", m.from, m.to))
 }
 
+/// The error the test knob [`Env::fault_after`] gives where the power "goes" (nothing after it may run, nothing may clean up).
+const POWER_CUT: &str = "the power was cut here (test)";
+
 fn spend(env: &Env, n: usize) -> Result<(), String> {
     if let Some(left) = env.fault_after {
         let cur = left.load(AtOrd::SeqCst);
         if (n as u64) > cur {
             left.store(0, AtOrd::SeqCst);
-            return Err("the power was cut here (test)".into());
+            return Err(POWER_CUT.into());
         }
         left.store(cur - n as u64, AtOrd::SeqCst);
     }
@@ -773,8 +776,8 @@ fn keep_for_loader(vol: &BootVol, env: &Env, bz: &Path, initrd: &Path, version: 
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         for (src, name) in [(bz, "bzImage"), (initrd, "initrd")] {
             let tmp = dir.join(format!("{name}.tmp"));
-            std::fs::copy(src, &tmp).map_err(|e| format!("{name}: {e}"))?;
-            std::fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+            // under the fault knob like every other write to the boot volume (a cut here leaves a half `.tmp` and no marker)
+            copy_file(env, src, &tmp).map_err(|e| format!("{name}: {e}"))?;
             if files::sha256_file(&tmp)? != files::sha256_file(src)? {
                 return Err(format!("the copy of {name} does not match"));
             }
@@ -782,14 +785,15 @@ fn keep_for_loader(vol: &BootVol, env: &Env, bz: &Path, initrd: &Path, version: 
         }
         let marker = dir.join(if root_changed { "set-oldroot" } else { "set-plain" });
         let tmp = dir.join("marker.tmp");
-        std::fs::write(&tmp, format!("version {version}\nstamp {stamp}\n")).map_err(|e| e.to_string())?;
-        std::fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+        write_bytes(env, &tmp, format!("version {version}\nstamp {stamp}\n").as_bytes())?;
         std::fs::rename(&tmp, &marker).map_err(|e| e.to_string())?;
         sync_dir(&marker);
         Ok(())
     };
     match go() {
         Ok(()) => format!("the boot loader's menu keeps IYAKKI {version} as \"{PREV_TITLE}\" (copy on the boot volume, stamp {stamp})"),
+        // a real power cut runs no clean-up: the half copy stays, without a marker the loader never offers it (and the next update removes it first)
+        Err(e) if e.contains(POWER_CUT) => format!("the power was cut while the loader's copy was written ({e})"),
         Err(e) => {
             drop_loader_prev(&dir);
             let _ = std::fs::remove_file(dir.join("marker.tmp"));
@@ -989,13 +993,26 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
     }
     let run = running_from(&env.release, &ro.root);
     let root_img = p.needs.iter().any(|n| is_root_image(n));
-    let root_new = root_img || layers_new;
+    // an update that was cut and is run again (power is back): its marker is still there, and so is the whole copy of the version it was replacing. The boot files
+    // may then be a mix of the two sets (the initramfs replaced, the kernel not yet), so the copy of the "previous version" is the saved one, never the files that
+    // stand now (LDR2: a retry used to keep the mix as the previous version, for GRUB's entry and for the loader's row).
+    let resume = interrupted(env.dm.data_dir()).filter(|mk| !mk.prev_id.is_empty()).and_then(|mk| {
+        let d = env.prev_root().join(&mk.prev_id);
+        ["bzImage", "initrd"].iter().all(|n| std::fs::metadata(d.join(n)).is_ok_and(|m| m.len() > 0)).then_some((mk, d))
+    });
+    // and when the first run had already switched the system image, the saved version still needs the old root
+    let resumed_root = resume.is_some()
+        && (ro.root.join(LOADER_PREV_DIR).join(PREV_MARKERS[1]).is_file()
+            || find_ci(&ro.root, "boot/grub/grub.cfg").and_then(|c| std::fs::read_to_string(c).ok()).is_some_and(|c| c.contains(PREV_TITLE) && c.contains("iyakki.root=previous")));
+    let root_new = root_img || layers_new || resumed_root;
     let touches_kernel = root_new || p.needs.iter().any(|n| matches!(key(n).as_str(), "boot/bzimage" | "boot/initrd" | "boot/initrd-lean"));
     // after a change of the system image the previous-version entry must start the root that was replaced, not the new one
     let extra = if root_new { "iyakki.root=previous" } else { "" };
     // 2. the version being replaced goes to the data partition, checked, before the boot partition changes
     let mut prev: Option<(String, String)> = None;
-    if touches_kernel {
+    if let (true, Some((mk, _))) = (touches_kernel, &resume) {
+        prev = Some((mk.prev_id.clone(), mk.from.clone()));
+    } else if touches_kernel {
         let base = sanitize_id(run.on_disk());
         let mut id = base.clone();
         let mut n = 2;
@@ -1038,8 +1055,12 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
     // the boot loader cannot read the data partition: the version being replaced is also kept on the boot volume (best effort, see keep_for_loader)
     let mut loader_note = String::new();
     if touches_kernel {
-        if let (Some(bz), Some(ird)) = (find_ci(&vol.root, "boot/bzImage"), find_ci(&vol.root, initrd_rel)) {
-            loader_note = keep_for_loader(&vol, env, &bz, &ird, run.on_disk(), root_new, p.growth.max(0) as u64);
+        let (bz, ird, ver) = match &resume {
+            Some((mk, d)) => (Some(d.join("bzImage")), Some(d.join("initrd")), mk.from.clone()),
+            None => (find_ci(&vol.root, "boot/bzImage"), find_ci(&vol.root, initrd_rel), run.on_disk().to_string()),
+        };
+        if let (Some(bz), Some(ird)) = (bz, ird) {
+            loader_note = keep_for_loader(&vol, env, &bz, &ird, &ver, root_new, p.growth.max(0) as u64);
             env.dm.log(who, "", "dev.update.prev", &loader_note, true);
         }
     }
@@ -1049,6 +1070,12 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
     std::fs::write(marker_mirror(env.dm.data_dir()), &mjson).map_err(|e| e.to_string())?;
     let marker_path = vol.root.join(MARKER);
     write_bytes(env, &marker_path, &mjson)?;
+    // the boot counter starts before the first boot file changes: a power cut in the middle leaves a start that cannot run, and the second start
+    // then falls back to the saved version by itself (without this the person had to choose it in the menu). A finished update puts the
+    // counter back to idle here; the update centre arms it again for the first start of the new version. A counter already running stays.
+    let env_file = vol.root.join(super::bootcount::ENV_FILE);
+    let env_before = std::fs::read(find_ci(&vol.root, super::bootcount::ENV_FILE).unwrap_or(env_file.clone())).ok();
+    let armed_early = touches_kernel && super::bootcount::read_state(&vol.root) == super::bootcount::State::Idle && super::bootcount::arm(&vol.root).is_ok();
     // 4a. a lean install's system image goes to the data partition and becomes the root (the kernel is replaced after it, as docs/BOOT-SPEED.md says)
     let mut root_done = false;
     if root_img {
@@ -1113,6 +1140,19 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
         sync_dir(&mp);
     }
     let _ = std::fs::remove_file(marker_mirror(env.dm.data_dir()));
+    if armed_early {
+        // the environment block is put back as it was (or removed when there was none): a finished direct update changes only its own files
+        let at = find_ci(&vol.root, super::bootcount::ENV_FILE).unwrap_or(env_file);
+        match env_before {
+            Some(b) => {
+                let _ = std::fs::write(&at, b);
+            }
+            None => {
+                let _ = std::fs::remove_file(&at);
+            }
+        }
+        sync_dir(&at);
+    }
     let _ = std::fs::remove_dir_all(&staging);
     // keep the version just saved and one older; remove the rest
     if let Some((keep, _)) = &prev {

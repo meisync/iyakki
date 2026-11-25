@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-34",
+  "feature_sha": "6f55d27864c324ae",
+  "title": "wake phrase takes and evaluation",
+  "clauses": [
+    {
+      "id": "owner-takes",
+      "text": "A person records wake phrase takes in a quiet room",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Following docs/development/WAKE-PHRASE.md, say the phrase 'My IYAKKI' about 50 times in a quiet room and save the WAV takes in the folder the doc names. Then run iyakki-wake-eval as the doc says.",
+          "expect": "The takes are saved as WAV files and the evaluation runs on them."
+        }
+      ]
+    }
+  ]
+}

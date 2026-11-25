@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-TALES-15",
+ "feature_sha": "7638a86950269ecf",
+ "title": "Tales pictures drawn by the chosen writer",
+ "clauses": [
+  {
+   "id": "agent-pictures",
+   "text": "A Tales story written by Claude Code has pictures drawn by Claude Code; they show the scene of the story and are not blank or one flat colour.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "In Tales, choose Claude Code as the writer for a short story with pictures, and wait until it finishes.",
+     "expect": "Each picture shows the scene of its part of the story with several colours and details. None is empty or a single flat colour."
+    }
+   ]
+  }
+ ]
+}

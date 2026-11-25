@@ -7,12 +7,14 @@
 //! installing next to another system is planned. The page has a "Partition table: Auto / GPT / MBR" button (`t`) with a one-line
 //! explanation; the plan shows the table the disk has now and the layout it gets.
 
+use super::super::settings_port::PagePort;
+use super::system_port::RestartPort;
 use super::*;
 use iyakki_core_api::installer::{confirmation_ok, make_plan_with, Choices, DiskInfo, Installer, SourceInfo, TableChoice};
 use std::sync::Mutex;
 
 pub(super) struct InstallPanel {
-    /// The machine side: disks, source, writing (`cx.os.installer()`).
+    /// The machine side: disks, source, writing (the core's installer).
     pub(super) env: Arc<dyn Installer>,
     pub(super) disks: Vec<DiskInfo>,
     pub(super) source: Option<Result<SourceInfo, String>>,
@@ -94,7 +96,7 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn handle_install(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_install(&mut self, k: &Key, p: &dyn RestartPort) {
         let n = self.inst_len();
         match k {
             Key::Up => self.move_sel(-1, n),
@@ -103,7 +105,7 @@ impl SettingsApp {
                 self.inst_refresh();
                 self.ok("Disks looked at again.");
             }
-            Key::Char('p') | Key::Char('i') if self.admin(cx) => {
+            Key::Char('p') | Key::Char('i') if self.admin(p) => {
                 let Some(d) = self.inst_candidates().get(self.sel()).map(|d| (*d).clone()) else { return self.fail("No disk to use.") };
                 let Some(Ok(src)) = self.inst.source.clone() else { return self.fail("Nothing to copy from: this system was not started from an IYAKKI stick made with iyakki-usb --install.") };
                 let plan = match make_plan_with(&self.inst.disks, &d.drive.name, &src, &Choices::default(), self.inst.table, self.inst.env.uefi()) {
@@ -129,8 +131,8 @@ impl SettingsApp {
                 let t = self.inst.table;
                 self.ok(&format!("Partition table: {}. {}", t.label(), t.explain()));
             }
-            Key::Char('b') if self.admin(cx) => {
-                if cx.session.policy.power {
+            Key::Char('b') if self.admin(p) => {
+                if p.allows_power() {
                     self.modal = Some(Modal::Confirm(ConfirmKind::Reboot, "Restart this machine now?".into()));
                 } else {
                     self.fail("Your account may not restart the machine.");
@@ -140,8 +142,8 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn inst_submit(&mut self, cx: &AppCx, disk: &str, form: &Form) -> Result<String, String> {
-        if !self.admin(cx) {
+    pub(super) fn inst_submit(&mut self, p: &dyn PagePort, disk: &str, form: &Form) -> Result<String, String> {
+        if !self.admin(p) {
             return Err("Only administrators can install.".into());
         }
         let hostname = form.value(2).trim().to_string();
@@ -151,7 +153,7 @@ impl SettingsApp {
         if !confirmation_ok(&form.value(3), &form.value(4), &plan.target.drive) {
             return Err(format!("Type the drive name ({}) and its size ({}) exactly as shown, or press Esc.", plan.target.drive.name, human(plan.target.drive.size_bytes)));
         }
-        cx.audit.record(&cx.session.user, "install.disk", &format!("{} table={} zram={} swapfile={}", plan.target.drive.path, plan.table.label(), choices.zram, choices.swapfile));
+        p.audit("install.disk", &format!("{} table={} zram={} swapfile={}", plan.target.drive.path, plan.table.label(), choices.zram, choices.swapfile));
         let env = self.inst.env.clone();
         let prog = self.inst.progress.clone();
         let path = plan.target.drive.path.clone();

@@ -108,7 +108,7 @@ pkgdir_sums > "$WORK/g.pkgdirs"
   echo "hooks $(hash_files "$BOARD/iyakki/post-build.sh" "$BOARD/iyakki/prune-firmware.sh" "$BOARD/iyakki/mac-firmware.keep" "$BOARD/iyakki/pc-firmware.keep" "$BOARD/iyakki/restricted-firmware.sh" "$BOARD/iyakki/restricted-firmware.table" "$BOARD/iyakki/release-profile.sh" "$BOARD/iyakki/release-firmware.keep" "$BOARD/iyakki/release" $( [ "$VARIANT" = web ] || [ "$VARIANT" = macweb ] && echo "$BOARD/iyakki-web/web-post-build.sh" ))"
   echo "boot $(hash_files "$BOARD/iyakki/grub.cfg" "$BOARD/iyakki/grub" "$BOARD/iyakki/post-image.sh" "$BOARD/iyakki/genimage-install.cfg" "$HERE/secureboot.sh" "$BOARD/iyakki-aarch64/grub.cfg" "$BOARD/iyakki-aarch64/genimage.cfg" "$BOARD/iyakki-aarch64/post-image.sh")"
   echo "docs $(hash_files "$ROOT/LICENSE" "$ROOT/NOTICE" "$ROOT/LICENSING.md" "$ROOT/THIRD_PARTY_LICENSES.txt")"
-  echo "manual $(hash_files "$ROOT/dist/manual")"
+  echo "manual $(hash_files "$ROOT/dist/manual" "$ROOT/dist/autotest/checklists")"
   echo "samples $(hash_files "$ROOT/dist/samples/Music" "$ROOT/dist/samples/Videos" "$ROOT/dist/samples/README.md" "$ROOT/dist/samples/LICENSE")"
   if [ "$VARIANT" = web ] || [ "$VARIANT" = macweb ]; then echo "fonts $(hash_files "$ROOT"/crates/iyakki-shell/assets/NotoSans*.ttf "$ROOT/crates/iyakki-shell/assets/NOTO-OFL-LICENSE.txt")"; fi
   echo "env h264=${WEB_H264:-0} av=${WEB_AV_ADDON:-1} media=${WEB_MEDIA:-0} intel=${WEB_IRIS:-0}${WEB_CROCUS:-0} restricted=${IYAKKI_INCLUDE_RESTRICTED_FIRMWARE:-0} profile=${IYAKKI_IMAGE_PROFILE:-}"

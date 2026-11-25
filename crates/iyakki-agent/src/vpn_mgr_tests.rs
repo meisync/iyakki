@@ -839,6 +839,33 @@ fn roaming_to_another_network_and_a_resume_from_sleep_build_the_tunnel_again() {
 }
 
 #[test]
+fn a_roam_through_a_moment_with_no_uplink_builds_the_tunnel_again_even_on_the_same_interface_and_gateway() {
+    let r = rig("roam-empty");
+    let id = import_full(&r, "Office");
+    r.mgr.set_enabled(&id, true, NOW).unwrap();
+    hs(&r, NOW as i64);
+    r.mgr.tick(NOW + 5);
+    assert!(!r.log.lock().unwrap().iter().any(|l| l.starts_with("vpn.roam")));
+    // the uplink goes away entirely (an empty interface name): nothing is rebuilt while it is gone
+    let was = r.sys.st.lock().unwrap().net.physical_if.clone();
+    r.sys.st.lock().unwrap().net.physical_if = String::new();
+    hs(&r, (NOW + 10) as i64);
+    r.mgr.tick(NOW + 10);
+    assert!(!r.log.lock().unwrap().iter().any(|l| l.starts_with("vpn.roam")), "no uplink: no rebuild yet");
+    // the very same interface and gateway are back: the tunnel is built again, as for a roam
+    r.sys.st.lock().unwrap().net.physical_if = was;
+    hs(&r, (NOW + 15) as i64);
+    r.mgr.tick(NOW + 15);
+    assert_eq!(r.log.lock().unwrap().iter().filter(|l| l.starts_with("vpn.roam")).count(), 1, "{:?}", r.log.lock().unwrap());
+    // and once only
+    hs(&r, (NOW + 20) as i64);
+    r.mgr.tick(NOW + 20);
+    assert_eq!(r.log.lock().unwrap().iter().filter(|l| l.starts_with("vpn.roam")).count(), 1);
+    r.mgr.set_enabled(&id, false, NOW + 21).unwrap();
+    assert!(r.sys.clean());
+}
+
+#[test]
 fn vpn08_name_and_url_rules_put_policy_routing_in_place_for_the_marked_sockets_of_the_core_and_it_goes_with_the_tunnel() {
     let r = rig("policy-app-sockets");
     let id = import_full(&r, "Office");

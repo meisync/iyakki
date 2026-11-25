@@ -211,6 +211,31 @@ fn a_full_terminal_that_is_denied_never_shows_and_one_that_is_unavailable_says_s
     assert!(!v2.open_screen() && v2.error().is_some());
 }
 
+fn pod() -> PodSession {
+    PodSession { context: "dev".into(), namespace: "shop".into(), pod: "web-1".into(), ..Default::default() }
+}
+
+#[test]
+fn a_shell_in_a_pod_asks_naming_the_pod_and_shows_the_session_only_after_the_yes() {
+    let mut v = view();
+    assert!(v.open_pod(&pod()));
+    let q = v.pending_question().expect("the card is waiting").clone();
+    assert!(q.summary.contains("pod web-1") && q.summary.contains("namespace shop"), "{}", q.summary);
+    assert!(v.screen_text().is_none(), "nothing before the yes");
+    assert!(!v.open_pod(&pod()) && !v.open_screen(), "one question at a time");
+    v.decide(true);
+    assert!(v.in_screen() && v.screen_text().is_some());
+    let l = draw(&mut v, 700.0, 420.0, false, 1.0);
+    assert!(v.action(action_named(&l, "Leave")) && !v.in_screen());
+    // a no drops it; a pod without a name is refused in words; a port that has no pod sessions says so
+    assert!(v.open_pod(&pod()));
+    v.decide(false);
+    assert!(!v.in_screen());
+    assert!(!v.open_pod(&PodSession { pod: String::new(), ..pod() }) && v.error().is_some());
+    let mut off = TerminalView::new(Box::new(MemTerminal::unavailable()), 800);
+    assert!(!off.open_pod(&pod()) && off.error().unwrap().contains("not available"));
+}
+
 #[test]
 fn the_palette_has_the_sixteen_the_cube_and_the_grey_ramp() {
     assert_eq!(palette(0), [0, 0, 0, 255]);
@@ -220,4 +245,17 @@ fn the_palette_has_the_sixteen_the_cube_and_the_grey_ramp() {
     assert_eq!(palette(196), [255, 0, 0, 255]);
     assert_eq!(palette(232), [8, 8, 8, 255]);
     assert_eq!(palette(255), [238, 238, 238, 255]);
+}
+
+#[test]
+fn a_pod_session_is_carried_as_an_item_and_read_back_and_a_wrong_item_is_not_a_session() {
+    let p = PodSession { kubeconfig: "/k/c.yaml".into(), context: "dev".into(), namespace: "shop".into(), pod: "web-1".into(), container: "app".into(), shell: "bash".into() };
+    let item = p.to_item();
+    assert!(item.starts_with(POD_ITEM) && item.lines().count() == 6);
+    assert_eq!(PodSession::from_item(&item), Some(p));
+    let bare = PodSession { namespace: "a".into(), pod: "b".into(), ..Default::default() };
+    assert_eq!(PodSession::from_item(&bare.to_item()), Some(bare), "empty parts survive");
+    for bad in ["", "sandbox:x", "pod:a\nb", "pod:a\nb\nc\nd\ne\nf\ng"] {
+        assert_eq!(PodSession::from_item(bad), None, "{bad:?}");
+    }
 }

@@ -5,13 +5,14 @@
 //! time the engine starts. Only administrators change it (it is a device setting); everybody sees it.
 
 use super::*;
+use super::browser_port::BrowserSettingsPort;
 use crate::safeclamp::SafeClamp;
 
 impl SettingsApp {
     /// The section; returns the height it used. Buttons only where they fit, otherwise a line that says where the keys are.
-    pub(super) fn render_browser_graphics(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, cx: &AppCx) -> f32 {
-        let st = cx.agent.web_graphics().status(cx.data_dir());
-        let admin = cx.session.policy.manage_settings;
+    pub(super) fn render_browser_graphics(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, p: &dyn BrowserSettingsPort) -> f32 {
+        let st = p.agent().web_graphics().status(p.data_root());
+        let admin = p.is_admin();
         let need = 62.0 + 6.0;
         // the page does not scroll: when the row does not fit, it is a line where there is room for one and nothing where there is not
         if y0 + need * s > a.y + a.h - 4.0 * s {
@@ -55,20 +56,20 @@ impl SettingsApp {
         }
         y += 58.0 * s;
         y += 6.0 * s;
-        y += self.render_browser_accel(g, a, y, s, cx);
+        y += self.render_browser_accel(g, a, y, s, p);
         y - y0
     }
 
     /// One row under the graphics mode: whether the graphics card speeds the browser up (compositing, drawing, video decoding, WebGL) for this
     /// person, with a button for her switch (`G`) and one for the administrator's override of the whole computer (`C`). Drawn only where it fits.
-    fn render_browser_accel(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, cx: &AppCx) -> f32 {
+    fn render_browser_accel(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, p: &dyn BrowserSettingsPort) -> f32 {
         let h = 34.0 * s;
         if y0 + h > a.y + a.h - 4.0 * s {
             return 0.0;
         }
-        let admin = cx.session.policy.manage_settings;
-        let (pol, _) = iyakki_shared::webaccel::load(&cx.data_dir().join("web-profile"));
-        let me = iyakki_shared::webengine::safe_name(&cx.session.user);
+        let admin = p.is_admin();
+        let (pol, _) = iyakki_shared::webaccel::load(&p.data_root().join("web-profile"));
+        let me = iyakki_shared::webengine::safe_name(p.acting_user());
         let v = pol.verdict(&me, "");
         let line = if v.allowed { "Graphics acceleration of the full browser: on where the computer has a working graphics card".to_string() } else { format!("Graphics acceleration of the full browser: off, {}", v.why) };
         let size = 13.0 * s;
@@ -110,22 +111,22 @@ impl SettingsApp {
     }
 
     /// `g` changes the choice (Automatic, Software, Hardware), `t` tries the card again. True when the key was one of these.
-    pub(super) fn handle_browser_graphics(&mut self, k: &Key, cx: &AppCx) -> bool {
+    pub(super) fn handle_browser_graphics(&mut self, k: &Key, p: &dyn BrowserSettingsPort) -> bool {
         if matches!(k, Key::Char('G') | Key::Char('C')) {
-            return self.handle_browser_accel(k, cx);
+            return self.handle_browser_accel(k, p);
         }
         if !matches!(k, Key::Char('g') | Key::Char('t')) {
             return false;
         }
-        if !cx.session.policy.manage_settings {
+        if !p.is_admin() {
             self.fail("Only an administrator changes the browser's graphics mode.");
             return true;
         }
-        let data = cx.data_dir();
+        let data = p.data_root();
         let what = match k {
             Key::Char('g') => {
-                let next = cx.agent.web_graphics().load_mode(data).0.next();
-                match cx.agent.web_graphics().set_mode(data, next) {
+                let next = p.agent().web_graphics().load_mode(data).0.next();
+                match p.agent().web_graphics().set_mode(data, next) {
                     Ok(()) => format!("Browser graphics: {}. It applies the next time the browser engine starts.", next.label()),
                     Err(e) => {
                         self.fail(e);
@@ -134,8 +135,8 @@ impl SettingsApp {
                 }
             }
             _ => {
-                let st = cx.agent.web_graphics().status(data);
-                match cx.agent.web_graphics().try_hardware_again(data, &st.gpu) {
+                let st = p.agent().web_graphics().status(data);
+                match p.agent().web_graphics().try_hardware_again(data, &st.gpu) {
                     Ok(()) => "Browser graphics: trying the graphics card again. It applies the next time the browser engine starts.".to_string(),
                     Err(e) => {
                         self.fail(e);
@@ -144,18 +145,18 @@ impl SettingsApp {
                 }
             }
         };
-        cx.audit.record(&cx.session.user, "settings.browser", &what);
+        p.audit("settings.browser", &what);
         self.ok(what);
         true
     }
 
     /// `G` turns graphics acceleration off or on for this person, `C` (administrators) for the whole computer. It applies the next time the engine starts.
-    fn handle_browser_accel(&mut self, k: &Key, cx: &AppCx) -> bool {
-        let dir = cx.data_dir().join("web-profile");
+    fn handle_browser_accel(&mut self, k: &Key, p: &dyn BrowserSettingsPort) -> bool {
+        let dir = p.data_root().join("web-profile");
         let (mut pol, _) = iyakki_shared::webaccel::load(&dir);
-        let me = iyakki_shared::webengine::safe_name(&cx.session.user);
+        let me = iyakki_shared::webengine::safe_name(p.acting_user());
         let what = if matches!(k, Key::Char('C')) {
-            if !cx.session.policy.manage_settings {
+            if !p.is_admin() {
                 self.fail("Only an administrator changes this for the whole computer.");
                 return true;
             }
@@ -171,7 +172,7 @@ impl SettingsApp {
             self.fail(e);
             return true;
         }
-        cx.audit.record(&cx.session.user, "settings.browser", &what);
+        p.audit("settings.browser", &what);
         self.ok(format!("{what}. It applies the next time the browser engine starts."));
         true
     }

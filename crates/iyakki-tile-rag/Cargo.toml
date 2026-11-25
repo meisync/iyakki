@@ -1,0 +1,16 @@
+[package]
+name = "iyakki-tile-rag"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The RAG tile (search your documents, ask the model a grounded question, the evidence ledger). Rule
+# (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit` and `iyakki-tile-api` only, never on the agent or the shared
+# crate; the shell hands it the knowledge base, the research kit and the audit log through `RagPort` (a fake in tests).
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-tile-api = { path = "../iyakki-tile-api" }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

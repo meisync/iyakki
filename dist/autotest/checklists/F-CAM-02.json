@@ -1,0 +1,105 @@
+{
+ "schema": 1,
+ "row": "F-CAM-02",
+ "feature_sha": "ba7e956193bd67c5",
+ "title": "CAMERAS tile: live grid, snapshot, add and remove, per-person access (manual until automated)",
+ "clauses": [
+  {
+   "id": "grid-states",
+   "text": "The CAMERAS tile (Web & Media, not for guests) shows the views in a grid, with each camera's name and state in words.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Sign in as a person who is not a guest, open the CAMERAS tile and look at the grid.",
+     "expect": "Each view has the camera's name and a state word such as live, connecting, lost with the reason, in use, needs password or needs video add-on."
+    }
+   ]
+  },
+  {
+   "id": "enlarge",
+   "text": "A click or Enter on a view enlarges it.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Click a view, or select it and press Enter.",
+     "expect": "The view enlarges to a bigger picture."
+    }
+   ]
+  },
+  {
+   "id": "snapshot",
+   "text": "The snapshot button or key saves one JPEG in Pictures and says where.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Press the Snapshot button (or its key) on a live view.",
+     "expect": "A message says the snapshot is saved and gives its path in Pictures. The file opens as a picture."
+    }
+   ]
+  },
+  {
+   "id": "add-edit-remove",
+   "text": "Cameras can be added, edited and removed, and removing asks first.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Add a camera with its address and password, edit it, then remove it.",
+     "expect": "Add saves it and the password is not shown back. The edit form shows the clean address and never the password. Remove asks for confirmation first."
+    }
+   ]
+  },
+  {
+   "id": "light-off",
+   "text": "The computer's own USB camera closes when the tile leaves the screen by Esc, Home, F11, another tile, a view switch, the lock or sign-out.",
+   "machines": [
+    "lenovo"
+   ],
+   "steps": [
+    {
+     "do": "Open the CAMERAS tile with this computer's own USB camera in a view. Leave by Esc, open it again and leave by Home, then again and leave by F11, then open another tile.",
+     "expect": "The camera's light goes out each time the tile is left. Say what you see (the light going out is still to be confirmed on the Lenovo)."
+    }
+   ]
+  },
+  {
+   "id": "red-band",
+   "text": "A red band shows whenever this computer's own USB camera is on the screen.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Put this computer's USB camera in a view.",
+     "expect": "A red band shows. It goes when the camera leaves the screen."
+    }
+   ]
+  },
+  {
+   "id": "per-person",
+   "text": "Each person sees only the cameras allowed to them.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Sign in as a second person who is on no camera's list (needs a second account).",
+     "expect": "That person sees no camera they were not given."
+    }
+   ]
+  }
+ ]
+}

@@ -72,8 +72,7 @@ impl ContextSync {
     }
 
     fn save<T: Serialize>(&self, fleet: &str, what: &str, v: &T) -> Result<(), String> {
-        std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
-        std::fs::write(self.file(fleet, what), serde_json::to_string(v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+        iyakki_schema::write_atomic(&self.file(fleet, what), serde_json::to_string(v).map_err(|e| e.to_string())?.as_bytes(), 0o600)
     }
 
     pub fn conflicts(&self, fleet: &str) -> Vec<Conflict> {

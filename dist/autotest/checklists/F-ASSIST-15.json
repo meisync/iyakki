@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-15",
+  "feature_sha": "148744480519d08f",
+  "title": "planning on the feature board",
+  "clauses": [
+    {
+      "id": "create-board",
+      "text": "A workspace with no board shows Create board, and it writes a starter table",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Open a workspace with no feature board file and its Board tab.",
+          "expect": "A Create board button is shown and pressing it writes the starter table. In a read-only workspace it is not shown."
+        }
+      ]
+    },
+    {
+      "id": "plans-rows",
+      "text": "A multi-step change is planned as one row per step before work starts",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "In that workspace's chat, ask for a small two-file change.",
+          "expect": "Planned rows appear on the board before work starts, and no row is done without a passed test or a verified check."
+        }
+      ]
+    }
+  ]
+}

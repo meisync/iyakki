@@ -6,13 +6,13 @@ use iyakki_shared::settingstools::{no_args};
 use super::chat_settings::Env;
 use serde_json::json;
 
-use super::AppCx;
+use super::chat_port::ChatPort;
 
 pub const TOOLS: [&str; 2] = ["camera_vision_status", "camera_vision_set"];
 
 pub const PROMPT_RULE: &str = "\nCAMERA ALERT SUMMARIES: camera_vision_status says whether a model describes the picture of a motion alert in one sentence (off until the person switches it on); camera_vision_set changes it and asks the person first, because the picture then goes to the chat model they use. A description is the model's words, never a fact to act on.";
 
-pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
+pub fn entries(cx: &dyn ChatPort, env: &Env) -> Vec<Entry> {
     let mut v = Vec::new();
     {
         let (data, user) = (cx.data_dir().to_path_buf(), env.user.clone());
@@ -64,7 +64,7 @@ mod tests {
         let a2 = audits.clone();
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
         let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
-        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&crate::apps::chat_port::CxChat(&cx), &env));
         let d = t.defs();
         assert_eq!(d.iter().find(|x| x.spec.name == "camera_vision_status").unwrap().risk, Risk::Safe);
         assert_eq!(d.iter().find(|x| x.spec.name == "camera_vision_set").unwrap().risk, Risk::Ask);

@@ -1,0 +1,12 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 657c024af26774d9; honest subset only: everything not checked is under not-covered.
+row: F-WEB-32
+targets: browser
+feature-sha: 657c024af26774d9
+doc: web page Git: a clone is listed, opened for status, diff, log and branches; an address with a password is refused
+clause: 1 the Git page lists the clone of the person's space with its branch and opens it for status (changed and new files), a diff drawn with + and - in the text, the log newest first and branches
+clause: 2 an address with a password in it is refused and the secret is neither sent nor shown
+not-covered: paging of the log
+not-covered: binary or too large states
+not-covered: loading, empty, error and not-allowed states
+not-covered: cloning a repository from the page (the https-only check is only seen through the refusal)
+suite: run_pages.py --only more

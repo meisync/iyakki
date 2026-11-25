@@ -94,8 +94,8 @@ pub enum Status {
     Connecting,
     /// Signed in and receiving pictures.
     Live,
-    /// The link dropped; the client is trying again (the session on the server is kept for a while). After 2 minutes without success
-    /// it becomes `Closed`.
+    /// The link dropped; the client is trying again (the session on the server is kept for a while). It does not give up by itself
+    /// (F-LIFE-17): after a few minutes the waits grow to a minute and [`Client::notice`] says how long it has been.
     Reconnecting,
     /// The server refused the account or password. Final.
     Refused(String),
@@ -150,8 +150,26 @@ pub(crate) const MAX_MESSAGE: usize = 8 << 20;
 const MAX_PIXELS: usize = 4096 * 4096;
 const MAX_QUEUE: usize = 20_000;
 pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(8);
-/// How long the link may be down (reconnecting) before the client gives up.
-const GIVE_UP: Duration = Duration::from_secs(120);
+/// After this long down the client says so in a notice (it used to give up here; it now keeps trying with longer waits, F-LIFE-17).
+const NOTICE_AFTER: Duration = Duration::from_secs(120);
+/// The longest wait between two tries: 10 seconds at first, 30 after two minutes down, 60 after ten.
+pub(crate) fn longest_wait(down: Duration) -> Duration {
+    match down.as_secs() {
+        0..=119 => Duration::from_secs(10),
+        120..=599 => Duration::from_secs(30),
+        _ => Duration::from_secs(60),
+    }
+}
+
+/// The next wait after a failed try, and the notice for the person (none in the first two minutes).
+pub(crate) fn retry_plan(down: Duration, backoff: Duration) -> (Duration, Option<String>) {
+    let next = (backoff * 2).min(longest_wait(down));
+    let notice = (down >= NOTICE_AFTER).then(|| {
+        let m = down.as_secs() / 60;
+        format!("the tenant has not answered for {m} minute{}; still trying every {} seconds", if m == 1 { "" } else { "s" }, longest_wait(down).as_secs())
+    });
+    (next, notice)
+}
 /// No message at all (the server sends statistics every second) for this long means the link is dead.
 const SILENT: Duration = Duration::from_secs(20);
 
@@ -160,8 +178,8 @@ pub(crate) type Tls = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
 /// A live connection to one tenant. Cheap to poll from the shell's frame loop: nothing here blocks the caller.
 ///
 /// `connect` signs in on the caller's thread and then one thread of its own carries the WebSocket, decodes pictures, sends the queued
-/// input and reconnects (with a growing wait of 0.5 s to 10 s) when the link drops. It ends on `close()`, on drop, when the server says
-/// the person signed out, when the pin does not match, when the password is refused, or after 2 minutes of failed reconnects.
+/// input and reconnects (with a growing wait of 0.5 s to 10 s, later 30 s and 60 s) when the link drops. It ends on `close()`, on drop, when the server says
+/// the person signed out, when the pin does not match, when the password is refused, (a link that stays down is not given up: the waits grow to a minute and a notice says how long, F-LIFE-17).
 pub struct Client {
     inner: Arc<Inner>,
 }
@@ -171,6 +189,8 @@ struct Inner {
     user: String,
     password: Zeroizing<String>,
     status: Mutex<Status>,
+    /// What to tell the person while reconnecting takes long (cleared by any other status).
+    notice: Mutex<Option<String>>,
     shown: Mutex<Option<Shown>>,
     generation: AtomicU64,
     out: Mutex<VecDeque<String>>,
@@ -195,6 +215,11 @@ impl Inner {
         if let Ok(mut g) = self.status.lock() {
             if !matches!(*g, Status::Refused(_) | Status::Closed(_)) {
                 log::debug!("desktop connector: {s:?}");
+                if s != Status::Reconnecting {
+                    if let Ok(mut n) = self.notice.lock() {
+                        *n = None;
+                    }
+                }
                 *g = s;
             }
         }
@@ -233,6 +258,7 @@ impl Client {
             user: user.trim().to_string(),
             password: Zeroizing::new(password.to_string()),
             status: Mutex::new(Status::Connecting),
+            notice: Mutex::new(None),
             shown: Mutex::new(None),
             generation: AtomicU64::new(0),
             out: Mutex::new(VecDeque::new()),
@@ -269,6 +295,11 @@ impl Client {
             Err(e) => return Err(e.text()),
         }
         Ok(Client { inner })
+    }
+
+    /// A line for the person while the link has been down a long time (`None` otherwise), e.g. "the tenant has not answered for 3 minutes".
+    pub fn notice(&self) -> Option<String> {
+        self.inner.notice.lock().ok().and_then(|n| n.clone())
     }
 
     pub fn status(&self) -> Status {
@@ -724,11 +755,11 @@ fn supervise(inner: &Inner, mut session: Option<Session>, mut next: Option<(Tls,
                     }
                 }
                 let since = *down_since.get_or_insert_with(Instant::now);
-                if since.elapsed() > GIVE_UP {
-                    inner.set_status(Status::Closed(format!("the tenant did not answer for {} seconds ({})", GIVE_UP.as_secs(), e.text())));
-                    break;
+                let (next, notice) = retry_plan(since.elapsed(), backoff);
+                if let Ok(mut n) = inner.notice.lock() {
+                    *n = notice;
                 }
-                backoff = (backoff * 2).min(Duration::from_secs(10));
+                backoff = next;
             }
         }
     }
@@ -1059,6 +1090,7 @@ mod tests {
                 user: String::new(),
                 password: Zeroizing::new(String::new()),
                 status: Mutex::new(Status::Connecting),
+                notice: Mutex::new(None),
                 shown: Mutex::new(None),
                 generation: AtomicU64::new(0),
                 out: Mutex::new(VecDeque::new()),
@@ -1154,5 +1186,49 @@ mod tests {
         drop(l);
         assert!(probe(&addr, Duration::from_secs(2)).is_err());
         assert!(Client::connect(&Target { addr, pin: Pin([1; 32]) }, "alice", "pw", (800, 600)).is_err());
+    }
+
+    #[test]
+    fn a_link_that_stays_down_is_never_given_up_the_waits_grow_and_a_notice_says_how_long() {
+        let sec = Duration::from_secs;
+        // the first two minutes: waits double up to 10 seconds, no notice
+        assert_eq!(retry_plan(sec(5), Duration::from_millis(500)), (sec(1), None));
+        assert_eq!(retry_plan(sec(60), sec(8)), (sec(10), None));
+        // past two minutes (the old give-up point): still a plan, longer waits, and a notice
+        let (next, notice) = retry_plan(sec(120), sec(10));
+        assert_eq!(next, sec(20));
+        assert_eq!(notice.as_deref(), Some("the tenant has not answered for 2 minutes; still trying every 30 seconds"));
+        assert_eq!(retry_plan(sec(125), sec(20)).0, sec(30), "the wait caps at 30 seconds up to ten minutes");
+        let (next, notice) = retry_plan(sec(3 * 3600), sec(60));
+        assert_eq!(next, sec(60), "and at a minute after that, however long it takes");
+        assert!(notice.unwrap().starts_with("the tenant has not answered for 180 minutes"));
+        assert!(retry_plan(sec(60), sec(1)).1.is_none() && retry_plan(sec(119), sec(1)).1.is_none());
+    }
+
+    #[test]
+    fn the_notice_is_cleared_by_any_status_but_reconnecting_and_a_final_status_stays() {
+        let i = Inner {
+            target: Target { addr: "x:1".into(), pin: Pin([0; 32]) },
+            user: String::new(),
+            password: Zeroizing::new(String::new()),
+            status: Mutex::new(Status::Reconnecting),
+            notice: Mutex::new(Some("the tenant has not answered for 3 minutes".into())),
+            shown: Mutex::new(None),
+            generation: AtomicU64::new(0),
+            out: Mutex::new(VecDeque::new()),
+            size: Mutex::new((1, 1)),
+            cursor: Mutex::new(None),
+            copied: Mutex::new(VecDeque::new()),
+            clip: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+        };
+        i.set_status(Status::Reconnecting);
+        assert!(i.notice.lock().unwrap().is_some(), "still reconnecting: the notice stays");
+        i.set_status(Status::Live);
+        assert!(i.notice.lock().unwrap().is_none(), "live again: the notice is gone");
+        *i.notice.lock().unwrap() = Some("old".into());
+        i.set_status(Status::Closed("bye".into()));
+        assert!(i.notice.lock().unwrap().is_none());
     }
 }

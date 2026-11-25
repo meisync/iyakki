@@ -2,22 +2,23 @@
 //! Browser is not offered to any page. Here it comes back: the keys 1 to 9 press **Use again** on the row. Nothing is opened or tested here.
 
 use super::*;
+use super::browser_port::BrowserSettingsPort;
 use iyakki_shared::browserdev::{self, DevicePrefs};
 
 const MAX_ROWS: usize = 9;
 
 impl SettingsApp {
-    fn hidden_device_rows(cx: &AppCx) -> (DevicePrefs, Vec<(&'static str, String, String)>) {
-        let prefs = DevicePrefs::load(&crate::apps::browser_media::devprefs_path(cx));
-        let cams = browserdev::list_cameras(&cx.agent.browserdev_sys_root());
-        let mics = cx.agent.voicedesk_list_mics(&cx.agent.voicedesk_proc_root());
+    fn hidden_device_rows(p: &dyn BrowserSettingsPort) -> (DevicePrefs, Vec<(&'static str, String, String)>) {
+        let prefs = DevicePrefs::load(&crate::apps::browser_media::devprefs_path(p));
+        let cams = browserdev::list_cameras(&p.agent().browserdev_sys_root());
+        let mics = p.agent().voicedesk_list_mics(&p.agent().voicedesk_proc_root());
         let rows = prefs.hidden_rows(&cams, &mics);
         (prefs, rows)
     }
 
     /// The list of hidden devices; nothing at all (no title, no height) when none is hidden.
-    pub(super) fn render_browser_devices(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, cx: &AppCx) -> f32 {
-        let (_, rows) = Self::hidden_device_rows(cx);
+    pub(super) fn render_browser_devices(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, p: &dyn BrowserSettingsPort) -> f32 {
+        let (_, rows) = Self::hidden_device_rows(p);
         if rows.is_empty() || y0 + 90.0 * s > a.y + a.h {
             return 0.0;
         }
@@ -36,23 +37,23 @@ impl SettingsApp {
     }
 
     /// The keys 1 to 9 of the Browser tab: use the n-th hidden device again.
-    pub(super) fn handle_browser_devices(&mut self, k: &Key, cx: &AppCx) -> bool {
+    pub(super) fn handle_browser_devices(&mut self, k: &Key, p: &dyn BrowserSettingsPort) -> bool {
         let Key::Char(c @ '1'..='9') = k else { return false };
         let n = (*c as u8 - b'1') as usize;
-        let (mut prefs, rows) = Self::hidden_device_rows(cx);
+        let (mut prefs, rows) = Self::hidden_device_rows(p);
         let Some((kind, id, label)) = rows.get(n).cloned() else { return false };
         if kind == "camera" {
             prefs.show_cam(&id);
         } else {
             prefs.show_mic(&id);
         }
-        if let Err(e) = prefs.save(&crate::apps::browser_media::devprefs_path(cx)) {
+        if let Err(e) = prefs.save(&crate::apps::browser_media::devprefs_path(p)) {
             self.fail(format!("Could not save the choice: {e}"));
             return true;
         }
-        browserdev::share_all(&cx.agent.voicedesk_mic_share_dir(), &prefs, &prefs.cam, &cx.voice_settings().mic);
+        browserdev::share_all(&p.agent().voicedesk_mic_share_dir(), &prefs, &prefs.cam, &p.voice_mic());
         let what = format!("Pages can use the {kind} \"{label}\" again.");
-        cx.audit.record(&cx.session.user, "settings.browser", &format!("{kind} used again"));
+        p.audit("settings.browser", &format!("{kind} used again"));
         self.ok(what);
         true
     }

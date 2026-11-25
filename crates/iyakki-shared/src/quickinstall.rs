@@ -672,7 +672,12 @@ pub fn failure_reason(p: &Presence) -> Option<&str> {
 
 /// Which item a job of [`WORKSPACE`] installs (from its command).
 pub fn item_of(job: &Job) -> Option<Item> {
-    let words: Vec<&str> = job.command.split_whitespace().collect();
+    item_of_command(&job.command)
+}
+
+/// The same from a job's command line alone (the screens hold a plain copy of the job).
+pub fn item_of_command(command: &str) -> Option<Item> {
+    let words: Vec<&str> = command.split_whitespace().collect();
     let i = words.iter().position(|w| *w == "quick-install")?;
     words.get(i + 1).and_then(|w| Item::parse(w))
 }

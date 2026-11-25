@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-DATA-03",
+ "feature_sha": "57a3665318c9a3e7",
+ "title": "the data tools answer as Markdown tables and data_export asks first",
+ "clauses": [
+  {
+   "id": "data-table",
+   "text": "the data tools answer as Markdown tables and data_export asks first",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Give the assistant a CSV in your files and ask it to open, describe and query it, then export.",
+     "expect": "The answers are tables of at most 50 rows; the export asks first."
+    }
+   ]
+  }
+ ]
+}

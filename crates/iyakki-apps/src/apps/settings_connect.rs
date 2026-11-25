@@ -7,6 +7,7 @@
 //! `settings.client_link`, `settings.client_revoke`); the audit never holds the link or its token.
 
 use super::*;
+use crate::apps::settings::network_port::NetworkSettingsPort;
 use iyakki_shared::clientlink as cl;
 use iyakki_shared::clientmedia::{DEVICE_PERMISSIONS, DEVICE_ROLES};
 use iyakki_shared::clientmedia::permission_capability;
@@ -75,15 +76,15 @@ impl SettingsApp {
     }
 
     /// Keys of the section; true when the key was one of them.
-    pub(super) fn connect_key(&mut self, k: &Key, cx: &AppCx) -> bool {
+    pub(super) fn connect_key(&mut self, k: &Key, p: &dyn NetworkSettingsPort) -> bool {
         let armed = std::mem::take(&mut self.remote.connect.revoke_armed);
         let perm_armed = std::mem::take(&mut self.remote.connect.perm_armed);
         // the permissions of one device are on show: 1 to 5 switch them, p goes back
-        if self.remote.connect.perm.is_some() && cl::enabled(cx.data_dir()) {
+        if self.remote.connect.perm.is_some() && cl::enabled(p.data_root()) {
             match k {
                 Key::Char(c @ '1'..='5') => {
-                    if self.admin(cx) {
-                        self.connect_toggle(cx, *c as usize - '1' as usize);
+                    if self.admin(p) {
+                        self.connect_toggle(p, *c as usize - '1' as usize);
                     }
                     return true;
                 }
@@ -92,8 +93,8 @@ impl SettingsApp {
                     return true;
                 }
                 Key::Char('r') => {
-                    if self.admin(cx) {
-                        self.connect_role_next(cx);
+                    if self.admin(p) {
+                        self.connect_role_next(p);
                     }
                     return true;
                 }
@@ -102,36 +103,36 @@ impl SettingsApp {
         }
         match k {
             Key::Char('d') => {
-                if self.admin(cx) {
+                if self.admin(p) {
                     self.remote.connect.perm_armed = true;
                     self.ok("Permissions of which device? Press its number (1 to 9) in the list below, or any other key to cancel.");
                 }
             }
             Key::Char(c @ '1'..='9') if perm_armed => {
-                if self.admin(cx) {
-                    self.connect_open_perm(cx, *c as usize - '1' as usize);
+                if self.admin(p) {
+                    self.connect_open_perm(p, *c as usize - '1' as usize);
                 }
             }
             Key::Char('k') => {
-                if self.admin(cx) {
-                    let on = !cl::enabled(cx.data_dir());
-                    self.connect_set(cx, on);
+                if self.admin(p) {
+                    let on = !cl::enabled(p.data_root());
+                    self.connect_set(p, on);
                 }
             }
             Key::Char('l') => {
-                if self.admin(cx) {
-                    self.connect_link(cx);
+                if self.admin(p) {
+                    self.connect_link(p);
                 }
             }
             Key::Char('x') => {
-                if self.admin(cx) {
+                if self.admin(p) {
                     self.remote.connect.revoke_armed = true;
                     self.ok("Revoke which device? Press its number (1 to 9) in the list below, or any other key to cancel.");
                 }
             }
             Key::Char(c @ '1'..='9') if armed => {
-                if self.admin(cx) {
-                    self.connect_revoke(cx, *c as usize - '1' as usize);
+                if self.admin(p) {
+                    self.connect_revoke(p, *c as usize - '1' as usize);
                 }
             }
             _ => return false,
@@ -139,11 +140,10 @@ impl SettingsApp {
         true
     }
 
-    fn connect_set(&mut self, cx: &AppCx, on: bool) {
-        let _svc = Self::svc(cx);
-        match cl::set_enabled(cx.data_dir(), on) {
+    fn connect_set(&mut self, p: &dyn NetworkSettingsPort, on: bool) {
+        match cl::set_enabled(p.data_root(), on) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.client_endpoint", if on { "on" } else { "off" });
+                p.audit("settings.client_endpoint", if on { "on" } else { "off" });
                 if on {
                     self.ok("Client connections (experimental) are on. Make a one-time link with l. Web access above must be on too, because clients come in through it.");
                 } else {
@@ -155,19 +155,18 @@ impl SettingsApp {
         }
     }
 
-    fn connect_link(&mut self, cx: &AppCx) {
-        let svc = Self::svc(cx);
-        if !cl::enabled(cx.data_dir()) {
+    fn connect_link(&mut self, p: &dyn NetworkSettingsPort) {
+        if !cl::enabled(p.data_root()) {
             return self.fail("Switch client connections on first (k).");
         }
         let at = now();
-        match cl::create_token(cx.data_dir(), &cx.session.user, at, cl::TOKEN_TTL_SECS) {
+        match cl::create_token(p.data_root(), p.acting_user(), at, cl::TOKEN_TTL_SECS) {
             Ok(token) => {
-                let base = wa::urls(&iyakki_shared::devname::label(cx.data_dir()), &wa::local_ips(), svc.web_access_port()).into_iter().next().unwrap_or_default();
+                let base = wa::urls(&iyakki_shared::devname::label(p.data_root()), &wa::local_ips(), p.web_access_port()).into_iter().next().unwrap_or_default();
                 // the machine's own certificate is in the link, so the window program pins it without a question (a browser still shows its warning)
-                let url = cl::link_url_pinned(&base, &token, cx.agent.devmode().cert_fingerprint(cx.data_dir()).as_deref());
+                let url = cl::link_url_pinned(&base, &token, p.agent().devmode().cert_fingerprint(p.data_root()).as_deref());
                 // the audit says that a link was made, never what it is
-                cx.audit.record(&cx.session.user, "settings.client_link", &format!("one-time, {} min", cl::TOKEN_TTL_SECS / 60));
+                p.audit("settings.client_link", &format!("one-time, {} min", cl::TOKEN_TTL_SECS / 60));
                 self.remote.connect.shown = Some(Shown { qr: iyakki_qr::qr::encode(url.as_bytes()), url, expires: at + cl::TOKEN_TTL_SECS });
                 self.ok("A one-time link is on the page. It works once and stops after a few minutes.");
             }
@@ -175,23 +174,22 @@ impl SettingsApp {
         }
     }
 
-    fn connect_open_perm(&mut self, cx: &AppCx, index: usize) {
-        match cl::list_devices(cx.data_dir()).into_iter().filter(|d| d.active()).nth(index) {
+    fn connect_open_perm(&mut self, p: &dyn NetworkSettingsPort, index: usize) {
+        match cl::list_devices(p.data_root()).into_iter().filter(|d| d.active()).nth(index) {
             Some(d) => self.remote.connect.perm = Some((d.id, d.name)),
             None => self.fail("There is no device with that number."),
         }
     }
 
     /// Switch permission `i` (0 to 4 in [`DEVICE_PERMISSIONS`]) of the device on show: audited, effective at the device's next request.
-    fn connect_toggle(&mut self, cx: &AppCx, i: usize) {
+    fn connect_toggle(&mut self, p: &dyn NetworkSettingsPort, i: usize) {
         let Some((id, name)) = self.remote.connect.perm.clone() else { return };
         let Some((perm, _, what)) = DEVICE_PERMISSIONS.get(i).copied() else { return };
-        let _svc = Self::svc(cx);
         let cap = permission_capability(perm).unwrap_or(perm);
-        let on = !cx.agent.client_media().device_holds(cx.data_dir(), &id).iter().any(|c| c == cap);
-        match cx.agent.client_media().set_permission(cx.data_dir(), &id, perm, on, &cx.session.user, now()) {
+        let on = !p.agent().client_media().device_holds(p.data_root(), &id).iter().any(|c| c == cap);
+        match p.agent().client_media().set_permission(p.data_root(), &id, perm, on, p.acting_user(), now()) {
             Ok(_) => {
-                cx.audit.record(&cx.session.user, "settings.client_permission", &format!("{perm} {} {name} {id}", if on { "on" } else { "off" }));
+                p.audit("settings.client_permission", &format!("{perm} {} {name} {id}", if on { "on" } else { "off" }));
                 if on {
                     self.ok(format!("{name} may now ask to {what}. Where it says asked every use, a card still comes up on the machine each time."));
                 } else {
@@ -205,30 +203,29 @@ impl SettingsApp {
     /// Put the device on show on the next role of the table (viewer, listener, presenter, full, then viewer again). A device whose switches
     /// were set one by one (`custom`) starts at the first role. Same function as the chat tool `client_device_role`; audited, never a card
     /// (a role only says what the device may ASK for: the hard asks stay cards at every use).
-    fn connect_role_next(&mut self, cx: &AppCx) {
+    fn connect_role_next(&mut self, p: &dyn NetworkSettingsPort) {
         let Some((id, name)) = self.remote.connect.perm.clone() else { return };
-        let now_role = cx.agent.client_media().device_role(cx.data_dir(), &id);
+        let now_role = p.agent().client_media().device_role(p.data_root(), &id);
         let next = match DEVICE_ROLES.iter().position(|r| r.0 == now_role) {
             Some(i) => DEVICE_ROLES[(i + 1) % DEVICE_ROLES.len()],
             None => DEVICE_ROLES[0],
         };
-        match cx.agent.client_media().set_device_role(cx.data_dir(), &id, next.0, &cx.session.user, now()) {
+        match p.agent().client_media().set_device_role(p.data_root(), &id, next.0, p.acting_user(), now()) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.client_role", &format!("{} {name} {id}", next.0));
+                p.audit("settings.client_role", &format!("{} {name} {id}", next.0));
                 self.ok(format!("{name} is on the role {}: it {}. It counts from the device's next request; a card still comes up on the machine at every hard ask.", next.0, next.1));
             }
             Err(e) => self.fail(e),
         }
     }
 
-    fn connect_revoke(&mut self, cx: &AppCx, index: usize) {
-        let _svc = Self::svc(cx);
-        let Some(d) = cl::list_devices(cx.data_dir()).into_iter().filter(|d| d.active()).nth(index) else {
+    fn connect_revoke(&mut self, p: &dyn NetworkSettingsPort, index: usize) {
+        let Some(d) = cl::list_devices(p.data_root()).into_iter().filter(|d| d.active()).nth(index) else {
             return self.fail("There is no device with that number.");
         };
-        match cl::revoke_device(cx.data_dir(), &d.id, now()) {
+        match cl::revoke_device(p.data_root(), &d.id, now()) {
             Ok(true) => {
-                cx.audit.record(&cx.session.user, "settings.client_revoke", &format!("{} {}", d.name, d.id));
+                p.audit("settings.client_revoke", &format!("{} {}", d.name, d.id));
                 self.ok(format!("{} is revoked: it cannot connect again and its open session ends within a second.", d.name));
             }
             Ok(false) => self.fail("That device is revoked already."),
@@ -237,9 +234,8 @@ impl SettingsApp {
     }
 
     /// The lines of the section and where the QR code goes (the index of the line it sits above).
-    pub(super) fn connect_lines(&mut self, cx: &AppCx, lines: &mut Vec<Line>) -> Option<usize> {
-        let _svc = Self::svc(cx);
-        let on = cl::enabled(cx.data_dir());
+    pub(super) fn connect_lines(&mut self, p: &dyn NetworkSettingsPort, lines: &mut Vec<Line>) -> Option<usize> {
+        let on = cl::enabled(p.data_root());
         self.remote.connect.on = on;
         let at = now();
         if self.remote.connect.shown.as_ref().is_some_and(|s| s.expires <= at) {
@@ -258,7 +254,7 @@ impl SettingsApp {
                 lines.push((s.url.clone(), 12.0, ACCENT, Face::Mono));
                 lines.push(("Anyone who opens it in the next minutes can enrol a device, so show it only to the device you mean. The part after # never leaves the device that opens it.".into(), 12.0, DIM, Face::Sans));
             }
-            let devices = cl::list_devices(cx.data_dir());
+            let devices = cl::list_devices(p.data_root());
             if devices.is_empty() {
                 lines.push(("No client is enrolled yet.".into(), 13.0, MUTED, Face::Sans));
             }
@@ -275,8 +271,8 @@ impl SettingsApp {
             self.remote.connect.perm_buttons.clear();
             if let Some((id, name)) = self.remote.connect.perm.clone() {
                 if devices.iter().any(|d| d.id == id && d.active()) {
-                    let held = cx.agent.client_media().device_holds(cx.data_dir(), &id);
-                    let role = cx.agent.client_media().device_role(cx.data_dir(), &id);
+                    let held = p.agent().client_media().device_holds(p.data_root(), &id);
+                    let role = p.agent().client_media().device_role(p.data_root(), &id);
                     let what = DEVICE_ROLES.iter().find(|r| r.0 == role).map_or("has its switches set one by one", |r| r.1);
                     lines.push((format!("Role of {name}: {role}, it {what}. Press r for the next role (it sets every switch of the role at once)."), 13.0, TEXT, Face::Sans));
                     lines.push((format!("Permissions of {name} (press 1 to 5 to switch one, d to go back):"), 13.0, TEXT, Face::Bold));

@@ -1,0 +1,42 @@
+{
+ "schema": 1,
+ "row": "F-GEMVOICE-16",
+ "feature_sha": "e6e319c43580a484",
+ "title": "gapless join between Gemini voice segments (manual until automated)",
+ "clauses": [
+  {
+   "id": "gapless",
+   "text": "Segments of Gemini's own voice join without a gap.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "With the yes given and the key set up, ask a question that gets a long spoken answer, and listen to the joins. (If no key is set up, mark cannot-test.)",
+     "expect": "The answer is continuous, with no gap or click at the joins. Say where a gap is heard."
+    }
+   ]
+  },
+  {
+   "id": "barge-in",
+   "text": "A barge-in stops both players at once.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "While Gemini is speaking, speak over it to interrupt.",
+     "expect": "The speech stops at once and does not carry on from a second copy."
+    }
+   ]
+  }
+ ]
+}

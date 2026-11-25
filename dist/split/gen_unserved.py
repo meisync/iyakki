@@ -13,11 +13,11 @@ OUT = ROOT + '/crates/iyakki-ui-rpc/src/gen_unserved.rs'
 # traits of other crates, written by hand in unserved.rs
 # traits of other crates: (file, the crate, the module path inside it). The agent-api ones are found by the census itself.
 EXTERNAL = {
-    'Tools': ('crates/iyakki-shared/src/agent.rs', 'iyakki_shared', 'agent'), 'ChatBackend': ('crates/iyakki-shared/src/chat.rs', 'iyakki_shared', 'chat'),
-    'CodeVault': ('crates/iyakki-shared/src/authcodes.rs', 'iyakki_shared', 'authcodes'), 'Synth': ('crates/iyakki-shared/src/story.rs', 'iyakki_shared', 'story'),
-    'Speaker': ('crates/iyakki-shared/src/voiceassist.rs', 'iyakki_shared', 'voiceassist'), 'TurnLog': ('crates/iyakki-shared/src/voiceassist.rs', 'iyakki_shared', 'voiceassist'),
+    'Tools': ('crates/iyakki-shared/src/agent.rs', 'iyakki_shared', 'agent'), 'ChatBackend': ('crates/iyakki-chat-model/src/lib.rs', 'iyakki_shared', 'chat'),
+    'CodeVault': ('crates/iyakki-shared/src/authcodes.rs', 'iyakki_shared', 'authcodes'), 'Synth': ('crates/iyakki-story-model/src/lib.rs', 'iyakki_shared', 'story'),
+    'Speaker': ('crates/iyakki-voice-model/src/voiceassist.rs', 'iyakki_shared', 'voiceassist'), 'TurnLog': ('crates/iyakki-voice-model/src/voiceassist.rs', 'iyakki_shared', 'voiceassist'),
     'LessonHost': ('crates/iyakki-shared/src/studylesson.rs', 'iyakki_shared', 'studylesson'), 'Kube': ('crates/iyakki-shared/src/modelhost.rs', 'iyakki_shared', 'modelhost'),
-    'Runner': ('crates/iyakki-shared/src/wsexec.rs', 'iyakki_shared', 'wsexec'), 'Kubectl': ('crates/iyakki-shared/src/kubectl.rs', 'iyakki_shared', 'kubectl'),
+    'Runner': ('crates/iyakki-k8s-model/src/wsexec.rs', 'iyakki_shared', 'wsexec'), 'Kubectl': ('crates/iyakki-sysinfo-model/src/kubectl.rs', 'iyakki_shared', 'kubectl'),
     'Mic': ('crates/iyakki-audiolink/src/lib.rs', 'iyakki_shared', 'wakelisten'), 'DashHost': ('crates/iyakki-dash/src/tools.rs', 'iyakki_dash', 'tools'),
     'Upstream': ('crates/iyakki-proxy/src/lib.rs', 'iyakki_proxy', ''), 'RemoteSource': ('crates/iyakki-tile-api/src/remote.rs', 'iyakki_tile_api', 'remote'),
 }
@@ -82,7 +82,8 @@ def build():
         rel = os.path.relpath(path, ROOT); stem = os.path.basename(path)[:-3]
         ext = [v for v in EXTERNAL.values() if v[0] == rel]
         crate, mod = (ext[0][1], ext[0][2]) if ext else ('iyakki_agent_api', stem)
-        o += ['mod u_%s_%s {' % (crate, stem), '    use super::*;', '    use iyakki_agent_api::*;']
+        uname = stem if stem != 'lib' else os.path.basename(os.path.dirname(os.path.dirname(path))).replace('-', '_')  # two crates can both have a lib.rs
+        o += ['mod u_%s_%s {' % (crate, uname), '    use super::*;', '    use iyakki_agent_api::*;']
         if mod: o.append(f'    use {crate}::{mod}::*;')
         else: o.append(f'    use {crate}::*;')
         for u in uses(path, crate): o.append('    ' + u)

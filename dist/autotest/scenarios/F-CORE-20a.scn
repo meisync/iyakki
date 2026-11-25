@@ -1,0 +1,9 @@
+# autotest pilot, batch A (2026-11-21); split into sub-row F-CORE-20a on 2026-11-21: this scenario covers the whole visible clause, the API clauses are F-CORE-20b.
+row: F-CORE-20a
+targets: qemu
+provided-by: program  # every clause is given by the iyakki program (core, shell, Settings, SAMPLE); the rootfs of alpha.8 and alpha.10 differ in no file this scenario reads (docs/development/AUTOTEST.md)
+profile: ram
+feature-sha: 849e9ac99256d995
+doc: `dev info` shows the compatibility report of the running core (where unfinished migrations would appear)
+clause: 1 `dev info` shows the compatibility report of the running core (where unfinished migrations would appear)
+expect-info compat\s+core

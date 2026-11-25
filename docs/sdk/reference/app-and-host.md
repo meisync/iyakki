@@ -33,6 +33,7 @@ Methods:
 - `fn title(&self) -> String`
 - `fn dock_status(&self) -> Option<DockStatus>  // has a default`: A badge and a status line for this app's dock icon, asked after every event.
 - `fn wants_keyboard(&self) -> bool  // has a default`: True while the app has a text field in focus: the host shows the on-screen keyboard (a touch screen has no other way to type) and takes it away when this turns false. Asked after every event, like [`UiApp::dock_status`].
+- `fn open_item(&mut self, _item: &str)  // has a default`: The shell opened this app because another app asked for one thing in it (the K8S tile asks the Terminal for a shell in a pod): plain text, never a secret. The default does nothing.
 - `fn event(&mut self, ev: &UiEvent, cx: &mut UiCx) -> Flow`
 - `fn view(&mut self, canvas: &mut dyn Canvas, cx: &UiCx)`: Draw the whole frame. Lay it out from `canvas.size()` and `cx.metrics()`.
 

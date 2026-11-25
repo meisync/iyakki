@@ -1296,6 +1296,52 @@ use iyakki_shared::speechtime::{Timed, TimingSource};
     }
 
     #[test]
+    fn every_story_file_that_is_saved_again_is_a_new_file_so_a_failed_or_cut_save_could_never_leave_a_truncated_old_one() {
+        // F-LIFE-02: a hard link keeps the OLD inode; an in-place write would change what it sees, a write-then-rename would not
+        use std::fs::{hard_link, read_to_string};
+        let (s, d) = store("atomic");
+        let o = StoryOptions { topic: "a fox".into(), language: "English".into(), ..Default::default() };
+        let e = s.save(&tale("The Brave Fox", "Once there was a fox."), &o, 100).unwrap();
+        let dir = d.join("home/Stories").join(&e.id);
+        let count = std::cell::Cell::new(0);
+        let keep = |name: &str| -> (PathBuf, String) {
+            let p = dir.join(name);
+            count.set(count.get() + 1);
+            let link = dir.join(format!("{name}.oldcopy{}", count.get()));
+            hard_link(&p, &link).unwrap();
+            (link, read_to_string(&p).unwrap())
+        };
+        // the story text: a revision, a favourite mark, a chosen version
+        let (l_md, before_md) = keep("story.md");
+        s.set_favourite(&e.id, true).unwrap();
+        assert_eq!(read_to_string(&l_md).unwrap(), before_md, "the favourite mark wrote a new file");
+        assert!(read_to_string(dir.join("story.md")).unwrap().contains("favourite"));
+        let n = s.save_revision(&e.id, &tale("The Brave Fox", "A second telling."), &o).unwrap();
+        assert_eq!(read_to_string(&l_md).unwrap(), before_md, "a revision wrote a new story.md");
+        let (l_md2, before_md2) = keep("story.md");
+        s.select_version(&e.id, 1).unwrap();
+        assert_eq!(read_to_string(&l_md2).unwrap(), before_md2, "choosing a version wrote a new story.md");
+        assert!(n >= 2);
+        // the conversation kept with the story and the person's prefs
+        s.save_chat(&e.id, &StoryChat { version: 1, messages: vec![] }).unwrap();
+        let (l_chat, before_chat) = keep("chat.json");
+        s.save_chat(&e.id, &StoryChat { version: 2, messages: vec![] }).unwrap();
+        assert_eq!(read_to_string(&l_chat).unwrap(), before_chat);
+        assert!(read_to_string(dir.join("chat.json")).unwrap().contains('2'));
+        s.save_prefs(&Prefs::default()).unwrap();
+        let prefs = d.join("home/Stories/.prefs.json");
+        let link = d.join("home/Stories/.prefs.oldcopy");
+        hard_link(&prefs, &link).unwrap();
+        let old = read_to_string(&prefs).unwrap();
+        s.save_prefs(&Prefs { speed: 1.5, ..Prefs::default() }).unwrap();
+        assert_eq!(read_to_string(&link).unwrap(), old);
+        assert_ne!(read_to_string(&prefs).unwrap(), old);
+        // nothing is left beside the files
+        let left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.contains(".tmp")).collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[test]
     fn stories_are_saved_listed_found_opened_favourited_and_deleted() {
         let (s, d) = store("crud");
         assert!(s.list().is_empty(), "nothing yet, nothing made");

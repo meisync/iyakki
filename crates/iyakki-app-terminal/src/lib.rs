@@ -25,6 +25,14 @@ use iyakki_ui_sdk::zoom::{TextZoom, ZoomChange};
 #[cfg(all(target_arch = "wasm32", feature = "tile"))]
 mod guest;
 
+/// `tile.wasm`: the wasm32 build of this app (`cargo build --release --lib --target wasm32-unknown-unknown -p iyakki-app-terminal --features tile`,
+/// recorded in `tile.wasm.sha256`), the module the browser host serves as the CLI tile. `tests/wasm32_guest.rs` builds it again and checks it behaves like this file.
+#[cfg(not(target_arch = "wasm32"))]
+pub const TILE_WASM: &[u8] = include_bytes!("../tile.wasm");
+
+/// The capabilities the tile asks for, the same as `tile_caps` in `app.toml`: the browser host checks them before any call reaches the core.
+pub const TILE_CAPS: [&str; 3] = ["terminal", "storage", "dock"];
+
 /// The app id the launcher, the dock and the policy know it by.
 pub const ID: &str = "cli";
 /// The storage key of the text size.
@@ -80,6 +88,13 @@ impl UiApp for CliApp {
 
     fn wants_keyboard(&self) -> bool {
         self.term.wants_keyboard()
+    }
+
+    /// `pod:...` (the K8S tile's "Open a terminal"): ask for a whole session inside that pod; the card names the pod and nothing starts before the yes.
+    fn open_item(&mut self, item: &str) {
+        if let Some(p) = iyakki_ui_sdk::terminal::PodSession::from_item(item) {
+            self.term.open_pod(&p);
+        }
     }
 
     fn event(&mut self, ev: &UiEvent, _cx: &mut UiCx) -> Flow {

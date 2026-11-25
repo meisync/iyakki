@@ -1,0 +1,9 @@
+[package]
+name = "iyakki-frames"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Picture plumbing with no I/O: a minimal RGBA PNG writer (screenshots, video frames) and the size a picture gets inside an area. iyakki_shared::browserjobs::png and iyakki_shared::player::fit re-export it."
+
+[dependencies]
+miniz_oxide = "0.8"

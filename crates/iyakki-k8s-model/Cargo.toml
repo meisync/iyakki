@@ -1,0 +1,11 @@
+[package]
+name = "iyakki-k8s-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The cluster explorer's model: kubectl argument arrays, the Kube trait and its fake, bounded lists, details, logs, custom resources, retry tracking and plain failure texts, with no process started. Split out of iyakki-shared; iyakki-shared re-exports every module."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log.workspace = true

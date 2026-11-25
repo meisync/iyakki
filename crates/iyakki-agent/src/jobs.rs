@@ -62,6 +62,10 @@ struct Meta {
     announced_ui: bool,
     announced_agent: bool,
     announced_inbox: bool,
+    /// The person asked for the job to go on after they sign out (`job_start` with `keep_after_sign_out`, or `job_keep`). Without it a
+    /// sign-out stops the job (D-SESSION-END). Old files have no such line: they read as false.
+    #[serde(default)]
+    keep: bool,
 }
 
 #[derive(Clone)]
@@ -478,6 +482,28 @@ impl Jobs {
         self.list(owner).into_iter().filter(|j| !j.dismissed).collect()
     }
 
+    /// Mark a job to go on after the person signs out (or take the mark off). The mark lives in the job's own file.
+    pub fn set_keep(&self, owner: &str, id: &str, keep: bool) -> Result<(), String> {
+        let _g = self.lock();
+        let d = self.dir(owner, id)?;
+        let mut m = Self::read_meta(&d).ok_or_else(|| format!("no job {id}"))?;
+        m.keep = keep;
+        Self::write_meta(&d, &m)
+    }
+
+    /// Whether a job is marked to go on after sign-out.
+    pub fn kept(&self, owner: &str, id: &str) -> bool {
+        let _g = self.lock();
+        self.dir(owner, id).ok().and_then(|d| Self::read_meta(&d)).is_some_and(|m| m.keep)
+    }
+
+    /// The end of the person's session (D-SESSION-END): every running job of `owner` that `pick` chooses and that is not marked to continue is
+    /// stopped (TERM to its group, KILL after `grace`). Returns how many were stopped. A finished job, a kept job and a job `pick` refuses stay.
+    pub fn end_session(&self, owner: &str, pick: &dyn Fn(&Job) -> bool, grace: Duration) -> usize {
+        let running: Vec<Job> = self.list(owner).into_iter().filter(|j| j.running() && pick(j)).collect();
+        running.iter().filter(|j| !self.kept(owner, &j.id)).filter(|j| self.stop(owner, &j.id, grace).is_ok()).count()
+    }
+
     pub fn running_count(&self, owner: &str) -> usize {
         self.list(owner).iter().filter(|j| j.running()).count()
     }
@@ -858,6 +884,29 @@ mod tests {
         let s = j.stop("alice", "j1", Duration::from_millis(400)).unwrap();
         assert_eq!(s.state, State::Stopped);
         assert!(t0.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn the_end_of_a_session_stops_the_persons_picked_jobs_but_not_a_kept_one_or_another_persons() {
+        let t = Tmp::new("endsess");
+        let j = t.jobs();
+        let ide = |t: &Tmp, label: &str| Spec { workspace: "proj".into(), ..sh(t, label, "sleep 300") };
+        let a = j.start("ann", &ide(&t, "build"), &ok).unwrap();
+        let b = j.start("ann", &ide(&t, "serve"), &ok).unwrap();
+        let c = j.start("ann", &sh(&t, "chat", "sleep 300"), &ok).unwrap();
+        let other = j.start("bob", &ide(&t, "theirs"), &ok).unwrap();
+        j.set_keep("ann", &b.id, true).unwrap();
+        assert!(j.kept("ann", &b.id) && !j.kept("ann", &a.id) && !j.kept("ann", "j99"));
+        let n = j.end_session("ann", &|x: &Job| !x.workspace.is_empty(), Duration::from_millis(200));
+        assert_eq!(n, 1, "only the IDE run that was not kept");
+        let state = |o: &str, id: &str| j.get(o, id).unwrap().state;
+        assert_eq!(state("ann", &a.id), State::Stopped);
+        assert_eq!((state("ann", &b.id), state("ann", &c.id), state("bob", &other.id)), (State::Running, State::Running, State::Running));
+        assert_eq!(j.end_session("ann", &|x: &Job| x.workspace.is_empty(), Duration::from_millis(200)), 1, "the chat job is the other scope");
+        assert_eq!(j.end_session("ann", &|_| true, Duration::from_millis(200)), 0, "the kept job stays until the person stops it");
+        j.set_keep("ann", &b.id, false).unwrap();
+        assert_eq!(j.end_session("ann", &|_| true, Duration::from_millis(200)), 1, "unmarked, it stops with the next sign-out");
+        let _ = j.stop("bob", &other.id, Duration::from_millis(200));
     }
 
     #[test]

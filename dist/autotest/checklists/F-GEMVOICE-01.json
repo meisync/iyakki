@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-GEMVOICE-01",
+  "feature_sha": "6b44cfe076ab7660",
+  "title": "Gemini live session wire (experimental)",
+  "clauses": [
+    {
+      "id": "live-talk",
+      "text": "A Gemini live session answers one spoken sentence",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "With the Gemini voice assistant on and the owner's Google key set (the key is never typed in chat), start a session and say one sentence.",
+          "expect": "A reply comes back as text in the chat."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,92 @@
+{
+ "schema": 1,
+ "row": "F-CAM-11",
+ "feature_sha": "c78da86fab362c7c",
+ "title": "assistant camera tools: photos, recording, passport, red sign (manual until automated)",
+ "clauses": [
+  {
+   "id": "asks-photo",
+   "text": "Taking a photo always asks, and the longest grant offered is Allow for 5 minutes.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant to take a photo.",
+     "expect": "An approval card appears. The grant it offers is at most Allow for 5 minutes, and no option allows the rest of the session."
+    }
+   ]
+  },
+  {
+   "id": "red-sign",
+   "text": "A red sign reads Camera in use by the assistant on every screen while the assistant uses the camera.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "While the assistant takes a photo or records, look at another screen (for example open another app).",
+     "expect": "The red sign Camera in use by the assistant shows on every screen while it works, and goes when it stops."
+    }
+   ]
+  },
+  {
+   "id": "record-limit",
+   "text": "A recording stops at its time limit (30 seconds by default, at most 600) and can be stopped early.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant for a 30 second recording, and then, on another one, ask it to stop early.",
+     "expect": "The first stops by itself after about 30 seconds. The second stops at once when asked."
+    }
+   ]
+  },
+  {
+   "id": "passport",
+   "text": "A passport photo gives the photo, a sheet (PNG or PDF) and the rules used, each with its source or UNVERIFIED.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant for a passport photo for a country, with a 4x6 sheet. Stand centred, because the frame is fixed.",
+     "expect": "The photo and sheet come back. The rules say where they come from or say UNVERIFIED."
+    }
+   ]
+  },
+  {
+   "id": "paths-only",
+   "text": "Pictures and recordings are saved in the person's Pictures and Videos, and the chat gives only the paths.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "After a photo, read where the chat says it was saved.",
+     "expect": "A path in Pictures is given (Videos for a recording). No picture is pasted into the chat."
+    }
+   ]
+  },
+  {
+   "id": "busy",
+   "text": "While the CAMERA app holds the camera, the assistant's tool says the camera is busy.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Open the CAMERA app with its preview on, then ask the assistant for a photo.",
+     "expect": "The assistant says the camera is busy."
+    }
+   ]
+  }
+ ]
+}

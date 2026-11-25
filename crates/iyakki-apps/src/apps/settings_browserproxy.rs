@@ -6,10 +6,11 @@
 use iyakki_proxy::proxyset;
 
 use super::*;
+use super::browser_port::BrowserSettingsPort;
 
 impl SettingsApp {
-    pub(super) fn render_browser_proxy(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, cx: &AppCx) -> f32 {
-        let t = proxyset::text(cx.data_dir());
+    pub(super) fn render_browser_proxy(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, p: &dyn BrowserSettingsPort) -> f32 {
+        let t = proxyset::text(p.data_root());
         let state = if t.is_empty() { "none (direct)".to_string() } else { t };
         let rh = 70.0 * s;
         if y0 + rh > a.y + a.h - 4.0 * s {
@@ -26,22 +27,22 @@ impl SettingsApp {
     }
 
     /// N of the Browser tab.
-    pub(super) fn handle_browser_proxy(&mut self, k: &Key, cx: &AppCx) -> bool {
+    pub(super) fn handle_browser_proxy(&mut self, k: &Key, p: &dyn BrowserSettingsPort) -> bool {
         if !matches!(k, Key::Char('N')) {
             return false;
         }
-        let now = proxyset::text(cx.data_dir());
+        let now = proxyset::text(p.data_root());
         self.open_form(FormKind::BrowserProxy, Form::new("Browser proxy").text("Proxy", &now, "host:port, for example proxy.example:3128; empty turns it off"));
         true
     }
 
-    pub(super) fn browser_proxy_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
-        let kept = proxyset::save(cx.data_dir(), form.value(0).trim())?;
+    pub(super) fn browser_proxy_submit(&mut self, p: &dyn BrowserSettingsPort, form: &Form) -> Result<String, String> {
+        let kept = proxyset::save(p.data_root(), form.value(0).trim())?;
         if kept.is_empty() {
-            cx.audit.record(&cx.session.user, "settings.browser", "Browser proxy: off");
+            p.audit("settings.browser", "Browser proxy: off");
             Ok("The browser connects to sites directly; it applies the next time the browser starts.".into())
         } else {
-            cx.audit.record(&cx.session.user, "settings.browser", &format!("Browser proxy: {kept}"));
+            p.audit("settings.browser", &format!("Browser proxy: {kept}"));
             Ok(format!("The browser will use the proxy {kept} from the next time it starts."))
         }
     }

@@ -1,0 +1,12 @@
+[package]
+name = "iyakki-cluster-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The cluster registry and the cloud deploy plan as plain data: cluster entries, the per-account registry and its rules, the confirmation texts, the cloud launch plan, the route table and the name rules. No process, no vault, no network. Split out of iyakki-shared (alpha.8 E7); iyakki-shared re-exports every module under the old path."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+iyakki-sec = { workspace = true }
+iyakki-clock = { workspace = true }

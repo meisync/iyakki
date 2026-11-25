@@ -262,6 +262,42 @@ pub fn install_request(cmdline: &str) -> Option<Result<Vec<String>, String>> {
     }
 }
 
+/// What a self-install did, so the caller (the boot) can power off after a good one.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SelfInstall {
+    /// The kernel line did not ask.
+    NotAsked,
+    /// Asked wrongly (one parameter, a mismatch, a bad name): nothing was run.
+    Refused,
+    /// This stick already installed once: nothing was run.
+    AlreadyDone,
+    /// The installer ran with this exit code; 0: remove the stick and power off.
+    Ran(i32),
+}
+
+/// The self-install of a cloud node, with the installer and the console injected: the kernel line is checked, the marker on the stick stops a
+/// second run (it is written BEFORE the installer starts, so a crash half way never loops), then `run` is called with the installer's arguments.
+pub fn self_install(cmdline: &str, marker: &std::path::Path, run: &mut dyn FnMut(&[String]) -> i32, out: &mut dyn FnMut(String)) -> SelfInstall {
+    match install_request(cmdline) {
+        None => SelfInstall::NotAsked,
+        Some(Err(e)) => {
+            out(format!("IYAKKI-CLOUD {e}"));
+            SelfInstall::Refused
+        }
+        Some(Ok(a)) => {
+            if marker.exists() {
+                out(format!("IYAKKI-CLOUD self-install skipped: this stick already installed once (remove {} to allow it again)", marker.display()));
+                return SelfInstall::AlreadyDone;
+            }
+            let _ = std::fs::write(marker, "installed\n");
+            out(format!("IYAKKI-CLOUD self-install of {} starts", a[1]));
+            let rc = run(&a);
+            out(format!("IYAKKI-CLOUD self-install exit {rc}: remove the stick and restart"));
+            SelfInstall::Ran(rc)
+        }
+    }
+}
+
 /// At boot, on a cloud node: read the first drive labelled for us (and the `iyakki-config/` folder of the data partition) and apply it.
 /// Returns log lines. Needs `mount`; not covered by unit tests (the QEMU test in dist/cloud/build-cloud.sh covers it).
 pub fn boot(cmdline: &str, variant: &str, data_dir: &str) -> Vec<String> {
@@ -398,6 +434,46 @@ mod tests {
         std::fs::write(d.join("other.txt"), "x").unwrap();
         let m = read_folder(&d);
         assert_eq!(m.keys().map(String::as_str).collect::<Vec<_>>(), [CFG_FILE, "tls/cert.pem"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_self_install_runs_the_installer_once_per_stick_only_when_both_parameters_agree_and_says_so_on_the_console() {
+        let d = std::env::temp_dir().join(format!("iyakki-cloud-selfinst-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let marker = d.join("cloud-install-done");
+        let mut ran: Vec<Vec<String>> = Vec::new();
+        let mut said: Vec<String> = Vec::new();
+        let go = |cmd: &str, rc: i32, ran: &mut Vec<Vec<String>>, said: &mut Vec<String>| {
+            let mut runner = |a: &[String]| {
+                assert!(marker.exists() || rc < 0, "the marker is written before the installer starts");
+                ran.push(a.to_vec());
+                rc
+            };
+            let mut out = |l: String| said.push(l);
+            self_install(cmd, &marker, &mut runner, &mut out)
+        };
+        assert_eq!(go("quiet", 0, &mut ran, &mut said), SelfInstall::NotAsked);
+        assert_eq!(go("iyakki.cloud.install=sda", 0, &mut ran, &mut said), SelfInstall::Refused);
+        assert_eq!(go("iyakki.cloud.install=sda iyakki.cloud.confirm=ERASE-sdb", 0, &mut ran, &mut said), SelfInstall::Refused);
+        assert_eq!(go("iyakki.cloud.confirm=ERASE-sda", 0, &mut ran, &mut said), SelfInstall::NotAsked);
+        assert!(ran.is_empty() && !marker.exists(), "nothing ran and no marker for a wrong or missing parameter");
+        assert!(said.iter().any(|l| l.contains("ERASE-sda")), "{said:?}");
+        // both agree: the installer runs once with the exact arguments, and the console says start and exit
+        let line = "console=ttyS0 iyakki.cloud.install=nvme0n1 iyakki.cloud.confirm=ERASE-nvme0n1";
+        assert_eq!(go(line, 0, &mut ran, &mut said), SelfInstall::Ran(0));
+        assert_eq!(ran, [["--disk", "nvme0n1", "--confirm", "nvme0n1", "--yes"]]);
+        assert!(marker.exists());
+        assert!(said.iter().any(|l| l.contains("of nvme0n1 starts")) && said.iter().any(|l| l.contains("exit 0")));
+        // the same stick again: skipped, the installer is not run twice
+        assert_eq!(go(line, 0, &mut ran, &mut said), SelfInstall::AlreadyDone);
+        assert_eq!(ran.len(), 1);
+        assert!(said.last().unwrap().contains("already installed once"));
+        // a failed installer reports its code and the marker still stops a loop
+        std::fs::remove_file(&marker).unwrap();
+        assert_eq!(go(line, 3, &mut ran, &mut said), SelfInstall::Ran(3));
+        assert_eq!(go(line, 0, &mut ran, &mut said), SelfInstall::AlreadyDone);
         let _ = std::fs::remove_dir_all(&d);
     }
 

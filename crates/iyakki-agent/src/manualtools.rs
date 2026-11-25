@@ -1,9 +1,9 @@
 //! The lead assistant's tools for the DOCTOR "Manual tests" tab (chat reach for F-DOCTOR-04): list the checklists a person goes through,
-//! open one (its steps and what to expect), record a person's answer, and export the answers as one file.
+//! open one (its steps and what to expect), record a person's answer, export the answers as one file and import the files of other machines.
 //!
 //! Reading is free. Recording and exporting always ask (`Risk::Ask`): a verdict is evidence that a person tried the thing, so the assistant
 //! may only write down what the person told it they saw or heard, and the card shows the exact words before anything is written. Like
-//! the tab, the tools only make the human level of evidence (`manual-tests/human/<ROW>.<clause>.json` in the person's home).
+//! the tab, the tools only make the human level of evidence (`manual-tests/human/<ROW>.<clause>.<machine>.json` in the person's home, the runner's schema).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,16 +12,18 @@ use serde_json::{json, Value};
 
 use crate::agent::{Risk, ToolDef, Tools};
 use crate::chat::ToolSpec;
-use iyakki_shared::manualtest::{self as mt, ChkParser, EvidenceStore, Filter, Scenario, State, Verdict, Who};
+use iyakki_shared::manualtest::{self as mt, ChkParser, EvidenceStore, Filter, RunnerParser, Scenario, State, Verdict, Who};
 pub use iyakki_shared::manualtest::PROMPT_RULE;
 
 pub const LIST_TOOL: &str = "manual_tests_list";
 pub const OPEN_TOOL: &str = "manual_test_open";
 pub const RECORD_TOOL: &str = "manual_test_record";
 pub const EXPORT_TOOL: &str = "manual_tests_export";
+pub const IMPORT_TOOL: &str = "manual_tests_import";
+pub const MACHINE_TOOL: &str = "manual_machine_set";
 
 pub fn is_manual_tool(n: &str) -> bool {
-    matches!(n, LIST_TOOL | OPEN_TOOL | RECORD_TOOL | EXPORT_TOOL)
+    matches!(n, LIST_TOOL | OPEN_TOOL | RECORD_TOOL | EXPORT_TOOL | IMPORT_TOOL | MACHINE_TOOL)
 }
 
 pub trait Backend: Send + Sync {
@@ -131,6 +133,9 @@ impl ManualTools {
     fn record(&self, args: &Value) -> Result<String, String> {
         let (sc, steps, v, note) = self.parse_record(args)?;
         let who = self.backend.who();
+        if who.machine.is_empty() {
+            return Err(mt::PICK_FIRST.into());
+        }
         let mut wrote = 0;
         for &i in &steps {
             for (row, clause) in sc.targets(i) {
@@ -146,9 +151,37 @@ impl ManualTools {
 
     fn export(&self) -> Result<String, String> {
         let who = self.backend.who();
+        if who.machine.is_empty() {
+            return Err(mt::PICK_FIRST.into());
+        }
         let p = mt::export(self.backend.store(), &who.machine, self.backend.now())?;
         self.backend.audit("manual.export", &format!("{p} (by chat)"));
         Ok(format!("Exported to {p} in the home folder: one file the team can collect."))
+    }
+
+    /// Merge the answers other machines exported (the bundles in `manual-tests/import` and on a stick DISKS opened). The same merge as the tab's
+    /// Import button: per machine, row and clause the newer answer wins; a file that is no evidence is named and skipped.
+    fn import(&self) -> Result<String, String> {
+        let who = self.backend.who();
+        let extra = mt::stick_dirs(self.backend.store());
+        let r = mt::import(self.backend.store(), &who.machine, &extra);
+        self.backend.audit("manual.import", &format!("{} files, {} new, {} newer (by chat)", r.files, r.added, r.updated));
+        if r.files == 0 {
+            return Ok(format!("No file to merge. The other machines' files go in {} in the home folder, or on a stick DISKS opened.", mt::IMPORT_DIR));
+        }
+        let mut t = format!("Merged {} file{}: {} new, {} newer, {} already here.", r.files, if r.files == 1 { "" } else { "s" }, r.added, r.updated, r.kept);
+        if !r.refused.is_empty() {
+            t.push_str(&format!(" Skipped: {}.", r.refused.join("; ")));
+        }
+        Ok(t)
+    }
+
+    /// The person's own pick of which computer this is; the tool never chooses, and only a listed kind is kept.
+    fn set_machine(&self, args: &Value) -> Result<String, String> {
+        let kind = args["kind"].as_str().ok_or_else(|| format!("name the computer the person picked: {}", mt::PICK_KINDS.join(", ")))?.trim();
+        mt::pick_kind(self.backend.store(), kind)?;
+        self.backend.audit("manual.machine", &format!("{kind} (by chat)"));
+        Ok(format!("This computer is a {}. Manual test answers are filed under {kind}.", mt::kind_label(kind)))
     }
 
     fn gate(&self) -> Result<(), String> {
@@ -169,6 +202,8 @@ impl Tools for ManualTools {
         add(OPEN_TOOL, "Show one manual test checklist: the rows it covers, what to do before, each numbered step with what the person should see or hear, and the answers recorded so far. Reads only.", json!({"type": "object", "properties": {"scenario": {"type": "string"}}, "required": ["scenario"]}), Risk::Safe);
         add(RECORD_TOOL, "Record the person's own answer for one step (or all) of a manual test: pass, fail, cannot-test or skip, with an optional note. Write down ONLY what the person told you they saw or heard; never guess or assume a result. Always asks first. A skip writes nothing.", json!({"type": "object", "properties": {"scenario": {"type": "string"}, "step": {"description": "the step number from 1, or \"all\""}, "verdict": {"type": "string", "enum": ["pass", "fail", "cannot-test", "skip"]}, "note": {"type": "string"}}, "required": ["scenario", "step", "verdict"]}), Risk::Ask);
         add(EXPORT_TOOL, "Write every recorded manual-test answer as one file in the person's home folder (manual-tests/export) for the team to collect. Always asks first.", json!({"type": "object", "properties": {}}), Risk::Ask);
+        add(IMPORT_TOOL, "Merge the manual-test answers other machines exported (the files in manual-tests/import in the person's home folder, or on a stick DISKS opened) into the answers kept here. The newer answer per machine, row and clause wins; files that are not answers are named and skipped. Always asks first.", json!({"type": "object", "properties": {}}), Risk::Ask);
+        add(MACHINE_TOOL, "Keep which computer this is for the manual tests: mac-mini-2014, mac-mini-2018, macbook-pro, lenovo, hp, t7-ssd or other. Use ONLY the kind the person told you; never work it out from the hardware or guess. The manual-test answers are filed under it. Always asks first.", json!({"type": "object", "properties": {"kind": {"type": "string", "enum": mt::PICK_KINDS}}, "required": ["kind"]}), Risk::Ask);
         v
     }
 
@@ -178,6 +213,8 @@ impl Tools for ManualTools {
             OPEN_TOOL => self.gate().and_then(|_| self.open(args)),
             RECORD_TOOL => self.gate().and_then(|_| self.record(args)),
             EXPORT_TOOL => self.gate().and_then(|_| self.export()),
+            IMPORT_TOOL => self.gate().and_then(|_| self.import()),
+            MACHINE_TOOL => self.gate().and_then(|_| self.set_machine(args)),
             _ => self.inner.call(name, args),
         }
     }
@@ -191,6 +228,8 @@ impl Tools for ManualTools {
                 Err(_) => "Record an answer for a manual test".into(),
             },
             EXPORT_TOOL => "Export the manual test answers as one file".into(),
+            IMPORT_TOOL => "Merge the manual test answers of other machines".into(),
+            MACHINE_TOOL => format!("Keep this computer as {} for the manual tests", args["kind"].as_str().unwrap_or("the chosen kind")),
             _ => self.inner.describe(name, args),
         }
     }
@@ -210,6 +249,8 @@ impl Tools for ManualTools {
                 Err(e) => format!("Cannot record: {e}"),
             }),
             EXPORT_TOOL => Some("Writes one file with every recorded answer into manual-tests/export in your home folder. Nothing is sent anywhere.".into()),
+            IMPORT_TOOL => Some("Reads the answer files in manual-tests/import in your home folder (and on a stick DISKS opened) and merges them into the answers kept here: the newer one per machine, row and clause wins. Nothing is sent anywhere and no answer is changed by being merged.".into()),
+            MACHINE_TOOL => Some("Keeps the computer you name in manual-tests/machine.json in your home folder; the manual test answers are filed under that name. Say yes only if that is the computer you are sitting at.".into()),
             LIST_TOOL | OPEN_TOOL => None,
             _ => self.inner.preview(name, args),
         }
@@ -217,7 +258,8 @@ impl Tools for ManualTools {
 
     fn refusal(&self, name: &str, args: &Value) -> Option<String> {
         match name {
-            LIST_TOOL | EXPORT_TOOL => self.gate().err(),
+            LIST_TOOL | EXPORT_TOOL | IMPORT_TOOL => self.gate().err(),
+            MACHINE_TOOL => self.gate().and_then(|_| args["kind"].as_str().filter(|k| mt::PICK_KINDS.contains(k)).map(|_| ()).ok_or_else(|| format!("the kind is one of {}", mt::PICK_KINDS.join(", ")))).err(),
             OPEN_TOOL => self.gate().and_then(|_| self.find(args).map(|_| ())).err(),
             RECORD_TOOL => self.gate().and_then(|_| self.parse_record(args).map(|_| ())).err(),
             _ => self.inner.refusal(name, args),
@@ -229,7 +271,7 @@ impl Tools for ManualTools {
     }
 
     fn approved_always(&self, name: &str) -> bool {
-        !matches!(name, RECORD_TOOL | EXPORT_TOOL) && self.inner.approved_always(name)
+        !matches!(name, RECORD_TOOL | EXPORT_TOOL | IMPORT_TOOL | MACHINE_TOOL) && self.inner.approved_always(name)
     }
 
     fn grant_blocker(&self, name: &str, args: &Value) -> Option<String> {
@@ -350,14 +392,18 @@ impl Backend for RealBackend {
         self.policy.allows_app(iyakki_sec::policy::App::Doctor)
     }
     fn scenarios(&self) -> (Vec<Scenario>, Vec<String>) {
-        let mut names: Vec<String> = std::fs::read_dir(mt::BUNDLED_DIR).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".chk")).collect();
-        names.sort();
-        let files: Vec<(String, String)> = names.into_iter().filter_map(|n| std::fs::read_to_string(format!("{}/{n}", mt::BUNDLED_DIR)).ok().map(|t| (n, t))).collect();
-        mt::load_all(&ChkParser, &files)
+        let read = |dir: &str, ext: &str| -> Vec<(String, String)> {
+            let mut names: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(ext)).collect();
+            names.sort();
+            names.into_iter().filter_map(|n| std::fs::read_to_string(format!("{dir}/{n}")).ok().map(|t| (n, t))).collect()
+        };
+        let (chk, runner) = (read(mt::BUNDLED_DIR, ".chk"), read(mt::BUNDLED_CHECKLIST_DIR, ".json"));
+        mt::load_sources(&[(&ChkParser, &chk), (&RunnerParser, &runner)])
     }
     fn who(&self) -> Who {
         let rel = iyakki_shared::relinfo::ReleaseInfo::load(std::path::Path::new(iyakki_shared::relinfo::RELEASE_FILE));
-        let machine = std::fs::read_to_string("/etc/hostname").map(|h| h.trim().to_string()).ok().filter(|h| !h.is_empty()).unwrap_or_else(|| "this-computer".into());
+        // the person's own pick, never a guess from the hardware: empty until it is picked
+        let machine = mt::picked_kind(&self.store).unwrap_or_default();
         Who { who: self.user.clone(), admin: self.policy.manage_settings, machine, image_commit: rel.map(|r| r.git_describe).unwrap_or_default() }
     }
     fn hardware(&self) -> String {
@@ -384,6 +430,8 @@ mod tests {
 
     struct Fake {
         may: bool,
+        /// What the backend answers for the machine: empty = the person has not picked yet.
+        machine: &'static str,
         store: MemStore,
         audit: std::sync::Mutex<Vec<String>>,
     }
@@ -395,7 +443,7 @@ mod tests {
             mt::load_all(&ChkParser, &[("a.chk".into(), SC.into()), ("b.chk".into(), OTHER.into()), ("c.chk".into(), "junk".into())])
         }
         fn who(&self) -> Who {
-            Who { who: "ana".into(), admin: true, machine: "m1".into(), image_commit: "abc".into() }
+            Who { who: "ana".into(), admin: true, machine: self.machine.into(), image_commit: "abc1234".into() }
         }
         fn hardware(&self) -> String {
             "Apple Mac mini".into()
@@ -425,7 +473,7 @@ mod tests {
     }
 
     fn rig(may: bool) -> (ManualTools, Arc<Fake>) {
-        let f = Arc::new(Fake { may, store: MemStore::default(), audit: Default::default() });
+        let f = Arc::new(Fake { may, machine: "m1", store: MemStore::default(), audit: Default::default() });
         (ManualTools::new(Arc::new(Empty), f.clone()), f)
     }
 
@@ -433,12 +481,12 @@ mod tests {
     fn reading_is_free_and_writing_always_asks() {
         let (t, _) = rig(true);
         let d = t.defs();
-        assert_eq!(d.len(), 4);
+        assert_eq!(d.len(), 6);
         for x in &d {
-            let writes = x.spec.name == RECORD_TOOL || x.spec.name == EXPORT_TOOL;
+            let writes = x.spec.name == RECORD_TOOL || x.spec.name == EXPORT_TOOL || x.spec.name == IMPORT_TOOL || x.spec.name == MACHINE_TOOL;
             assert_eq!(matches!(x.risk, Risk::Ask), writes, "{}", x.spec.name);
         }
-        assert!(!t.pre_approved(RECORD_TOOL) && !t.approved_always(RECORD_TOOL) && !t.approved_always(EXPORT_TOOL));
+        assert!(!t.pre_approved(RECORD_TOOL) && !t.approved_always(RECORD_TOOL) && !t.approved_always(EXPORT_TOOL) && !t.approved_always(IMPORT_TOOL) && !t.approved_always(MACHINE_TOOL) && !t.pre_approved(IMPORT_TOOL));
         assert!(t.grant_blocker(RECORD_TOOL, &json!({})).is_some());
         assert!(t.call("other", &json!({})).unwrap_err().contains("inner got"));
     }
@@ -473,9 +521,9 @@ mod tests {
         assert!(t.describe(RECORD_TOOL, &a).contains("Record Pass for SND-01 step 1"));
         assert!(f.store.names().is_empty(), "the card writes nothing");
         assert!(t.call(RECORD_TOOL, &a).unwrap().contains("1 evidence file"));
-        assert_eq!(f.store.names(), ["manual-tests/human/F-SND-01.tone.json"]);
+        assert_eq!(f.store.names(), ["manual-tests/human/F-SND-01.tone.m1.json"]);
         let e = &mt::load_evidence(&f.store)[0];
-        assert_eq!((e.who.as_str(), e.result.as_str(), e.note.as_str(), e.machine.as_str()), ("ana", "pass", "clear sound", "m1"));
+        assert_eq!((e.by.as_str(), e.verdict.as_str(), e.note.as_str(), e.machine.as_str(), e.image_commit.as_str()), ("admin", "pass", "clear sound", "m1", "abc1234"));
         assert!(f.audit.lock().unwrap().join("\n").contains("manual.record SND-01 step 1 pass (by chat)"));
         // the list now says in progress, and "all" fails the rest (a bare clause covers both rows)
         assert!(t.call(LIST_TOOL, &json!({})).unwrap().contains("in progress"));
@@ -505,11 +553,34 @@ mod tests {
         assert!(t.preview(EXPORT_TOOL, &json!({})).unwrap().contains("Nothing is sent anywhere"));
         assert!(f.audit.lock().unwrap().join("\n").contains("manual.export"));
         let (t, f) = rig(false);
-        for n in [LIST_TOOL, OPEN_TOOL, RECORD_TOOL, EXPORT_TOOL] {
+        for n in [LIST_TOOL, OPEN_TOOL, RECORD_TOOL, EXPORT_TOOL, IMPORT_TOOL] {
             assert!(t.call(n, &json!({"scenario": "SND-01", "step": 1, "verdict": "pass"})).unwrap_err().contains("may not open DOCTOR"), "{n}");
             assert!(t.refusal(n, &json!({"scenario": "SND-01", "step": 1, "verdict": "pass"})).is_some(), "{n}");
         }
         assert!(f.store.names().is_empty());
+    }
+
+    #[test]
+    fn import_merges_other_machines_after_the_card_and_audits() {
+        let (t, f) = rig(true);
+        // another machine's exported answers wait in the import folder and on a stick
+        let other = r#"{"schema":1,"row":"F-SND-01","clause":"tone","machine":"lenovo","image_commit":"abc1234","by":"person","verdict":"pass","date":"2027-01-15"}"#;
+        f.store.put("manual-tests/import/lenovo.json", other);
+        f.store.put("manual-tests/import/junk.json", "{\"schema\":1,\"extra\":true}");
+        f.store.put("media/stick/manual-tests/export/two.json", &other.replace("lenovo", "hp").replace("tone", "stop"));
+        assert!(t.preview(IMPORT_TOOL, &json!({})).unwrap().contains("Nothing is sent anywhere"));
+        assert!(t.describe(IMPORT_TOOL, &json!({})).contains("Merge"));
+        assert!(!f.store.names().iter().any(|n| n.starts_with("manual-tests/human/")), "the card writes nothing");
+        let o = t.call(IMPORT_TOOL, &json!({})).unwrap();
+        assert!(o.contains("Merged 3 files: 2 new, 0 newer, 0 already here.") && o.contains("junk.json"), "{o}");
+        assert!(f.store.names().contains(&"manual-tests/human/lenovo/F-SND-01.tone.lenovo.json".to_string()));
+        assert!(f.store.names().contains(&"manual-tests/human/hp/F-SND-01.stop.hp.json".to_string()));
+        assert!(f.audit.lock().unwrap().join("\n").contains("manual.import 3 files, 2 new, 0 newer (by chat)"));
+        // again: nothing new
+        assert!(t.call(IMPORT_TOOL, &json!({})).unwrap().contains("2 already here"));
+        // no files at all is said in words
+        let (t2, _) = rig(true);
+        assert!(t2.call(IMPORT_TOOL, &json!({})).unwrap().contains("No file to merge"));
     }
 
     #[test]
@@ -532,5 +603,29 @@ mod tests {
             assert!(s.read("lnk/x.json").is_err());
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_machine_is_the_persons_pick_and_without_it_nothing_is_recorded_or_exported() {
+        let f = Arc::new(Fake { may: true, machine: "", store: MemStore::default(), audit: Default::default() });
+        let t = ManualTools::new(Arc::new(Empty), f.clone());
+        let a = json!({"scenario": "SND-01", "step": 1, "verdict": "pass"});
+        assert_eq!(t.call(RECORD_TOOL, &a).unwrap_err(), mt::PICK_FIRST);
+        assert_eq!(t.call(EXPORT_TOOL, &json!({})).unwrap_err(), mt::PICK_FIRST);
+        assert!(f.store.names().is_empty(), "nothing is written before a pick");
+        // the tool asks, shows what it keeps, refuses a guess and a kind that is not on the list
+        let d = t.defs();
+        assert!(matches!(d.iter().find(|x| x.spec.name == MACHINE_TOOL).unwrap().risk, Risk::Ask));
+        assert!(t.preview(MACHINE_TOOL, &json!({"kind": "lenovo"})).unwrap().contains("manual-tests/machine.json"));
+        assert!(t.describe(MACHINE_TOOL, &json!({"kind": "lenovo"})).contains("lenovo"));
+        assert!(t.refusal(MACHINE_TOOL, &json!({"kind": "toaster"})).is_some() && t.refusal(MACHINE_TOOL, &json!({})).is_some());
+        assert!(t.refusal(MACHINE_TOOL, &json!({"kind": "hp"})).is_none());
+        assert!(t.call(MACHINE_TOOL, &json!({"kind": "qemu"})).is_err());
+        assert!(f.store.names().is_empty());
+        assert!(t.call(MACHINE_TOOL, &json!({"kind": "hp"})).unwrap().contains("HP"));
+        assert_eq!(mt::picked_kind(&f.store).as_deref(), Some("hp"));
+        assert!(f.audit.lock().unwrap().join("\n").contains("manual.machine hp (by chat)"));
+        assert!(!t.pre_approved(MACHINE_TOOL) && !t.approved_always(MACHINE_TOOL));
+        assert!(!PROMPT_RULE.is_empty());
     }
 }

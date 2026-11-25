@@ -402,4 +402,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(d);
         let _ = std::fs::remove_dir_all(d2);
     }
+
+    #[test]
+    fn the_trusted_tools_take_four_or_twelve_hours_or_none_say_so_in_status_refuse_the_rest_and_are_in_the_reachability_list() {
+        use super::super::trustedtools::*;
+        let (t, dm, d, lines) = setup("trusted-hours", Role::Admin);
+        // 12 hours: accepted and named in the status
+        t.call(TRUSTED_SET, &json!({"computer": "laptop", "on": true, "hours": 12})).unwrap();
+        let s = t.call(TRUSTED_STATUS, &json!({})).unwrap();
+        assert!(dm.trusted_active("laptop") && s.contains("every approval answered yes"), "{s}");
+        // 4 hours replaces it; no hours keeps it until switched off
+        t.call(TRUSTED_SET, &json!({"computer": "laptop", "on": true, "hours": 4})).unwrap();
+        t.call(TRUSTED_SET, &json!({"computer": "laptop", "on": true})).unwrap();
+        assert!(dm.trusted_list()[0].until == 0, "kept: no end time");
+        // refused: other hours, hours with off, an unknown computer
+        for bad in [json!({"computer": "laptop", "on": true, "hours": 6}), json!({"computer": "laptop", "on": false, "hours": 4}), json!({"on": true})] {
+            assert!(t.refusal(TRUSTED_SET, &bad).is_some() || t.call(TRUSTED_SET, &bad).is_err(), "{bad}");
+        }
+        assert!(t.call(TRUSTED_SET, &json!({"computer": "nobody", "on": true})).is_err());
+        // the patch grant is its own switch and ends on its own request
+        t.call(PATCH_SET, &json!({"computer": "laptop", "on": true, "hours": 12})).unwrap();
+        assert!(t.call(PATCH_STATUS, &json!({})).unwrap().contains("patches without asking"));
+        // every change is audited by name, never with a key
+        let l = lines.lock().unwrap().clone();
+        assert!(l.iter().filter(|x| x.starts_with("devmode.trusted.on laptop")).count() >= 3 && !l.iter().any(|x| x.contains("0000000000000000")), "{l:?}");
+        // listed for chat: the tools sit in the one reachability list and are served by this wrapper (no entry of their own in the chain)
+        let doc = include_str!("../../../../docs/development/CHAT-REACHABILITY.md");
+        for n in [TRUSTED_STATUS, TRUSTED_SET, PATCH_STATUS, PATCH_SET] {
+            assert!(doc.contains(&format!("`{n}`")), "{n} is listed in CHAT-REACHABILITY.md");
+            assert!(is_ours(n) && t.defs().iter().any(|x| x.spec.name == n), "{n} is served by the restart tools wrapper");
+        }
+        let _ = std::fs::remove_dir_all(d);
+    }
 }

@@ -11,16 +11,9 @@
 //! `iyakki.hostname=` locks the page.
 
 use super::*;
+use super::system_port::{HostNamePort, TimePort};
 use iyakki_clock as clock;
 use iyakki_clock::Zone;
-
-/// One setting read through the core contract (`settings.get`, docs/development/CORE-CONTRACT.md) instead of from the store directly:
-/// the first screen on the contract. `None` when the call is refused, so the page falls back to what it had (no behaviour change).
-fn contract_setting(cx: &AppCx, key: &str) -> Option<iyakki_core_api::contract::SettingValue> {
-    use iyakki_core_api::contract::{CallContext};
-    let ctx = CallContext::local(&cx.session.user, cx.session.policy.manage_settings);
-    cx.services.contract_local().settings().and_then(|s| s.get(&ctx, key).ok())
-}
 
 /// Changes the clock for a sync (the real one needs root; tests record).
 pub(super) type ClockSetter = Arc<dyn Fn(f64) -> Result<(), String> + Send + Sync>;
@@ -52,7 +45,7 @@ pub(super) struct NamePanel {
     pub(super) etc: std::path::PathBuf,
     pub(super) cmdline: String,
     pub(super) writable: bool,
-    /// A test seam; `None` is the real thing: the core changes the name (it asks) through `cx.os`.
+    /// A test seam; `None` is the real thing: the core changes the name (it asks) through the host name port.
     pub(super) apply: Option<NameSetter>,
     /// The name being typed, not yet applied or saved.
     pub(super) draft: Option<String>,
@@ -93,44 +86,44 @@ impl SettingsApp {
 
     // ------------------------------------------------------------------------------------------------ Time
 
-    fn time_settings(cx: &AppCx) -> iyakki_shared::settings::TimeSettings {
-        cx.settings().lock().map(|s| s.get().time.clone()).unwrap_or_default()
-    }
-
-    fn time_update(&mut self, cx: &AppCx, what: &str, f: impl FnOnce(&mut iyakki_shared::settings::TimeSettings)) -> bool {
-        let r = cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| f(&mut s.time));
+    fn time_update(&mut self, p: &dyn TimePort, what: &str, f: impl FnOnce(&mut iyakki_shared::settings::TimeSettings)) -> bool {
+        let mut f = Some(f);
+        let r = p.time_update(&mut |t| {
+            if let Some(f) = f.take() {
+                f(t)
+            }
+        });
         match r {
             Ok(()) => {
                 if self.time.global_zone {
-                    clock::set_chosen_zone(&Self::time_settings(cx).zone);
+                    clock::set_chosen_zone(&p.time_settings().zone);
                 }
-                cx.audit.record(&cx.session.user, "settings.time", what);
+                p.audit("settings.time", what);
                 true
             }
             Err(e) => {
-                self.fail(e.to_string());
+                self.fail(e);
                 false
             }
         }
     }
 
-    pub(super) fn handle_time(&mut self, k: &Key, cx: &AppCx) {
-        let (dir, user) = (cx.data_dir().to_path_buf(), cx.session.user.clone());
+    pub(super) fn handle_time(&mut self, k: &Key, p: &dyn TimePort) {
         match k {
             // your own clock face
             Key::Char('h') => {
-                let (h12, secs) = crate::uisize::load_clock(&dir, &user);
-                crate::uisize::save_clock(&dir, &user, !h12, secs);
+                let (h12, secs) = p.clock_face();
+                p.set_clock_face(!h12, secs);
                 self.ok(if h12 { "24-hour clock." } else { "12-hour clock with AM and PM." });
             }
             Key::Char('s') => {
-                let (h12, secs) = crate::uisize::load_clock(&dir, &user);
-                crate::uisize::save_clock(&dir, &user, h12, !secs);
+                let (h12, secs) = p.clock_face();
+                p.set_clock_face(h12, !secs);
                 self.ok(if secs { "The clock shows hours and minutes." } else { "The clock shows seconds too." });
             }
             // the machine's time: administrators
             Key::Char('z' | 'u' | 'n' | 'c' | 'y' | 'b' | 'a' | 'd') => {
-                if !self.admin(cx) {
+                if !self.admin(p) {
                     return;
                 }
                 if !self.time.writable {
@@ -142,7 +135,7 @@ impl SettingsApp {
                         self.modal = Some(Modal::Pick(PickKind::Zone, Picker::new("Time zone (type to search)", items)));
                     }
                     Key::Char('u') => {
-                        if self.time_update(cx, "zone=default", |t| {
+                        if self.time_update(p, "zone=default", |t| {
                             t.zone.clear();
                             t.zone_auto = false;
                         }) {
@@ -150,32 +143,32 @@ impl SettingsApp {
                         }
                     }
                     Key::Char('a') => {
-                        let on = !Self::time_settings(cx).zone_auto;
-                        if self.time_update(cx, if on { "zone=auto" } else { "zone=fixed" }, |t| t.zone_auto = on) {
+                        let on = !p.time_settings().zone_auto;
+                        if self.time_update(p, if on { "zone=auto" } else { "zone=fixed" }, |t| t.zone_auto = on) {
                             if on {
-                                self.zone_detect(cx);
+                                self.zone_detect(p);
                             } else {
                                 self.ok("The time zone stays as it is now; choose another one with Time zone.");
                             }
                         }
                     }
                     Key::Char('d') => {
-                        if !Self::time_settings(cx).zone_auto {
+                        if !p.time_settings().zone_auto {
                             return self.fail("Switch on Detect automatically first: it asks an internet service which zone this network's public IP address is in.");
                         }
-                        self.zone_detect(cx);
+                        self.zone_detect(p);
                     }
                     Key::Char('n') => {
-                        let off = !Self::time_settings(cx).no_ntp;
-                        if self.time_update(cx, if off { "ntp=off" } else { "ntp=on" }, |t| t.no_ntp = off) {
+                        let off = !p.time_settings().no_ntp;
+                        if self.time_update(p, if off { "ntp=off" } else { "ntp=on" }, |t| t.no_ntp = off) {
                             self.ok(if off { "The clock is no longer set from the network." } else { "The clock is set from the network when it is online." });
                         }
                     }
                     Key::Char('c') => {
-                        let t = Self::time_settings(cx);
+                        let t = p.time_settings();
                         self.open_form(FormKind::TimeServer, Form::new("Time server").text("Host name (empty = time.cloudflare.com, then pool.ntp.org)", &t.ntp_server, "for example ntp.example.org"));
                     }
-                    _ => self.time_sync(cx, matches!(k, Key::Char('b'))),
+                    _ => self.time_sync(p, matches!(k, Key::Char('b'))),
                 }
             }
             Key::Char('r') => self.ok("Read again."),
@@ -183,21 +176,21 @@ impl SettingsApp {
         }
     }
 
-    fn time_sync(&mut self, cx: &AppCx, allow_back: bool) {
-        let t = Self::time_settings(cx);
-        let servers = self.time.servers.clone().unwrap_or_else(|| cx.agent.ntp_servers_for(&t.ntp_server));
+    fn time_sync(&mut self, p: &dyn TimePort, allow_back: bool) {
+        let t = p.time_settings();
+        let servers = self.time.servers.clone().unwrap_or_else(|| p.ntp_servers_for(&t.ntp_server));
         let setter = self.time.set_clock.clone();
-        let agent = cx.agent.clone();
-        cx.audit.record(&cx.session.user, "settings.time.sync", if allow_back { "allow back" } else { "" });
+        let job = p.ntp_sync_job(servers, allow_back, setter);
+        p.audit("settings.time.sync", if allow_back { "allow back" } else { "" });
         self.start("Asking the time server", move || {
-            let st = agent.ntp().sync_once(&servers, allow_back, Duration::from_secs(4), &*setter);
-            if st.message.starts_with("Could not") || st.message.contains("could not be set") { JobOut::Msg(Err(st.message)) } else { JobOut::Msg(Ok(st.message)) }
+            let message = job();
+            if message.starts_with("Could not") || message.contains("could not be set") { JobOut::Msg(Err(message)) } else { JobOut::Msg(Ok(message)) }
         });
     }
 
-    pub(super) fn time_pick(&mut self, cx: &AppCx, item: &str) {
+    pub(super) fn time_pick(&mut self, p: &dyn TimePort, item: &str) {
         // a zone chosen by hand is fixed: automatic detection stops
-        if self.time_update(cx, &format!("zone={item}"), |t| {
+        if self.time_update(p, &format!("zone={item}"), |t| {
             t.zone = item.to_string();
             t.zone_auto = false;
         }) {
@@ -206,15 +199,15 @@ impl SettingsApp {
     }
 
     /// Look the zone up now ("Detect automatically" is on): through the test's detector at once, else in the background.
-    fn zone_detect(&mut self, cx: &AppCx) {
-        cx.audit.record(&cx.session.user, "settings.time.detect", "");
+    fn zone_detect(&mut self, p: &dyn TimePort) {
+        p.audit("settings.time.detect", "");
         match self.time.detect.clone() {
             Some(f) => {
                 let r = f();
                 let mut changed = None;
-                let saved = cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| changed = iyakki_shared::tzdetect::apply(&mut s.time, &r, clock::now_unix()));
+                let saved = p.time_update(&mut |t| changed = iyakki_shared::tzdetect::apply(t, &r, clock::now_unix()));
                 if let Err(e) = saved {
-                    return self.fail(e.to_string());
+                    return self.fail(e);
                 }
                 if let (Some(z), true) = (&changed, self.time.global_zone) {
                     clock::set_chosen_zone(z);
@@ -226,7 +219,7 @@ impl SettingsApp {
             }
             None => {
                 let global = self.time.global_zone;
-                let started = cx.b0().tz_refresh_in_background(true, Arc::new(move |z: &str| {
+                let started = p.zone_lookup_in_background(Arc::new(move |z: &str| {
                     if global {
                         clock::set_chosen_zone(z);
                     }
@@ -240,35 +233,35 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn time_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
-        if !self.admin(cx) {
+    pub(super) fn time_submit(&mut self, p: &dyn TimePort, form: &Form) -> Result<String, String> {
+        if !self.admin(p) {
             return Ok(String::new());
         }
         let server = form.value(0).trim().to_string();
-        if !server.is_empty() && !cx.agent.ntp_valid_server(&server) {
+        if !server.is_empty() && !p.ntp_valid_server(&server) {
             return Err("Use a host name or address: letters, digits, '.' and '-'.".into());
         }
-        let ok = self.time_update(cx, "ntp server", |t| t.ntp_server = server.clone());
+        let ok = self.time_update(p, "ntp server", |t| t.ntp_server = server.clone());
         if ok { Ok(if server.is_empty() { "Using the usual time servers.".to_string() } else { format!("Time server: {server}.") }) } else { Err("Could not save.".into()) }
     }
 
     /// The rows the page shows: (label, value, is it a warning).
-    pub(super) fn time_rows(&self, cx: &AppCx) -> Vec<(&'static str, String, bool)> {
+    pub(super) fn time_rows(&self, p: &dyn TimePort) -> Vec<(&'static str, String, bool)> {
         use iyakki_core_api::contract::SettingValue;
-        let mut t = Self::time_settings(cx);
+        let mut t = p.time_settings();
         // the zone, the network-time switch and the server are read through the core contract
-        if let Some(SettingValue::Text(z)) = contract_setting(cx, "time.zone") {
+        if let Some(SettingValue::Text(z)) = p.contract_setting("time.zone") {
             t.zone = z;
         }
-        if let Some(SettingValue::Bool(b)) = contract_setting(cx, "time.no_ntp") {
+        if let Some(SettingValue::Bool(b)) = p.contract_setting("time.no_ntp") {
             t.no_ntp = b;
         }
-        if let Some(SettingValue::Text(n)) = contract_setting(cx, "time.ntp_server") {
+        if let Some(SettingValue::Text(n)) = p.contract_setting("time.ntp_server") {
             t.ntp_server = n;
         }
         let z = Zone::system();
         let now = clock::now_unix();
-        let (h12, secs) = crate::uisize::load_clock(cx.data_dir(), &cx.session.user);
+        let (h12, secs) = p.clock_face();
         let mut rows = vec![("Now", clock::format(&z, now, "%A %d %B %Y, %H:%M:%S %Z (UTC%z)"), clock::looks_wrong(now))];
         let list = clock::zone_names();
         let source = if clock::has_zone_files() { "from the machine's zone files" } else { "from the built-in list (this image has no time zone package)" };
@@ -283,7 +276,7 @@ impl SettingsApp {
         rows.push(("Automatic zone", auto, t.zone_auto && t.zone_note.starts_with("Could not")));
         rows.push(("", iyakki_shared::tzdetect::EXPLAIN.to_string(), false));
         rows.push(("Your clock", format!("{}-hour{}", if h12 { 12 } else { 24 }, if secs { ", with seconds" } else { "" }), false));
-        let st = cx.agent.ntp().status();
+        let st = p.ntp_status();
         let server = if t.ntp_server.is_empty() { "time.cloudflare.com, then pool.ntp.org".to_string() } else { t.ntp_server.clone() };
         rows.push(("Network time", if t.no_ntp { "off".to_string() } else { format!("on · {server}") }, false));
         if st.last_sync > 0 {
@@ -298,7 +291,7 @@ impl SettingsApp {
         rows
     }
 
-    pub(super) fn render_time(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+    pub(super) fn render_time(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn TimePort) {
         let mut y = a.y;
         if !self.time.writable {
             for l in g.wrap(13.0 * s, "A desktop window follows the clock and time zone of the computer it runs on. Only your own clock face (12/24-hour, seconds) is changed here.", Face::Sans, a.w).iter().take(2) {
@@ -308,7 +301,7 @@ impl SettingsApp {
             y += 4.0 * s;
         }
         let label_w = (150.0 * s).min(a.w * 0.35);
-        for (label, value, warn) in self.time_rows(cx) {
+        for (label, value, warn) in self.time_rows(p) {
             if label.is_empty() {
                 for l in g.wrap(13.0 * s, &value, Face::Sans, a.w - label_w) {
                     g.text(a.x + label_w, y, 13.0 * s, if warn { crate::fx::AMBER } else { MUTED }, &l, Face::Sans);
@@ -331,20 +324,20 @@ impl SettingsApp {
     // ------------------------------------------------------------------------------------------------ Host name
 
     /// The file that keeps the name for the next boots: the one given (tests), else the core's `system.conf`.
-    fn hn_conf(&self, cx: &AppCx) -> std::path::PathBuf {
-        if self.hn.conf.as_os_str().is_empty() { cx.os.memory().conf_path() } else { self.hn.conf.clone() }
+    fn hn_conf(&self, p: &dyn HostNamePort) -> std::path::PathBuf {
+        if self.hn.conf.as_os_str().is_empty() { p.hostname_conf_path() } else { self.hn.conf.clone() }
     }
 
     fn hn_locked(&self) -> Option<String> {
         crate::hostname::locked_by(&self.hn.cmdline)
     }
 
-    pub(super) fn handle_host_name(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_host_name(&mut self, k: &Key, p: &dyn HostNamePort) {
         if let Key::Char('r') = k {
             self.hn.draft = None;
             return self.ok("Read again.");
         }
-        if !self.admin(cx) {
+        if !self.admin(p) {
             return;
         }
         if !self.hn.writable {
@@ -363,17 +356,17 @@ impl SettingsApp {
                     return self.fail("Press e and type a new name first.");
                 };
                 let apply_now = matches!(k, Key::Char('y'));
-                let conf = self.hn_conf(cx);
+                let conf = self.hn_conf(p);
                 let saved = crate::hostname::save(&conf, &name);
                 let applied = if apply_now {
                     Some(match &self.hn.apply {
                         Some(f) => f(&name, &self.hn.etc),
-                        None => cx.os.hardware().set_hostname(&name, &self.hn.etc),
+                        None => p.set_hostname(&name, &self.hn.etc),
                     })
                 } else {
                     None
                 };
-                cx.audit.record(&cx.session.user, if apply_now { "hostname.apply" } else { "hostname.save" }, &name);
+                p.audit(if apply_now { "hostname.apply" } else { "hostname.save" }, &name);
                 match (saved, applied) {
                     (Err(e), _) => self.fail(format!("Could not save: {e}")),
                     (Ok(()), Some(Err(e))) => self.fail(format!("Saved for the next boots, but not applied now: {e}")),
@@ -388,8 +381,8 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn host_name_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
-        if !self.admin(cx) {
+    pub(super) fn host_name_submit(&mut self, p: &dyn HostNamePort, form: &Form) -> Result<String, String> {
+        if !self.admin(p) {
             return Ok(String::new());
         }
         let name = crate::hostname::check(&form.value(0))?;
@@ -397,7 +390,7 @@ impl SettingsApp {
         Ok(format!("{name} is ready. Press Apply now to use it, or Save for next boots."))
     }
 
-    pub(super) fn render_host_name(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+    pub(super) fn render_host_name(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn HostNamePort) {
         let mut y = a.y;
         if !self.hn.writable {
             for l in g.wrap(13.0 * s, "A desktop window shows the name of the computer it runs on, read-only. The host name is changed on the IYAKKI system itself.", Face::Sans, a.w).iter().take(2) {
@@ -414,7 +407,7 @@ impl SettingsApp {
             *y += 24.0 * s;
         };
         row(g, &mut y, "Host name now", &crate::hostname::current("iyakki"), TEXT);
-        let saved = crate::hostname::saved(&self.hn_conf(cx));
+        let saved = crate::hostname::saved(&self.hn_conf(p));
         row(g, &mut y, "Kept for next boots", saved.as_deref().unwrap_or("not set (the image's own name)"), TEXT);
         if let Some(d) = &self.hn.draft {
             row(g, &mut y, "Typed, not applied", d, crate::fx::AMBER);

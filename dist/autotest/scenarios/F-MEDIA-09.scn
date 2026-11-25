@@ -1,0 +1,22 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 69db47b481b833e4; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-MEDIA-09
+targets: qemu
+profile: ram
+feature-sha: 69db47b481b833e4
+doc: Store, Setup, Media tools lists Media player (ffmpeg) (read only, nothing is installed)
+clause: 1 Store, Setup lists the group Media tools with the Media player (ffmpeg) card
+not-covered: the Install and Update states and the job beside the clock
+not-covered: the user-triggered download of the static build and its licence text
+skip-unless-button group Devices & System
+click group Devices & System
+skip-unless-button STORE
+click STORE
+wait text="Setup"
+skip-unless-button Setup
+click Setup
+wait text="This machine"
+scroll down
+scroll down
+shot page
+expect-not-blank
+expect-text ffmpeg

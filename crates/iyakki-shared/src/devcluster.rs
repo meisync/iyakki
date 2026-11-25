@@ -1,42 +1,11 @@
-//! Types moved out of `iyakki_agent::devcluster` (F-SPLIT-03, scripted by dist/split/move_types.py); the agent re-exports them.
+//! Finding and connecting to the cluster a project develops against. The person's last choice and the managed cluster's kubeconfig live in `iyakki-cluster-model` (alpha.8 E7).
+
+pub use iyakki_cluster_model::choice::*;
 
 use std::path::Path;
 use std::path::PathBuf;
 use serde::Deserialize;
 use serde::Serialize;
-
-/// The person's last choice, kept per user next to their other settings.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Choice {
-    pub kubeconfig: String,
-    pub context: String,
-}
-
-impl Choice {
-    pub fn path(dir: &Path, user: &str) -> PathBuf {
-        let safe: String = user.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-        dir.join(format!("devcluster-{safe}.json"))
-    }
-    pub fn load(dir: &Path, user: &str) -> Option<Choice> {
-        serde_json::from_str(&std::fs::read_to_string(Self::path(dir, user)).ok()?).ok().filter(|c: &Choice| !c.kubeconfig.is_empty())
-    }
-    pub fn save(&self, dir: &Path, user: &str) -> Result<(), String> {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        std::fs::write(Self::path(dir, user), serde_json::to_string_pretty(self).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
-    }
-}
-
-static MACHINE_KUBECONFIG: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
-
-/// Remember the kubeconfig of the cluster IYAKKI manages on this machine (`None` forgets it).
-pub fn set_machine_kubeconfig(p: Option<std::path::PathBuf>) {
-    *MACHINE_KUBECONFIG.lock().unwrap_or_else(|e| e.into_inner()) = p;
-}
-
-pub fn machine_kubeconfig() -> Option<std::path::PathBuf> {
-    MACHINE_KUBECONFIG.lock().unwrap_or_else(|e| e.into_inner()).clone()
-}
 
 // ---- merged from iyakki-agent (F-SPLIT-03) ----
 // Finding and connecting to the cluster a project develops against (docs/K3S-DEV.md, phase 1, window mode), and the rule

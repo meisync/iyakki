@@ -159,9 +159,22 @@ mod erased {
     }
 }
 
+/// How many calls one connection may make before the machine closes it. The cap is for the catalog's pace (a third-party peer: `MAX_CALLS_PER_CONNECTION`);
+/// a socket that was raised above that pace per second (`FIRST_PARTY_RATE`, the UI program) is not capped by count: its one long-lived connection makes several
+/// hundred calls a second, so under the cap the program lost the core after about four minutes (found by the first booted run of `iyakki.ui=process`,
+/// 2026-11-24: "exit status: 5" at 220 s and again at 522 s, the person back at the sign-in screen each time).
+pub fn call_cap(rate: &RateLimit) -> u64 {
+    let per_second = u128::from(rate.calls) * 1000 / u128::from(rate.per_ms.max(1));
+    if per_second > u128::from(MAX_CALLS_PER_CONNECTION) {
+        u64::MAX
+    } else {
+        MAX_CALLS_PER_CONNECTION
+    }
+}
+
 /// Serve one connection until it closes, a line is too long, or too many calls were made.
 pub fn serve_connection(s: &Served, input: impl Read, out: impl Write + Send) {
-    serve_connection_x(s, input, out, None);
+    serve_connection_x(s, input, out, None, call_cap(&s.hello.rate_limit));
 }
 
 /// Where the bytes of a bulk block come from (`bulk.get`, F-SPLIT-07): a display list, an audio block, a camera frame. A caller of the unix
@@ -173,7 +186,7 @@ pub trait BulkSource: Send + Sync {
 /// [`serve_connection`] that can also answer `bulk.get` by handing a memory file over `stream` (the same unix socket as `input` and `out`).
 #[cfg(unix)]
 pub fn serve_connection_bulk(s: &Served, input: impl Read, out: impl Write + Send, bulk: &dyn BulkSource, stream: &std::os::unix::net::UnixStream) {
-    serve_connection_x(s, input, out, Some((bulk, stream)));
+    serve_connection_x(s, input, out, Some((bulk, stream)), call_cap(&s.hello.rate_limit));
 }
 
 #[cfg(unix)]
@@ -181,7 +194,7 @@ type BulkPath<'a> = Option<(&'a dyn BulkSource, &'a std::os::unix::net::UnixStre
 #[cfg(not(unix))]
 type BulkPath<'a> = Option<(&'a dyn BulkSource, &'a ())>;
 
-fn serve_connection_x<W: Write + Send>(s: &Served, input: impl Read, out: W, bulk: BulkPath<'_>) {
+fn serve_connection_x<W: Write + Send>(s: &Served, input: impl Read, out: W, bulk: BulkPath<'_>, cap: u64) {
     // the writer is shared with the push threads of the connection (`facets`): one line at a time, under the lock; the threads live in this
     // scope, so they end with the connection and need no 'static writer
     let out = std::sync::Mutex::new(out);
@@ -201,7 +214,7 @@ fn serve_connection_x<W: Write + Send>(s: &Served, input: impl Read, out: W, bul
             text.push('\n');
             o.write_all(text.as_bytes()).and_then(|_| o.flush()).is_ok()
         };
-        for _ in 0..MAX_CALLS_PER_CONNECTION {
+        for _ in 0..cap {
             let mut line = String::new();
             match (&mut input).take(MAX_LINE as u64 + 1).read_line(&mut line) {
                 Ok(0) | Err(_) => break,
@@ -380,5 +393,39 @@ pub fn settings_hello(machine: &str, rate: RateLimit) -> Hello {
         capabilities: Default::default(),
         rate_limit: rate,
         deprecations: vec![],
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+
+    fn served(rate: RateLimit) -> Served {
+        Served { hello: settings_hello("cap", rate), settings: None, vault: None, flows: None, assistant: None, cameras: None, rpc: None, appevents: None, ctx: CallContext::remote("a", Transport::Relay, &[]) }
+    }
+
+    fn hellos(n: usize) -> String {
+        (1..=n).map(|i| format!("{{\"id\":{i},\"call\":\"hello\"}}\n")).collect()
+    }
+
+    fn answers(cap: u64, calls: usize) -> usize {
+        let s = served(RateLimit { calls: 1_000, per_ms: 1000 });
+        let mut out = Vec::new();
+        serve_connection_x(&s, std::io::Cursor::new(hellos(calls)), &mut out, None, cap);
+        String::from_utf8(out).unwrap().lines().count()
+    }
+
+    #[test]
+    fn a_capped_connection_is_closed_after_its_calls_and_an_uncapped_one_goes_on() {
+        assert_eq!(answers(3, 5), 3, "the fourth call finds the connection closed");
+        assert_eq!(answers(u64::MAX, 5), 5);
+    }
+
+    #[test]
+    fn the_catalogs_pace_is_capped_by_count_and_the_first_party_pace_is_not() {
+        assert_eq!(call_cap(&RateLimit { calls: 120, per_ms: 60_000 }), MAX_CALLS_PER_CONNECTION, "the catalog's 120 a minute");
+        assert_eq!(call_cap(&RateLimit { calls: 100_000, per_ms: 1000 }), MAX_CALLS_PER_CONNECTION, "a pace that the cap itself allows in a second is still capped");
+        assert_eq!(call_cap(&RateLimit { calls: 200_000, per_ms: 1000 }), u64::MAX, "FIRST_PARTY_RATE of the UI program's socket");
+        assert_eq!(call_cap(&RateLimit { calls: 5, per_ms: 0 }), MAX_CALLS_PER_CONNECTION, "a zero window does not divide by zero");
     }
 }

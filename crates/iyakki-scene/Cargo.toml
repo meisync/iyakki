@@ -1,0 +1,14 @@
+[package]
+name = "iyakki-scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The scene composer of TALES: the scene JSON, the hand-made vector art, the character sheet, the rich SVG prompt and the checks of a picture model's reply. No shell, no agent. iyakki_shared::scene re-exports it (alpha.9 P6, D-S2-01)."
+
+[dependencies]
+iyakki-chat-model = { workspace = true }
+iyakki-story-model = { workspace = true }
+iyakki-hostrules = { workspace = true }
+iyakki-web = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

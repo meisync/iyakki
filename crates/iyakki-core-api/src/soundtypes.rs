@@ -484,3 +484,421 @@ impl CueHandle {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn out(card_id: &str, device: u32, kind: Kind, connected: Option<bool>) -> Output {
+        Output {
+            card: 0,
+            device,
+            card_id: card_id.into(),
+            card_name: "Card".into(),
+            pcm_name: "pcm".into(),
+            kind,
+            connected,
+            monitor: None,
+            speakers: None,
+            hdmi_no: 0,
+            digital_off: false,
+            builtin_speaker: false,
+            hw_volume: None,
+            dummy_volume: false,
+        }
+    }
+
+    #[test]
+    fn volume_modes_step_automatic_then_hardware_then_software_then_back_and_automatic_is_the_default() {
+        assert_eq!(VolumeMode::default(), VolumeMode::Automatic);
+        assert_eq!(VolumeMode::Automatic.next(), VolumeMode::Hardware);
+        assert_eq!(VolumeMode::Hardware.next(), VolumeMode::Software);
+        assert_eq!(VolumeMode::Software.next(), VolumeMode::Automatic);
+        assert_eq!([VolumeMode::Automatic.label(), VolumeMode::Hardware.label(), VolumeMode::Software.label()], ["Automatic", "Hardware", "Software"]);
+    }
+
+    #[test]
+    fn kind_labels_are_the_words_settings_shows() {
+        assert_eq!(Kind::Analog.label(), "speakers/headphones");
+        assert_eq!(Kind::Hdmi.label(), "HDMI/DP");
+        assert_eq!(Kind::Usb.label(), "USB");
+        assert_eq!(Kind::Bluetooth.label(), "Bluetooth");
+        assert_eq!(Kind::Digital.label(), "digital");
+    }
+
+    #[test]
+    fn output_keys_take_letters_digits_and_four_separators_up_to_64_characters() {
+        assert!(output_key_ok("PCH:3"));
+        assert!(output_key_ok("hdmi_1-2.x"));
+        assert!(output_key_ok(&"a".repeat(64)), "exactly the limit is allowed");
+        assert!(!output_key_ok(&"a".repeat(65)), "one over the limit is refused");
+        assert!(!output_key_ok("PCH 3"), "a space is refused");
+        assert!(!output_key_ok("PCH/3"), "a slash is refused");
+        assert!(!output_key_ok("PCH\n"), "a control character is refused");
+        assert!(!output_key_ok("café"), "a non-ASCII letter is refused");
+    }
+
+    #[test]
+    fn an_empty_output_key_is_allowed_because_it_means_automatic() {
+        assert!(output_key_ok(""));
+        assert_eq!(SoundSettings::default().validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_default_sound_settings_are_valid_and_start_at_the_documented_levels() {
+        let s = SoundSettings::default();
+        assert_eq!(s.validate(), Ok(()));
+        assert_eq!((s.volume_pct, s.muted, s.mixer, s.web_mix, s.highlight_offset_ms), (DEFAULT_VOLUME_PCT, false, true, false, 0));
+        assert_eq!(s.boost_for("PCH"), DEFAULT_BOOST_DB);
+    }
+
+    #[test]
+    fn the_volume_is_refused_one_point_over_one_hundred_percent() {
+        let mut s = SoundSettings::default();
+        s.volume_pct = 100;
+        assert_eq!(s.validate(), Ok(()));
+        s.volume_pct = 101;
+        assert_eq!(s.validate(), Err("the volume must be between 0 and 100 percent".to_string()));
+    }
+
+    #[test]
+    fn a_chosen_output_must_be_a_card_and_device_key_such_as_pch_3() {
+        let mut s = SoundSettings::default();
+        s.output = "PCH:3".into();
+        assert_eq!(s.validate(), Ok(()));
+        s.output = "PCH 3".into();
+        assert_eq!(s.validate(), Err("the sound output must be a card id and device number such as PCH:3".to_string()));
+    }
+
+    #[test]
+    fn remembered_levels_allow_32_outputs_at_most_and_only_percentages_up_to_100() {
+        let msg = "the remembered output volumes are not valid";
+        let mut s = SoundSettings::default();
+        for i in 0..MAX_LEVELS {
+            s.levels.insert(format!("out{i}"), 100);
+        }
+        assert_eq!(s.validate(), Ok(()));
+        s.levels.insert("one-more".into(), 0);
+        assert_eq!(s.validate(), Err(msg.to_string()));
+        s.levels.clear();
+        s.levels.insert("loud".into(), 101);
+        assert_eq!(s.validate(), Err(msg.to_string()));
+        s.levels.clear();
+        s.levels.insert(String::new(), 50);
+        assert_eq!(s.validate(), Err(msg.to_string()));
+    }
+
+    #[test]
+    fn boosts_stop_at_twelve_db_and_a_card_with_no_entry_gets_the_default() {
+        let msg = "the sound boost must be between 0 and 12 dB";
+        let mut s = SoundSettings::default();
+        s.boosts.insert("PCH".into(), MAX_BOOST_DB);
+        assert_eq!(s.validate(), Ok(()));
+        s.boosts.insert("PCH".into(), MAX_BOOST_DB + 1);
+        assert_eq!(s.validate(), Err(msg.to_string()));
+        s.boosts.clear();
+        assert_eq!(s.boost_for("HDMI"), DEFAULT_BOOST_DB);
+        s.boosts.insert("PCH".into(), 0);
+        assert_eq!(s.boost_for("PCH"), 0, "zero is the person's choice of no boost, not the default");
+    }
+
+    #[test]
+    fn the_highlight_timing_offset_is_limited_to_plus_or_minus_500_ms() {
+        let msg = "the highlight timing offset must be between -500 and 500 ms";
+        let mut s = SoundSettings::default();
+        for ok in [-500, 0, 500] {
+            s.highlight_offset_ms = ok;
+            assert_eq!(s.validate(), Ok(()), "{ok} ms is allowed");
+        }
+        for bad in [-501, 501] {
+            s.highlight_offset_ms = bad;
+            assert_eq!(s.validate(), Err(msg.to_string()), "{bad} ms is refused");
+        }
+    }
+
+    #[test]
+    fn a_sound_source_name_is_at_most_32_characters_with_no_control_characters_and_at_most_100_percent() {
+        let msg = "the volumes of the sounds are not valid";
+        let mut s = SoundSettings::default();
+        s.source_levels.insert("a".repeat(32), 100);
+        assert_eq!(s.validate(), Ok(()));
+        s.source_levels.clear();
+        s.source_levels.insert("a".repeat(33), 100);
+        assert_eq!(s.validate(), Err(msg.to_string()), "33 characters is one over the limit");
+        s.source_levels.clear();
+        s.source_levels.insert("a\tb".into(), 10);
+        assert_eq!(s.validate(), Err(msg.to_string()), "a tab is a control character");
+        s.source_levels.clear();
+        s.source_levels.insert("radio".into(), 101);
+        assert_eq!(s.validate(), Err(msg.to_string()));
+        s.source_levels.clear();
+        s.source_levels.insert(String::new(), 10);
+        assert_eq!(s.validate(), Err(msg.to_string()));
+        s.source_levels.clear();
+        s.source_levels.insert("Browser tab".into(), 0);
+        assert_eq!(s.validate(), Ok(()), "a space is allowed in a sound name");
+    }
+
+    #[test]
+    fn volume_control_entries_are_capped_and_keyed_by_a_safe_card_id() {
+        let msg = "the remembered volume controls are not valid";
+        let mut s = SoundSettings::default();
+        for i in 0..MAX_LEVELS {
+            s.volume_modes.insert(format!("C{i}"), VolumeMode::Software);
+        }
+        assert_eq!(s.validate(), Ok(()));
+        s.volume_modes.insert("extra".into(), VolumeMode::Hardware);
+        assert_eq!(s.validate(), Err(msg.to_string()));
+        s.volume_modes.clear();
+        s.volume_modes.insert("bad id".into(), VolumeMode::Hardware);
+        assert_eq!(s.validate(), Err(msg.to_string()));
+    }
+
+    #[test]
+    fn choosing_automatic_removes_the_card_entry_and_an_unknown_card_is_automatic() {
+        let mut s = SoundSettings::default();
+        assert_eq!(s.volume_mode_for("PCH"), VolumeMode::Automatic);
+        s.set_volume_mode("PCH", VolumeMode::Software);
+        assert_eq!(s.volume_mode_for("PCH"), VolumeMode::Software);
+        s.set_volume_mode("PCH", VolumeMode::Automatic);
+        assert!(s.volume_modes.is_empty());
+        assert_eq!(s.volume_mode_for("PCH"), VolumeMode::Automatic);
+    }
+
+    #[test]
+    fn a_volume_control_is_not_stored_for_an_empty_or_unsafe_card_id() {
+        let mut s = SoundSettings::default();
+        s.set_volume_mode("", VolumeMode::Hardware);
+        s.set_volume_mode("PCH 0", VolumeMode::Hardware);
+        assert!(s.volume_modes.is_empty());
+    }
+
+    #[test]
+    fn a_full_list_of_volume_controls_refuses_a_new_card_but_still_changes_a_known_one() {
+        let mut s = SoundSettings::default();
+        for i in 0..MAX_LEVELS {
+            s.set_volume_mode(&format!("C{i}"), VolumeMode::Software);
+        }
+        assert_eq!(s.volume_modes.len(), MAX_LEVELS);
+        s.set_volume_mode("new", VolumeMode::Hardware);
+        assert_eq!(s.volume_modes.len(), MAX_LEVELS);
+        assert_eq!(s.volume_mode_for("new"), VolumeMode::Automatic);
+        s.set_volume_mode("C0", VolumeMode::Hardware);
+        assert_eq!(s.volume_mode_for("C0"), VolumeMode::Hardware);
+    }
+
+    #[test]
+    fn a_boost_is_clamped_to_the_maximum_and_refused_for_an_unsafe_card_id() {
+        let mut s = SoundSettings::default();
+        s.set_boost("PCH", 99);
+        assert_eq!(s.boost_for("PCH"), MAX_BOOST_DB);
+        s.set_boost("", 3);
+        s.set_boost("PCH 1", 3);
+        assert!(!s.boosts.contains_key(""));
+        assert!(!s.boosts.contains_key("PCH 1"));
+        assert_eq!(s.boosts.len(), 1);
+    }
+
+    #[test]
+    fn remembering_a_level_stores_the_current_volume_capped_at_100_and_ignores_unsafe_names() {
+        let mut s = SoundSettings::default();
+        s.volume_pct = 40;
+        s.remember_level("PCH:0");
+        assert_eq!(s.levels.get("PCH:0"), Some(&40));
+        s.volume_pct = 150;
+        s.remember_level("PCH:0");
+        assert_eq!(s.levels.get("PCH:0"), Some(&100));
+        s.remember_level("");
+        s.remember_level("PCH 1");
+        assert_eq!(s.levels.len(), 1);
+    }
+
+    #[test]
+    fn a_full_list_of_remembered_levels_refuses_a_new_output_but_updates_a_known_one() {
+        let mut s = SoundSettings::default();
+        for i in 0..MAX_LEVELS {
+            s.levels.insert(format!("O{i}"), 1);
+        }
+        s.volume_pct = 55;
+        s.remember_level("new:0");
+        assert!(!s.levels.contains_key("new:0"));
+        s.remember_level("O0");
+        assert_eq!(s.levels.get("O0"), Some(&55));
+    }
+
+    #[test]
+    fn the_gain_is_the_volume_capped_at_100_and_zero_when_muted() {
+        let mut s = SoundSettings::default();
+        assert_eq!(s.gain(), DEFAULT_VOLUME_PCT);
+        s.volume_pct = 250;
+        assert_eq!(s.gain(), 100);
+        s.muted = true;
+        assert_eq!(s.gain(), 0);
+    }
+
+    #[test]
+    fn an_output_is_remembered_by_card_id_and_device_and_played_through_plughw() {
+        let mut o = out("PCH", 3, Kind::Analog, Some(true));
+        o.card = 2;
+        assert_eq!(o.key(), "PCH:3");
+        assert_eq!(o.alsa(), "plughw:2,3");
+    }
+
+    #[test]
+    fn hardware_volume_is_used_only_when_the_card_has_a_control_and_automatic_skips_a_dummy_one() {
+        let mut o = out("PCH", 0, Kind::Analog, Some(true));
+        for m in [VolumeMode::Automatic, VolumeMode::Hardware, VolumeMode::Software] {
+            assert!(!o.uses_hw_volume(m), "no hardware control means software for {m:?}");
+        }
+        o.hw_volume = Some("Master".into());
+        assert!(o.uses_hw_volume(VolumeMode::Automatic));
+        assert!(o.uses_hw_volume(VolumeMode::Hardware));
+        assert!(!o.uses_hw_volume(VolumeMode::Software));
+        o.dummy_volume = true;
+        assert!(!o.uses_hw_volume(VolumeMode::Automatic), "a known dummy control is skipped in automatic mode");
+        assert!(o.uses_hw_volume(VolumeMode::Hardware), "the person can still force the hardware control");
+    }
+
+    #[test]
+    fn output_labels_name_the_device_in_plain_words() {
+        assert_eq!(Output::system_default().label(), "System default output");
+        let mut h = out("NV", 3, Kind::Hdmi, Some(true));
+        h.hdmi_no = 2;
+        assert_eq!(h.label(), "HDMI 2 (monitor connected)");
+        h.connected = Some(false);
+        assert_eq!(h.label(), "HDMI 2 (no monitor)");
+        h.connected = None;
+        assert_eq!(h.label(), "HDMI 2");
+        h.monitor = Some("PDM-15T".into());
+        assert_eq!(h.label(), "HDMI: PDM-15T");
+        assert_eq!(out("USB", 0, Kind::Usb, None).label(), "USB Audio: Card");
+        assert_eq!(out("BT", 0, Kind::Bluetooth, None).label(), "Bluetooth: Card");
+        let mut b = out("PCH", 0, Kind::Analog, Some(true));
+        b.builtin_speaker = true;
+        assert_eq!(b.label(), "Built-in speaker (Card)");
+        let mut hp = out("PCH", 0, Kind::Analog, Some(true));
+        hp.pcm_name = "Headphone".into();
+        assert_eq!(hp.label(), "Headphones (Card)");
+        let mut co = out("PCH", 0, Kind::Analog, Some(true));
+        co.pcm_name = "Codec Output".into();
+        assert_eq!(co.label(), "Headphones (Card)");
+        assert_eq!(out("PCH", 0, Kind::Analog, Some(true)).label(), "Speakers/headphones (Card)");
+        let mut d = out("PCH", 1, Kind::Digital, None);
+        d.pcm_name = "IEC958".into();
+        assert_eq!(d.label(), "Digital out (Card · IEC958)");
+    }
+
+    #[test]
+    fn the_state_line_says_what_the_hardware_reports_and_flags_a_switched_off_digital_output() {
+        let mut h = out("NV", 3, Kind::Hdmi, Some(true));
+        h.speakers = Some(false);
+        assert_eq!(h.state(), "monitor connected, it reports no speakers");
+        h.speakers = Some(true);
+        assert_eq!(h.state(), "monitor connected");
+        h.connected = Some(false);
+        assert_eq!(h.state(), "no monitor");
+        let mut b = out("PCH", 0, Kind::Analog, Some(true));
+        b.builtin_speaker = true;
+        assert_eq!(b.state(), "built-in speaker");
+        assert_eq!(out("PCH", 0, Kind::Analog, Some(true)).state(), "speaker or headphones present");
+        assert_eq!(out("PCH", 0, Kind::Analog, Some(false)).state(), "nothing plugged in");
+        assert_eq!(out("USB", 0, Kind::Usb, None).state(), "plugged in");
+        assert_eq!(out("BT", 0, Kind::Bluetooth, Some(false)).state(), "plugged in");
+        assert_eq!(out("D", 0, Kind::Digital, None).state(), "the card does not report what is connected");
+        let mut d = out("D", 0, Kind::Digital, None);
+        d.digital_off = true;
+        assert_eq!(d.state(), "the card does not report what is connected · digital output switched off in the mixer");
+    }
+
+    #[test]
+    fn with_no_outputs_and_no_choice_the_reason_says_no_sound_card_was_found() {
+        let c = choose(&[], "");
+        assert_eq!(c.output, None);
+        assert!(!c.chosen);
+        assert_eq!(c.reason, format!("{} (no sound card was found)", NO_OUTPUT));
+    }
+
+    #[test]
+    fn a_list_with_nothing_usable_gives_no_output_and_the_plain_sentence() {
+        let c = choose(&[out("D", 0, Kind::Digital, None)], "");
+        assert_eq!(c.output, None);
+        assert_eq!(c.reason, NO_OUTPUT);
+    }
+
+    #[test]
+    fn a_chosen_output_that_is_there_is_used_and_marked_as_chosen() {
+        let outs = [out("PCH", 0, Kind::Analog, Some(true)), out("USB", 0, Kind::Usb, None)];
+        let c = choose(&outs, "USB:0");
+        assert!(c.chosen);
+        assert_eq!(c.output.map(|o| o.key()), Some("USB:0".to_string()));
+    }
+
+    #[test]
+    fn a_chosen_analog_output_stays_chosen_even_when_nothing_is_plugged_in() {
+        let c = choose(&[out("PCH", 0, Kind::Analog, Some(false))], "PCH:0");
+        assert!(c.chosen);
+        assert_eq!(c.reason, "chosen in Settings → Sound");
+    }
+
+    #[test]
+    fn a_missing_choice_falls_back_to_the_best_connected_output_and_says_why() {
+        let c = choose(&[out("PCH", 0, Kind::Analog, Some(true))], "HDA:0");
+        assert!(!c.chosen);
+        assert_eq!(c.reason, "the chosen output (HDA:0) is not connected now; automatic: speakers or headphones are connected");
+        assert_eq!(c.output.map(|o| o.key()), Some("PCH:0".to_string()));
+    }
+
+    #[test]
+    fn automatic_choice_prefers_speakers_then_a_monitor_then_usb_and_the_built_in_speaker_last() {
+        let mut builtin = out("PCH", 0, Kind::Analog, Some(true));
+        builtin.builtin_speaker = true;
+        let usb = out("USB", 0, Kind::Usb, None);
+        let c = choose(&[builtin.clone(), usb.clone()], "");
+        assert_eq!(c.output, Some(usb.clone()));
+        assert_eq!(c.reason, "automatic: a USB audio device is plugged in");
+
+        let mut hdmi = out("NV", 3, Kind::Hdmi, Some(true));
+        hdmi.monitor = Some("PDM-15T".into());
+        let c = choose(&[usb.clone(), hdmi.clone()], "");
+        assert_eq!(c.output, Some(hdmi.clone()));
+        assert_eq!(c.reason, "automatic: monitor PDM-15T is connected over HDMI/DP");
+
+        let speakers = out("PCH", 1, Kind::Analog, Some(true));
+        let c = choose(&[hdmi.clone(), builtin.clone(), speakers.clone()], "");
+        assert_eq!(c.output, Some(speakers));
+        assert_eq!(c.reason, "automatic: speakers or headphones are connected");
+    }
+
+    #[test]
+    fn an_hdmi_monitor_without_speakers_comes_before_an_analog_output_that_reports_nothing() {
+        let mut quiet = out("NV", 3, Kind::Hdmi, Some(true));
+        quiet.speakers = Some(false);
+        let unknown = out("PCH", 0, Kind::Analog, None);
+        let c = choose(&[unknown.clone(), quiet.clone()], "");
+        assert_eq!(c.output, Some(quiet));
+        assert_eq!(c.reason, "automatic: a monitor is connected over HDMI/DP but reports no speakers");
+
+        let unplugged = out("PCH", 1, Kind::Analog, Some(false));
+        let c = choose(&[unplugged, unknown.clone()], "");
+        assert_eq!(c.output, Some(unknown));
+        assert_eq!(c.reason, "automatic: the card's analog output (it does not report its jacks)");
+    }
+
+    #[test]
+    fn a_chosen_hdmi_pin_with_no_monitor_yields_to_the_next_automatic_output_until_it_is_back() {
+        let pin = out("DP", 3, Kind::Hdmi, Some(false));
+        let spk = out("PCH", 0, Kind::Analog, Some(true));
+        let c = choose(&[pin, spk.clone()], "DP:3");
+        assert!(!c.chosen);
+        assert_eq!(c.output, Some(spk));
+        assert_eq!(c.reason, "the chosen output (DP:3) has no monitor connected now, it comes back when one is; automatic: speakers or headphones are connected");
+    }
+
+    #[test]
+    fn a_chosen_hdmi_pin_with_no_monitor_stays_chosen_when_nothing_else_could_play() {
+        let pin = out("DP", 3, Kind::Hdmi, Some(false));
+        let c = choose(&[pin.clone()], "DP:3");
+        assert!(c.chosen);
+        assert_eq!(c.output, Some(pin));
+    }
+}
+

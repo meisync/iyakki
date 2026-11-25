@@ -110,7 +110,7 @@ pub fn list_linux(sys: &Path, proc_mounts: &str, swaps: &str) -> Vec<Drive> {
     names.sort();
     let mut out = Vec::new();
     for n in names {
-        if ["loop", "ram", "zram", "dm-", "md", "sr", "fd", "nbd"].iter().any(|p| n.starts_with(p)) {
+        if ["loop", "ram", "zram", "dm-", "md", "sr", "fd", "nbd", "mtd"].iter().any(|p| n.starts_with(p)) {
             continue;
         }
         let d = sys.join("block").join(&n);
@@ -251,6 +251,23 @@ mod tests {
         assert!(!nv.removable && !nv.usb && nv.swap && nv.mounts.len() == 2);
         assert!(matches!(verdict(nv, Path::new("/tmp/x.iso")), Verdict::Refused(_)), "the system disk is refused");
         assert_eq!(verdict(sdb, Path::new("/tmp/x.iso")), Verdict::Ok);
+    }
+
+    #[test]
+    fn flash_chips_of_a_board_are_never_offered_as_drives() {
+        // A Raspberry Pi 5 shows its boot EEPROM as /sys/block/mtdblock0: IYAKKI never writes it (docs/development/RASPBERRY-PI-PLAN.md 1.5)
+        let root = std::env::temp_dir().join(format!("iyakki-usb-mtd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for n in ["mtdblock0", "mtdblock1", "mmcblk0"] {
+            let d = root.join("devices/platform").join(n);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("size"), "16384\n").unwrap();
+            std::fs::create_dir_all(root.join("block")).unwrap();
+            std::os::unix::fs::symlink(&d, root.join("block").join(n)).unwrap();
+        }
+        let d = list_linux(&root, "", "");
+        assert_eq!(d.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["mmcblk0"], "an SD card is a drive, the SPI flash is not");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

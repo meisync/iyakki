@@ -78,10 +78,4 @@ pub fn clock_text(secs: f64) -> String {
 // ---- moved from iyakki-agent (F-SPLIT-03) ----
 
 
-/// The size a picture of `src` gets inside `area`: as large as fits, the proportions kept, both sides even (the decoder wants it).
-pub fn fit(src: (u32, u32), area: (u32, u32)) -> (u32, u32) {
-    let (sw, sh) = (src.0.max(1) as f64, src.1.max(1) as f64);
-    let k = (area.0.max(2) as f64 / sw).min(area.1.max(2) as f64 / sh);
-    let even = |v: f64| ((v.round() as u32).max(2)) & !1;
-    (even(sw * k), even(sh * k))
-}
+pub use iyakki_frames::fit;

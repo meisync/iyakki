@@ -1,0 +1,20 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 5e611eff4b5a559d; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-SHELL-62
+targets: qemu
+profile: ram
+feature-sha: 5e611eff4b5a559d
+doc: Settings, Account lists the built-in themes Dark, Light and High contrast (read only)
+clause: 1 Settings, Account lists the built-in themes Dark, Light and High contrast beside which a person's own theme file would appear
+not-covered: a theme file a person adds and its appearing in the list
+not-covered: a damaged theme file being refused
+key s
+wait app=Settings
+skip-unless-button Account
+click-sidebar Account
+wait app=Settings page="Account"
+shot page
+expect-not-blank
+expect-text Dark
+expect-text Light
+expect-text High contrast
+expect-page Account

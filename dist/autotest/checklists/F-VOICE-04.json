@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-04",
+  "feature_sha": "dfa5809304c6683b",
+  "title": "verification on a real microphone and speaker",
+  "clauses": [
+    {
+      "id": "mic-speaker",
+      "text": "Read-aloud and dictation work with a real microphone and speakers",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "Plug in a USB microphone and speakers (or use the built-in ones). Open VOICE, READ ALOUD, paste a paragraph and press Play. Then DICTATE and speak one sentence.",
+          "expect": "The paragraph is clear and easy to follow from the speakers. The spoken sentence appears as text you can read back."
+        }
+      ]
+    }
+  ]
+}

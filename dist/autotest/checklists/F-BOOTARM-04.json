@@ -1,0 +1,73 @@
+{
+ "schema": 1,
+ "row": "F-BOOTARM-04",
+ "feature_sha": "71b3aef0c8944e62",
+ "title": "Raspberry Pi 5 first boot with U-Boot and the IYAKKI boot loader",
+ "clauses": [
+  {
+   "id": "uboot",
+   "text": "the firmware starts U-Boot (kernel=u-boot.bin)",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Write iyakki-rpi5-loader.img, copy the downloaded u-boot.bin to the first partition, connect the serial console and power on.",
+     "expect": "U-Boot's banner appears on the serial console."
+    }
+   ]
+  },
+  {
+   "id": "efi",
+   "text": "U-Boot finds and starts EFI/BOOT/BOOTAA64.EFI from the card",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Read the U-Boot lines after the banner.",
+     "expect": "It reports the removable-media binary efi/boot/bootaa64.efi and starts it; report which storage it scanned first."
+    }
+   ]
+  },
+  {
+   "id": "loader",
+   "text": "the loader reads boot.cfg and starts the kernel and the lean RAM disk",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Read the serial text.",
+     "expect": "Lines boot: loader started, config: /boot.cfg read, start: iyakki kernel=/kernel8.img, then Linux version and the stage1 lines."
+    }
+   ]
+  },
+  {
+   "id": "system",
+   "text": "the system comes up as on the baseline card",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Check Ethernet and HDMI as in the baseline guide.",
+     "expect": "Each works as on the baseline card, or the difference is reported."
+    }
+   ]
+  },
+  {
+   "id": "counter",
+   "text": "the boot-tries counter and the system's confirmation",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Restart three times and read the tries_left lines.",
+     "expect": "Either tries_left is refilled after each good start or it falls by one each time (report it)."
+    }
+   ]
+  }
+ ]
+}

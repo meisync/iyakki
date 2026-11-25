@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-44",
+  "feature_sha": "8bacd1f9d9d4af42",
+  "title": "echo cancellation against other apps",
+  "clauses": [
+    {
+      "id": "talk-over-music",
+      "text": "The assistant hears your question over music or video from another app",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "Settings, Voice: press E to turn echo cancellation on. Start My IYAKKI, play music or a video in another app, and ask the assistant a question while it plays.",
+          "expect": "The assistant hears your question clearly and answers, not its own voice or the music."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 39acd010e7d71092; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-LOOK-05
+targets: qemu
+profile: ram
+feature-sha: 39acd010e7d71092
+doc: Settings, Appearance lists the built-in Looks (read only)
+clause: 1 Settings, Appearance lists the built-in Looks Default, Compact and Classic
+not-covered: .look and .theme files of the person's and the shared theme folders
+not-covered: loading a Look by name
+not-covered: the choice kept as look in ui-<user>.json and an old file still read
+key s
+wait app=Settings
+skip-unless-button Appearance
+click-sidebar Appearance
+wait app=Settings page="Appearance"
+shot page
+expect-not-blank
+expect-text Default
+expect-text Compact
+expect-text Classic
+expect-page Appearance

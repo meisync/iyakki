@@ -146,6 +146,7 @@ pub fn gather(g: &Gather) -> Facts {
         clock_synced: crate::ntp::synced(),
         network_time_on,
         clock_ahead_secs: crate::ntp::status().pending_back.map(|s| s.max(0.0) as u64),
+        clock_skew: Some(iyakki_shared::clockskew::judge(&iyakki_shared::clockskew::SystemClock, crate::ntp::status().pending_back.map(|s| s.max(0.0) as u64))),
         exposure_unexpected: None,
         models_unreachable: Vec::new(),
         net: None,

@@ -541,6 +541,7 @@ mod tests {
 
     #[test]
     fn a_copied_skill_is_added_listed_audited_and_deleted_after_asking() {
+        let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
         let cx = admin_cx("skl1");
         let mut a = SkillsApp::new(&CxPort(&cx));
         draw(&mut a, &cx);

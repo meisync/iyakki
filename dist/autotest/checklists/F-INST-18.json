@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-INST-18",
+ "feature_sha": "0ec6fc8f792c697a",
+ "title": "object_storage_install and object_storage_remove ask every time and th",
+ "clauses": [
+  {
+   "id": "storage-cards",
+   "text": "object_storage_install and object_storage_remove ask every time and the card says whether data is deleted",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant to install object storage, decline, ask to remove it.",
+     "expect": "Each asks first, the remove card says whether data is deleted and defaults to keeping it, and no key-like value appears in a card."
+    }
+   ]
+  }
+ ]
+}

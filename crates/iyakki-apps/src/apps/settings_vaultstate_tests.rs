@@ -44,7 +44,8 @@ fn only_the_vault_page_reports_a_locked_vault_as_a_status() {
             offenders.push(name);
         }
     }
-    let page = std::fs::read_to_string(dir.join("settings.rs")).unwrap();
+    // the Vault page's drawing code lives in settings_vault.rs (moved out of settings.rs, S0)
+    let page = std::fs::read_to_string(dir.join("settings_vault.rs")).unwrap();
     assert!(page.contains("vaultstate_page::status_words(true,") && page.contains("vaultstate_page::status_words(false,"), "the Vault page uses the one wording");
     assert!(offenders.is_empty(), "LOCKED is worded only in settings_vaultstate.rs: {offenders:?}");
 }

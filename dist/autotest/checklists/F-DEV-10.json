@@ -1,0 +1,22 @@
+{
+ "schema": 1,
+ "row": "F-DEV-10",
+ "feature_sha": "8df8fa033423406d",
+ "title": "iyakki dev usb brings developer mode up over one USB-C cable between t",
+ "clauses": [
+  {
+   "id": "usb-link",
+   "text": "iyakki dev usb brings developer mode up over one USB-C cable between two computers",
+   "machines": [
+    "mac-mini-2018",
+    "macbook-pro"
+   ],
+   "steps": [
+    {
+     "do": "Connect two computers with one USB-C cable and run iyakki dev usb check, then pair.",
+     "expect": "The seven steps turn green one by one and the pair works; if not, note which step stops (KI-992 is open)."
+    }
+   ]
+  }
+ ]
+}

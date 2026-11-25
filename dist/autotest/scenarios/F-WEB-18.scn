@@ -1,0 +1,12 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 74f241e50efd45be; honest subset only: everything not checked is under not-covered.
+row: F-WEB-18
+targets: browser
+feature-sha: 74f241e50efd45be
+doc: web page Remote access: confirm step, nothing before the confirm, address and fingerprint, ports 1 to 1023 refused
+clause: 1 the Serve this desktop switch asks first and says what it exposes, nothing is switched on until the person confirms, Esc cancels and returns the focus
+clause: 2 after Yes the service is on with an address and the certificate fingerprint on the page, and Stop serving switches it off
+clause: 3 a port under 1024 is refused on the page
+not-covered: administrators only and audited like the native page (unit tests)
+not-covered: unknown fields refused
+not-covered: 501 on a pod
+suite: run_pages.py --only more

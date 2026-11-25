@@ -1,0 +1,21 @@
+# OPTIONAL "rpi5" variant (aarch64 only): the Raspberry Pi 5 SD-card / USB / NVMe image.  ARCH=aarch64 dist/buildroot/build.sh rpi5
+# Appended to iyakki_aarch64_defconfig by build.sh. What changes against the generic aarch64 (UEFI, GRUB) image:
+#   1. the kernel comes from the Raspberry Pi tree at a pinned tag (bcm2712 device tree, RP1, vc4/v3d), fetched at build time (GPL-2.0, recorded
+#      in legal/ by legal-info); the 4 KiB page option and the built-in lean-start options are board/iyakki-rpi5/linux.fragment;
+#   2. no GRUB and no ESP: the Pi firmware reads a FAT volume with config.txt (board/iyakki-rpi5/post-image.sh and dist/rpi/make-pi-image.sh);
+#   3. NO Raspberry Pi firmware blob and no EEPROM image is in the image (rule "firmware by button": docs/RESTRICTED-FIRMWARE.md; a Pi 5 needs none).
+# The kernel-only route (dist/rpi/build-pi-kernel.sh) builds the same kernel from the same pin and fragments without a full Buildroot run, which is how
+# the first Pi 5 kernel was built (incremental builds only: the userland of the existing aarch64 build is reused).
+# BR2_LINUX_KERNEL_CUSTOM_VERSION is not set
+BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://codeload.github.com/raspberrypi/linux/tar.gz/refs/tags/oldstable_20261103"
+# BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG is not set
+BR2_LINUX_KERNEL_USE_DEFCONFIG=y
+BR2_LINUX_KERNEL_DEFCONFIG="bcm2712"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki-aarch64/linux.fragment $(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki-rpi5/linux.fragment"
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2712-rpi-5-b"
+BR2_LINUX_KERNEL_INSTALL_TARGET=y
+# BR2_TARGET_GRUB2 is not set
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki-rpi5/post-image.sh"
+BR2_ROOTFS_POST_SCRIPT_ARGS=""

@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-CLI-07",
+ "feature_sha": "ca6d9ec9f3bcb5c4",
+ "title": "the Connections tab of the CLI tile connects to a saved host and asks ",
+ "clauses": [
+  {
+   "id": "cli-connect",
+   "text": "the Connections tab of the CLI tile connects to a saved host and asks first for a new host key",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Open the CLI tile, Connections, add a host of your own, press Connect.",
+     "expect": "A new host key is shown and asked about first; after yes the default command runs; the tab lists names only."
+    }
+   ]
+  }
+ ]
+}

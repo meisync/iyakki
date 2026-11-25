@@ -480,4 +480,48 @@ mod tests {
         let id2 = b.open("alice", "s", &spec).unwrap();
         assert_eq!(b.state("alice", "s", id2).unwrap().engine, EnginePref::Full);
     }
+
+    /// F-SDK-60 (UT2): the rest of the facet end to end on the fake: forward, reload and stop, a page given as text, wheel, key, resize and typed
+    /// text (each moves the frame's generation or is refused), a permission question and its answer, and a bad answer or size.
+    #[test]
+    fn history_input_resize_and_a_permission_question_work_through_the_facet_and_every_change_moves_the_generation() {
+        let b = fake();
+        b.add_page("https://a.org/cam", FakePage::new("Camera", &["a meeting"]).asking(PromptKind::Permission, "Use the camera?"));
+        let id = b.open("alice", "sample", &OpenSpec::new(300.0, 200.0)).unwrap();
+        b.navigate("alice", "sample", id, &Navigate::Url("https://a.org/".into())).unwrap();
+        b.navigate("alice", "sample", id, &Navigate::Url("https://a.org/cam".into())).unwrap();
+        let st = b.state("alice", "sample", id).unwrap();
+        assert_eq!((st.can_back, st.can_forward, st.title.as_str()), (true, false, "Camera"));
+        let ask = b.prompts("alice", "sample", id);
+        assert_eq!((ask.len(), ask[0].kind), (1, PromptKind::Permission));
+        b.answer_prompt("alice", "sample", id, ask[0].id, true).unwrap();
+        assert_eq!(b.answers(), vec![("Use the camera?".to_string(), true)]);
+        assert!(b.prompts("alice", "sample", id).is_empty(), "an answered question is gone");
+        assert!(matches!(b.answer_prompt("alice", "sample", id, 99, true), Err(BrowserError::Invalid(_))));
+        b.navigate("alice", "sample", id, &Navigate::Back).unwrap();
+        b.navigate("alice", "sample", id, &Navigate::Forward).unwrap();
+        assert_eq!(b.state("alice", "sample", id).unwrap().title, "Camera");
+        b.navigate("alice", "sample", id, &Navigate::Reload).unwrap();
+        b.navigate("alice", "sample", id, &Navigate::Stop).unwrap();
+        // each input that changes what is drawn moves the generation, so the next frame is a new one
+        let gen = |b: &FakeBrowser| b.state("alice", "sample", id).unwrap().generation;
+        for input in [Input::Wheel(-2), Input::Key(PageKey::Down), Input::Key(PageKey::Home), Input::Resize { width: 120.0, height: 90.0 }] {
+            let before = gen(&b);
+            b.input("alice", "sample", id, &input).unwrap();
+            assert!(gen(&b) > before, "{input:?}");
+            assert!(b.frame("alice", "sample", id, before).unwrap().is_some(), "{input:?}");
+        }
+        let before = gen(&b);
+        b.input("alice", "sample", id, &Input::Text("hello".into())).unwrap();
+        assert_eq!(gen(&b), before, "the in-house page has no text field: typed text changes nothing");
+        assert!(matches!(b.input("alice", "sample", id, &Input::Text("x".repeat(MAX_TEXT + 1))), Err(BrowserError::Invalid(_))));
+        assert!(matches!(b.input("alice", "sample", id, &Input::Resize { width: 0.0, height: 10.0 }), Err(BrowserError::Invalid(_))));
+        // a page given as text opens in the same session and joins the history
+        b.navigate("alice", "sample", id, &Navigate::Html { base: "https://a.org/mine".into(), html: "made by the app".into() }).unwrap();
+        let f = b.frame("alice", "sample", id, 0).unwrap().unwrap();
+        assert!(DisplayList::parse(&f.list).unwrap().texts().iter().any(|t| t.contains("made by the app")));
+        assert!(matches!(b.navigate("alice", "sample", id, &Navigate::Html { base: "https://a.org/x".into(), html: "x".repeat(MAX_HTML + 1) }), Err(BrowserError::Invalid(_))));
+        b.close("alice", "sample", id);
+        assert_eq!(b.state("alice", "sample", id), Err(BrowserError::NoSuchSession));
+    }
 }

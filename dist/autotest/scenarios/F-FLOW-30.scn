@@ -1,0 +1,17 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 5aebf8b28becdc5e; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-FLOW-30
+targets: qemu
+profile: ram
+feature-sha: 5aebf8b28becdc5e
+doc: FLOWS lists the sample flow Is the person sleeping? (read only)
+clause: 1 The FLOWS templates list offers the sample flow Is the person sleeping?
+not-covered: the camera photo, the vision model answer and the INBOX note
+not-covered: the flow running (no camera, no vision model in a scratch guest)
+skip-unless-button group Build
+click group Build
+skip-unless-button FLOWS
+click FLOWS
+wait text="FLOWS|Templates"
+shot page
+expect-not-blank
+expect-text sleeping

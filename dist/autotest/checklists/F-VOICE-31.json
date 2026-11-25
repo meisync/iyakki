@@ -1,0 +1,60 @@
+{
+ "schema": 1,
+ "row": "F-VOICE-31",
+ "feature_sha": "8a850ad5598825eb",
+ "title": "tidy model for wording fixes, with a longer wait and one retry (manual until automated)",
+ "clauses": [
+  {
+   "id": "tidy-set",
+   "text": "Settings, Models lets you choose a tidy model (key y) for wording fixes and revisions.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Models and press y on the tidy model entry, then choose a model.",
+     "expect": "The chosen tidy model is shown, and it is still there after you leave the page and come back."
+    }
+   ]
+  },
+  {
+   "id": "tidy-used",
+   "text": "A wording fix uses the tidy model before the chat model.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant in the chat for a wording fix of one sentence.",
+     "expect": "A fixed sentence comes back and no error is shown."
+    }
+   ]
+  },
+  {
+   "id": "retry",
+   "text": "A provider that refuses the thinking hint gets one more try without it.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "With a provider that refuses the reasoning request (the NVIDIA model, if you use it), ask for a wording fix.",
+     "expect": "The fixed sentence still comes back. No failure caused by the hint is shown."
+    }
+   ]
+  },
+  {
+   "id": "remote-wait",
+   "text": "A remote tidy model waits up to 20 seconds, and a local one 8 seconds, before it gives up.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Turn the network off, ask for a wording fix with a remote tidy model, and count the seconds until an answer or a message.",
+     "expect": "A plain message comes within about 20 seconds. With a local tidy model it comes within about 8 seconds."
+    }
+   ]
+  }
+ ]
+}

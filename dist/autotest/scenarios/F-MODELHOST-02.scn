@@ -1,0 +1,19 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha e8400d7aa5aa7b43; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-MODELHOST-02
+targets: qemu
+profile: ram
+feature-sha: e8400d7aa5aa7b43
+doc: Settings, Models offers Scan this network for model hosts (read only, nothing is scanned)
+clause: 1 Settings, Models offers Scan this network, the entry to adding a model host
+not-covered: the Test button and Add to Models
+not-covered: the address rules (private, link-local, loopback, .local names)
+not-covered: a host that answers (nothing is scanned in this scenario)
+key s
+wait app=Settings
+skip-unless-button Models
+click-sidebar Models
+wait app=Settings page="Models"
+shot page
+expect-not-blank
+expect-text Scan this network
+expect-page Models

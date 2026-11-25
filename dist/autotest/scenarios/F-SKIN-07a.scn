@@ -1,0 +1,9 @@
+# autotest pilot, batch A (2026-11-21); split into sub-row F-SKIN-07a on 2026-11-21: this scenario covers the whole visible clause, the API clauses are F-SKIN-07b.
+row: F-SKIN-07a
+targets: qemu
+provided-by: program  # every clause is given by the iyakki program (core, shell, Settings, SAMPLE); the rootfs of alpha.8 and alpha.10 differ in no file this scenario reads (docs/development/AUTOTEST.md)
+profile: ram
+feature-sha: ed1e75dfb26f9e07
+doc: Light, High contrast and Dark apply on the real Display page and the page title stays readable (measured)
+clause: 1 Light, High contrast and Dark apply on the real Display page and the page title stays readable (measured)
+session-check: theme_switch

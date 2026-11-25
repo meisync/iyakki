@@ -8,6 +8,7 @@ use iyakki_core_api::soundtypes::Cue;
 use iyakki_shared::syssounds as ss;
 
 use super::*;
+use super::super::settings_device_port::SystemSoundsPort;
 
 /// Master switch, level, then one row for each cue.
 pub(super) const ROWS: usize = 2 + Cue::ALL.len();
@@ -24,92 +25,90 @@ impl SettingsApp {
         vec![("Switch on or off", ACCENT, 'e'), ("Preview", ACCENT, 'p'), ("Quieter", TEXT, '-'), ("Louder", TEXT, '+')]
     }
 
-    pub(super) fn handle_sysnd(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_sysnd(&mut self, k: &Key, p: &dyn SystemSoundsPort) {
         let sel = self.sel();
         match k {
             Key::Up => self.move_sel(-1, ROWS),
             Key::Down => self.move_sel(1, ROWS),
             Key::Home => self.sel[self.tab] = 0,
             Key::End => self.sel[self.tab] = ROWS - 1,
-            Key::Enter | Key::Char(' ' | 'e') => self.sysnd_toggle(sel, cx),
-            Key::Char('p') => self.sysnd_preview(sel, cx),
-            Key::Char('+' | '=') => self.sysnd_level(STEP_DB, cx),
-            Key::Char('-') => self.sysnd_level(-STEP_DB, cx),
+            Key::Enter | Key::Char(' ' | 'e') => self.sysnd_toggle(sel, p),
+            Key::Char('p') => self.sysnd_preview(sel, p),
+            Key::Char('+' | '=') => self.sysnd_level(STEP_DB, p),
+            Key::Char('-') => self.sysnd_level(-STEP_DB, p),
             _ => {}
         }
     }
 
     /// A button or switch on a row: `Y` switches, `P` previews, `+` and `-` change the level.
-    pub(super) fn sysnd_sub(&mut self, row: usize, c: char, cx: &AppCx) {
+    pub(super) fn sysnd_sub(&mut self, row: usize, c: char, p: &dyn SystemSoundsPort) {
         self.sel[self.tab] = row.min(ROWS - 1);
         match c {
-            'Y' => self.sysnd_toggle(row, cx),
-            'P' => self.sysnd_preview(row, cx),
-            '+' => self.sysnd_level(STEP_DB, cx),
-            '-' => self.sysnd_level(-STEP_DB, cx),
+            'Y' => self.sysnd_toggle(row, p),
+            'P' => self.sysnd_preview(row, p),
+            '+' => self.sysnd_level(STEP_DB, p),
+            '-' => self.sysnd_level(-STEP_DB, p),
             _ => {}
         }
     }
 
-    pub(super) fn sysnd_slider(&mut self, x: f32, w: f32, cx: &AppCx) {
+    pub(super) fn sysnd_slider(&mut self, x: f32, w: f32, p: &dyn SystemSoundsPort) {
         let v = controls::value_at(x, w, ss::MIN_OFFSET_DB as i64, ss::MAX_OFFSET_DB as i64, 1) as i32;
-        self.sysnd_set_level(v, cx);
+        self.sysnd_set_level(v, p);
     }
 
-    fn sysnd_toggle(&mut self, row: usize, cx: &AppCx) {
-        if !self.admin(cx) {
+    fn sysnd_toggle(&mut self, row: usize, p: &dyn SystemSoundsPort) {
+        if !self.admin(p) {
             return;
         }
-        let svc = Self::svc(cx);
-        let now = svc.system_sounds();
+        let now = p.system_sounds();
         let r = match row {
-            0 => svc.update_system_sounds(|s| s.enabled = !now.enabled).map(|n| (if n.enabled { "System sounds are on." } else { "System sounds are off." }.to_string(), "all", n.enabled)),
+            0 => p.update_system_sounds(&mut |s| s.enabled = !now.enabled).map(|n| (if n.enabled { "System sounds are on." } else { "System sounds are off." }.to_string(), "all", n.enabled)),
             1 => return self.ok("Use the slider, + or - to change the level."),
             _ => {
                 let c = Self::sysnd_cue(row);
-                svc.update_system_sounds(|s| s.set(c, !now.get(c))).map(|n| (format!("{} sound: {}.", c.label(), if n.get(c) { "on" } else { "off" }), c.id(), n.get(c)))
+                p.update_system_sounds(&mut |s| s.set(c, !now.get(c))).map(|n| (format!("{} sound: {}.", c.label(), if n.get(c) { "on" } else { "off" }), c.id(), n.get(c)))
             }
         };
         match r {
             Ok((m, what, on)) => {
-                cx.audit.record(&cx.session.user, "settings.sysnd", &format!("{what} {}", if on { "on" } else { "off" }));
+                p.audit("settings.sysnd", &format!("{what} {}", if on { "on" } else { "off" }));
                 self.ok(m);
             }
             Err(e) => self.fail(e),
         }
     }
 
-    fn sysnd_level(&mut self, delta: i32, cx: &AppCx) {
-        let now = Self::svc(cx).system_sounds().offset_db;
-        self.sysnd_set_level(now + delta, cx);
+    fn sysnd_level(&mut self, delta: i32, p: &dyn SystemSoundsPort) {
+        let now = p.system_sounds().offset_db;
+        self.sysnd_set_level(now + delta, p);
     }
 
-    fn sysnd_set_level(&mut self, db: i32, cx: &AppCx) {
-        if !self.admin(cx) {
+    fn sysnd_set_level(&mut self, db: i32, p: &dyn SystemSoundsPort) {
+        if !self.admin(p) {
             return;
         }
         let db = db.clamp_safe(ss::MIN_OFFSET_DB, ss::MAX_OFFSET_DB);
-        match Self::svc(cx).update_system_sounds(|s| s.offset_db = db) {
+        match p.update_system_sounds(&mut |s| s.offset_db = db) {
             Ok(n) => {
-                cx.audit.record(&cx.session.user, "settings.sysnd.level", &n.offset_db.to_string());
+                p.audit("settings.sysnd.level", &n.offset_db.to_string());
                 self.ok(format!("System sounds are {} dB from IYAKKI's volume.", n.offset_db));
             }
             Err(e) => self.fail(e),
         }
     }
 
-    fn sysnd_preview(&mut self, row: usize, cx: &AppCx) {
+    fn sysnd_preview(&mut self, row: usize, p: &dyn SystemSoundsPort) {
         let cue = Self::sysnd_cue(row);
-        cx.audit.record(&cx.session.user, "settings.sysnd.preview", cue.id());
-        let svc = Self::svc(cx).clone();
-        let out = svc.cue_out();
-        self.start("playing the sound", move || JobOut::Msg(svc.preview_cue(cue, out)));
+        p.audit("settings.sysnd.preview", cue.id());
+        let job = p.preview_job(cue);
+        self.start("playing the sound", move || JobOut::Msg(job()));
     }
 
-    pub(super) fn render_sysnd(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let sounds = Self::svc(cx).system_sounds();
-        let muted = cx.sound_settings().muted;
-        let admin = cx.session.policy.manage_settings;
+    pub(super) fn render_sysnd(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn SystemSoundsPort) {
+        let sounds = p.system_sounds();
+        let muted = p.sound_muted();
+        let admin = p.is_admin();
         let low = a.y + a.h - 44.0 * s;
         let step = |i: usize| if i == 1 { 90.0 * s } else { 64.0 * s };
         let sel = self.sel().min(ROWS - 1);

@@ -1,0 +1,16 @@
+# autotest alpha.10 batch F (lane Q8, 2026-11-24); split into sub-row F-GEMVOICE-13a on 2026-11-24 (lane SC2): this scenario covers the whole visible clause, the API and rule clauses are F-GEMVOICE-13b.
+row: F-GEMVOICE-13a
+targets: qemu
+profile: ram
+feature-sha: 212cb3821871d3c1
+doc: Settings, Gemini voice (experimental) is a page of its own and says it is experimental (read only, nothing is changed)
+clause: 1 Settings, Gemini voice (experimental) is a page of its own and says it is experimental
+key s
+wait app=Settings
+skip-unless-button Gemini voice (experimental)
+click-sidebar Gemini voice (experimental)
+wait app=Settings page="Gemini voice (experimental)"
+shot page
+expect-not-blank
+expect-text Gemini voice
+expect-page Gemini voice (experimental)

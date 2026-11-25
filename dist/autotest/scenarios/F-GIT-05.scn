@@ -1,0 +1,19 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 322f56224e6d8295; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-GIT-05
+targets: qemu
+profile: ram
+feature-sha: 322f56224e6d8295
+doc: Settings, Git offers Add connection (read only)
+clause: 1 Settings, Git offers Add connection, the start of the wizard
+not-covered: the five wizard steps
+not-covered: the token kept in the vault only
+not-covered: the first connection being the default
+key s
+wait app=Settings
+skip-unless-button Git
+click-sidebar Git
+wait app=Settings page="Git"
+shot page
+expect-not-blank
+expect-text Add connection
+expect-page Git

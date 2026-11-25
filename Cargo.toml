@@ -15,6 +15,7 @@ members = [
     "crates/iyakki-vt",
     "crates/iyakki-camdetect",
     "crates/iyakki-diskcrypt",
+    "crates/iyakki-disks-model",
     "crates/iyakki-battery",
     "crates/iyakki-clockfloor",
     "crates/iyakki-macrecovery",
@@ -29,6 +30,44 @@ members = [
     "crates/iyakki-wordtime",
     "crates/iyakki-clock",
     "crates/iyakki-board-model",
+    "crates/iyakki-k8s-model",
+    "crates/iyakki-cluster-model",
+    "crates/iyakki-study-model",
+    "crates/iyakki-inbox-model",
+    "crates/iyakki-story-model",
+    "crates/iyakki-chat-model",
+    "crates/iyakki-voice-model",
+    "crates/iyakki-store-model",
+    "crates/iyakki-sysinfo-model",
+    "crates/iyakki-scene",
+    "crates/iyakki-piclog",
+    "crates/iyakki-hostrules",
+    "crates/iyakki-speechtime",
+    "crates/iyakki-lab-model",
+    "crates/iyakki-ide-model",
+    "crates/iyakki-tile-lab",
+    "crates/iyakki-tile-tales",
+    "crates/iyakki-tile-voice",
+    "crates/iyakki-tile-store",
+    "crates/iyakki-tile-inbox",
+    "crates/iyakki-tile-system",
+    "crates/iyakki-provider-kind",
+    "crates/iyakki-frames",
+    "crates/iyakki-serde-static",
+    "crates/iyakki-credguard",
+    "crates/iyakki-git-model",
+    "crates/iyakki-querybox",
+    "crates/iyakki-chatview",
+    "crates/iyakki-voice-model",
+    "crates/iyakki-store-model",
+    "crates/iyakki-story-kit",
+    "crates/iyakki-flows-model",
+    "crates/iyakki-tile-learn",
+    "crates/iyakki-tile-dash",
+    "crates/iyakki-tile-k8s",
+    "crates/iyakki-tile-devtools",
+    "crates/iyakki-tile-flows",
+    "crates/iyakki-tile-git",
     "crates/iyakki-testkit",
     "crates/iyakki-cloudmode",
     "crates/iyakki-shared",
@@ -55,12 +94,20 @@ members = [
     "crates/iyakki-ui-bin",
     "crates/iyakki-tile-api",
     "crates/iyakki-tile-usage",
+    "crates/iyakki-tile-checkup",
+    "crates/iyakki-tile-doctor",
+    "crates/iyakki-tile-runlog",
+    "crates/iyakki-tile-mesh",
+    "crates/iyakki-tile-scan",
+    "crates/iyakki-tile-linuxwin",
+    "crates/iyakki-tile-rag",
     "crates/iyakki-tile-board",
     "crates/iyakki-tile-radio",
     "crates/iyakki-tile-pdf",
     "crates/iyakki-tile-calendar",
     "crates/iyakki-tile-remotefiles",
     "crates/iyakki-tile-cameras",
+    "crates/iyakki-tile-disks",
     "crates/iyakki-tile-firewall",
     "crates/iyakki-site-apps",
     "crates/iyakki-hostfiles",
@@ -120,7 +167,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-alpha.7-dev"
+version = "0.1.0-alpha.10-dev"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -129,6 +176,7 @@ iyakki-sshfs = { path = "crates/iyakki-sshfs" }
 iyakki-vt = { path = "crates/iyakki-vt" }
 iyakki-camdetect = { path = "crates/iyakki-camdetect" }
 iyakki-diskcrypt = { path = "crates/iyakki-diskcrypt" }
+iyakki-disks-model = { path = "crates/iyakki-disks-model" }
 iyakki-battery = { path = "crates/iyakki-battery" }
 iyakki-clockfloor = { path = "crates/iyakki-clockfloor" }
 iyakki-macrecovery = { path = "crates/iyakki-macrecovery" }
@@ -141,8 +189,31 @@ iyakki-qr = { path = "crates/iyakki-qr" }
 iyakki-webcrypto = { path = "crates/iyakki-webcrypto" }
 iyakki-audiodec = { path = "crates/iyakki-audiodec" }
 iyakki-wordtime = { path = "crates/iyakki-wordtime" }
+iyakki-chatview = { path = "crates/iyakki-chatview" }
+iyakki-voice-model = { path = "crates/iyakki-voice-model" }
+iyakki-store-model = { path = "crates/iyakki-store-model" }
+iyakki-story-kit = { path = "crates/iyakki-story-kit" }
 iyakki-clock = { path = "crates/iyakki-clock" }
 iyakki-board-model = { path = "crates/iyakki-board-model" }
+iyakki-k8s-model = { path = "crates/iyakki-k8s-model" }
+iyakki-cluster-model = { path = "crates/iyakki-cluster-model" }
+iyakki-study-model = { path = "crates/iyakki-study-model" }
+iyakki-inbox-model = { path = "crates/iyakki-inbox-model" }
+iyakki-story-model = { path = "crates/iyakki-story-model" }
+iyakki-chat-model = { path = "crates/iyakki-chat-model" }
+iyakki-sysinfo-model = { path = "crates/iyakki-sysinfo-model" }
+iyakki-scene = { path = "crates/iyakki-scene" }
+iyakki-piclog = { path = "crates/iyakki-piclog" }
+iyakki-hostrules = { path = "crates/iyakki-hostrules" }
+iyakki-speechtime = { path = "crates/iyakki-speechtime" }
+iyakki-lab-model = { path = "crates/iyakki-lab-model" }
+iyakki-ide-model = { path = "crates/iyakki-ide-model" }
+iyakki-provider-kind = { path = "crates/iyakki-provider-kind" }
+iyakki-frames = { path = "crates/iyakki-frames" }
+iyakki-serde-static = { path = "crates/iyakki-serde-static" }
+iyakki-credguard = { path = "crates/iyakki-credguard" }
+iyakki-git-model = { path = "crates/iyakki-git-model" }
+iyakki-flows-model = { path = "crates/iyakki-flows-model" }
 iyakki-cloudmode = { path = "crates/iyakki-cloudmode" }
 iyakki-shared = { path = "crates/iyakki-shared" }
 iyakki-dash = { path = "crates/iyakki-dash" }

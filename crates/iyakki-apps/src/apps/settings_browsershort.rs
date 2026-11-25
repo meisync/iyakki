@@ -4,6 +4,7 @@
 //! assistant (`browser_short_words_*`, which asks). They are kept in the person's browser file; every change is audited by word only.
 
 use super::*;
+use super::browser_port::BrowserSettingsPort;
 
 impl SettingsApp {
     /// What the search row says about the short words.
@@ -32,7 +33,7 @@ impl SettingsApp {
     }
 
     /// `w` and `W`: the forms. True when the key was used.
-    pub(super) fn handle_browser_short(&mut self, k: &Key, _cx: &AppCx) -> bool {
+    pub(super) fn handle_browser_short(&mut self, k: &Key, _p: &dyn BrowserSettingsPort) -> bool {
         match k {
             Key::Char('w') => {
                 self.open_form(FormKind::BrowserShort(true), Form::new("Add a short word").text("Word (1 to 12 lowercase letters or digits)", "", "for example yt").text("Address with %s where the search words go", "", "https://www.youtube.com/results?search_query=%s"));
@@ -46,8 +47,8 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn short_submit(&mut self, cx: &AppCx, add: bool, form: &Form) -> Result<String, String> {
-        let mut c = super::super::browser_config::load(cx);
+    pub(super) fn short_submit(&mut self, p: &dyn BrowserSettingsPort, add: bool, form: &Form) -> Result<String, String> {
+        let mut c = super::super::browser_config::load(p);
         let word = form.value(0).trim().to_ascii_lowercase();
         let what = if add {
             let template = form.value(1).trim().to_string();
@@ -63,8 +64,8 @@ impl SettingsApp {
             }
             format!("Short word {word} removed.")
         };
-        super::super::browser_config::save(cx, &c);
-        cx.audit.record(&cx.session.user, "settings.browser", &what);
+        super::super::browser_config::save(p, &c);
+        p.audit("settings.browser", &what);
         Ok(what)
     }
 }

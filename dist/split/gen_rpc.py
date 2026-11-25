@@ -78,11 +78,13 @@ def handle_of(ret):
 
 def uses(path):
     t = census.strip(open(path).read())
+    # `crate::` means the crate the trait file is in (iyakki-agent-api, or a leaf crate a trait moved to)
+    me = re.search(r'/crates/([^/]+)/', path).group(1).replace('-', '_')
     out = []
     for m in re.finditer(r'^use\s+([^;]*?);', t, flags=re.M | re.S):
         u = ' '.join(m.group(1).split())
-        u = re.sub(r'\bcrate::', 'iyakki_agent_api::', u)
-        u = re.sub(r'^crate\b', 'iyakki_agent_api', u)
+        u = re.sub(r'\bcrate::', me + '::', u)
+        u = re.sub(r'^crate\b', me, u)
         if u.startswith('super') or u.startswith('self'): continue
         out.append('use ' + u + ';')
     return out
@@ -126,7 +128,7 @@ def main():
                 m['cls'] = 'S'; m['wire'] = True
     # supertraits and `self:` receivers decide whether a trait can be an object at all
     src = {}
-    for f in {f for (f, _) in by}: src[f] = census.strip(open(ROOT + '/crates/iyakki-agent-api/src/' + f).read())
+    for f in {f for (f, _) in by}: src[f] = census.strip(open(census.path_of(f)).read())
     ok, skipped = [], []
     for (f, t), ms in by.items():
         if allow is not None and t not in allow: continue
@@ -193,6 +195,12 @@ def prelude(files):
 
 def modname(f): return 'g_' + f.replace('.rs', '')
 
+def modpath(f):
+    """The Rust path of the module that holds the trait file `f`: a file of iyakki-agent-api, or a leaf crate a trait moved to (rpc_census.MOVED_FILES)."""
+    p = census.path_of(f)
+    crate = re.search(r'/crates/([^/]+)/', p).group(1).replace('-', '_')
+    return crate + '::' + os.path.basename(p)[:-3]
+
 def gen_remote(ok):
     o = prelude(None)
     o += ['use std::sync::Arc;', 'use crate::{Lost, Rpc};', '']
@@ -200,8 +208,8 @@ def gen_remote(ok):
     for f, t, ms, _ in ok: files.setdefault(f, []).append((t, ms))
     names = {t for (_, t, _, _) in ok}
     for f, items in files.items():
-        o.append('mod %s {' % modname(f)); o.append('    use super::*;'); o.append('    use iyakki_agent_api::*;'); o.append('    use iyakki_agent_api::%s::*;' % f[:-3])
-        for u in uses(ROOT + '/crates/iyakki-agent-api/src/' + f): o.append('    ' + u)
+        o.append('mod %s {' % modname(f)); o.append('    use super::*;'); o.append('    use iyakki_agent_api::*;'); o.append('    use %s::*;' % modpath(f))
+        for u in uses(census.path_of(f)): o.append('    ' + u)
         for t, ms in items:
             o.append(f'    /// `{t}` over the connection (object `obj` of the core).')
             cached = [m for m in ms if m.get('mode') == 'cached']
@@ -220,8 +228,9 @@ def gen_remote(ok):
                     for p in params:
                         n, ty = p.split(':', 1); n = n.strip().lstrip('_') or 'a'; n = 'a_' + n if n in ('type', 'ref', 'match', 'fn', 'in') else n
                         decl.append(f'{n}: {ty.strip()}'); names_.append(n)
-                    m = dict(m, ret=re.sub(r'\bcrate::', 'iyakki_agent_api::', m['ret']))
-                    decl = [re.sub(r'\bcrate::', 'iyakki_agent_api::', d) for d in decl]
+                    me = re.search(r'/crates/([^/]+)/', census.path_of(f)).group(1).replace('-', '_')  # `crate::` is the crate of the trait's file
+                    m = dict(m, ret=re.sub(r'\bcrate::', me + '::', m['ret']))
+                    decl = [re.sub(r'\bcrate::', me + '::', d) for d in decl]
                     ret = m['ret'] or '()'
                     recv = 'self: Arc<Self>' if re.match(r'^self:\s*Arc<Self>', m['args'].strip()) else '&self'
                     sig = f'        fn {m["fn"]}{m["gen"]}({recv}{"".join(", " + d for d in decl)})' + (f' -> {m["ret"]}' if m['ret'] else '') + ' {'
@@ -289,7 +298,7 @@ def gen_remote(ok):
     o.append('        _ => return None,'); o.append('    })'); o.append('}')
     o.append('/// One of the generated remote objects, by trait.'); o.append('pub enum RemoteAny {')
     for f, items in files.items():
-        for t, _ in items: o.append(f'    {t}(Arc<dyn iyakki_agent_api::{f[:-3]}::{t}>),')
+        for t, _ in items: o.append(f'    {t}(Arc<dyn {modpath(f)}::{t}>),')
     o.append('}')
     emit(OUT + '/gen_remote.rs', '\n'.join(o) + '\n')
 
@@ -300,8 +309,8 @@ def gen_serve(ok):
     for f, t, ms, _ in ok: files.setdefault(f, []).append((t, ms))
     o.append('use iyakki_agent_api::*;')
     for f in files:
-        o.append('mod %s { use super::*;' % modname(f)); o.append('    use iyakki_agent_api::%s::*;' % f[:-3])
-        for u in uses(ROOT + '/crates/iyakki-agent-api/src/' + f): o.append('    ' + u)
+        o.append('mod %s { use super::*;' % modname(f)); o.append('    use %s::*;' % modpath(f))
+        for u in uses(census.path_of(f)): o.append('    ' + u)
         o.append('    pub(crate) trait Dummy {}')
         for t, ms in files[f]:
             o.append(f"    pub(crate) fn serve_{t}(t: &Arc<dyn {t}>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {{")
@@ -323,6 +332,8 @@ def gen_serve(ok):
                     if k_ == 'actor':
                         names_.append(f'x{i}'); tys.append('String'); exprs.append(f'&reg.actor(&x{i})?'); continue
                     ow, ex = owned(ty.strip())
+                    me = re.search(r'/crates/([^/]+)/', census.path_of(f)).group(1).replace('-', '_')  # `crate::` is the crate of the trait's file
+                    ow = re.sub(r'\bcrate::', me + '::', ow); ex = re.sub(r'\bcrate::', me + '::', ex)
                     names_.append(f'x{i}'); tys.append(ow); exprs.append(ex.replace('x', f'x{i}', 1) if ex.startswith('x') else ex.replace('x', f'x{i}'))
                     if k_ in ('dir_r', 'dir_w'): exprs[-1] = f'&reg.project_dir(&x{i}, {"true" if k_ == "dir_w" else "false"})?'
                     if n.strip().lstrip('_') == 'user': uservar = f'x{i}'
@@ -363,7 +374,7 @@ def gen_serve(ok):
     o.append('/// The kinds of object the core hands out: one per generated trait.')
     o.append('#[derive(Clone)]'); o.append('pub enum Obj {')
     for f, items in files.items():
-        for t, _ in items: o.append(f'    {t}(Arc<dyn iyakki_agent_api::{f[:-3]}::{t}>),')
+        for t, _ in items: o.append(f'    {t}(Arc<dyn {modpath(f)}::{t}>),')
     o.append('    /// The whole `ServicesHandle` of the core (gen_services.py): its plain methods and the handles it hands out.')
     o.append('    ServicesHandle(Arc<crate::ServicesRoot>),')
     o.append('    /// A hand-written object (served.rs, D-SPLIT-03-SERVED): the traits that are not in iyakki-agent-api or cannot be generated.')

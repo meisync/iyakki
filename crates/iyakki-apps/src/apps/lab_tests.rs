@@ -2,6 +2,14 @@
 //! fake vision backend streams a short answer, a fake frame source returns flat colours.
 
 use super::*;
+use iyakki_shared::lab::{self, FrameSource, PictureBackend, PictureRequest, Sees, VisionAnswer, VisionBackend, VisionRequest};
+use iyakki_shared::providers::ImageTrace;
+use iyakki_tile_lab::app::Modal;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
+use crate::ui::Key;
 use crate::apps::chatpic::fixtures::png;
 use crate::apps::tests::{cx_with_admin_store, temp_dir};
 use crate::gfx::Gfx;
@@ -134,6 +142,7 @@ fn rig(w: &World, ffmpeg: bool) -> Rig {
     let calls = w.camera_calls.clone();
     let shot = png(40, 30, [10, 120, 60]);
     Rig {
+        codec: Arc::new(crate::apps::lab_port::ShellCodec),
         picture: w.pic.clone(),
         vision: w.vis.clone(),
         frames: Arc::new(FakeFrames { ok: ffmpeg }),
@@ -428,7 +437,7 @@ fn the_history_keeps_at_most_sixteen_and_a_memory_budget() {
     assert_eq!(a.history.len(), lab::HISTORY_MAX_ITEMS);
     assert_eq!(a.history.last().unwrap().id, (lab::HISTORY_MAX_ITEMS + 3) as u64, "the newest is kept");
     // a result that weighs a lot pushes the older ones out
-    let pm = Arc::new(Pixmap::new(8, 8).unwrap());
+    let pm = Arc::new(tiny_skia::Pixmap::new(8, 8).unwrap());
     let mk = |id: u64, mb: usize| Item { id, provider: "p".into(), model: "m".into(), remote: false, prompt: String::new(), negative: String::new(), seed: 1, asked: (8, 8), size: (8, 8), steps: None, ms: 1, bytes: vec![0; mb << 20], ext: "png", view: pm.clone(), thumb: pm.clone() };
     a.history = vec![mk(1, 20), mk(2, 20), mk(3, 20)];
     a.enforce_caps();
@@ -538,12 +547,13 @@ fn a_picture_from_a_file_is_shrunk_to_a_bounded_size_and_the_size_sent_is_shown(
     let mut bomb = png(2, 2, [0, 0, 0]);
     bomb[16..20].copy_from_slice(&20000u32.to_be_bytes());
     bomb[20..24].copy_from_slice(&20000u32.to_be_bytes());
-    assert!(lab_pic::prepare(&bomb, "x").unwrap_err().contains("64 megapixels"));
-    assert_eq!(lab_pic::header_size(&png(7, 5, [1, 2, 3])), Some((7, 5)));
+    assert!(iyakki_tile_lab::pic::prepare(&crate::apps::lab_port::ShellCodec, &bomb, "x").unwrap_err().contains("64 megapixels"));
+    assert_eq!(iyakki_tile_lab::pic::header_size(&png(7, 5, [1, 2, 3])), Some((7, 5)));
 }
 
 #[test]
 fn the_camera_the_screen_and_the_clipboard_give_a_picture_and_the_private_ones_ask_first() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     let w = world("lab-src", true);
     let mut a = app(&w);
     a.switch(Tab::Vision);
@@ -643,7 +653,7 @@ fn a_model_that_cannot_take_pictures_says_so_and_nothing_is_faked() {
     dalle.sees = Sees::Unknown;
     a.cat.chat_other.push(dalle);
     a.vis_a = Some(("oa".into(), "dall-e-3".into()));
-    a.run_vision(&w.cx, false);
+    a.run_vision(&CxPort(&w.cx), false);
     assert!(a.status_text().unwrap().0.contains("draws pictures from text"), "{:?}", a.status_text());
     assert_eq!(w.vis.calls.lock().unwrap().len(), before, "nothing was sent");
     assert!(a.log_text().contains("not sent") && a.log_text().contains("refused before sending"));
@@ -770,7 +780,7 @@ fn video_generation_is_offered_only_when_a_provider_lists_a_video_model() {
     p.base_url = Some(base.clone());
     w.cx.settings().lock().unwrap().upsert_provider(p).unwrap();
     iyakki_shared::lemonade::remember(&iyakki_shared::lemonade::api_base(&base), &iyakki_shared::lemonade::parse_models(&list, &[]));
-    a.reload(&w.cx);
+    a.reload(&CxPort(&w.cx));
     assert_eq!(a.cat.video.len(), 1);
     let line = lab::video_line(&a.cat);
     assert!(line.contains("Wan-Video-1") && line.contains("nothing is faked"), "{line}");
@@ -870,7 +880,7 @@ fn keys_and_mouse_both_drive_it() {
     assert_eq!(a.focus, Focus::Prompt);
     // Esc with nothing running and nothing focused goes back
     a.handle(&Event::Key(Key::Esc), &w.cx);
-    assert!(matches!(a.handle(&Event::Key(Key::Esc), &w.cx), Flow::Back));
+    assert!(matches!(a.handle(&Event::Key(Key::Esc), &w.cx), crate::apps::Flow::Back));
     // the wheel scrolls the controls when they do not fit
     let mut g = Gfx::new(500, 360);
     a.render(&mut g, R::new(0.0, 46.0, 500.0, 314.0), 1.0, &w.cx, 0);

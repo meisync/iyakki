@@ -6,6 +6,8 @@
 //! kernel's CPU frequency files at once and again at every start; the idle rules are applied by the shell (`shell_power.rs`). Every
 //! choice is a card that a click, a tap or a key sets; there is no hidden gesture.
 
+use super::super::settings_port::SettingsDataPort;
+use super::system_port::PowerPort;
 use super::*;
 use iyakki_shared::power::{Caps, PowerEnv};
 use iyakki_shared::power::{self, PowerSettings, Profile};
@@ -30,50 +32,50 @@ impl SettingsApp {
         self
     }
 
-    fn pw_read(&mut self) -> (Caps, Option<Profile>) {
+    fn pw_read(&mut self, p: &dyn PowerPort) -> (Caps, Option<Profile>) {
         if let Some((at, c, p)) = &self.pw.cache {
             if at.elapsed() < std::time::Duration::from_secs(2) {
                 return (c.clone(), *p);
             }
         }
-        let (c, p) = (crate::agent().host_probe().power_caps(&self.pw.env), crate::agent().host_probe().power_current(&self.pw.env));
-        self.pw.cache = Some((std::time::Instant::now(), c.clone(), p));
-        (c, p)
+        let (c, cur) = (p.power_caps(&self.pw.env), p.power_current(&self.pw.env));
+        self.pw.cache = Some((std::time::Instant::now(), c.clone(), cur));
+        (c, cur)
     }
 
-    fn pw_settings(cx: &AppCx) -> PowerSettings {
-        cx.settings().lock().map(|s| s.get().power.clone()).unwrap_or_default()
+    fn pw_settings(p: &dyn SettingsDataPort) -> PowerSettings {
+        p.settings_get().power
     }
 
-    fn pw_save(&mut self, cx: &AppCx, what: &str, f: impl FnOnce(&mut PowerSettings)) -> bool {
-        let r = cx.settings().lock().map(|mut s| s.update(|s| f(&mut s.power)));
-        match r {
-            Ok(Ok(_)) => {
-                cx.audit.record(&cx.session.user, "settings.power", what);
+    fn pw_save(&mut self, p: &dyn SettingsDataPort, what: &str, f: impl FnOnce(&mut PowerSettings)) -> bool {
+        let mut f = Some(f);
+        match p.settings_update(&mut |s| {
+            if let Some(f) = f.take() {
+                f(&mut s.power)
+            }
+        }) {
+            Ok(()) => {
+                p.audit("settings.power", what);
                 self.pw.cache = None;
                 true
             }
-            Ok(Err(e)) => {
-                self.fail(e.to_string());
-                false
-            }
-            Err(_) => {
-                self.fail("The settings are busy; try again.");
+            Err(e) => {
+                self.fail(e.message());
                 false
             }
         }
     }
 
-    pub(super) fn handle_power(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_power(&mut self, k: &Key, p: &dyn PowerPort) {
         let Key::Char(c) = k else { return };
         if !matches!(c, 'e' | 'b' | 'v' | 's' | 'w' | 'x' | 'l' | 'p' | 'f') {
             return;
         }
-        if !self.admin(cx) {
+        if !self.admin(p) {
             return;
         }
-        let (caps, _) = self.pw_read();
-        let cur = Self::pw_settings(cx);
+        let (caps, _) = self.pw_read(p);
+        let cur = Self::pw_settings(p);
         match c {
             'e' | 'b' | 'v' => {
                 let profile = match c {
@@ -81,9 +83,9 @@ impl SettingsApp {
                     'b' => Profile::Balanced,
                     _ => Profile::PowerSaver,
                 };
-                match crate::agent().host_probe().power_set_profile(&self.pw.env, profile) {
+                match p.power_set_profile(&self.pw.env, profile) {
                     Ok(_) => {
-                        if self.pw_save(cx, &format!("profile={profile:?}"), |s| s.profile = profile) {
+                        if self.pw_save(p, &format!("profile={profile:?}"), |s| s.profile = profile) {
                             self.ok(format!("Power profile: {}.", profile.label()));
                         }
                     }
@@ -95,7 +97,7 @@ impl SettingsApp {
                     return self.fail("This computer cannot sleep, so there is nothing to set.");
                 }
                 let m = cur.next_sleep();
-                if self.pw_save(cx, &format!("sleep_after_min={m}"), |s| s.sleep_after_min = m) {
+                if self.pw_save(p, &format!("sleep_after_min={m}"), |s| s.sleep_after_min = m) {
                     self.ok(if m == 0 { "The computer will not sleep by itself.".to_string() } else { format!("The computer sleeps after {m} minutes without use, unless something is running.") });
                 }
             }
@@ -104,7 +106,7 @@ impl SettingsApp {
                     return self.fail("This computer shows no lid switch, so there is nothing to set.");
                 }
                 let next = cur.lid.next();
-                if self.pw_save(cx, &format!("lid={next:?}"), |s| s.lid = next) {
+                if self.pw_save(p, &format!("lid={next:?}"), |s| s.lid = next) {
                     self.ok(match next {
                         power::LidAction::Nothing => "Closing the lid does nothing.".to_string(),
                         power::LidAction::Lock => "Closing the lid locks the screen. Apps and runs go on.".to_string(),
@@ -112,22 +114,22 @@ impl SettingsApp {
                     });
                 }
             }
-            'f' => match crate::agent().host_probe().power_fan_toggle(&self.pw.env, cx.data_dir()) {
+            'f' => match p.power_fan_toggle(&self.pw.env) {
                 Ok(on) => {
-                    cx.audit.record(&cx.session.user, "settings.fan", if on { "on" } else { "off" });
+                    p.audit("settings.fan", if on { "on" } else { "off" });
                     self.ok(if on { "IYAKKI runs the fans now (within a few seconds). The firmware's own curve takes over again on any doubt." } else { "The firmware runs the fans again (within a few seconds)." });
                 }
                 Err(e) => self.fail(e),
             },
             'p' => {
                 let next = cur.button.next();
-                if self.pw_save(cx, &format!("button={next:?}"), |s| s.button = next) {
+                if self.pw_save(p, &format!("button={next:?}"), |s| s.button = next) {
                     self.ok(format!("The power button: {}.", next.label()));
                 }
             }
             'w' => {
                 let on = !cur.sleep_when_busy;
-                if self.pw_save(cx, &format!("sleep_when_busy={on}"), |s| s.sleep_when_busy = on) {
+                if self.pw_save(p, &format!("sleep_when_busy={on}"), |s| s.sleep_when_busy = on) {
                     self.ok(if on { "It may sleep while an install, download, job or model is working." } else { "It never sleeps while an install, download, job or model is working." });
                 }
             }
@@ -136,7 +138,7 @@ impl SettingsApp {
                     return;
                 }
                 let on = !cur.sleep_experimental;
-                if self.pw_save(cx, &format!("sleep_experimental={on}"), |s| s.sleep_experimental = on) {
+                if self.pw_save(p, &format!("sleep_experimental={on}"), |s| s.sleep_experimental = on) {
                     self.ok(if on { "Real sleep is tried on this Mac. If it does not wake, hold the power button and start again." } else { "When idle this Mac only switches to the power saver profile." });
                 }
             }
@@ -147,10 +149,10 @@ impl SettingsApp {
         vec![("Performance", TEXT, 'e'), ("Balanced", ACCENT, 'b'), ("Power saver", TEXT, 'v'), ("Sleep after idle", TEXT, 's'), ("Sleep while busy", TEXT, 'w'), ("Lid", TEXT, 'l'), ("Power button", TEXT, 'p')]
     }
 
-    pub(super) fn render_power(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let (caps, now) = self.pw_read();
-        let cfg = Self::pw_settings(cx);
-        let admin = cx.session.policy.manage_settings;
+    pub(super) fn render_power(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn PowerPort) {
+        let (caps, now) = self.pw_read(p);
+        let cfg = Self::pw_settings(p);
+        let admin = p.is_admin();
         let limit = a.y + a.h;
         let mut y = a.y;
         let rh = 62.0 * s;
@@ -182,7 +184,7 @@ impl SettingsApp {
         if caps.t2 {
             cards.push(("Try real sleep on this Mac (experimental)".into(), "Sleep and wake are not dependable on Apple T2 Macs. If it does not wake, hold the power button.".into(), cfg.sleep_experimental, admin && caps.sleep, 'x'));
         }
-        let fan = crate::agent().host_probe().power_fan_card(&self.pw.env, cx.data_dir());
+        let fan = p.power_fan_card(&self.pw.env);
         if let Some(f) = &fan {
             cards.push((format!("Fan control: {}", if f.enabled { "IYAKKI runs the fans" } else { "the firmware runs the fans" }), format!("Off by default. {}", f.line), f.enabled, admin, 'f'));
         }

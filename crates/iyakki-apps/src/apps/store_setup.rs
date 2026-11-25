@@ -1,5 +1,5 @@
 //! STORE -> Setup: everything the old "Quick install" page of the IYAKKI menu did, as cards grouped by purpose (docs/STORE.md,
-//! docs/USER-GUIDE.md). The engine is unchanged (`iyakki_agent::quickinstall`, the `iyakki quick-install ITEM` job runner); this file
+//! docs/USER-GUIDE.md). The engine is unchanged (the quick-install engine behind the port, the `iyakki quick-install ITEM` job runner); this file
 //! is the screen: which cards this machine shows, what each says about itself, what the one button does, the search and filters,
 //! "Recommended for this machine", "Install all recommended" with its review, the keys, the scrolling list.
 //!
@@ -14,12 +14,12 @@ use crate::safeclamp::SafeClamp;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use iyakki_shared::jobs::Job;
-use iyakki_shared::k3sdev::Svc;
-use iyakki_shared::quickinstall::{Presence};
-use iyakki_shared::quickinstall::{self as qi, Facts, Item};
+use iyakki_tile_api::store_qi::Job;
+use iyakki_tile_store::setup_svc::K3s as Svc;
+use iyakki_tile_api::store_qi::{self as qi, Facts, Item, Presence};
 
-use super::{blink, AppCx, Flow};
+use super::{blink, Flow};
+use crate::apps::store_port::StorePort;
 use crate::fx;
 use crate::gfx::{rgb, Face, Gfx, Icon};
 use crate::scrolllist::ScrollList;
@@ -93,7 +93,7 @@ pub struct Machine {
     pub fw: Vec<Item>,
     /// The AI hardware profile (docs/AI-HARDWARE.md): what the AI tools are shown, recommended or hidden by. `None`: not read
     /// (tests, unknown): nothing is hidden.
-    pub ai: Option<Arc<dyn iyakki_agent_api::AiMachine>>,
+    pub ai: Option<Arc<dyn iyakki_tile_store::ai::AiProfilePort>>,
     /// Settings: "Show all AI tools".
     pub show_all_ai: bool,
     /// Whether a speech engine is set up (Settings \u{2192} Voice has a speech-to-text or a reading voice of its own). `None`: not read
@@ -108,44 +108,45 @@ impl Machine {
     }
 
     /// Read this machine (sysfs and proc: a few small reads).
-    pub fn detect(cx: &AppCx) -> Machine {
-        let gpus = iyakki_shared::gpu::detect(std::path::Path::new("/"));
-        let kb = cx.core.host().mem_total_kb();
+    pub fn detect(cx: &dyn StorePort) -> Machine {
+        let hw = cx.setup_hw();
+        let gpus = hw.gpu_facts();
+        let host = cx.machine_facts();
+        let kb = host.mem_total_kb;
         Machine {
-            cloud: cx.core.cloud().detect().on,
-            window: cx.agent.webengine_host_session(),
-            model: cx.core.host().product_name(),
-            gpus: gpus.iter().filter(|g| !g.is_virtual()).count(),
-            nvidia: iyakki_shared::gpu::has_nvidia(&gpus),
-            amd_rocm: iyakki_shared::gpu_rocm::any_usable(&gpus),
+            cloud: cx.cloud_on(),
+            window: hw.window_session(),
+            model: host.product_name.clone(),
+            gpus: gpus.count,
+            nvidia: gpus.nvidia,
+            amd_rocm: gpus.amd_rocm,
             ram_mb: kb / 1024,
-            camera: cx.agent.camfw_camera_in(cx.core.host().sys_root().as_path()),
+            camera: hw.camera_in(&host.sys_root),
             fw: Item::ALL
-                .into_iter()
+                .iter()
+                .copied()
                 .filter(|i| match i.fw_def() {
-                    Some(d) => iyakki_shared::fwpack::present_in(cx.core.host().sys_root().as_path(), d),
+                    Some(_) => cx.qi().fw_present(&host.sys_root, *i),
                     // the hardware firmware item is shown where a driver asked for a file that is missing, or when it is installed
-                    None => *i == Item::FwHardware && (iyakki_shared::fwextra::installed(cx.data_dir()).is_some() || !cx.agent.hw_firmware().plan_is_empty(cx.data_dir())),
+                    None => *i == Item::FwHardware && (cx.qi().hw_installed(cx.data_dir()) || !hw.firmware_plan_empty(cx.data_dir())),
                 })
                 .collect(),
-            ai: Some(cx.agent.ai_profile().machine(cx.data_dir())),
-            show_all_ai: cx.services.show_all_ai(),
+            ai: Some(cx.ai_profile()),
+            show_all_ai: cx.show_all_ai(),
             voice_engines: Some(Self::has_voice_engines(cx)),
         }
     }
 
     /// A speech engine is set in Settings \u{2192} Voice (listening or reading).
-    fn has_voice_engines(cx: &AppCx) -> bool {
-        let Ok(st) = cx.settings().lock() else { return false };
-        let v = &st.get().voice;
-        v.stt.is_some() || v.tts.is_some()
+    fn has_voice_engines(cx: &dyn StorePort) -> bool {
+        cx.voice_engines_set()
     }
 
     /// What the AI hardware profile says about this tool (Show when there is no profile, and in cloud mode, which keeps its own rules).
-    pub fn ai_vis(&self, item: Item) -> iyakki_shared::aiprofile::Vis {
+    pub fn ai_vis(&self, item: Item) -> iyakki_tile_store::ai::Vis {
         match &self.ai {
             Some(p) if !self.cloud => p.visibility(item.id(), self.show_all_ai),
-            _ => iyakki_shared::aiprofile::Vis::Show,
+            _ => iyakki_tile_store::ai::Vis::Show,
         }
     }
 
@@ -188,7 +189,7 @@ impl Machine {
 
     /// The plain note for a heavy item on a small machine.
     pub fn heavy_note(&self, item: Item) -> Option<String> {
-        use iyakki_shared::aiprofile::Vis;
+        use iyakki_tile_store::ai::Vis;
         if self.too_small(item) {
             return Some(format!("Needs about {} GB of memory; this machine has {:.1} GB, so it is not recommended here.", item.min_ram_mb().div_ceil(1024), self.ram_mb as f64 / 1024.0));
         }
@@ -201,7 +202,7 @@ impl Machine {
 
     /// Why this is recommended for this machine (None: not recommended). `present` says what is installed already.
     pub fn recommend(&self, item: Item, present: &dyn Fn(Item) -> bool) -> Option<&'static str> {
-        if present(item) || !self.shows(item) || self.too_small(item) || matches!(self.ai_vis(item), iyakki_shared::aiprofile::Vis::NotRecommended(_)) {
+        if present(item) || !self.shows(item) || self.too_small(item) || matches!(self.ai_vis(item), iyakki_tile_store::ai::Vis::NotRecommended(_)) {
             return None;
         }
         match item {
@@ -211,7 +212,7 @@ impl Machine {
             Item::GpuNvidia => Some("An NVIDIA GPU was found: its driver gives pods CUDA"),
             Item::GpuRocm => Some("A supported AMD GPU was found: ROCm gives pods its compute"),
             Item::MacFirmware => Some("This is a Mac: Wi-Fi and Bluetooth need Apple's firmware"),
-            Item::MacHost if matches!(self.ai_vis(item), iyakki_shared::aiprofile::Vis::Recommended(_)) => Some("No GPU for models here: the GPU of a Mac on your network can run them"),
+            Item::MacHost if matches!(self.ai_vis(item), iyakki_tile_store::ai::Vis::Recommended(_)) => Some("No GPU for models here: the GPU of a Mac on your network can run them"),
             _ => None,
         }
     }
@@ -231,6 +232,14 @@ pub enum Gk {
     Hardware,
     LinuxApps,
 }
+
+// The category colours are the accents of the tiles they open (the copies are checked against those tiles in the Store tests,
+// `store_setup_fake_tests.rs`): the Store tile names no other tile.
+pub(crate) const TILE_ACCENT_AI: [u8; 4] = rgb(138, 128, 255);
+pub(crate) const TILE_ACCENT_DATA: [u8; 4] = rgb(238, 226, 112);
+pub(crate) const TILE_ACCENT_MEDIA: [u8; 4] = rgb(255, 99, 72);
+pub(crate) const TILE_ACCENT_HARDWARE: [u8; 4] = rgb(86, 200, 255);
+pub(crate) const TILE_ACCENT_LINUX: [u8; 4] = rgb(255, 220, 130);
 
 impl Gk {
     pub const ALL: [Gk; 8] = [Gk::GetStarted, Gk::Ai, Gk::Voices, Gk::Agents, Gk::Data, Gk::Media, Gk::Hardware, Gk::LinuxApps];
@@ -279,13 +288,13 @@ impl Gk {
     pub fn accent(self) -> [u8; 4] {
         match self {
             Gk::GetStarted => fx::CYAN,
-            Gk::Ai => crate::apps::flows::ACCENT,
+            Gk::Ai => TILE_ACCENT_AI,
             Gk::Voices => fx::MAGENTA,
             Gk::Agents => AMBER,
-            Gk::Data => crate::apps::data::ACCENT,
-            Gk::Media => crate::apps::camera::ACCENT,
-            Gk::Hardware => crate::apps::dash::ACCENT,
-            Gk::LinuxApps => crate::apps::story::ACCENT,
+            Gk::Data => TILE_ACCENT_DATA,
+            Gk::Media => TILE_ACCENT_MEDIA,
+            Gk::Hardware => TILE_ACCENT_HARDWARE,
+            Gk::LinuxApps => TILE_ACCENT_LINUX,
         }
     }
 
@@ -569,24 +578,24 @@ pub struct Setup {
     pub jobs: Vec<Job>,
     pub failed: Vec<Item>,
     /// The camera firmware job's last result (`camfw::read_outcome`) and the bytes of its kept download.
-    pub camera_outcome: Option<iyakki_shared::camfw::Outcome>,
+    pub camera_outcome: Option<iyakki_tile_store::setup_hw::FwNote>,
     pub camera_kept: u64,
     /// The Mac firmware job's last result and what it keeps on the data volume (`macfw::card_status`: kept images, "Retry (no new download)").
-    pub mac_outcome: Option<iyakki_shared::macfw::Outcome>,
+    pub mac_outcome: Option<iyakki_tile_store::setup_hw::FwNote>,
     pub mac_cache: String,
     /// The restricted firmware packs' last results (`fwpack::read_outcome`): the cards' notes and the Reboot button.
-    pub fw_outcomes: Vec<(Item, iyakki_shared::fwpack::Outcome)>,
+    pub fw_outcomes: Vec<(Item, qi::FwOutcome)>,
     /// Seconds the machine has been up (a result older than the start is not a pending restart); 0 when unknown.
     pub uptime: i64,
     /// The licence form of this pack was asked for (the Store opens it), and the restart confirm.
     pub fw_ask: Option<Item>,
     /// The hardware-firmware item: what the card shows (read by a worker), its last result, and the form was asked for.
-    pub hw_view: Option<iyakki_agent_api::HwView>,
-    hw_slot: Arc<Mutex<Option<iyakki_agent_api::HwView>>>,
-    pub hw_outcome: Option<iyakki_shared::fwpack::Outcome>,
+    pub hw_view: Option<iyakki_tile_store::setup_svc::HwStatus>,
+    hw_slot: Arc<Mutex<Option<iyakki_tile_store::setup_svc::HwStatus>>>,
+    pub hw_outcome: Option<qi::FwOutcome>,
     pub hw_ask: bool,
     pub reboot_ask: bool,
-    pub signin: Vec<(Item, crate::agent_login::State)>,
+    pub signin: Vec<(Item, iyakki_tile_store::shell::LoginState)>,
     pub query: TextField,
     pub searching: bool,
     pub filter: Filter,
@@ -612,6 +621,8 @@ pub struct Setup {
     pub note: Option<(String, bool)>,
     /// Replaces the program the jobs run (tests use a stand-in).
     pub launch: Option<qi::Launch>,
+    /// The quick-install services, taken from the port when the tab opens and on every read (the drawing and the review have no port).
+    qi_h: Option<Arc<dyn qi::QuickInstall>>,
     pub request: Option<(String, String)>,
     /// What the cluster supervisor says now (read each frame: a lock and a copy); None until read, and in tests.
     pub live_k3s: Option<Svc>,
@@ -624,7 +635,10 @@ pub struct Setup {
     /// while that popup is open.
     pub(super) ds_state: Option<(String, String)>,
     /// Deletes a model of this machine's Lemonade (the voice pack's Remove); tests give a fake.
-    pub lemonade_delete: Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>,
+    /// The Setup tab's hardware port, read at each refresh (the voice pack review and removal use it).
+    pub hw_h: Option<Arc<dyn iyakki_tile_store::setup_hw::SetupHwPort>>,
+    /// Test seam: the voice pack's model removal; `None` asks the hardware port.
+    pub lemonade_delete: Option<Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>>,
     started: bool,
     last_poll: u64,
     last_facts: u64,
@@ -638,9 +652,9 @@ pub struct Setup {
     pub admin: bool,
     ticks: u64,
     /// The cluster switcher of the popups of the items that deploy to a cluster (hidden with one cluster), made when the tab is drawn.
-    pub host: Option<crate::apps::cluster_host::ClusterHost>,
+    pub host: Option<Box<dyn iyakki_tile_store::switch::ClusterSwitchView>>,
     /// The cluster the account works against now (`clusters::Registry::active_entry`), as the last drawing saw it.
-    pub cluster: Option<iyakki_shared::clusters::ClusterEntry>,
+    pub cluster: Option<iyakki_cluster_model::clusters::ClusterEntry>,
 }
 
 impl Default for Setup {
@@ -698,7 +712,9 @@ impl Setup {
             ollama_host: None,
             ctl_slot: Default::default(),
             ds_state: None,
-            lemonade_delete: Arc::new(|m: &str| crate::agent().helpers_b4().voicepack_delete_local_model(m)),
+            hw_h: None,
+            lemonade_delete: None,
+            qi_h: None,
             started: false,
             last_poll: 0,
             last_facts: 0,
@@ -724,8 +740,8 @@ impl Setup {
     }
 
     /// The tab was opened (or came back): read the machine and start reading what is installed.
-    pub fn enter(&mut self, cx: &AppCx) {
-        self.admin = cx.session.policy.manage_settings;
+    pub fn enter(&mut self, cx: &dyn StorePort) {
+        self.admin = cx.manage_settings();
         if !self.machine_fixed {
             self.machine = Machine::detect(cx);
         }
@@ -735,57 +751,64 @@ impl Setup {
         self.started = true;
     }
 
-    fn refresh_facts(&mut self, cx: &AppCx) {
+    fn refresh_facts(&mut self, cx: &dyn StorePort) {
         if self.fixed {
             return;
         }
         // tests read it at once (what is installed on a made-up data folder); the screen asks a thread
-        if crate::TESTING {
-            self.facts = Some(cx.b0().qi_gather_facts());
+        if cx.testing() {
+            self.facts = Some(cx.qi().gather_facts());
             return;
         }
-        let (svc, slot) = (cx.services.clone(), self.slot.clone());
+        let (svc, slot) = (cx.qi(), self.slot.clone());
         *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let _ = std::thread::Builder::new().name("iyakki-setup-facts".into()).spawn(move || {
-            let f = svc.b0().qi_gather_facts();
+            let f = svc.gather_facts();
             *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
         });
         if self.latest.is_empty() {
-            let (svc, slot) = (cx.services.clone(), self.latest_slot.clone());
+            let (svc, slot) = (cx.qi(), self.latest_slot.clone());
             let _ = std::thread::Builder::new().name("iyakki-setup-latest".into()).spawn(move || {
-                let r = svc.b0().qi_check_upgrades();
+                let r = svc.check_upgrades();
                 *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
             });
         }
     }
 
     /// Read what the hardware-firmware card shows (kernel log, devices, network) on a worker; tests and a fixed machine skip it.
-    pub fn refresh_hw(&mut self, cx: &AppCx) {
-        if self.machine_fixed || crate::TESTING || self.machine.cloud {
+    pub fn refresh_hw(&mut self, cx: &dyn StorePort) {
+        if self.machine_fixed || cx.testing() || self.machine.cloud {
             return;
         }
-        let (agent, data, home, slot) = (cx.agent.clone(), cx.data_dir().to_path_buf(), std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("/root")), self.hw_slot.clone());
+        let (svc, data, home, slot) = (cx.setup_svc(), cx.data_dir().to_path_buf(), std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("/root")), self.hw_slot.clone());
         let _ = std::thread::Builder::new().name("iyakki-setup-hwfw".into()).spawn(move || {
-            let v = agent.hw_firmware().view_now(&data, &home);
+            let v = svc.hw_view_now(&data, &home);
             *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
         });
     }
 
-    fn refresh_jobs(&mut self, cx: &AppCx) {
-        self.hw_outcome = iyakki_shared::fwextra::read_outcome(cx.data_dir());
-        self.jobs = cx.b0().qi_install_jobs(&cx.session.user);
+    fn qi(&self) -> Option<&Arc<dyn qi::QuickInstall>> {
+        self.qi_h.as_ref()
+    }
+
+    fn refresh_jobs(&mut self, cx: &dyn StorePort) {
+        self.qi_h = Some(cx.qi());
+        self.hw_outcome = cx.qi().hw_outcome(cx.data_dir());
+        self.jobs = cx.qi().install_jobs(&cx.user());
         self.failed = qi::failed_items(&self.jobs);
+        let hw = cx.setup_hw();
+        self.hw_h = Some(hw.clone());
         if self.machine.camera {
-            self.camera_outcome = cx.agent.camfw_read_outcome(cx.data_dir());
-            self.camera_kept = cx.agent.camfw_leftovers(cx.data_dir());
+            self.camera_outcome = hw.camera_outcome(cx.data_dir());
+            self.camera_kept = hw.camera_leftovers(cx.data_dir());
         }
         if self.machine.is_mac() {
-            self.mac_outcome = cx.agent.macfw_read_outcome(cx.data_dir());
-            self.mac_cache = cx.agent.macfw_card_status(cx.data_dir());
+            self.mac_outcome = hw.mac_outcome(cx.data_dir());
+            self.mac_cache = hw.mac_card_status(cx.data_dir());
         }
         // the restricted firmware packs' results (a few small files) and how long the machine has been up
-        self.fw_outcomes = self.machine.fw.iter().chain(Item::ALL.iter().filter(|i| i.fw_def().is_some_and(|d| iyakki_shared::fwpack::installed(cx.data_dir(), d).is_some()))).collect::<std::collections::BTreeSet<_>>().into_iter().filter_map(|i| Some((*i, iyakki_shared::fwpack::read_outcome(cx.data_dir(), i.fw_def()?)?))).collect();
-        self.uptime = cx.core.host().uptime_secs() as i64;
+        self.fw_outcomes = self.machine.fw.iter().chain(Item::ALL.iter().filter(|i| i.fw_def().is_some() && cx.qi().fw_installed(cx.data_dir(), **i))).collect::<std::collections::BTreeSet<_>>().into_iter().filter_map(|i| Some((*i, cx.qi().fw_outcome(cx.data_dir(), *i)?))).collect();
+        self.uptime = cx.machine_facts().uptime_secs as i64;
         // who is signed in to the two coding agents (from the remembered status; no program runs here)
         let facts = self.facts.as_ref();
         let installed = |it: Item| facts.is_some_and(|f| f.presence.iter().any(|(x, p)| *x == it && matches!(p, Presence::Installed(_))));
@@ -793,15 +816,15 @@ impl Setup {
             .into_iter()
             .filter(|it| installed(*it))
             .filter_map(|it| {
-                let agent = it.cli_id().and_then(crate::agent_login::agent_of_cli)?;
-                Some((it, crate::agent_login::state(cx, agent, true)))
+                let agent = it.cli_id().and_then(|c| cx.agent_of_cli(c))?;
+                Some((it, cx.agent_login_state(agent, true)))
             })
             .collect();
     }
 
     /// A heartbeat: the jobs about every half second while one runs (else every few seconds), the facts when a thread answered or a job
     /// finished. True when the screen should be drawn again.
-    pub fn tick(&mut self, cx: &AppCx) -> bool {
+    pub fn tick(&mut self, cx: &dyn StorePort) -> bool {
         self.ticks += 1;
         let mut changed = false;
         if let Some(f) = self.slot.lock().ok().and_then(|mut x| x.take()) {
@@ -831,7 +854,7 @@ impl Setup {
             let after = (self.jobs.iter().map(|j| (j.id.clone(), j.state.clone(), j.progress.map(|p| p as i32))).collect::<Vec<_>>(), self.failed.clone());
             changed |= before != after;
             // something finished (even while another job still runs, such as a long driver install): what is installed changed
-            let one_finished = before.0.iter().any(|b| b.1 == iyakki_shared::jobs::State::Running && !self.jobs.iter().any(|j| j.id == b.0 && j.running()));
+            let one_finished = before.0.iter().any(|b| b.1 == qi::JobState::Running && !self.jobs.iter().any(|j| j.id == b.0 && j.running()));
             if one_finished && self.ticks.saturating_sub(self.last_facts) > 5 {
                 self.last_facts = self.ticks;
                 self.fixed = false;
@@ -845,11 +868,11 @@ impl Setup {
 
     /// Read what the cluster supervisor says (a lock and a copy; never a program). Tests give the facts, so they keep what they set.
     /// True when it changed.
-    fn read_live(&mut self, cx: &AppCx) -> bool {
+    fn read_live(&mut self, cx: &dyn StorePort) -> bool {
         if self.fixed {
             return false;
         }
-        let now = cx.k3sdev().state();
+        let now = cx.setup_svc().k3s_state();
         let changed = self.live_k3s.as_ref() != Some(&now);
         self.live_k3s = Some(now);
         changed
@@ -891,7 +914,7 @@ impl Setup {
         let last_failed = self.failed.contains(&item) || pres.as_ref().and_then(qi::failure_reason).is_some();
         let state = base_state(self.running_job(item).map(|j| j.progress), last_failed, self.facts.is_none(), healthy, bad.clone(), pres.as_ref());
         let latest = self.latest.iter().find(|(x, _)| *x == item).map(|(_, l)| l);
-        let signed_out = self.signin.iter().any(|(x, s)| *x == item && matches!(s, crate::agent_login::State::SignedOut));
+        let signed_out = self.signin.iter().any(|(x, s)| *x == item && matches!(s, iyakki_tile_store::shell::LoginState::SignedOut));
         let window_block = self.machine.window && (item == Item::K3s || item.needs().contains(&Item::K3s));
         let svc_state = self.service_state(item, pres.as_ref());
         let running = svc_state.as_ref().map(|s| *s == Svc::Running);
@@ -1030,7 +1053,7 @@ impl Setup {
                 notes.push((format!("A newer version is available: {}", v.trim_start_matches('v')), false));
             }
         }
-        if let Some((_, crate::agent_login::State::SignedIn(who))) = self.signin.iter().find(|(x, s)| *x == item && matches!(s, crate::agent_login::State::SignedIn(_))).map(|(i, s)| (i, s.clone())) {
+        if let Some((_, iyakki_tile_store::shell::LoginState::SignedIn(who))) = self.signin.iter().find(|(x, s)| *x == item && matches!(s, iyakki_tile_store::shell::LoginState::SignedIn(_))).map(|(i, s)| (i, s.clone())) {
             notes.push((format!("Signed in as {who}"), false));
         }
         if window_block {
@@ -1040,7 +1063,10 @@ impl Setup {
         let deps = if matches!(state, CardState::Missing | CardState::Failed | CardState::Earlier | CardState::Elsewhere | CardState::NotRunnable(_)) && item.runs_as_job() {
             let steps = qi::order(item, &|i| self.present(i));
             let runtimes = self.facts.as_ref().map(|f| f.runtimes.clone()).unwrap_or_default();
-            let titles = crate::agent().b0().quickinstall().order_titles_with(&steps, &|i: Item| runtimes.iter().find(|(x, _)| *x == i).map(|(_, v)| v.clone()).unwrap_or_default());
+            let titles = match self.qi() {
+                Some(q) => q.order_titles_with(&steps, &|i: Item| runtimes.iter().find(|(x, _)| *x == i).map(|(_, v)| v.clone()).unwrap_or_default()),
+                None => steps.iter().map(|s| s.title().to_string()).collect(),
+            };
             let mine = item.title().to_string();
             let before: Vec<String> = titles.into_iter().filter(|t| *t != mine).collect();
             (!before.is_empty()).then(|| format!("Installs {} first", before.join(", ")))
@@ -1164,7 +1190,7 @@ impl Setup {
     fn plan_for(&self, targets: Vec<Item>, title: String) -> Confirm {
         let mut present: HashSet<Item> = self.facts.iter().flat_map(|f| f.presence.iter().filter(|(_, p)| p.present()).map(|(i, _)| *i)).collect();
         let installed_before: Vec<Item> = present.iter().copied().collect();
-        let mut review = if targets.contains(&Item::VoicePack) { crate::agent().voicepack_review_lines(present.contains(&Item::Lemonade)) } else { Vec::new() };
+        let mut review = if targets.contains(&Item::VoicePack) { self.hw_h.as_ref().map_or_else(Vec::new, |h| h.voicepack_review_lines(present.contains(&Item::Lemonade))) } else { Vec::new() };
         let mut steps = Vec::new();
         for t in &targets {
             for s in qi::order(*t, &|i| present.contains(&i)) {
@@ -1176,21 +1202,21 @@ impl Setup {
         }
         let cluster = steps.iter().any(|s| deploys_to_cluster(*s)).then(|| self.deploy_phrase());
         // the services together may take more than 60 % of the memory: said in plain words in the review
-        if let Some(w) = qi::resources::total_warning(&steps, &installed_before, self.machine.ram_mb) {
+        if let Some(w) = self.qi().and_then(|q| q.total_warning(&steps, &installed_before, self.machine.ram_mb)) {
             review.push(w);
         }
         Confirm { steps, targets, title, cluster, review, scroll: 0 }
     }
 
     /// The cluster the account works against now (`local` unless another was chosen), read from the registry.
-    pub fn active_cluster(cx: &AppCx) -> iyakki_shared::clusters::ClusterEntry {
-        iyakki_shared::clusters::Registry::load_synced(cx.data_dir(), &cx.session.user).active_entry()
+    pub fn active_cluster(cx: &dyn StorePort) -> iyakki_cluster_model::clusters::ClusterEntry {
+        iyakki_cluster_model::clusters::Registry::load_synced(cx.data_dir(), &cx.user()).active_entry()
     }
 
     /// `Deploy the cluster items to cluster "This machine" (local)`: the confirmation text of a plan that puts things into a cluster.
     fn deploy_phrase(&self) -> String {
-        let e = self.cluster.clone().unwrap_or_else(iyakki_shared::clusters::ClusterEntry::local_primary);
-        iyakki_shared::clusters::confirm_text("Deploy the cluster items", &e)
+        let e = self.cluster.clone().unwrap_or_else(iyakki_cluster_model::clusters::ClusterEntry::local_primary);
+        iyakki_cluster_model::clusters::confirm_text("Deploy the cluster items", &e)
     }
 
     /// The confirmation line of one item that deploys to a cluster: `Deploy Lemonade to cluster "gpu-box" (remote)`; for a cluster that is
@@ -1199,8 +1225,8 @@ impl Setup {
         if !deploys_to_cluster(item) {
             return None;
         }
-        let e = self.cluster.clone().unwrap_or_else(iyakki_shared::clusters::ClusterEntry::local_primary);
-        let mut t = iyakki_shared::clusters::confirm_text(&format!("Deploy {}", item.title()), &e);
+        let e = self.cluster.clone().unwrap_or_else(iyakki_cluster_model::clusters::ClusterEntry::local_primary);
+        let mut t = iyakki_cluster_model::clusters::confirm_text(&format!("Deploy {}", item.title()), &e);
         if !e.kind.is_local() {
             t.push_str(". Setup puts this into the cluster on this machine only: choose \"This machine\" above first");
         }
@@ -1209,7 +1235,7 @@ impl Setup {
 
     /// Setup's installers run in this machine's own cluster; the Indic-TTS review (Platform services) follows the active one. Another
     /// cluster is refused with the way out (the other screens use it).
-    fn cluster_refusal(cx: &AppCx, item: Item) -> Option<String> {
+    fn cluster_refusal(cx: &dyn StorePort, item: Item) -> Option<String> {
         if !deploys_to_cluster(item) {
             return None;
         }
@@ -1250,29 +1276,29 @@ impl Setup {
         v
     }
 
-    fn start_all(&mut self, cx: &AppCx) {
+    fn start_all(&mut self, cx: &dyn StorePort) {
         let Some(c) = self.confirm.take() else { return };
         // the consent text of "Build it here (k3s)" was read and confirmed: the install job takes the build route (avbuild.rs)
-        if c.title == iyakki_shared::avbuild::CONFIRM_TITLE {
-            if let Err(e) = cx.agent.avbuild_write_request(cx.data_dir()) {
+        if c.title == cx.setup_svc().av_confirm_title() {
+            if let Err(e) = cx.setup_svc().av_write_request(cx.data_dir()) {
                 self.say(format!("Could not record the request: {e}"), false);
                 return;
             }
         }
         // the review of an Ollama on the host was read and confirmed: the job gets the choice (copy the models, or start fresh)
         let mode = if c.title == qi::ollama_cluster::MOVE_TITLE { Some(qi::ollama_cluster::Mode::Move) } else if c.title == qi::ollama_cluster::FRESH_TITLE { Some(qi::ollama_cluster::Mode::Fresh) } else { None };
-        if mode == Some(qi::ollama_cluster::Mode::Move) && qi::ollama_cluster::decide(&self.host_info(cx)) != qi::ollama_cluster::Decision::Copy {
+        if mode == Some(qi::ollama_cluster::Mode::Move) && cx.qi().ollama_decide(&self.host_info(cx)) != qi::ollama_cluster::Decision::Copy {
             // the card said why: a move that cannot be done safely in one step starts nothing (Start fresh is the other way)
             self.confirm = Some(c);
             self.say("The models cannot be copied safely now. Close this card and choose \"Start fresh in the cluster, keep host models where they are\".", false);
             return;
         }
         if let Some(m) = mode {
-            if let Err(e) = qi::ollama_cluster::write_mode(cx.data_dir(), m) {
+            if let Err(e) = cx.qi().ollama_write_mode(cx.data_dir(), m) {
                 self.say(format!("Could not record the choice: {e}"), false);
                 return;
             }
-            cx.audit.record(&cx.session.user, "quickinstall.ollama", if m == qi::ollama_cluster::Mode::Move { "move into the cluster" } else { "start fresh in the cluster" });
+            cx.record("quickinstall.ollama", if m == qi::ollama_cluster::Mode::Move { "move into the cluster" } else { "start fresh in the cluster" });
         }
         let mut present: HashSet<Item> = self.facts.iter().flat_map(|f| f.presence.iter().filter(|(_, p)| p.present()).map(|(i, _)| *i)).collect();
         if mode.is_some() {
@@ -1301,7 +1327,7 @@ impl Setup {
         });
     }
 
-    fn launch_for(&self, cx: &AppCx) -> Result<qi::Launch, String> {
+    fn launch_for(&self, cx: &dyn StorePort) -> Result<qi::Launch, String> {
         if let Some(l) = &self.launch {
             return Ok(l.clone());
         }
@@ -1309,9 +1335,9 @@ impl Setup {
     }
 
     /// Start the jobs for one target (and what it needs first). Returns how many steps started.
-    fn start_one(&mut self, cx: &AppCx, item: Item, present: &HashSet<Item>, audit_note: bool) -> Result<usize, String> {
-        if !cx.session.policy.manage_settings {
-            return Err(format!("Only an administrator can install software for the whole machine (your role is {}).", cx.session.role.name()));
+    fn start_one(&mut self, cx: &dyn StorePort, item: Item, present: &HashSet<Item>, audit_note: bool) -> Result<usize, String> {
+        if !cx.manage_settings() {
+            return Err(format!("Only an administrator can install software for the whole machine (your role is {}).", cx.role_name()));
         }
         if item == Item::FwHardware {
             // the licence list comes first: the Store opens its form (vendors, licences, the way to get the files); nothing is fetched before that
@@ -1335,19 +1361,19 @@ impl Setup {
         let launch = self.launch_for(cx)?;
         if item == Item::MacCamera {
             // its own job (the firmware from Apple's CDN), not a step of the installer's order
-            let j = cx.b0().qi_start_camera_firmware(&cx.session.user, &launch)?;
-            cx.audit.record(&cx.session.user, "quickinstall.start", &format!("{} ({})", item.id(), j.label));
+            let j = cx.qi().start_camera_firmware(&cx.user(), &launch)?;
+            cx.record("quickinstall.start", &format!("{} ({})", item.id(), j.label));
             if audit_note {
                 self.note = Some((format!("Started: {}. Apple's camera firmware (about 17.6 MB) is downloaded from Apple; progress is on the tile and beside the clock.", j.label), true));
             }
             return Ok(1);
         }
-        let started = cx.b0().qi_start(&cx.session.user, item, &|i| present.contains(&i), &launch)?;
+        let started = cx.qi().start(&cx.user(), item, &|i| present.contains(&i), &launch)?;
         let steps: Vec<String> = started.iter().map(|j| j.label.clone()).collect();
         let on = if steps.iter().any(|_| deploys_to_cluster(item)) { format!(" on {}", Self::active_cluster(cx).phrase()) } else { String::new() };
-        cx.audit.record(&cx.session.user, "quickinstall.start", &format!("{} ({}){on}", item.id(), steps.join(", ")));
+        cx.record("quickinstall.start", &format!("{} ({}){on}", item.id(), steps.join(", ")));
         if audit_note {
-            self.note = Some((format!("Started: {}{}. Progress is on the tile and beside the clock.", steps.join(", then "), if on.is_empty() { String::new() } else { format!(" ({})", iyakki_shared::clusters::confirm_text(&format!("Deploy {}", item.title()), &Self::active_cluster(cx))) }), true));
+            self.note = Some((format!("Started: {}{}. Progress is on the tile and beside the clock.", steps.join(", then "), if on.is_empty() { String::new() } else { format!(" ({})", iyakki_cluster_model::clusters::confirm_text(&format!("Deploy {}", item.title()), &Self::active_cluster(cx))) }), true));
         }
         Ok(started.len())
     }
@@ -1359,7 +1385,7 @@ impl Setup {
     }
 
     /// The card's one button.
-    pub fn press(&mut self, item: Item, cx: &AppCx) {
+    pub fn press(&mut self, item: Item, cx: &dyn StorePort) {
         let card = self.card(item);
         self.cursor = item;
         if card.blocked {
@@ -1368,7 +1394,7 @@ impl Setup {
             return;
         }
         if card.act.needs_admin() && !self.admin {
-            self.say(format!("Only an administrator can install software for the whole machine (your role is {}). Ask an administrator.", cx.session.role.name()), false);
+            self.say(format!("Only an administrator can install software for the whole machine (your role is {}). Ask an administrator.", cx.role_name()), false);
             return;
         }
         if card.act != Act::OwnCopy {
@@ -1384,13 +1410,13 @@ impl Setup {
                 }
             }
             Act::SignIn => {
-                if let Some(agent) = item.cli_id().and_then(crate::agent_login::agent_of_cli) {
-                    crate::agent_login::request(agent, false);
+                if let Some(agent) = item.cli_id().and_then(|c| cx.agent_of_cli(c)) {
+                    cx.login_request(agent, false);
                 }
             }
             Act::Deploy => {
                 let on = Self::active_cluster(cx);
-                cx.audit.record(&cx.session.user, "quickinstall.handoff", &format!("indic-tts: {}", iyakki_shared::clusters::confirm_text("Deploy Indic-TTS", &on)));
+                cx.record("quickinstall.handoff", &format!("indic-tts: {}", iyakki_cluster_model::clusters::confirm_text("Deploy Indic-TTS", &on)));
                 self.request = Some(("settings".into(), "platform:indic-tts".into()));
                 self.popup = None;
             }
@@ -1422,7 +1448,7 @@ impl Setup {
                     self.say("The browser add-on is being installed: its progress is beside the clock.", false);
                     return;
                 }
-                let found = cx.agent.helpers_b6().avaddon_plan(cx.data_dir());
+                let found = cx.setup_svc().avaddon_plan(cx.data_dir());
                 // nothing supplied (no package, no usable ffmpeg of the person's own): the default is the one the design names, download the vendors' sources and build here
                 if !found.has_source && self.card(Item::K3s).running == Some(true) && !self.build_unavailable(cx) {
                     self.build_here(cx);
@@ -1461,26 +1487,26 @@ impl Setup {
     /// The result of this pack's last run says a restart is wanted and the machine has not started since.
     pub fn fw_reboot_pending(&self, item: Item) -> bool {
         let now = iyakki_clock::now_unix();
-        self.fw_outcomes.iter().any(|(x, o)| *x == item && iyakki_shared::fwpack::reboot_pending(o, now, self.uptime))
+        self.fw_outcomes.iter().any(|(x, o)| *x == item && o.reboot_pending(now, self.uptime))
     }
 
     /// The hardware firmware's last run says a restart is wanted and the machine has not started since.
     pub fn hw_reboot_pending(&self) -> bool {
         let now = iyakki_clock::now_unix();
-        self.hw_outcome.as_ref().is_some_and(|o| iyakki_shared::fwpack::reboot_pending(o, now, self.uptime))
+        self.hw_outcome.as_ref().is_some_and(|o| o.reboot_pending(now, self.uptime))
     }
 
     /// The hardware-firmware form was answered with "I accept": record the acceptance of exactly the list the person saw (audit line),
     /// then start the job with the way they chose. `source`: "download", "link", "folder" or "received".
-    pub fn hardware_accept_and_start(&mut self, cx: &AppCx, source: &str, folder: Option<std::path::PathBuf>, with_nvidia: bool) -> Result<String, String> {
-        if !cx.session.policy.manage_settings {
-            return Err(format!("Only an administrator can install software for the whole machine (your role is {}).", cx.session.role.name()));
+    pub fn hardware_accept_and_start(&mut self, cx: &dyn StorePort, source: &str, folder: Option<std::path::PathBuf>, with_nvidia: bool) -> Result<String, String> {
+        if !cx.manage_settings() {
+            return Err(format!("Only an administrator can install software for the whole machine (your role is {}).", cx.role_name()));
         }
         let launch = self.launch_for(cx)?;
         let from = match source {
             "folder" => {
                 let f = folder.ok_or("Choose the folder or USB stick with the firmware files.")?;
-                cx.core.file_scope().check_read(&cx.session.policy, &cx.session.user, &f)?;
+                cx.check_read(&f)?;
                 if !f.is_dir() {
                     return Err(format!("{} is not a folder", f.display()));
                 }
@@ -1491,11 +1517,11 @@ impl Setup {
         };
         let link = if source == "link" { Some(self.hw_view.as_ref().and_then(|v| v.link_iface.clone()).ok_or("No cable to another computer is connected.")?) } else { None };
         let with: Vec<String> = if with_nvidia { vec!["nvidia".into()] } else { Vec::new() };
-        let sel = cx.agent.hw_firmware().accept(&launch.data, &with, &cx.session.user, iyakki_clock::now_unix() as u64)?;
-        cx.audit.record(&cx.session.user, "firmware.accept", &format!("fw-hardware {} file(s), list {}, linux-firmware {}", sel.files, sel.digest16, iyakki_shared::fwextra::TAG));
+        let sel = cx.setup_svc().hw_accept(&launch.data, &with, &cx.user(), iyakki_clock::now_unix() as u64)?;
+        cx.record("firmware.accept", &format!("fw-hardware {} file(s), list {}, linux-firmware {}", sel.files, sel.digest16, cx.qi().hw_tag()));
         let opts = qi::HwFirmwareOpts { from, with, link };
-        let j = cx.b0().qi_start_hardware_firmware(&cx.session.user, &opts, &launch)?;
-        cx.audit.record(&cx.session.user, "quickinstall.start", &format!("{} ({})", Item::FwHardware.id(), j.label));
+        let j = cx.qi().start_hardware_firmware(&cx.user(), &opts, &launch)?;
+        cx.record("quickinstall.start", &format!("{} ({})", Item::FwHardware.id(), j.label));
         self.refresh_jobs(cx);
         Ok(format!("Started: {}. {}; progress is on the tile and beside the clock.", j.label, match source {
             "folder" => "The files are read from the folder and checked",
@@ -1506,13 +1532,13 @@ impl Setup {
     }
 
     /// Remove the extra firmware (the person chose it in the form): the driver pack and the kept download go; the audit log says so.
-    pub fn hardware_remove(&mut self, cx: &AppCx) -> Result<String, String> {
-        if !cx.session.policy.manage_settings {
-            return Err(format!("Only an administrator can change the machine's firmware (your role is {}).", cx.session.role.name()));
+    pub fn hardware_remove(&mut self, cx: &dyn StorePort) -> Result<String, String> {
+        if !cx.manage_settings() {
+            return Err(format!("Only an administrator can change the machine's firmware (your role is {}).", cx.role_name()));
         }
         let launch = self.launch_for(cx)?;
-        iyakki_shared::fwextra::remove(&launch.data)?;
-        cx.audit.record(&cx.session.user, "firmware.remove", "fw-hardware");
+        cx.qi().hw_remove(&launch.data)?;
+        cx.record("firmware.remove", "fw-hardware");
         self.hw_outcome = None;
         self.fixed = false;
         self.refresh_facts(cx);
@@ -1521,61 +1547,61 @@ impl Setup {
 
     /// The licence form was answered with "I accept": record it (the pack's record and the audit log), then start the pack's job, from a
     /// folder or stick when `from` is given. Returns the plain line for the note.
-    pub fn firmware_accept_and_start(&mut self, cx: &AppCx, item: Item, from: Option<std::path::PathBuf>) -> Result<String, String> {
-        if !cx.session.policy.manage_settings {
-            return Err(format!("Only an administrator can install software for the whole machine (your role is {}).", cx.session.role.name()));
+    pub fn firmware_accept_and_start(&mut self, cx: &dyn StorePort, item: Item, from: Option<std::path::PathBuf>) -> Result<String, String> {
+        if !cx.manage_settings() {
+            return Err(format!("Only an administrator can install software for the whole machine (your role is {}).", cx.role_name()));
         }
-        let def = item.fw_def().ok_or_else(|| format!("{} is not a firmware pack", item.title()))?;
+        let def = item.fw_def().ok_or_else(|| format!("{} is not a firmware pack", item.title()))?.clone();
         if let Some(f) = &from {
-            cx.core.file_scope().check_read(&cx.session.policy, &cx.session.user, f)?;
+            cx.check_read(f)?;
             if !f.is_dir() {
                 return Err(format!("{} is not a folder", f.display()));
             }
         }
         let launch = self.launch_for(cx)?;
-        iyakki_shared::fwpack::accept(&launch.data, def, &cx.session.user, iyakki_clock::now_unix())?;
-        cx.audit.record(&cx.session.user, "firmware.accept", &format!("{} licence {} (sha256 {}) at linux-firmware {}", def.pack_id, def.licence_id, &iyakki_shared::fwpack::licence_digest(def)[..16], &iyakki_shared::fwpack::table().commit[..10]));
-        let j = cx.b0().qi_start_firmware_pack(&cx.session.user, item, from.as_deref(), &launch)?;
-        cx.audit.record(&cx.session.user, "quickinstall.start", &format!("{} ({})", item.id(), j.label));
+        cx.qi().fw_accept(&launch.data, item, &cx.user(), iyakki_clock::now_unix())?;
+        cx.record("firmware.accept", &format!("{} licence {} (sha256 {}) at linux-firmware {}", def.pack_id, def.licence_id, &cx.qi().fw_licence_digest(item)[..16], &cx.qi().fw_commit()[..10]));
+        let j = cx.qi().start_firmware_pack(&cx.user(), item, from.as_deref(), &launch)?;
+        cx.record("quickinstall.start", &format!("{} ({})", item.id(), j.label));
         self.refresh_jobs(cx);
         Ok(format!("Started: {}. {}; progress is on the tile and beside the clock.", j.label, if from.is_some() { "The files are read from the folder and checked" } else { "The files are downloaded from the upstream linux-firmware repository and checked" }))
     }
 
     /// The restart was confirmed: ask the system to restart (the same path as Settings and the CLI).
-    pub fn reboot_now(&mut self, cx: &AppCx) -> Result<String, String> {
-        if !cx.session.policy.manage_settings || !cx.session.policy.power {
-            return Err(format!("Only an administrator can restart this machine (your role is {}).", cx.session.role.name()));
+    pub fn reboot_now(&mut self, cx: &dyn StorePort) -> Result<String, String> {
+        if !cx.manage_settings() || !cx.can_power() {
+            return Err(format!("Only an administrator can restart this machine (your role is {}).", cx.role_name()));
         }
-        cx.audit.record(&cx.session.user, "power.reboot", "restricted firmware pack");
-        cx.host.reboot();
+        cx.record("power.reboot", "restricted firmware pack");
+        cx.reboot_machine();
         Ok("Restarting…".into())
     }
 
     /// The camera card's Delete download: the kept pieces of Apple's update go (the installed firmware stays).
-    pub fn delete_download(&mut self, cx: &AppCx) {
+    pub fn delete_download(&mut self, cx: &dyn StorePort) {
         if !self.admin {
-            self.say(format!("Only an administrator can delete the download (your role is {}). Ask an administrator.", cx.session.role.name()), false);
+            self.say(format!("Only an administrator can delete the download (your role is {}). Ask an administrator.", cx.role_name()), false);
             return;
         }
         if self.running_job(Item::MacCamera).is_some() {
             self.say("The camera firmware is being installed: delete the download when it is done.", false);
             return;
         }
-        let n = cx.agent.camfw_delete_leftovers(cx.data_dir());
-        cx.audit.record(&cx.session.user, "quickinstall.camera.delete-download", &format!("{n} bytes"));
-        self.camera_kept = cx.agent.camfw_leftovers(cx.data_dir());
+        let n = cx.setup_hw().camera_delete_leftovers(cx.data_dir());
+        cx.record("quickinstall.camera.delete-download", &format!("{n} bytes"));
+        self.camera_kept = cx.setup_hw().camera_leftovers(cx.data_dir());
         self.say(format!("Deleted the camera firmware download ({:.1} MB). The installed firmware is untouched.", n as f64 / 1e6), true);
     }
 
     /// The "Show all AI tools" link: the administrator's switch of Settings -> Cloud mode (key A there), audited the same way.
-    pub fn show_all_ai_tools(&mut self, cx: &AppCx) {
-        if !cx.session.policy.manage_settings {
-            self.say(format!("Only an administrator can show all AI tools (your role is {}). Ask an administrator.", cx.session.role.name()), false);
+    pub fn show_all_ai_tools(&mut self, cx: &dyn StorePort) {
+        if !cx.manage_settings() {
+            self.say(format!("Only an administrator can show all AI tools (your role is {}). Ask an administrator.", cx.role_name()), false);
             return;
         }
-        match cx.services.set_show_all_ai(true) {
+        match cx.set_show_all_ai(true) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.show_all_ai", "on");
+                cx.record("settings.show_all_ai", "on");
                 self.machine.show_all_ai = true;
                 self.say("Show all AI tools: on. Tools this machine's hardware does not suit are listed as not recommended (Settings, Cloud mode switches it off again).", true);
                 self.after_narrow();
@@ -1613,17 +1639,17 @@ impl Setup {
 
     /// Start or stop the managed dev cluster through its supervisor (k3s only: the other services run in the cluster). The supervisor may
     /// wait for the network, so the call runs on a thread of its own and the answer comes back to the next heartbeat.
-    fn control(&mut self, cx: &AppCx, item: Item, start: bool) {
+    fn control(&mut self, cx: &dyn StorePort, item: Item, start: bool) {
         if item != Item::K3s {
             return;
         }
-        let (svc, user, slot) = (cx.services.clone(), cx.session.user.clone(), self.ctl_slot.clone());
-        cx.audit.record(&cx.session.user, if start { "quickinstall.k3s.start" } else { "quickinstall.k3s.stop" }, "k3s");
+        let (svc, user, slot) = (cx.setup_svc(), cx.user(), self.ctl_slot.clone());
+        cx.record(if start { "quickinstall.k3s.start" } else { "quickinstall.k3s.stop" }, "k3s");
         let run = move || {
-            let r = if start { svc.k3sdev().start(&user).map(|_| "k3s is starting. The tile says Running when the node is ready.".to_string()) } else { svc.k3sdev().stop(&user).map(|_| "k3s was stopped.".to_string()) };
+            let r = if start { svc.k3s_start(&user).map(|_| "k3s is starting. The tile says Running when the node is ready.".to_string()) } else { svc.k3s_stop(&user).map(|_| "k3s was stopped.".to_string()) };
             *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
         };
-        if crate::TESTING {
+        if cx.testing() {
             run();
             self.take_control_result();
         } else {
@@ -1645,14 +1671,15 @@ impl Setup {
     /// "Build it here (k3s)" on the browser audio and video card: gate (k3s running, a map entry for this IYAKKI version), then the consent text with
     /// its button. Nothing starts before the button; the package is only built and copied to /local/packages (the usual review and confirm follow).
     /// True when this image has no build recipe for the add-on (the map has no entry for its version), so Install falls back to the supply route.
-    fn build_unavailable(&self, cx: &AppCx) -> bool {
-        let map = self.av_map.clone().unwrap_or_else(|| std::fs::read_to_string(std::path::Path::new(iyakki_shared::avbuild::BRIDGE_DIR).join("versions.map")).unwrap_or_default());
-        cx.agent.av_build().consent(&map).is_err()
+    fn build_unavailable(&self, cx: &dyn StorePort) -> bool {
+        let svc = cx.setup_svc();
+        let map = self.av_map.clone().unwrap_or_else(|| svc.av_map_text());
+        svc.av_consent(&map).is_err()
     }
 
-    pub fn build_here(&mut self, cx: &AppCx) {
+    pub fn build_here(&mut self, cx: &dyn StorePort) {
         if !self.admin {
-            self.say(format!("Only an administrator can build software for the whole machine (your role is {}). Ask an administrator.", cx.session.role.name()), false);
+            self.say(format!("Only an administrator can build software for the whole machine (your role is {}). Ask an administrator.", cx.role_name()), false);
             return;
         }
         if self.running_job(Item::FfmpegLibs).is_some() {
@@ -1660,14 +1687,15 @@ impl Setup {
             return;
         }
         if self.card(Item::K3s).running != Some(true) {
-            self.say(iyakki_shared::avbuild::NO_K3S_TEXT, false);
+            self.say(cx.setup_svc().av_no_k3s_text(), false);
             return;
         }
-        let map = self.av_map.clone().unwrap_or_else(|| std::fs::read_to_string(std::path::Path::new(iyakki_shared::avbuild::BRIDGE_DIR).join("versions.map")).unwrap_or_default());
-        match cx.agent.av_build().consent(&map) {
+        let svc = cx.setup_svc();
+        let map = self.av_map.clone().unwrap_or_else(|| svc.av_map_text());
+        match svc.av_consent(&map) {
             Ok(review) => {
                 self.popup = None;
-                let mut c = self.plan_for(vec![Item::FfmpegLibs], iyakki_shared::avbuild::CONFIRM_TITLE.into());
+                let mut c = self.plan_for(vec![Item::FfmpegLibs], svc.av_confirm_title());
                 c.review = review;
                 self.confirm = Some(c);
             }
@@ -1682,10 +1710,10 @@ impl Setup {
 
     /// The review card of moving the host Ollama into the cluster (`Mode::Move`) or starting fresh there (`Mode::Fresh`). Nothing runs
     /// before the person confirms; a move that cannot be done safely in one step is refused here with the other way offered.
-    pub fn ollama_review(&mut self, mode: qi::ollama_cluster::Mode, cx: &AppCx) {
+    pub fn ollama_review(&mut self, mode: qi::ollama_cluster::Mode, cx: &dyn StorePort) {
         use qi::ollama_cluster as oc;
         if !self.admin {
-            self.say(format!("Only an administrator can move software (your role is {}). Ask an administrator.", cx.session.role.name()), false);
+            self.say(format!("Only an administrator can move software (your role is {}). Ask an administrator.", cx.role_name()), false);
             return;
         }
         if !self.ollama_on_host() {
@@ -1701,28 +1729,28 @@ impl Setup {
             return;
         }
         let host = self.host_info(cx);
-        let d = oc::decide(&host);
+        let d = cx.qi().ollama_decide(&host);
         self.popup = None;
         let title = if mode == oc::Mode::Move { oc::MOVE_TITLE } else { oc::FRESH_TITLE };
         let mut c = self.plan_for(vec![Item::Ollama], title.into());
-        let mut lines = oc::review_lines(mode, &host, d);
+        let mut lines = cx.qi().ollama_review_lines(mode, &host, d);
         lines.extend(std::mem::take(&mut c.review));
         c.review = lines;
         self.confirm = Some(c);
     }
 
     /// The host Ollama's models folder, its size and the free room (tests give their own).
-    fn host_info(&self, cx: &AppCx) -> qi::ollama_cluster::HostInfo {
+    fn host_info(&self, cx: &dyn StorePort) -> qi::ollama_cluster::HostInfo {
         
         if let Some(h) = &self.ollama_host {
             return h.clone();
         }
-        cx.agent.b0().quickinstall().ollama_host_info(cx.data_dir())
+        cx.qi().ollama_host_info(cx.data_dir())
     }
 
-    pub fn stop(&mut self, item: Item, cx: &AppCx) {
+    pub fn stop(&mut self, item: Item, cx: &dyn StorePort) {
         if !self.admin {
-            self.say(format!("Only an administrator can stop the cluster (your role is {}). Ask an administrator.", cx.session.role.name()), false);
+            self.say(format!("Only an administrator can stop the cluster (your role is {}). Ask an administrator.", cx.role_name()), false);
             return;
         }
         self.control(cx, item, false);
@@ -1750,21 +1778,23 @@ impl Setup {
 
     /// The popup's Remove button of the voice pack: the speech engines that were set before come back (when you have not changed them
     /// since) and the models the pack downloaded are deleted from Lemonade. Administrators only; audited.
-    pub fn remove_voice_pack(&mut self, cx: &AppCx) {
+    pub fn remove_voice_pack(&mut self, cx: &dyn StorePort) {
         if !self.admin {
-            self.say(format!("Only an administrator can remove the voice pack (your role is {}). Ask an administrator.", cx.session.role.name()), false);
+            self.say(format!("Only an administrator can remove the voice pack (your role is {}). Ask an administrator.", cx.role_name()), false);
             return;
         }
         if self.running_job(Item::VoicePack).is_some() {
             self.say("The voice pack is being installed: remove it when that is done.", false);
             return;
         }
-        let (svc, slot, del) = (cx.services.clone(), self.ctl_slot.clone(), self.lemonade_delete.clone());
-        cx.audit.record(&cx.session.user, "quickinstall.voicepack.remove", "voice-pack");
+        let (svc, slot) = (cx.shell_jobs(), self.ctl_slot.clone());
+        let hw = cx.setup_hw();
+        let del = self.lemonade_delete.clone().unwrap_or_else(|| Arc::new(move |m: &str| hw.voicepack_delete_model(m)));
+        cx.record("quickinstall.voicepack.remove", "voice-pack");
         let run = move || {
-            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(svc.b4().voicepack_remove(&|m: &str| del(m)));
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(svc.voicepack_remove(&|m: &str| del(m)));
         };
-        if crate::TESTING {
+        if cx.testing() {
             run();
             self.take_control_result();
         } else {
@@ -1776,12 +1806,12 @@ impl Setup {
     }
 
     /// Read the data science toolkit's record again while its popup is open (a small file; nothing runs). True when what it says changed.
-    pub fn refresh_toolkit(&mut self, cx: &AppCx) -> bool {
+    pub fn refresh_toolkit(&mut self, cx: &dyn StorePort) -> bool {
         if self.popup != Some(Item::DataScience) {
             return false;
         }
         let data = self.launch_for(cx).map(|l| l.data).unwrap_or_else(|_| cx.data_dir().to_path_buf());
-        let now = cx.agent.helpers_b4().datasci_state(&data);
+        let now = cx.setup_svc().datasci_state(&data);
         let changed = self.ds_state.as_ref() != Some(&now);
         self.ds_state = Some(now);
         changed
@@ -1789,9 +1819,9 @@ impl Setup {
 
     /// The popup's Verify button of the toolkit: its self-test runs again in the Linux apps sandbox with no network (on a thread of its own);
     /// the sentence it saw becomes the note. Administrators only; audited.
-    pub fn verify_toolkit(&mut self, cx: &AppCx) {
+    pub fn verify_toolkit(&mut self, cx: &dyn StorePort) {
         if !self.admin {
-            self.say(format!("Only an administrator can run the toolkit self-test (your role is {}). Ask an administrator.", cx.session.role.name()), false);
+            self.say(format!("Only an administrator can run the toolkit self-test (your role is {}). Ask an administrator.", cx.role_name()), false);
             return;
         }
         if self.running_job(Item::DataScience).is_some() {
@@ -1799,12 +1829,12 @@ impl Setup {
             return;
         }
         let data = self.launch_for(cx).map(|l| l.data).unwrap_or_else(|_| cx.data_dir().to_path_buf());
-        let (agent, user, slot) = (cx.agent.clone(), cx.session.user.clone(), self.ctl_slot.clone());
-        cx.audit.record(&cx.session.user, "quickinstall.datasci.verify", "datasci");
+        let (svc, user, slot) = (cx.setup_svc(), cx.user(), self.ctl_slot.clone());
+        cx.record("quickinstall.datasci.verify", "datasci");
         let run = move || {
-            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(agent.helpers_b4().datasci_verify(&data, &user).map(|m| format!("The toolkit self-test passed: {m}")));
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(svc.datasci_verify(&data, &user).map(|m| format!("The toolkit self-test passed: {m}")));
         };
-        if crate::TESTING {
+        if cx.testing() {
             run();
             self.take_control_result();
         } else {
@@ -1817,9 +1847,9 @@ impl Setup {
 
     /// The popup's Upgrade button: the install runs again with the files this IYAKKI pins (the same job as Install: the folder is swapped only
     /// after the new self-test passes, so a failed upgrade leaves the old toolkit). Only when the record says the pins differ.
-    pub fn upgrade_toolkit(&mut self, cx: &AppCx) {
+    pub fn upgrade_toolkit(&mut self, cx: &dyn StorePort) {
         if !self.admin {
-            self.say(format!("Only an administrator can upgrade the toolkit (your role is {}). Ask an administrator.", cx.session.role.name()), false);
+            self.say(format!("Only an administrator can upgrade the toolkit (your role is {}). Ask an administrator.", cx.role_name()), false);
             return;
         }
         if self.ds_state.as_ref().map(|s| s.0.as_str()) != Some("upgrade") {
@@ -1890,8 +1920,8 @@ impl Setup {
     // ---- events
 
     /// Keys and clicks of the tab. None: the Store handles it (section switching).
-    pub fn handle(&mut self, ev: &Event, cx: &AppCx) -> Option<Flow> {
-        self.admin = cx.session.policy.manage_settings;
+    pub fn handle(&mut self, ev: &Event, cx: &dyn StorePort) -> Option<Flow> {
+        self.admin = cx.manage_settings();
         if let Event::Tick = ev {
             return Some(if self.tick(cx) { Flow::Stay } else { Flow::Stay });
         }
@@ -1978,7 +2008,7 @@ impl Setup {
     }
 
     /// Everything while a popup is open: it is modal, so keys and clicks mean the popup's buttons, and Esc or a click outside closes it.
-    fn popup_event(&mut self, item: Item, ev: &Event, cx: &AppCx) -> Option<Flow> {
+    fn popup_event(&mut self, item: Item, ev: &Event, cx: &dyn StorePort) -> Option<Flow> {
         if let Event::MouseMove(x, y) = ev {
             self.list.pointer = Some((*x, *y));
         }
@@ -1991,15 +2021,15 @@ impl Setup {
             if let Some(h) = self.host.as_mut() {
                 if matches!(ev, Event::Tab(n) if (SWITCH..SWITCH + 100).contains(n)) || (h.owns_keys() && matches!(ev, Event::Key(_))) {
         
-                    use crate::apps::cluster_host::HostOut;
-                    match h.handle(ev, &|_| None) {
+                    use iyakki_tile_store::switch::SwitchOut as HostOut;
+                    match h.handle(ev) {
                         HostOut::Switched(e) => {
                             self.cluster = Some(e.clone());
                             self.note = Some((format!("Working against {}.", e.phrase()), true));
                         }
                         HostOut::Refused(why) => self.note = Some((why, false)),
                         HostOut::Manage => {
-                            self.request = Some((crate::apps::cluster_host::MANAGE_REQUEST.0.into(), crate::apps::cluster_host::MANAGE_REQUEST.1.into()));
+                            self.request = Some((cx.manage_request().0.into(), cx.manage_request().1.into()));
                             self.popup = None;
                         }
                         HostOut::None => {}
@@ -2033,8 +2063,8 @@ impl Setup {
                 }
             }
             Event::Tab(n) if *n == LOGOUT + idx => {
-                if let Some(agent) = item.cli_id().and_then(crate::agent_login::agent_of_cli) {
-                    crate::agent_login::request(agent, true);
+                if let Some(agent) = item.cli_id().and_then(|c| cx.agent_of_cli(c)) {
+                    cx.login_request(agent, true);
                 }
             }
             Event::Tab(DELETE) => self.delete_download(cx),
@@ -2075,7 +2105,7 @@ impl Setup {
         self.fix_cursor();
     }
 
-    fn key(&mut self, k: &Key, cx: &AppCx) -> Option<Flow> {
+    fn key(&mut self, k: &Key, cx: &dyn StorePort) -> Option<Flow> {
         if self.searching {
             match k {
                 Key::Enter | Key::Down | Key::Tab => self.searching = false,
@@ -2239,7 +2269,7 @@ fn short_about(item: Item) -> &'static str {
         Item::YtDlp => "Save one video from a page address into your video folder and the media index; the program is fetched from its vendor at your click.",
         Item::DataScience => "Python with scikit-learn, NumPy, SciPy and OpenCV for the data and picture flows, fetched from the vendors at your click.",
         Item::FwHardware => "The vendor firmware this computer asks for and lacks (Wi-Fi, Bluetooth, graphics, network): listed with each licence, then downloaded at your click.",
-        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek => item.fw_def().map_or("Firmware for hardware in this machine, downloaded at your click.", |d| d.about),
+        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek => item.fw_def().map_or("Firmware for hardware in this machine, downloaded at your click.", |d| d.about.as_str()),
     }
 }
 
@@ -2252,6 +2282,10 @@ fn state_color(c: &CardState) -> [u8; 4] {
         CardState::Missing | CardState::Checking => DIM,
     }
 }
+
+#[cfg(test)]
+#[path = "store_setup_fake_tests.rs"]
+pub(crate) mod fake_tests;
 
 #[cfg(test)]
 #[path = "store_setup_tests.rs"]
@@ -2295,13 +2329,13 @@ pub const PKG_CARD_READING: &str = "Reading the version and size from your store
 impl Setup {
     /// Read the package card from the pinned store without holding the screen: a thread makes the network read and leaves the answer in a slot
     /// that [`Setup::tick`] takes.
-    fn start_pkg_card(&mut self, cx: &AppCx) {
-        let (agent, data, up, slot) = (cx.agent.clone(), cx.data_dir().to_path_buf(), cx.quick_upstream(), self.pkg_card_slot.clone());
+    fn start_pkg_card(&mut self, cx: &dyn StorePort) {
+        let (jobs, data, slot) = (cx.shell_jobs(), cx.data_dir().to_path_buf(), self.pkg_card_slot.clone());
         if let Ok(mut s) = slot.lock() {
             *s = None;
         }
         std::thread::spawn(move || {
-            let r = agent.b0().quickinstall().browser_package_card(&data, up);
+            let r = jobs.browser_package_card(&data);
             if let Ok(mut s) = slot.lock() {
                 *s = Some(r);
             }

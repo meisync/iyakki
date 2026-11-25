@@ -410,23 +410,12 @@ fn real_main() -> ExitCode {
                 // cloud node: install to the internal disk only when the kernel line carries BOTH iyakki.cloud.install=DISK and
                 // iyakki.cloud.confirm=ERASE-DISK (docs/CLOUD-IMAGES.md); the existing installer does the work, once per stick
                 #[cfg(feature = "shell")]
-                match iyakki_agent::cloudseed::install_request(&cmdline) {
-                    Some(Ok(a)) => {
-                        let done = std::path::Path::new(iyakki_core::boot::DATA_DIR).join("cloud-install-done");
-                        if done.exists() {
-                            out!("IYAKKI-CLOUD self-install skipped: this stick already installed once (remove {} to allow it again)", done.display());
-                        } else {
-                            let _ = std::fs::write(&done, "installed\n");
-                            out!("IYAKKI-CLOUD self-install of {} starts", a[1]);
-                            let rc = iyakki_usb::install_cli::run(&a);
-                            out!("IYAKKI-CLOUD self-install exit {rc}: remove the stick and restart");
-                            if rc == 0 {
-                                iyakki_core::boot::power_off();
-                            }
-                        }
+                {
+                    let done = std::path::Path::new(iyakki_core::boot::DATA_DIR).join("cloud-install-done");
+                    let r = iyakki_agent::cloudseed::self_install(&cmdline, &done, &mut |a| iyakki_usb::install_cli::run(a), &mut |l| out!("{l}"));
+                    if r == iyakki_agent::cloudseed::SelfInstall::Ran(0) {
+                        iyakki_core::boot::power_off();
                     }
-                    Some(Err(e)) => out!("IYAKKI-CLOUD {e}"),
-                    None => {}
                 }
                 // install mode (GRUB entry "IYAKKI - Install to a disk", docs/INSTALLER.md): the installer's pages on the console
                 // instead of the desktop; when it ends the machine restarts. Nothing else (shell, web, supervisor) is started.
@@ -1317,6 +1306,8 @@ fn build_shell_env(headless: bool) -> Result<iyakki_shell::shell::ShellEnv, Stri
     }
     if std::process::id() == 1 {
         let svc = env.services.clone();
+        // the one look at the way out of the machine: what waits for the network (the clock, downloads, tunnels) is woken when it returns
+        iyakki_agent::routeevents::spawn_watcher();
         iyakki_agent::ntp::spawn_sync_thread(move || svc.settings().lock().map(|s| (!s.get().time.no_ntp, s.get().time.ntp_server.clone())).unwrap_or((true, String::new())));
     }
     Ok(env)
@@ -1361,8 +1352,10 @@ fn start_ui(cmdline: &str) {
         Err(e) => log::warn!("ui program: the UI socket could not be set up: {e}"),
     }
     let audit: iyakki_core::helpers::Audit = std::sync::Arc::new(|event, detail| log::info!("ui program: {event} {detail}"));
-    let handle = iyakki_core::uiprocess::start(exe, iyakki_core_local::kernelfacts::DEFAULT_FB, audit);
     let _ = std::thread::Builder::new().name("iyakki-ui-watch".into()).spawn(move || {
+        // the boot screen lets go of the display BEFORE the program starts drawing (it waits for the splash for up to three seconds, so not on the boot thread)
+        desktop_start_steps();
+        let handle = iyakki_core::uiprocess::start(exe, iyakki_core_local::kernelfacts::DEFAULT_FB, audit);
         while !iyakki_core::uiprocess::give_up_falls_back(&handle.state()) {
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
@@ -1370,6 +1363,37 @@ fn start_ui(cmdline: &str) {
         start_shell_thread();
         drop(handle);
     });
+}
+
+/// What the core does when the desktop is about to be drawn, whether the shell is a thread of the core or the program `iyakki-ui` (F-SPLIT-03): the
+/// boot screen lets go of the display (found in the first booted run of `iyakki.ui=process`, 2026-11-24: nothing stopped it, so the splash and the
+/// program drew on the same framebuffer), the boot loader is told this start worked, a live restart reports healthy, staged data migrations are
+/// confirmed and a monitor that woke up late is looked for once more.
+#[cfg(feature = "shell")]
+fn desktop_start_steps() {
+    // the wake phrase counters move to their new layout through the two-phase library (F-CORE-31): staged next to the old file BEFORE
+    // anything reads it, committed only for a start that was confirmed earlier and has run through its grace period
+    {
+        let data = std::env::var("IYAKKI_DATA").unwrap_or_else(|_| iyakki_shell::shell::ShellPaths::default().data);
+        iyakki_agent::wakestats::boot_step(std::path::Path::new(&data), iyakki_agent::relinfo::VERSION, "previous", iyakki_agent::clock::now_unix());
+    }
+    // the boot screen lets go of the display before the desktop draws on it
+    iyakki_core::boot::finish_boot_screen();
+    // the sign-in screen is the first thing the shell draws: tell the boot loader this start worked (docs/BOOT-LOADER.md)
+    iyakki_core::bootconfirm::confirm_soon(std::time::Duration::from_secs(2));
+    // a live-restarted program reports healthy here too (the sign-in screen is about to be drawn)
+    iyakki_core::liverestart::report_healthy_soon(iyakki_core::liverestart::Paths::real(), std::time::Duration::from_secs(2));
+    // data migrations staged by an update (F-CORE-20): this version started, so the staged ones for it are confirmed and the
+    // ones staged for another version are rolled back; the old data is never dropped here
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        let data = std::env::var("IYAKKI_DATA").unwrap_or_else(|_| iyakki_shell::shell::ShellPaths::default().data);
+        for (id, phase) in iyakki_agent::twophase::reconcile(std::path::Path::new(&data), iyakki_agent::relinfo::VERSION, iyakki_agent::clock::now_unix()) {
+            log::info!("boot: data migration {id} is now {phase:?}");
+        }
+    });
+    // a monitor that woke up during boot but was not seen: one more look (in the background)
+    iyakki_core::display::probe_once_in_background("the desktop started", iyakki_core::boot::screen_found);
 }
 
 #[cfg(feature = "shell")]
@@ -1413,29 +1437,7 @@ fn start_shell_thread() {
             |sh| {
                 // the program of a live restart stops this loop (and so lets go of the screen) before it replaces itself
                 let stop = &SHELL_STOP;
-                // the wake phrase counters move to their new layout through the two-phase library (F-CORE-31): staged next to the old file BEFORE
-                // anything reads it, committed only for a start that was confirmed earlier and has run through its grace period
-                {
-                    let data = std::env::var("IYAKKI_DATA").unwrap_or_else(|_| iyakki_shell::shell::ShellPaths::default().data);
-                    iyakki_agent::wakestats::boot_step(std::path::Path::new(&data), iyakki_agent::relinfo::VERSION, "previous", iyakki_agent::clock::now_unix());
-                }
-                // the boot screen lets go of the display before the desktop draws on it
-                iyakki_core::boot::finish_boot_screen();
-                // the sign-in screen is the first thing the shell draws: tell the boot loader this start worked (docs/BOOT-LOADER.md)
-                iyakki_core::bootconfirm::confirm_soon(std::time::Duration::from_secs(2));
-                // a live-restarted program reports healthy here too (the sign-in screen is about to be drawn)
-                iyakki_core::liverestart::report_healthy_soon(iyakki_core::liverestart::Paths::real(), std::time::Duration::from_secs(2));
-                // data migrations staged by an update (F-CORE-20): this version started, so the staged ones for it are confirmed and the
-                // ones staged for another version are rolled back; the old data is never dropped here
-                std::thread::spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_secs(4));
-                    let data = std::env::var("IYAKKI_DATA").unwrap_or_else(|_| iyakki_shell::shell::ShellPaths::default().data);
-                    for (id, phase) in iyakki_agent::twophase::reconcile(std::path::Path::new(&data), iyakki_agent::relinfo::VERSION, iyakki_agent::clock::now_unix()) {
-                        log::info!("boot: data migration {id} is now {phase:?}");
-                    }
-                });
-                // a monitor that woke up during boot but was not seen: one more look (in the background)
-                iyakki_core::display::probe_once_in_background("the desktop started", iyakki_core::boot::screen_found);
+                desktop_start_steps();
                 if let Err(e) = iyakki_shell::backend::run_fb(sh, fb, stop) {
                     log::error!("shell: {e}");
                 }
@@ -1807,5 +1809,26 @@ mod serve_args_tests {
         assert!(serve_args(&["serve".to_string()]).is_empty());
         let a = ["serve".to_string(), "--profile".to_string(), "agent-api".to_string()];
         assert_eq!(serve_args(&a), &a[1..]);
+    }
+}
+
+#[cfg(all(test, feature = "shell"))]
+mod ui_start_tests {
+    /// Found by the first booted run of `iyakki.ui=process` (2026-11-24): the boot screen was never told to let go of the display and drew over the program.
+    /// The steps that end the boot screen and tell the boot loader this start worked are ONE function, run by the shell thread and by the program's start,
+    /// the second one before the program starts.
+    #[test]
+    fn the_program_start_ends_the_boot_screen_before_it_starts_the_program_and_the_thread_runs_the_same_steps() {
+        let src = include_str!("main.rs");
+        let start_ui = &src[src.find("fn start_ui(").expect("start_ui")..src.find("fn desktop_start_steps()").expect("steps")];
+        let steps = start_ui.find("desktop_start_steps();").expect("the program start runs the steps");
+        let program = start_ui.find("uiprocess::start(").expect("the program is started");
+        assert!(steps < program, "the boot screen must let go before the program starts drawing");
+        let thread = &src[src.find("fn start_shell_thread()").expect("thread")..];
+        assert!(thread.contains("desktop_start_steps();"), "the shell thread runs the same steps");
+        let steps_fn = &src[src.find("fn desktop_start_steps()").unwrap()..src.find("fn start_shell_thread()").unwrap()];
+        for needle in ["finish_boot_screen()", "bootconfirm::confirm_soon", "liverestart::report_healthy_soon", "twophase::reconcile"] {
+            assert!(steps_fn.contains(needle), "{needle} belongs to the steps both ways of running the shell share");
+        }
     }
 }

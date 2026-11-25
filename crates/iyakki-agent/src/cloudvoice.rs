@@ -152,6 +152,18 @@ impl CloudListener {
         self.ret.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
+    /// The session ended (sign-out, lock, suspend): the thread stops, the port closes and no more frames are taken. A later offer starts a
+    /// new listener with a new certificate (D-SESSION-END).
+    pub fn end(&self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect_timeout(&self.wake, std::time::Duration::from_secs(1));
+    }
+
+    /// Whether [`CloudListener::end`] was called.
+    pub fn ended(&self) -> bool {
+        self.stop.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// The microphone My IYAKKI listens to; handed out once.
     pub fn take_audio(&self) -> Option<DownlinkAudio> {
         self.audio.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
@@ -172,6 +184,9 @@ impl Drop for CloudListener {
 /// My IYAKKI's mouth in a cloud session: the sentence is made into sound by `synth` (a WAV), turned into 16 kHz mono and sent to the device
 /// over the pinned link in the other direction ([`send_answer`]). Nothing plays on the cloud machine. No return link is an error the
 /// assistant says in words. One sentence at a time on a helper thread.
+/// The answers being sent to a device, for the end-of-session hook `cloud-speaker` (D-SESSION-END).
+pub static SPEAKER_STOPS: iyakki_shared::sessionend::StopSet = iyakki_shared::sessionend::StopSet::new();
+
 pub struct CloudSpeaker {
     synth: Arc<dyn Fn(&str) -> Result<Vec<u8>, String> + Send + Sync>,
     target: Arc<dyn Fn() -> Option<(SocketAddr, Vec<u8>)> + Send + Sync>,
@@ -194,10 +209,11 @@ impl crate::voiceassist::Speaker for CloudSpeaker {
         self.busy = busy.clone();
         self.stop = stop.clone();
         let (synth, text) = (self.synth.clone(), text.to_string());
+        let ended = SPEAKER_STOPS.enter(|| {});
         std::thread::spawn(move || {
             if let Ok(wav) = synth(&text) {
                 if let Ok(w) = crate::voice::parse_wav(&wav) {
-                    if !stop.load(Ordering::SeqCst) {
+                    if !stop.load(Ordering::SeqCst) && !ended.stopped() {
                         let _ = send_answer(&crate::voice::to_mono_16k(&w), addr, &cert);
                     }
                 }

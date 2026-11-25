@@ -37,7 +37,7 @@ impl RadioRecover {
             "When a live station drops, the radio reconnects {} time{} and then {}.",
             self.retries(),
             if self.retries() == 1 { "" } else { "s" },
-            if self.auto_switch() { "goes on to the next station of the list (one pass at most)" } else { "stops (switching to the next station is off)" }
+            if self.auto_switch() { "goes on to the next station of the list (one pass at most; when every station failed it stops saying so and starts again by itself when the network returns, or after 1, 5 and then every 15 minutes)" } else { "stops (switching to the next station is off)" }
         )
     }
 }

@@ -92,6 +92,7 @@ impl ServicesFacetB4 for ServicesB4 {
         let tools: Arc<dyn Tools> = Arc::new(crate::doctortools::DoctorTools::new(inner, Arc::new(crate::doctortools::RealBackend { svc: svc.clone(), policy: env.policy.clone(), user: env.user.clone(), audit_recent: env.audit_recent.clone() })));
         let tools: Arc<dyn Tools> = Arc::new(crate::sessionlogtools::SessionLogTools::new(tools, Arc::new(crate::sessionlogtools::RealBackend { svc: svc.clone(), policy: env.policy.clone(), user: env.user.clone(), audit: audit_fn(env) })));
         let tools: Arc<dyn Tools> = Arc::new(crate::manualtools::ManualTools::new(tools, Arc::new(crate::manualtools::RealBackend::new(env.policy.clone(), &env.user, svc.dir(), audit_fn(env)))));
+        let tools: Arc<dyn Tools> = Arc::new(crate::sessionendtools::SessionEndTools::new(tools));
         let guest = env.role == Role::Guest;
         Arc::new(crate::lockscreentools::LockTools::new(tools, Arc::new(crate::lockscreentools::RealBackend { dir: svc.dir().to_path_buf(), user: env.user.clone(), guest, audit: audit_fn(env) })))
     }

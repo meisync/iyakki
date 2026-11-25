@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-TALES-16",
+ "feature_sha": "c7228313b588a6f0",
+ "title": "Tales cartoon pictures for small models",
+ "clauses": [
+  {
+   "id": "cartoon-scenes",
+   "text": "With a small local model, Tales draws a cartoon scene for each part of the story and the hero looks the same on each page.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "In Tales, choose a small local model as the writer and write a short story with pictures (for example a story about a fox).",
+     "expect": "Each page has a cartoon picture of the scene in its sentence, and the hero looks the same on every page. If a scene cannot be drawn, a plain sketch appears and the app says so in words."
+    }
+   ]
+  }
+ ]
+}

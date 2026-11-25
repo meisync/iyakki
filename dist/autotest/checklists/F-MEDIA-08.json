@@ -1,0 +1,144 @@
+{
+ "schema": 1,
+ "row": "F-MEDIA-08",
+ "feature_sha": "0a70aceb013be64e",
+ "title": "in-house video and sound player, with the media tools (manual until automated)",
+ "clauses": [
+  {
+   "id": "play-with-tools",
+   "text": "With the media tools installed, MEDIA and the menu's Media player play a video with its sound through IYAKKI's own player.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Open a video in MEDIA, or from the IYAKKI menu use Media player.",
+     "expect": "The pictures move at the video's speed and the sound comes from the speakers."
+    }
+   ]
+  },
+  {
+   "id": "keys",
+   "text": "Space pauses, the arrows, f and Esc do what the page says.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Press Space to pause and again to resume. Press the arrow keys, then f for full screen, then Esc.",
+     "expect": "Each key does what its name says. Pause holds the picture and sound, and the picture is back in step with the sound after resume."
+    }
+   ]
+  },
+  {
+   "id": "progress-bar",
+   "text": "The progress bar can be clicked to seek, and the time shows the new position.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Click a point on the progress bar.",
+     "expect": "The video jumps to that time with sound from there, and the time shows the new position."
+    }
+   ]
+  },
+  {
+   "id": "info-line",
+   "text": "An info line names the codec, size, frame rate, sound and length.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Read the info line for the video.",
+     "expect": "It names the codec, the picture size, the frame rate, whether there is sound, and the length."
+    }
+   ]
+  },
+  {
+   "id": "in-step",
+   "text": "Pictures wait for the sound: the sound is the clock and late pictures are dropped.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Play a longer video for two minutes and watch a clap or lip movement against the sound.",
+     "expect": "The picture and sound stay together. Say if they drift, or if a delay shows at pause and resume (a short lag at pause is expected)."
+    }
+   ]
+  },
+  {
+   "id": "volume",
+   "text": "The volume in Settings, Sound applies to the video.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Change the volume in Settings, Sound while a video plays.",
+     "expect": "The video's loudness changes with it."
+    }
+   ]
+  },
+  {
+   "id": "camera-avi",
+   "text": "A camera recording in .avi plays in this player.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Open a .avi recording made by the camera (if you have one) in MEDIA or the Media player.",
+     "expect": "The recording plays with picture and sound."
+    }
+   ]
+  },
+  {
+   "id": "no-tools",
+   "text": "Without the media tools, MEDIA and the Media player say: Install the media player: Store → Setup → Media tools, and the Media page has an Install button.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "On a device without the media tools, open a video in MEDIA.",
+     "expect": "The page says: Install the media player: Store → Setup → Media tools. An Install button is shown on the Media page."
+    }
+   ]
+  }
+ ]
+}

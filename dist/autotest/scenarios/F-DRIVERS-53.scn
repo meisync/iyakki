@@ -1,0 +1,24 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 201acf1cee155695; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-DRIVERS-53
+targets: qemu
+profile: ram
+feature-sha: 201acf1cee155695
+doc: Store, Setup lists Hardware firmware (read only, nothing is installed)
+clause: 1 Store, Setup lists the item Hardware firmware for the Wi-Fi, Bluetooth and graphics files this computer asks for
+not-covered: the plan from the kernel log lines Direct firmware load failed
+not-covered: the pinned linux-firmware release and the licence lines
+not-covered: the install itself
+skip-unless-button group Devices & System
+click group Devices & System
+skip-unless-button STORE
+click STORE
+wait text="Setup"
+skip-unless-button Setup
+click Setup
+wait text="This machine"
+scroll down
+scroll down
+scroll down
+shot page
+expect-not-blank
+expect-text Hardware firmware

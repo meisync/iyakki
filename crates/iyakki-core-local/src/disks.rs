@@ -94,6 +94,11 @@ pub trait DiskEnv: Send + Sync {
     fn mount(&self, dev: &str, target: &str, fstype: &str, flags: MountFlags, data: &str) -> Result<(), String>;
     /// A plain unmount: never forced, never lazy. A busy folder answers with "busy" in the text.
     fn umount(&self, target: &str) -> Result<(), String>;
+    /// Let go of a mount whose drive is no longer there (a lazy unmount): used only for a drive that was unplugged, never for one that is
+    /// present. The default is the plain unmount.
+    fn umount_detach(&self, target: &str) -> Result<(), String> {
+        self.umount(target)
+    }
     fn make_dir(&self, path: &str) -> Result<(), String>;
     /// Give a folder we made to the person (their user and group id).
     fn chown(&self, path: &str, uid: u32, gid: u32) -> Result<(), String>;
@@ -746,6 +751,45 @@ impl Disks {
             }
         }
         if failed.is_empty() { None } else { Some(format!("Some drives could not be closed at sign-out and stay open: {}", failed.join(" "))) }
+    }
+
+    /// A drive was pulled out while it was open (F-LIFE-12, audit P-08): the mounts of this person's `media` folder whose drive is no longer
+    /// there are let go (the drive is gone, so nothing is at risk), the empty folders left in `media` are removed, and the sentence for the
+    /// person says what happened and which programs had files open on it. `None` when nothing was left behind.
+    pub fn after_unplug(&self, who: &Actor, audit: AuditFn) -> Option<String> {
+        let media = media_dir(&who.home);
+        let prefix = media.clone() + "/";
+        let snap = self.scan();
+        let mounts = parse_mountinfo(&self.env.read_text("/proc/self/mountinfo").unwrap_or_default());
+        let mut said = Vec::new();
+        for m in mounts.iter().filter(|m| m.mp.starts_with(&prefix)) {
+            let dev = base(&m.source);
+            if dev.is_empty() || !m.source.starts_with("/dev/") || snap.part(dev).is_some() {
+                continue;
+            }
+            let label = m.mp.rsplit('/').next().unwrap_or(&m.mp).to_string();
+            let users = self.users_of(&m.mp);
+            let freed = self.env.umount(&m.mp).or_else(|_| self.env.umount_detach(&m.mp));
+            if freed.is_ok() {
+                let _ = self.env.remove_dir(&m.mp);
+            }
+            let names: Vec<String> = users.iter().take(5).map(|(p, n)| format!("{n} (process {p})")).collect();
+            audit("disks.unplugged", &format!("user={} folder={} programs={} freed={}", who.user, m.mp, users.len(), freed.is_ok()));
+            said.push(match (users.is_empty(), freed) {
+                (true, Ok(())) => format!("The drive {label} was removed. It was not in use, and its folder is closed."),
+                (false, Ok(())) => format!("The drive {label} was removed while {} had files open on it. Whatever they had not saved to it is lost; save your work to another place and close them.", names.join(", ")),
+                (_, Err(e)) => format!("The drive {label} was removed, but its folder could not be closed ({e}). Close the programs that use it, or restart."),
+            });
+        }
+        // a folder left in `media` with nothing in it and nothing mounted on it goes (remove_dir refuses anything that is not empty)
+        let still: Vec<String> = parse_mountinfo(&self.env.read_text("/proc/self/mountinfo").unwrap_or_default()).into_iter().map(|m| m.mp).collect();
+        for name in self.env.list(&media) {
+            let p = format!("{prefix}{name}");
+            if !still.contains(&p) && self.env.list(&p).is_empty() && self.env.remove_dir(&p).is_ok() {
+                audit("disks.media_folder_removed", &format!("user={} folder={p}", who.user));
+            }
+        }
+        if said.is_empty() { None } else { Some(said.join(" ")) }
     }
 
     pub(crate) fn unmount_part(&self, d: &Disk, p: &Part, audit: AuditFn) -> Result<(), String> {

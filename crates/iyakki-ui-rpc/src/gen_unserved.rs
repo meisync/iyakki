@@ -68,7 +68,7 @@ mod u_iyakki_shared_voiceassist {
     impl Lost for Box<dyn TurnLog> { fn lost(_: &str) -> Self { Box::new(Unserved) } }
     impl Lost for Arc<dyn TurnLog + Send + Sync> { fn lost(_: &str) -> Self { Arc::new(Unserved) } }
 }
-mod u_iyakki_shared_lib {
+mod u_iyakki_shared_iyakki_audiolink {
     use super::*;
     use iyakki_agent_api::*;
     use iyakki_shared::wakelisten::*;
@@ -106,7 +106,7 @@ mod u_iyakki_shared_kubectl {
     impl Lost for Box<dyn Kubectl> { fn lost(_: &str) -> Self { Box::new(Unserved) } }
     impl Lost for Arc<dyn Kubectl + Send + Sync> { fn lost(_: &str) -> Self { Arc::new(Unserved) } }
 }
-mod u_iyakki_proxy_lib {
+mod u_iyakki_proxy_iyakki_proxy {
     use super::*;
     use iyakki_agent_api::*;
     use iyakki_proxy::*;
@@ -121,20 +121,11 @@ mod u_iyakki_proxy_lib {
     impl Lost for Box<dyn Upstream> { fn lost(_: &str) -> Self { Box::new(Unserved) } }
     impl Lost for Arc<dyn Upstream + Send + Sync> { fn lost(_: &str) -> Self { Arc::new(Unserved) } }
 }
-mod u_iyakki_shared_story {
+mod u_iyakki_shared_iyakki_story_model {
     use super::*;
     use iyakki_agent_api::*;
     use iyakki_shared::story::*;
-    use iyakki_shared::speechtime::{Timed, TimingSource};
     use serde::{Deserialize, Serialize};
-    use iyakki_shared::chat::Message;
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use std::time::Duration;
-    use iyakki_sec::policy::Policy;
-    use iyakki_shared::scope;
-    use iyakki_shared::voice::{self, VoiceSettings};
     impl Synth for Unserved {
         fn synth(&self, text: &str) -> Result<Vec<u8>, String> {
             <Result<Vec<u8>, String> as Lost>::lost(super::NOT_SERVED)
@@ -149,12 +140,8 @@ mod u_iyakki_shared_wsexec {
     use iyakki_agent_api::*;
     use iyakki_shared::wsexec::*;
     use std::path::Path;
-    use std::sync::Arc;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use std::io::Read;
-    use std::process::{Command, Stdio};
-    use std::time::{Instant};
     impl Runner for Unserved {
         fn run(&self, cwd: &Path, argv: &[String], env: &[(String, String)], timeout: Duration, cap: usize, sink: Option<Sink>) -> Out {
             <Out as Lost>::lost(super::NOT_SERVED)

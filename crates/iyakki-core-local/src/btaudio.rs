@@ -300,7 +300,7 @@ impl BtAudio for LocalBtAudio {
                 if *whole_computer {
                     self.route.attach(self.send.clone(), *mute_speakers);
                     self.remember(&d.address, *mute_speakers);
-                    Ok(format!("Sending this computer's sound to {} ({}){}. If the headphones stop taking sound the speakers play again by themselves.", d.title(), self.send.view().codec, if *mute_speakers { "; its own speakers are silent" } else { "" }))
+                    Ok(format!("Sending this computer's sound to {} ({}){}. If the headphones leave or stop taking sound, playback pauses (it does not move to the speakers); press play to carry on.", d.title(), self.send.view().codec, if *mute_speakers { "; its own speakers are silent" } else { "" }))
                 } else {
                     Ok(format!("Connected to {} ({}). Only a test tone goes to it; use bluetooth_audio_send_tone to hear it.", d.title(), self.send.view().codec))
                 }

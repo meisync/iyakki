@@ -6,11 +6,12 @@
 
 use crate::apps::browser_badsites as bs;
 use super::*;
+use super::browser_port::BrowserSettingsPort;
 
 impl SettingsApp {
-    pub(super) fn render_browser_bad(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, cx: &AppCx) -> f32 {
-        let on = bs::enabled(cx);
-        let n = bs::load_list(cx).len();
+    pub(super) fn render_browser_bad(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, p: &dyn BrowserSettingsPort) -> f32 {
+        let on = bs::enabled(p);
+        let n = bs::load_list(p).len();
         let state = format!("{} · {} site{}", if on { "on" } else { "off" }, n, if n == 1 { "" } else { "s" });
         let rh = 86.0 * s;
         if y0 + rh > a.y + a.h - 4.0 * s {
@@ -25,12 +26,12 @@ impl SettingsApp {
     }
 
     /// I, J and O of the Browser tab.
-    pub(super) fn handle_browser_bad(&mut self, k: &Key, cx: &AppCx) -> bool {
+    pub(super) fn handle_browser_bad(&mut self, k: &Key, p: &dyn BrowserSettingsPort) -> bool {
         match k {
             Key::Char('I') => {
-                let on = !bs::enabled(cx);
-                bs::set_enabled(cx, on);
-                cx.audit.record(&cx.session.user, "settings.browser", &format!("Known-bad site list: {}.", if on { "on" } else { "off" }));
+                let on = !bs::enabled(p);
+                bs::set_enabled(p, on);
+                p.audit("settings.browser", &format!("Known-bad site list: {}.", if on { "on" } else { "off" }));
                 self.ok(format!("The known-bad site list is {}.", if on { "on" } else { "off" }));
                 true
             }
@@ -46,29 +47,29 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn browser_bad_add_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
+    pub(super) fn browser_bad_add_submit(&mut self, p: &dyn BrowserSettingsPort, form: &Form) -> Result<String, String> {
         let site = form.value(0);
         if site.trim().is_empty() {
             return Err("Write the site's name.".into());
         }
-        let h = bs::add(cx, &site, form.value(1).trim())?;
-        cx.audit.record(&cx.session.user, "settings.browser", &format!("Known-bad site list: added {h}"));
+        let h = bs::add(p, &site, form.value(1).trim())?;
+        p.audit("settings.browser", &format!("Known-bad site list: added {h}"));
         Ok(format!("{h} is on the list; it and the sites under it will not open."))
     }
 
-    pub(super) fn browser_bad_remove_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
+    pub(super) fn browser_bad_remove_submit(&mut self, p: &dyn BrowserSettingsPort, form: &Form) -> Result<String, String> {
         let site = form.value(0);
         let site = site.trim();
         if site.is_empty() {
             return Err("Write the site's name, or all.".into());
         }
         if site.eq_ignore_ascii_case("all") {
-            let n = bs::clear(cx);
-            cx.audit.record(&cx.session.user, "settings.browser", "Known-bad site list: emptied");
+            let n = bs::clear(p);
+            p.audit("settings.browser", "Known-bad site list: emptied");
             return Ok(format!("The list is empty ({n} removed)."));
         }
-        if bs::remove(cx, site) {
-            cx.audit.record(&cx.session.user, "settings.browser", &format!("Known-bad site list: removed {site}"));
+        if bs::remove(p, site) {
+            p.audit("settings.browser", &format!("Known-bad site list: removed {site}"));
             Ok(format!("{site} is off the list."))
         } else {
             Err(format!("{site} is not on the list (a site covered only through a parent site is removed by naming the parent)."))

@@ -1,0 +1,36 @@
+{
+ "schema": 1,
+ "row": "F-CAM-21",
+ "feature_sha": "196646a46220cbe2",
+ "title": "inbox notes carry a motion picture (manual until automated)",
+ "clauses": [
+  {
+   "id": "thumbnail-shown",
+   "text": "A motion note can carry the event's picture, shown small at the left of the note's words.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Turn on the setting that lets thumbnails travel with notices, then make the camera see motion in front of it.",
+     "expect": "The Inbox shows a small picture at the left of the note's words."
+    }
+   ]
+  },
+  {
+   "id": "without-picture",
+   "text": "A note without a picture looks as it did before.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Look at an Inbox note that has no picture.",
+     "expect": "It shows its words only, as before."
+    }
+   ]
+  }
+ ]
+}

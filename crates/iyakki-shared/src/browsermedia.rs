@@ -761,6 +761,24 @@ pub fn for_user(user: &str) -> Option<Arc<BrowserMedia>> {
     with_entries(|r| r.iter().find(|(u, _)| u == user).map(|(_, m)| m.clone()))
 }
 
+/// The end of a session (D-SESSION-END): the microphone and camera of this person's page are switched off (the page is told). `user` empty:
+/// every page (the machine goes to sleep). Returns how many pages had something on.
+pub fn stop_capture_of(user: &str) -> usize {
+    let all: Vec<Arc<BrowserMedia>> = with_entries(|r| r.iter().filter(|(u, _)| user.is_empty() || u == user).map(|(_, m)| m.clone()).collect());
+    all.iter().filter(|m| m.stop_capture()).count()
+}
+
+/// The end of a person's session: the sound the web mixer sends to their page stops (the page's own tabs are its business). Returns whether
+/// the page was getting sound.
+pub fn stop_audio_of(user: &str) -> bool {
+    let Some(m) = for_user(user) else { return false };
+    let was = m.sources().audio_out;
+    if was {
+        m.set_audio_out(false);
+    }
+    was
+}
+
 /// Does any connected page listen to the session's sound? (The mixer sends nothing, and keeps nothing, when this is false.)
 pub fn audio_listeners() -> bool {
     with_entries(|r| r.iter().any(|(_, m)| m.wants_audio()))
@@ -807,3 +825,28 @@ pub fn session_dir(runtime: &std::path::Path, user: &str) -> PathBuf {
 }
 
 
+
+#[cfg(test)]
+mod end_tests {
+    use super::*;
+
+    #[test]
+    fn the_end_of_a_session_switches_off_that_persons_page_and_a_suspend_every_page() {
+        isolate_for_this_thread();
+        let (a, b) = (BrowserMedia::silent(Policy::allow_all()), BrowserMedia::silent(Policy::allow_all()));
+        register("end-a", a.clone());
+        register("end-b", b.clone());
+        for m in [&a, &b] {
+            m.set(Kind::Mic, true).unwrap();
+            m.set(Kind::Camera, true).unwrap();
+            m.set_audio_out(true);
+        }
+        assert_eq!(stop_capture_of("end-a"), 1);
+        assert!(!a.is_on(Kind::Mic) && !a.is_on(Kind::Camera) && b.is_on(Kind::Mic), "only that person's page");
+        assert_eq!(stop_capture_of("end-a"), 0, "nothing left to stop");
+        assert!(stop_audio_of("end-a") && !a.sources().audio_out && b.sources().audio_out);
+        assert!(!stop_audio_of("end-a") && !stop_audio_of("nobody"));
+        assert_eq!(stop_capture_of(""), 1, "a suspend stops every page");
+        assert!(!b.is_on(Kind::Camera));
+    }
+}

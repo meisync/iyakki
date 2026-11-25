@@ -1,0 +1,18 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha d54a302b71ff6a17; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-GIT-12
+targets: qemu
+profile: ram
+feature-sha: d54a302b71ff6a17
+doc: The AI IDE tab strip has Git as the last main tab (read only)
+clause: 1 The AI IDE tab strip has Git as its last main tab, after K8s
+not-covered: the branch picture and Ctrl+Shift+L
+not-covered: Git shown only to accounts that may open it
+skip-unless-button group Build
+click group Build
+skip-unless-button AI IDE
+click AI IDE
+wait text="Editor|Board"
+shot page
+expect-not-blank
+expect-text K8s
+expect-text Git

@@ -1,0 +1,10 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 90b50acb04908ff2; honest subset only: everything not checked is under not-covered.
+row: F-UPD-12
+targets: qemu
+profile: ram
+feature-sha: 90b50acb04908ff2
+doc: store.daily_check through dev config and what the System update page says
+clause: 1 the store.daily_check setting is read and written through dev config (the scope is granted on the screen) and the System update page says what it holds
+not-covered: the chat tools updates_settings_status (free) and updates_settings_set (asks, administrators only)
+not-covered: the daily check covers only sources the person added
+session-check: config_daily_check

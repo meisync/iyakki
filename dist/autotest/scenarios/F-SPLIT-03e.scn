@@ -1,0 +1,9 @@
+# autotest alpha.10, lane B1 (2026-11-24): the UI as its own program on a booted image. Written against the Feature text with sha cdfe282a641b4e83; honest subset only: everything not checked is under not-covered.
+row: F-SPLIT-03
+targets: qemu
+profile: ui_process
+feature-sha: cdfe282a641b4e83
+doc: the UI program is not restarted by itself while the machine runs
+clause: 5 the program keeps its connection to the core: after 420 s of uptime the audit shows no exit of the program by itself
+not-covered: real hardware (a real display, a touch screen, a GPU), the tiles that need a live object of the core (FLOWS, TALES, LAB, STORE, RADIO, MEDIA: they say so in the program), the apps-only push of a ui layer to a device
+session-check: ui_process_stays_up

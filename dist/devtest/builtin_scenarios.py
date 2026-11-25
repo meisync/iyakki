@@ -316,9 +316,9 @@ def text_size(t):
 
 # Extra verbs (dist/autotest/verbs.py registers them): verb -> fn(t, arg). A scenario file may also carry the autotest headers
 #   row: F-X-1, F-X-2 | targets: qemu browser real hw:KEY | clause: TEXT (repeatable) | not-covered: TEXT (repeatable)
-#   needs-hw: TEXT | feature-sha: HEX | profile: ram | session-check: NAME | suite: SCRIPT ARGS | human: CLAUSE | ACTION
+#   provided-by: program (every clause is provided by the iyakki program, so a result on a base layer of an older commit counts; docs/development/AUTOTEST.md) | needs-hw: TEXT | feature-sha: HEX | profile: ram | session-check: NAME | suite: SCRIPT ARGS | host-script: SCRIPT ARGS | human: CLAUSE | ACTION
 EXTRA_VERBS = {}
-HEADER_KEYS = ("name", "devices", "restore", "doc", "row", "targets", "needs-hw", "clause", "not-covered", "feature-sha", "profile", "session-check", "suite", "human")
+HEADER_KEYS = ("name", "devices", "restore", "doc", "row", "targets", "needs-hw", "clause", "not-covered", "feature-sha", "profile", "session-check", "suite", "host-script", "human", "provided-by")
 LIST_KEYS = ("clause", "not-covered", "needs-hw", "human")
 
 
@@ -381,7 +381,13 @@ def _register_text(path):
                 t.check("page is %s" % arg, st.page.lower() == arg.lower(), "page=%s" % st.page)
             elif verb == "skip-unless-button":
                 if not t.dev.state().button(arg):
-                    raise Skip("no button %r in this build" % arg)
+                    found = t.dev.settings_find(arg)
+                    if found is not None:
+                        t.dev.settings_clear_search()
+                    else:
+                        if t.dev.state().app.lower() == "settings":
+                            t.dev.settings_clear_search()
+                        raise Skip("no button %r in this build" % arg)
             elif verb == "scroll":
                 words = arg.split()
                 if not words or words[0] not in ("down", "up") or len(words) not in (1, 3, 4):

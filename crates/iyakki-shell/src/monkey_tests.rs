@@ -282,8 +282,8 @@ pub(crate) fn open_ide_with_workspace(sh: &mut Shell) {
 /// stopped, an update, a failed install, one that is installing, found by hand. The jobs run a stand-in program, never the real installer.
 pub(crate) fn open_store_setup(sh: &mut Shell) {
     use crate::apps::store::setup::Machine;
-    use iyakki_shared::quickinstall::{Presence};
-    use iyakki_shared::quickinstall::{Facts, Item, Latest};
+    use iyakki_tile_api::store_qi::{Presence};
+    use iyakki_tile_api::store_qi::{Facts, Item, Latest};
     let Some(cx) = sh.cx_for_test() else { return };
     let mut store = crate::apps::store::StoreApp::new(&cx);
     let mut f = Facts::default();
@@ -303,7 +303,7 @@ pub(crate) fn open_store_setup(sh: &mut Shell) {
     store.setup.set_facts(f);
     store.setup.latest = vec![(Item::ClaudeCode, Latest::Newer("v2.2.0".into()))];
     store.setup.failed = vec![Item::Registry];
-    store.setup.launch = Some(iyakki_shared::quickinstall::Launch { exe: "/usr/bin/true".into(), data: std::env::temp_dir().join(format!("iyakki-monkey-qi-{}", std::process::id())) });
+    store.setup.launch = Some(iyakki_tile_api::store_qi::Launch { exe: "/usr/bin/true".into(), data: std::env::temp_dir().join(format!("iyakki-monkey-qi-{}", std::process::id())) });
     crate::apps::App::handle(&mut store, &Event::Tab(4), &cx);
     sh.show_app_for_test(Box::new(store), PApp::Store);
 }

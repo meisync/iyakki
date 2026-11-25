@@ -34,37 +34,11 @@ pub struct HostRule {
     pub token: bool,
 }
 
-/// What an address will use.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Auth {
-    /// Nothing: a public repository over HTTPS, or an SSH address with no key chosen (git will say it cannot log in).
-    None,
-    Key { id: String, from_workspace: bool },
-    Token { host: String },
-}
-
-impl Auth {
-    /// The word written in project.json and the audit.
-    pub fn label(&self) -> String {
-        match self {
-            Auth::None => String::new(),
-            Auth::Key { id, .. } => id.clone(),
-            Auth::Token { .. } => "token".into(),
-        }
-    }
-}
-
 /// Things kept for this session only, in memory: passphrases typed once, and which keys an assistant may use.
 #[derive(Default)]
 pub struct Session {
     pub pass: Mutex<HashMap<String, Zeroizing<String>>>,
     pub approved: Mutex<HashSet<String>>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Who {
-    Person,
-    Assistant,
 }
 
 impl Session {
@@ -87,15 +61,7 @@ impl Session {
     }
 }
 
-pub type AuditFn = Arc<dyn Fn(&str, &str) + Send + Sync>;
-
-/// What the person's vault offers; the real one is `ServicesStore` (in the agent), tests use `MemStore`.
-pub trait SecretStore: Send + Sync {
-    fn get(&self, name: &str) -> Result<zeroize::Zeroizing<String>, String>;
-    fn set(&self, name: &str, value: &str) -> Result<(), String>;
-    fn delete(&self, name: &str) -> Result<(), String>;
-    fn names(&self) -> Result<Vec<String>, String>;
-}
+pub use iyakki_git_model::keys::{Auth, AuditFn, SecretStore, Who};
 
 
 

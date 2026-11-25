@@ -1746,6 +1746,7 @@ fn ide_k8s_registry_every_option_round_trips_through_save_reopen_reload_and_work
 
 #[test]
 fn ide_k8s_flow_text_selects_with_drag_ctrl_c_right_click_copy_and_copy_all_and_keys_still_work() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     use super::ide_k8s::FLOW_AREA;
     let (_g, r, _k3s, _remote) = k3s_machine("flow-select");
     let w = world("flow-select");
@@ -1803,6 +1804,7 @@ fn ide_k8s_flow_text_selects_with_drag_ctrl_c_right_click_copy_and_copy_all_and_
 
 #[test]
 fn ide_k8s_log_lines_select_and_copy() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     let _k = fake_cluster();
     let w = world("k8s-copy");
     let d = project(&w, "alpha", &[]);

@@ -1,0 +1,42 @@
+{
+ "schema": 1,
+ "row": "F-RADIO-15",
+ "feature_sha": "09be104000015679",
+ "title": "Opus radio streams, with IYAKKI's own decoder (manual until automated)",
+ "clauses": [
+  {
+   "id": "opus-plays",
+   "text": "A live Opus station plays through IYAKKI's own helper at normal pitch and speed, without cutting out.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Play a live Opus station for at least three minutes.",
+     "expect": "It plays with natural pitch and speed and does not cut out. Note any crackle or drop-out and when it happened."
+    }
+   ]
+  },
+  {
+   "id": "without-addon",
+   "text": "Opus plays without the ffmpeg add-on installed, because the own helper is tried first.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Check that the ffmpeg add-on is not installed, then play the Opus station.",
+     "expect": "It plays."
+    }
+   ]
+  }
+ ]
+}

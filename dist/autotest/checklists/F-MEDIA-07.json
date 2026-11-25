@@ -1,0 +1,93 @@
+{
+ "schema": 1,
+ "row": "F-MEDIA-07",
+ "feature_sha": "2f9fbac759ee7275",
+ "title": "sample media in the IYAKKI samples folder (manual until automated)",
+ "clauses": [
+  {
+   "id": "samples-folder",
+   "text": "On a fresh install a read-only IYAKKI samples folder holds the melody, the beat and a short video.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Open MEDIA on a fresh library.",
+     "expect": "A folder named IYAKKI samples is listed with the sample MP3 files and the short video. Try to delete or rename a file in it: it is refused because the folder is read-only."
+    }
+   ]
+  },
+  {
+   "id": "mp3-sound",
+   "text": "The sample MP3 files play in IYAKKI with sound from the speakers.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Play the sample melody, then the kuthu-style beat.",
+     "expect": "Both play all the way through with clear sound at normal pitch."
+    }
+   ]
+  },
+  {
+   "id": "beats-search",
+   "text": "Searching for kuthu finds the beats.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Type kuthu in MEDIA's search.",
+     "expect": "The sample beat is among the results."
+    }
+   ]
+  },
+  {
+   "id": "video-plays",
+   "text": "The sample video plays in the MEDIA page with moving pictures, a time, a seek bar, and Space pauses.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Open the sample video in MEDIA. Press Space to pause, then Space again.",
+     "expect": "The picture moves, a time and seek bar show, and Space pauses and resumes."
+    }
+   ]
+  },
+  {
+   "id": "video-sound",
+   "text": "The sample video has sound.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Play the sample video with the volume up and listen.",
+     "expect": "Sound is heard with the picture. If it is silent, check the volume is not muted, and write what you found in the note."
+    }
+   ]
+  }
+ ]
+}

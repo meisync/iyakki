@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use iyakki_agent_api::SshHost;
 use iyakki_shared::ssh::{self, Connection, HostKey};
 type Env = Arc<dyn SshHost>;
-use iyakki_sec::policy::CliLevel;
 
-use super::super::{AppCx, Flow};
+use super::super::Flow;
+use super::super::cli_port::CliPort;
 use super::ACCENT;
 use crate::gfx::{rgb, Face, Gfx};
 use crate::ui::{Event, Key, TextField, DIM, ERR, MUTED, OK, R, TEXT};
@@ -95,12 +95,8 @@ impl Conns {
         }
     }
 
-    fn env(cx: &AppCx) -> Env {
-        cx.services.ssh_host(&cx.session.user)
-    }
-
-    fn list(cx: &AppCx) -> Vec<Connection> {
-        Self::env(cx).connections()
+    fn list(port: &dyn CliPort) -> Vec<Connection> {
+        port.ssh().connections()
     }
 
     #[cfg(any(test, feature = "testing"))]
@@ -125,8 +121,8 @@ impl Conns {
         !matches!(self.mode, CMode::List)
     }
 
-    fn can_connect(cx: &AppCx) -> Result<(), String> {
-        if cx.session.policy.cli != CliLevel::Full {
+    fn can_connect(port: &dyn CliPort) -> Result<(), String> {
+        if !port.full_terminal() {
             return Err("Connecting needs a full terminal; ask an administrator.".into());
         }
         Ok(())
@@ -139,16 +135,16 @@ impl Conns {
 
     /// L: log in with a terminal. Needs the same things as Connect (a full terminal, a host the account may reach) and a host key that
     /// is already trusted: the question about a new key is asked by Trust key (T), never in the middle of a login.
-    fn request_login(&mut self, cx: &AppCx, c: &Connection) {
-        if let Err(e) = Self::can_connect(cx) {
+    fn request_login(&mut self, port: &dyn CliPort, c: &Connection) {
+        if let Err(e) = Self::can_connect(port) {
             self.status = Some((e, false));
             return;
         }
-        if !cx.session.policy.allows_host(&c.host) {
+        if !port.allows_host(&c.host) {
             self.status = Some((format!("Your account may not reach {}.", c.host), false));
             return;
         }
-        if Self::env(cx).trusted_keys(&c.host, c.port).is_empty() {
+        if port.ssh().trusted_keys(&c.host, c.port).is_empty() {
             self.status = Some((format!("The host key of {} is not trusted yet: press T to see its fingerprint and trust it, then L.", c.host), false));
             return;
         }
@@ -157,9 +153,9 @@ impl Conns {
     }
 
     /// A login the assistant asked for (the person approved the card): the connection by name, through the same checks as the L key.
-    pub fn login_by_name(&mut self, cx: &AppCx, name: &str) {
-        match Self::list(cx).into_iter().find(|c| c.name == name) {
-            Some(c) => self.request_login(cx, &c),
+    pub fn login_by_name(&mut self, port: &dyn CliPort, name: &str) {
+        match Self::list(port).into_iter().find(|c| c.name == name) {
+            Some(c) => self.request_login(port, &c),
             None => self.status = Some((format!("There is no saved connection called {name}."), false)),
         }
     }
@@ -190,39 +186,39 @@ impl Conns {
     }
 
     /// Fetch the host's key (a thread; the answer arrives with [`Conns::tick`]).
-    fn start_probe(&mut self, cx: &AppCx, host: &str, port: u16, then: Option<String>) {
-        if let Err(e) = Self::can_connect(cx) {
+    fn start_probe(&mut self, port: &dyn CliPort, host: &str, tcp: u16, then: Option<String>) {
+        if let Err(e) = Self::can_connect(port) {
             self.status = Some((e, false));
             return;
         }
-        if !cx.session.policy.allows_host(host) {
+        if !port.allows_host(host) {
             self.status = Some((format!("Your account may not reach {host}."), false));
             return;
         }
-        let env = Self::env(cx);
-        let shared = self.start_wait(&format!("Reading the host key of {host}:{port}…"));
+        let env = port.ssh();
+        let shared = self.start_wait(&format!("Reading the host key of {host}:{tcp}…"));
         let host = host.to_string();
         std::thread::spawn(move || {
-            let r = env.probe(&host, port);
+            let r = env.probe(&host, tcp);
             shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).done = Some(Done::Probe(r, then));
         });
     }
 
-    fn connect(&mut self, cx: &AppCx, c: &Connection) {
-        if let Err(e) = Self::can_connect(cx) {
+    fn connect(&mut self, port: &dyn CliPort, c: &Connection) {
+        if let Err(e) = Self::can_connect(port) {
             self.status = Some((e, false));
             return;
         }
-        if !cx.session.policy.allows_host(&c.host) {
+        if !port.allows_host(&c.host) {
             self.status = Some((format!("Your account may not reach {}.", c.host), false));
             return;
         }
-        let env = Self::env(cx);
+        let env = port.ssh();
         if env.trusted_keys(&c.host, c.port).is_empty() {
-            self.start_probe(cx, &c.host, c.port, Some(c.name.clone()));
+            self.start_probe(port, &c.host, c.port, Some(c.name.clone()));
             return;
         }
-        cx.audit.record(&cx.session.user, "ssh.connect", &c.name);
+        port.audit("ssh.connect", &c.name);
         let args = c.args();
         let shared = self.start_wait(&format!("Connected to {} … running {} (up to 2 minutes)", c.name, if c.command.is_empty() { "a quick check" } else { "the default command" }));
         self.out.push((format!("$ ssh {}", iyakki_shared::exec::command_line("", &args).trim()), OK));
@@ -260,7 +256,7 @@ impl Conns {
         true
     }
 
-    pub fn tick(&mut self, cx: &AppCx) {
+    pub fn tick(&mut self, port: &dyn CliPort) {
         let (text, done, streamed) = {
             let mut s = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             // whole lines now, the rest when the call ends
@@ -279,10 +275,10 @@ impl Conns {
             }
             Done::Probe(Ok(keys), then) => {
                 let host_port = keys.first().map(|k| k.pattern.clone()).unwrap_or_default();
-                let (host, port) = parse_pattern(&host_port);
-                let known = Self::env(cx).trusted_keys(&host, port);
+                let (host, tcp) = parse_pattern(&host_port);
+                let known = port.ssh().trusted_keys(&host, tcp);
                 let changed = !known.is_empty() && !keys.iter().any(|k| known.contains(k));
-                self.mode = CMode::Trust(TrustAsk { host, port, keys, changed, then });
+                self.mode = CMode::Trust(TrustAsk { host, port: tcp, keys, changed, then });
                 self.status = None;
             }
             Done::Run(r) => {
@@ -304,8 +300,8 @@ impl Conns {
         }
     }
 
-    pub fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
-        let list = Self::list(cx);
+    pub fn handle(&mut self, ev: &Event, port: &dyn CliPort) -> Flow {
+        let list = Self::list(port);
         let n = list.len();
         self.sel = self.sel.min(n.saturating_sub(1));
         match &mut self.mode {
@@ -314,8 +310,8 @@ impl Conns {
                 let editing = editing.clone();
                 match ev {
                     Event::Key(Key::Esc) => self.mode = CMode::List,
-                    Event::Tab(SAVE) => self.save(cx, editing),
-                    Event::Key(Key::Enter) if self.focus == FIELDS.len() - 1 => self.save(cx, editing),
+                    Event::Tab(SAVE) => self.save(port, editing),
+                    Event::Key(Key::Enter) if self.focus == FIELDS.len() - 1 => self.save(port, editing),
                     Event::Key(Key::Tab) | Event::Key(Key::Down) | Event::Key(Key::Enter) => self.focus = (self.focus + 1) % FIELDS.len(),
                     Event::Key(Key::Up) => self.focus = (self.focus + FIELDS.len() - 1) % FIELDS.len(),
                     Event::Paste(t) => {
@@ -336,9 +332,9 @@ impl Conns {
                 let name = name.clone();
                 if matches!(ev, Event::Key(Key::Char('y')) | Event::Key(Key::Enter)) {
                     self.mode = CMode::List;
-                    match Self::env(cx).remove_connection(&name) {
+                    match port.ssh().remove_connection(&name) {
                         Ok(()) => {
-                            cx.audit.record(&cx.session.user, "ssh.connection.remove", &name);
+                            port.audit("ssh.connection.remove", &name);
                             self.status = Some((format!("Removed {name}. Its host key and vault key were left alone."), true));
                         }
                         Err(e) => self.status = Some((e, false)),
@@ -350,14 +346,14 @@ impl Conns {
             }
             CMode::Trust(ask) => {
                 if matches!(ev, Event::Key(Key::Char('y'))) {
-                    let (host, port, keys, then) = (ask.host.clone(), ask.port, ask.keys.clone(), ask.then.clone());
+                    let (host, tcp, keys, then) = (ask.host.clone(), ask.port, ask.keys.clone(), ask.then.clone());
                     self.mode = CMode::List;
-                    match Self::env(cx).trust(&host, port, &keys) {
+                    match port.ssh().trust(&host, tcp, &keys) {
                         Ok(()) => {
-                            cx.audit.record(&cx.session.user, "ssh.trust", &format!("{host}:{port}"));
-                            self.status = Some((format!("Trusted {host}:{port}."), true));
+                            port.audit("ssh.trust", &format!("{host}:{tcp}"));
+                            self.status = Some((format!("Trusted {host}:{tcp}."), true));
                             if let Some(c) = then.and_then(|n| list.iter().find(|c| c.name == n).cloned()) {
-                                self.connect(cx, &c);
+                                self.connect(port, &c);
                             }
                         }
                         Err(e) => self.status = Some((e, false)),
@@ -374,11 +370,9 @@ impl Conns {
                     Event::Key(Key::Enter) => {
                         let name = self.key_name.value.trim().to_string();
                         self.mode = CMode::List;
-                        let env = Self::env(cx);
-                        let (svc, user) = (cx.vault(), cx.session.user.clone());
-                        match env.generate_key(&name, &format!("{user}@iyakki"), &move |n, v| svc.user_set(&user, n, v).map_err(|e| format!("could not store the key in your vault: {e}"))) {
+                        match port.make_ssh_key(&name) {
                             Ok(public) => {
-                                cx.audit.record(&cx.session.user, "ssh.keygen", &name);
+                                port.audit("ssh.keygen", &name);
                                 self.fresh_pub = Some((name.clone(), public));
                                 self.status = Some((format!("Made {name} in your vault. Copy the public key below to the server's authorized_keys."), true));
                             }
@@ -417,22 +411,22 @@ impl Conns {
                 None => self.status = Some(("There is no connection to remove.".into(), false)),
             },
             Event::Key(Key::Char('c')) | Event::Key(Key::Enter) => match &cur {
-                Some(c) => self.connect(cx, c),
+                Some(c) => self.connect(port, c),
                 None => self.status = Some(("There is no connection yet; press N to add one.".into(), false)),
             },
             Event::Key(Key::Char('l')) => match &cur {
-                Some(c) => self.request_login(cx, c),
+                Some(c) => self.request_login(port, c),
                 None => self.status = Some(("There is no connection yet; press N to add one.".into(), false)),
             },
             Event::Key(Key::Char('t')) => match &cur {
-                Some(c) => self.start_probe(cx, &c.host.clone(), c.port, None),
+                Some(c) => self.start_probe(port, &c.host.clone(), c.port, None),
                 None => self.status = Some(("Choose a connection first.".into(), false)),
             },
             Event::Key(Key::Char('f')) => match &cur {
-                Some(c) => match Self::env(cx).forget(&c.host, c.port) {
+                Some(c) => match port.ssh().forget(&c.host, c.port) {
                     Ok(0) => self.status = Some((format!("No host key was trusted for {}.", c.host), false)),
                     Ok(_) => {
-                        cx.audit.record(&cx.session.user, "ssh.forget", &format!("{}:{}", c.host, c.port));
+                        port.audit("ssh.forget", &format!("{}:{}", c.host, c.port));
                         self.status = Some((format!("Forgot the host key of {}. Trust it again before connecting.", c.host), true));
                     }
                     Err(e) => self.status = Some((e, false)),
@@ -448,15 +442,15 @@ impl Conns {
         Flow::Stay
     }
 
-    fn save(&mut self, cx: &AppCx, editing: Option<String>) {
+    fn save(&mut self, port: &dyn CliPort, editing: Option<String>) {
         match self.form_connection().and_then(|c| {
             let name = c.name.clone();
-            Self::env(cx).save_connection(c, editing.as_deref()).map(|_| name)
+            port.ssh().save_connection(c, editing.as_deref()).map(|_| name)
         }) {
             Ok(name) => {
-                cx.audit.record(&cx.session.user, "ssh.connection.save", &name);
+                port.audit("ssh.connection.save", &name);
                 self.mode = CMode::List;
-                self.sel = Self::list(cx).iter().position(|c| c.name == name).unwrap_or(0);
+                self.sel = Self::list(port).iter().position(|c| c.name == name).unwrap_or(0);
                 self.status = Some((format!("Saved {name}."), true));
             }
             Err(e) => self.status = Some((e, false)),
@@ -474,7 +468,7 @@ impl Conns {
 
     // ------------------------------------------------------------------ drawing
 
-    pub fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+    pub fn render(&mut self, g: &mut Gfx, area: R, s: f32, port: &dyn CliPort, tick: u64) {
         let x = area.x + 24.0 * s;
         let w = area.w - 48.0 * s;
         let mut y = area.y + 4.0 * s;
@@ -485,10 +479,10 @@ impl Conns {
             g.text(x, y, 14.0 * s, if *ok { OK } else { ERR }, &m, Face::Sans);
             y += 24.0 * s;
         }
-        let env = Self::env(cx);
+        let env = port.ssh();
         let list = env.connections();
         self.sel = self.sel.min(list.len().saturating_sub(1));
-        let client = cx.clis().system_status("ssh");
+        let client = port.ssh_client();
         let list_w = (w * 0.34).clamp_safe(220.0 * s, 360.0 * s);
         let (rh, gap) = (46.0 * s, 5.0 * s);
         let bottom = area.y + area.h;
@@ -516,7 +510,7 @@ impl Conns {
         if pw >= 220.0 * s {
             let ph = bottom - y;
             crate::fx::panel(g, R::new(px, y, pw, ph), s, ACCENT);
-            self.draw_panel(g, R::new(px, y, pw, ph), s, cx, &env, list.get(self.sel), client.as_ref(), busy);
+            self.draw_panel(g, R::new(px, y, pw, ph), s, port, &env, list.get(self.sel), client.as_ref(), busy);
         }
         match &self.mode {
             CMode::Form(editing) => self.draw_form(g, area, s, editing.is_some(), tick),
@@ -528,7 +522,7 @@ impl Conns {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_panel(&self, g: &mut Gfx, p: R, s: f32, cx: &AppCx, env: &Env, cur: Option<&Connection>, client: Option<&iyakki_shared::clis::SystemStatus>, busy: bool) {
+    fn draw_panel(&self, g: &mut Gfx, p: R, s: f32, port: &dyn CliPort, env: &Env, cur: Option<&Connection>, client: Option<&iyakki_shared::clis::SystemStatus>, busy: bool) {
         let mut ty = p.y + 16.0 * s;
         // how many rows of buttons the panel's width needs, so the text above them stops in time
         let size = 15.0 * s;
@@ -577,7 +571,7 @@ impl Conns {
             if c.key.is_empty() {
                 line(g, &mut ty, "KEY", "none (the client's own default keys are not used here)", MUTED);
             } else {
-                let there = cx.vault().user_names(&cx.session.user).map(|n| n.contains(&c.key));
+                let there = port.ssh_key_in_vault(&c.key);
                 let (t, col) = match there {
                     Ok(true) => (format!("{} (in your vault)", c.key), OK),
                     Ok(false) => (format!("{} is not in your vault: press G to make it, or store it in Settings > Vault", c.key), WARN),

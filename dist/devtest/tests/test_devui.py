@@ -202,6 +202,57 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(json.load(open(os.path.join(d, "r.json")))["scenarios"][1]["status"], "fail")
 
 
+class SettingsSidebarTests(unittest.TestCase):
+    """A Settings page below the fold of the sidebar is found through the search box (Q1, 2026-11-21); nothing is sent blind and the search is emptied again."""
+
+    class Dev(devui.Device):
+        def __init__(self, below):
+            super().__init__("fake", run_dir=tempfile.gettempdir())
+            self.sent, self.typed, self.below, self.focus = [], "", below, ""
+
+        def _fresh(self):
+            return self.state()
+
+        def state(self):
+            side = [("Overview", 60, 150, 200, 40)]
+            if self.typed and self.typed in self.below:
+                side = [(self.typed, 60, 150, 200, 40)]
+            return st("Settings", buttons=side, focused=self.focus)
+
+        def run(self, args, retries=None, timeout=None):
+            self.sent.append(args[:3])
+            if args[:3] == ["input", "key", "/"]:
+                self.focus = "Search settings"
+            if args[:3] == ["input", "key", "Esc"]:
+                self.focus = ""
+            if args[:2] == ["input", "key"] and args[2] == "Delete":
+                self.typed = ""
+            if args[:2] == ["input", "text"]:
+                self.typed = args[2]
+            return ""
+
+    def test_a_page_below_the_fold_is_searched_tapped_and_the_search_emptied(self):
+        d = self.Dev(below=["Accessibility"])
+        d.pause = 0
+        d.click_sidebar("Accessibility")
+        sent = [" ".join(s) for s in d.sent]
+        self.assertIn("input text Accessibility", sent)
+        self.assertTrue(any(s.startswith("input tap") for s in sent))
+        self.assertEqual(sent[-1], "input key Esc")
+        self.assertIn("input key Delete", sent[-3:])
+
+    def test_a_page_this_build_does_not_have_is_not_found(self):
+        d = self.Dev(below=[])
+        d.pause = 0
+        self.assertIsNone(d.settings_find("Cloud access"))
+
+    def test_a_visible_page_needs_no_search(self):
+        d = self.Dev(below=[])
+        d.pause = 0
+        self.assertIsNotNone(d.settings_find("Overview"))
+        self.assertEqual(d.sent, [])
+
+
 class RunnerTests(unittest.TestCase):
     """run_scenario with a fake device: restore runs when a check fails and when the scenario raises."""
 

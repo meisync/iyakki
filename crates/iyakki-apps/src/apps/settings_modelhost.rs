@@ -12,6 +12,7 @@ use iyakki_shared::modelhost::{Found, TestReport};
 use iyakki_shared::modelhost::{self as mh, Host, Hosts, Kube, Limits, NewHost, Preset, ScanOpts, ServerApp};
 
 use super::*;
+use super::apps_port::ModelHostPort;
 
 /// What a finished background step hands back.
 pub(super) enum MhOut {
@@ -114,15 +115,15 @@ impl SettingsApp {
     }
 
     /// Open the page (administrators). `mac` chooses the preset.
-    pub(super) fn mh_open(&mut self, cx: &AppCx, mac: bool) {
-        if !cx.session.policy.manage_settings {
+    pub(super) fn mh_open(&mut self, p: &dyn ModelHostPort, mac: bool) {
+        if !p.is_admin() {
             self.fail("Only an administrator can add a model host.");
             return;
         }
         self.mh.open = true;
         self.mh.mac = mac;
         self.mh.scroll = 0.0;
-        self.mh_refresh(cx);
+        self.mh_refresh(p);
     }
 
     fn mh_close(&mut self) {
@@ -133,8 +134,8 @@ impl SettingsApp {
         self.mh.report = None;
     }
 
-    fn mh_refresh(&mut self, cx: &AppCx) {
-        self.mh.hosts = Hosts::new(cx.data_dir()).list();
+    fn mh_refresh(&mut self, p: &dyn ModelHostPort) {
+        self.mh.hosts = Hosts::new(&p.data_dir()).list();
     }
 
     fn mh_form(&self) -> Form {
@@ -167,7 +168,7 @@ impl SettingsApp {
     // ------------------------------------------------------------------ events
 
     /// Everything goes to the page while it is open. Returns true when the event was taken.
-    pub(super) fn mh_event(&mut self, ev: &Event, cx: &AppCx) -> bool {
+    pub(super) fn mh_event(&mut self, ev: &Event, p: &dyn ModelHostPort) -> bool {
         if !self.mh.open {
             return false;
         }
@@ -180,8 +181,8 @@ impl SettingsApp {
             Event::Key(Key::Home) => self.mh.scroll = 0.0,
             Event::Key(Key::End) => self.mh.scroll = self.mh.max_scroll,
             Event::Scroll(n) => self.mh_scroll(-(*n as f32) * 48.0),
-            Event::Key(Key::Char(c)) => self.mh_key(*c, cx),
-            Event::Tab(n) => self.mh_tab(*n, cx),
+            Event::Key(Key::Char(c)) => self.mh_key(*c, p),
+            Event::Tab(n) => self.mh_tab(*n, p),
             _ => {}
         }
         true
@@ -191,7 +192,7 @@ impl SettingsApp {
         self.mh.scroll = (self.mh.scroll + d).clamp_safe(0.0, self.mh.max_scroll);
     }
 
-    fn mh_key(&mut self, c: char, cx: &AppCx) {
+    fn mh_key(&mut self, c: char, p: &dyn ModelHostPort) {
         match c {
             'M' => self.mh.mac = true,
             'P' => self.mh.mac = false,
@@ -200,14 +201,14 @@ impl SettingsApp {
                 let f = self.mh_form();
                 self.open_form(FormKind::ModelHost, f);
             }
-            't' => self.mh_test(cx, false),
-            'a' => self.mh_test(cx, true),
-            's' => self.mh_scan(cx),
+            't' => self.mh_test(p, false),
+            'a' => self.mh_test(p, true),
+            's' => self.mh_scan(p),
             _ => {}
         }
     }
 
-    fn mh_tab(&mut self, n: usize, cx: &AppCx) {
+    fn mh_tab(&mut self, n: usize, p: &dyn ModelHostPort) {
         if (USE_BASE..USE_BASE + 64).contains(&n) {
             if let Some(f) = self.mh.found.get(n - USE_BASE).cloned() {
                 self.mh.address = format!("{}:{}", f.ip, f.port);
@@ -226,7 +227,7 @@ impl SettingsApp {
         } else if n >= HOST_BASE {
             let (i, act) = ((n - HOST_BASE) / 8, (n - HOST_BASE) % 8);
             if let Some(h) = self.mh.hosts.get(i).cloned() {
-                self.mh_host_action(cx, h, act);
+                self.mh_host_action(p, h, act);
             }
         }
     }
@@ -238,8 +239,8 @@ impl SettingsApp {
     }
 
     /// Test the typed host; with `add`, register it in Models too (testing first when the last test is not for this address).
-    fn mh_test(&mut self, cx: &AppCx, add: bool) {
-        if !self.admin(cx) {
+    fn mh_test(&mut self, p: &dyn ModelHostPort, add: bool) {
+        if !self.admin(p) {
             return;
         }
         let n = self.mh.new_host();
@@ -255,8 +256,8 @@ impl SettingsApp {
         let fp = self.mh.fingerprint(&t);
         let known = self.mh.report.clone().filter(|(f, _)| *f == fp).map(|r| r.1);
         let (lim_models, lim_chat) = self.mh_limits();
-        let svc = Self::svc(cx).clone();
-        cx.audit.record(&cx.session.user, if add { "settings.modelhost.add" } else { "settings.modelhost.test" }, &format!("{} {}", mh::provider_id(n.preset, &n.nickname).unwrap_or_default(), t.authority()));
+        let ops = p.modelhost_ops();
+        p.audit(if add { "settings.modelhost.add" } else { "settings.modelhost.test" }, &format!("{} {}", mh::provider_id(n.preset, &n.nickname).unwrap_or_default(), t.authority()));
         self.start(if add { "testing, then adding the host to Models" } else { "testing the model host" }, move || {
             let key = (!n.key.is_empty()).then_some(n.key.as_str());
             let report = match known {
@@ -269,7 +270,7 @@ impl SettingsApp {
             if !add {
                 return JobOut::Mh(MhOut::Tested(fp, Ok(report), None));
             }
-            match svc.modelhost_add(&n, &report) {
+            match ops.add(&n, &report) {
                 Ok(h) => {
                     let msg = format!("Added to Models as {} (default model {}). {} It is {}; pick it as the chat model with m on its row.", h.id, report.default_model.as_deref().unwrap_or("none yet"), report.summary(), h.label());
                     JobOut::Mh(MhOut::Tested(fp, Ok(report), Some(msg)))
@@ -280,11 +281,11 @@ impl SettingsApp {
     }
 
     /// Look for model servers on this machine's own /24, on the four usual ports. Only here, only on the click; nothing is added.
-    fn mh_scan(&mut self, cx: &AppCx) {
-        if !self.admin(cx) {
+    fn mh_scan(&mut self, p: &dyn ModelHostPort) {
+        if !self.admin(p) {
             return;
         }
-        cx.audit.record(&cx.session.user, "settings.modelhost.scan", "local /24");
+        p.audit("settings.modelhost.scan", "local /24");
         let over = self.mh.scan_override.clone();
         self.start("scanning your local network for model servers", move || {
             let (targets, opts) = match over {
@@ -301,35 +302,35 @@ impl SettingsApp {
         });
     }
 
-    fn mh_kube(&self, cx: &AppCx) -> Arc<dyn Kube + Send + Sync> {
+    fn mh_kube(&self, p: &dyn ModelHostPort) -> Arc<dyn Kube + Send + Sync> {
         match &self.mh.kube {
             Some(k) => k.clone(),
             None => {
-                let real: Arc<dyn Kube + Send + Sync> = cx.k3sdev().modelhost_kube();
+                let real: Arc<dyn Kube + Send + Sync> = p.modelhost_kube();
                 real
             }
         }
     }
 
-    fn mh_host_action(&mut self, cx: &AppCx, h: Host, act: usize) {
-        if !self.admin(cx) {
+    fn mh_host_action(&mut self, p: &dyn ModelHostPort, h: Host, act: usize) {
+        if !self.admin(p) {
             return;
         }
-        let svc = Self::svc(cx).clone();
+        let ops = p.modelhost_ops();
         let (lim_models, lim_chat) = self.mh_limits();
-        cx.audit.record(&cx.session.user, "settings.modelhost.action", &format!("{} {}", h.id, ["test", "publish", "unpublish", "cluster-test", "remove"].get(act).unwrap_or(&"?")));
+        p.audit("settings.modelhost.action", &format!("{} {}", h.id, ["test", "publish", "unpublish", "cluster-test", "remove"].get(act).unwrap_or(&"?")));
         match act {
             ACT_TEST => {
-                let key = cx.secrets().resolve(&format!("vault:{}-key", h.id), None).ok().map(|k| k.to_string());
+                let key = p.modelhost_key(&h.id);
                 let fp = format!("{}|", h.target().authority());
                 self.start("testing the model host", move || {
                     JobOut::Mh(MhOut::Tested(fp, mh::test(&h.target(), key.as_deref(), None, h.public_ok, &lim_models, &lim_chat).map_err(|e| e.message()), None))
                 });
             }
             ACT_PUBLISH | ACT_UNPUBLISH => {
-                let kube = self.mh_kube(cx);
+                let kube = self.mh_kube(p);
                 let publish = act == ACT_PUBLISH;
-                let data = cx.data_dir().to_path_buf();
+                let data = p.data_dir();
                 self.start(if publish { "publishing the host to the cluster" } else { "removing the host from the cluster" }, move || {
                     let hosts = Hosts::new(&data);
                     let r = if publish { mh::publish(&*kube, &data, &h).map(|_| format!("Published: pods in the cluster call {} (namespace {}). {}", h.cluster_url(), mh::NAMESPACE, mh::NETWORK_POLICY_NOTE)) } else { mh::unpublish(&*kube, &h.id).map(|_| format!("Removed {} from the cluster.", h.id)) };
@@ -340,16 +341,16 @@ impl SettingsApp {
                 });
             }
             ACT_CLUSTER_TEST => {
-                let kube = self.mh_kube(cx);
+                let kube = self.mh_kube(p);
                 let (timeout, poll) = if self.mh.kube.is_some() { (Duration::from_secs(20), Duration::from_millis(5)) } else { (Duration::from_secs(150), Duration::from_secs(2)) };
-                let data = cx.data_dir().to_path_buf();
+                let data = p.data_dir();
                 self.start("running a pod in the cluster that calls the host", move || {
                     let r = mh::test_from_cluster(&*kube, &data, &h, timeout, poll, &|d| std::thread::sleep(d));
                     JobOut::Mh(MhOut::Msg(r.and_then(|c| if c.dns && c.http { Ok(c.message(&h)) } else { Err(c.message(&h)) })))
                 });
             }
             ACT_REMOVE => {
-                let kube = self.mh_kube(cx);
+                let kube = self.mh_kube(p);
                 self.start("removing the model host", move || {
                     let mut note = String::new();
                     if h.in_cluster {
@@ -358,15 +359,15 @@ impl SettingsApp {
                             Err(e) => format!(" Its cluster Service could not be removed ({e})."),
                         };
                     }
-                    JobOut::Mh(MhOut::Msg(svc.modelhost_remove(&h.id).map(|_| format!("Removed {} from Models.{note} Its key (if any) stays in the vault until you delete it there.", h.id))))
+                    JobOut::Mh(MhOut::Msg(ops.remove(&h.id).map(|_| format!("Removed {} from Models.{note} Its key (if any) stays in the vault until you delete it there.", h.id))))
                 });
             }
             _ => {}
         }
     }
 
-    pub(super) fn mh_job_done(&mut self, cx: &AppCx, out: MhOut) {
-        self.mh_refresh(cx);
+    pub(super) fn mh_job_done(&mut self, p: &dyn ModelHostPort, out: MhOut) {
+        self.mh_refresh(p);
         match out {
             MhOut::Tested(fp, Ok(r), msg) => {
                 let text = msg.unwrap_or_else(|| r.summary());
@@ -394,7 +395,7 @@ impl SettingsApp {
 
     // ------------------------------------------------------------------ drawing
 
-    pub(super) fn mh_render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+    pub(super) fn mh_render(&mut self, g: &mut Gfx, area: R, s: f32, p: &dyn ModelHostPort, tick: u64) {
         // the page covers the settings behind it: what was drawn there (below the top bar) can no longer be clicked
         g.hits.retain(|h| h.rect.y + h.rect.h <= area.y + 0.5);
         g.rect(area.x, area.y, area.w, area.h, rgb(14, 18, 32));
@@ -407,11 +408,11 @@ impl SettingsApp {
         let sub = g.fit(13.0 * s, &format!("Use the GPU of another computer: {}", mh::METAL_FACTS[0]), Face::Sans, w);
         g.text(x, hy, 13.0 * s, MUTED, &sub, Face::Sans);
         let body = R::new(area.x, hy + 24.0 * s, area.w, (area.h - (hy - area.y) - 24.0 * s - 44.0 * s).max(60.0 * s));
-        let admin = cx.session.policy.manage_settings;
+        let admin = p.is_admin();
         let (preset, app, key_set) = (self.mh.preset(), self.mh.app(), !self.mh.key.is_empty());
         let (nick, addr, confirm_set) = (self.mh.nickname.clone(), self.mh.address.clone(), !self.mh.confirm.is_empty());
         let (report, found, scanned, hosts) = (self.mh.report.clone(), self.mh.found.clone(), self.mh.scanned, self.mh.hosts.clone());
-        let providers = Self::providers(cx);
+        let providers = p.settings_get().providers;
         let scroll = self.mh.scroll;
         let end = g.clipped(body, |g| {
             let mut y = body.y - scroll;

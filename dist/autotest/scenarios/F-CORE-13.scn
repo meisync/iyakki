@@ -1,0 +1,19 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 23532d09f56d9046; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-CORE-13
+targets: qemu
+profile: ram
+feature-sha: 23532d09f56d9046
+doc: Settings, Apps access is the page of the access broker (read only)
+clause: 1 Settings, Apps access is a page of its own that lists what apps hold
+not-covered: every call decided by the broker with stable refusal codes
+not-covered: the per-use card, the log and the clock
+not-covered: the capability catalogue
+key s
+wait app=Settings
+skip-unless-button Apps access
+click-sidebar Apps access
+wait app=Settings page="Apps access"
+shot page
+expect-not-blank
+expect-text Apps access
+expect-page Apps access

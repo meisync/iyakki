@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-KBD-12",
+ "feature_sha": "c47a1c075a0f7e28",
+ "title": "Touch Bar picture is drawn the right way round",
+ "clauses": [
+  {
+   "id": "strip-picture",
+   "text": "the Touch Bar strip shows its picture the right way round, with the two flip choices in Settings, Keyboard",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "With the Touch Bar showing, open Settings, Keyboard and use each of the two flip choices.",
+     "expect": "The picture on the strip reads normally with the right flip, and is not mirrored or upside down."
+    }
+   ]
+  }
+ ]
+}

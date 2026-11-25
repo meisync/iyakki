@@ -1966,3 +1966,158 @@ fn a_tile_without_the_terminal_capability_reaches_no_terminal_and_a_whole_sessio
     tick(&h); // and a key reaches the program
     assert!(h.extras.terminal.pty_frame("ann", "p1").unwrap().text().contains("ran:"), "the Enter reached the session");
 }
+
+/// The size of the first text drawn with exactly this label.
+fn size_of(v: &Value, label: &str) -> i64 {
+    v["frame"]["ops"].as_array().unwrap().iter().find(|o| o["op"] == "text" && o["text"] == label).unwrap_or_else(|| panic!("no text {label}"))["size"].as_i64().unwrap()
+}
+
+fn press(h: &H, tok: &str, tile: &str, code: i64) -> Value {
+    runs_tile_named(h, tok, tile, json!({"events": [{"type": "key", "code": code, "mods": 0, "down": true}]}))
+}
+
+fn type_into(h: &H, tok: &str, tile: &str, text: &str) -> Value {
+    runs_tile_named(h, tok, tile, json!({"events": [{"type": "text", "text": text}]}))
+}
+
+#[test]
+fn the_sdk_edit_and_cli_tiles_are_listed_with_exactly_the_capabilities_the_apps_ask_for_and_the_committed_wasm_is_the_recorded_build() {
+    let all = tiles::builtin();
+    let find = |id: &str| all.iter().find(|d| d.id == id).unwrap_or_else(|| panic!("no tile {id}"));
+    let (edit, cli, scratch) = (find("edit-sdk"), find("cli"), find("edit"));
+    assert_eq!(edit.caps, vec!["home", "assistant", "storage", "dock"]);
+    assert_eq!(cli.caps, vec!["terminal", "storage", "dock"]);
+    assert_eq!(scratch.title, "Edit (scratch)", "the scratch editor keeps its id and title");
+    // the manifests of the apps say the same, so the app and the host cannot drift apart
+    for (def, app) in [(edit, include_str!("../../../iyakki-app-edit/app.toml")), (cli, include_str!("../../../iyakki-app-terminal/app.toml"))] {
+        let line = app.lines().find(|l| l.starts_with("tile_caps")).expect("tile_caps");
+        let from_app: Vec<&str> = line.split('[').nth(1).unwrap().trim_end_matches(']').split(',').map(|c| c.trim().trim_matches('"')).collect();
+        assert_eq!(def.caps, from_app, "{}", def.id);
+    }
+    // the committed module is the one whose hash was recorded when it was built (cargo build --release --lib --target wasm32-unknown-unknown ... --features tile)
+    for (def, recorded) in [(edit, include_str!("../../../iyakki-app-edit/tile.wasm.sha256")), (cli, include_str!("../../../iyakki-app-terminal/tile.wasm.sha256"))] {
+        assert_eq!(crate::ocipush::sha256_hex(&def.wasm), recorded.split_whitespace().next().unwrap(), "{}", def.id);
+        assert!(def.wasm.starts_with(b"\0asm"), "a real wasm module");
+    }
+    let host = tiles::TileHost::new(all.clone());
+    assert!(host.list().iter().any(|d| d.id == "edit-sdk") && host.list().iter().any(|d| d.id == "cli"));
+}
+
+#[test]
+fn the_sdk_edit_tile_opens_draws_takes_a_click_and_a_key_and_asks_the_core_only_through_its_manifest() {
+    let h = harness("agent-api", |_| {});
+    let ann = h.ann();
+    let v = runs_tile_named(&h, &ann, "edit-sdk", json!({"width": 480, "height": 480}));
+    assert!(texts(&v).iter().any(|t| t == "Files") && texts(&v).iter().any(|t| t.starts_with("Assis")), "{:?}", texts(&v));
+    let before = size_of(&v, "A+");
+    // a click on A+ makes the text bigger (hit 5), one on A- smaller again (hit 4)
+    let v = click_at(&h, &ann, "edit-sdk", 400, 20);
+    assert!(size_of(&v, "A+") > before, "{:?}", texts(&v));
+    let v = click_at(&h, &ann, "edit-sdk", 290, 20);
+    assert_eq!(size_of(&v, "A+"), before);
+    // the Assistant tab, a click in its field, typing and Enter: the text reaches the core's assistant through the `assistant` domain
+    let v = click_at(&h, &ann, "edit-sdk", 180, 20);
+    assert!(texts(&v).iter().any(|t| t.starts_with("Se")) && texts(&v).contains(&"Ask the assistant".to_string()), "{:?}", texts(&v));
+    click_at(&h, &ann, "edit-sdk", 100, 452);
+    type_into(&h, &ann, "edit-sdk", "hello");
+    press(&h, &ann, "edit-sdk", 13);
+    let lines = h.accounts.lines().join("\n");
+    assert!(lines.contains("tile.call tile=edit-sdk tool=assistant_"), "{lines}");
+    assert!(!lines.contains("hello"), "no typed text in the audit");
+}
+
+#[test]
+fn the_sdk_edit_tile_without_the_files_capability_reaches_no_folder_and_the_audit_says_so() {
+    let h = harness("agent-api", |_| {});
+    let ann = h.ann();
+    h.svc.shared().tiles.register(TileDef { id: "edit-nocap".into(), title: "Edit".into(), wasm: Arc::new(iyakki_app_edit::TILE_WASM.to_vec()), caps: vec!["storage".into()], width: 480, height: 480, pictures: vec![] });
+    let v = runs_tile_named(&h, &ann, "edit-nocap", json!({"width": 480, "height": 480}));
+    assert!(texts(&v).iter().any(|t| t == "Files"), "it still draws: {:?}", texts(&v));
+    click_at(&h, &ann, "edit-nocap", 430, 58); // Refresh asks the folder list
+    let lines = h.accounts.lines().join("\n");
+    assert!(lines.contains("tile.denied tile=edit-nocap tool=home_list"), "the refused call is audited before the core: {lines}");
+    assert!(!lines.contains("tile.call tile=edit-nocap tool=home_"), "no folder call reached the core: {lines}");
+}
+
+#[test]
+fn the_cli_tile_runs_a_reading_line_asks_before_a_changing_one_and_a_no_runs_nothing() {
+    let h = harness("agent-api", |_| {});
+    let ann = h.ann();
+    runs_tile_named(&h, &ann, "cli", json!({"width": 480, "height": 480}));
+    click_at(&h, &ann, "cli", 100, 450);
+    type_into(&h, &ann, "cli", "ls");
+    let v = press(&h, &ann, "cli", 13);
+    assert!(texts(&v).contains(&"ran: ls".to_string()), "{:?}", texts(&v));
+    assert_eq!(h.extras.terminal.log(), vec!["ann: ls".to_string()]);
+    // a changing line: the tile shows the question and the person has a card in their page; the tile's own Allow counts for nothing
+    type_into(&h, &ann, "cli", "rm x");
+    let v = press(&h, &ann, "cli", 13);
+    assert!(texts(&v).iter().any(|t| t.contains("rm x")) && texts(&v).contains(&"Allow".to_string()), "{:?}", texts(&v));
+    let card = pending_tile_asks(&h, &ann);
+    assert_eq!((card.len(), card[0]["tool"].as_str()), (1, Some("terminal_line")), "{card:?}");
+    click_at(&h, &ann, "cli", 130, 416);
+    assert_eq!(h.extras.terminal.log(), vec!["ann: ls".to_string()], "nothing runs on the tile's click alone");
+    let id = card[0]["call"].as_str().unwrap().to_string();
+    assert_eq!(decide(&h, &h.login("bob", "bob-password-1"), &id, "approve").0, 404, "another person cannot answer it");
+    assert_eq!(decide(&h, &ann, &id, "approve").0, 200);
+    let v = click_at(&h, &ann, "cli", 130, 416);
+    assert_eq!(h.extras.terminal.log(), vec!["ann: ls".to_string(), "ann: rm x".to_string()], "after the yes the line ran once: {:?}", texts(&v));
+    // a second changing line and a Deny: nothing runs
+    type_into(&h, &ann, "cli", "rm y");
+    press(&h, &ann, "cli", 13);
+    assert_eq!(pending_tile_asks(&h, &ann).len(), 1);
+    click_at(&h, &ann, "cli", 350, 416);
+    assert!(pending_tile_asks(&h, &ann).is_empty());
+    assert_eq!(h.extras.terminal.log().len(), 2, "{:?}", h.extras.terminal.log());
+    let lines = h.accounts.lines().join("\n");
+    assert!(lines.contains("tile.asked tile=cli tool=terminal_line") && lines.contains("tile.call tile=cli tool=terminal_run"), "{lines}");
+    assert!(!lines.contains("rm x") && !lines.contains("rm y"), "no command text in the audit");
+}
+
+#[test]
+fn the_cli_tile_without_the_terminal_capability_gets_a_refusal_and_the_core_runs_nothing() {
+    let h = harness("agent-api", |_| {});
+    let ann = h.ann();
+    h.svc.shared().tiles.register(TileDef { id: "cli-nocap".into(), title: "CLI".into(), wasm: Arc::new(iyakki_app_terminal::TILE_WASM.to_vec()), caps: vec!["storage".into(), "dock".into()], width: 480, height: 480, pictures: vec![] });
+    runs_tile_named(&h, &ann, "cli-nocap", json!({"width": 480, "height": 480}));
+    click_at(&h, &ann, "cli-nocap", 100, 450);
+    type_into(&h, &ann, "cli-nocap", "ls");
+    press(&h, &ann, "cli-nocap", 13);
+    assert!(h.extras.terminal.log().is_empty(), "nothing reached the terminal");
+    assert!(pending_tile_asks(&h, &ann).is_empty());
+    let lines = h.accounts.lines().join("\n");
+    assert!(lines.contains("tile.denied") && lines.contains("terminal"), "{lines}");
+}
+
+#[test]
+fn the_sdk_edit_tile_keeps_its_text_size_per_person_in_the_core_and_its_dock_status_is_no_longer_refused() {
+    let h = harness("agent-api", |_| {});
+    let (ann, bob) = (h.ann(), h.login("bob", "bob-password-1"));
+    let start = runs_tile_named(&h, &ann, "edit-sdk", json!({"width": 480, "height": 480}));
+    let small = size_of(&start, "A+");
+    let grown = click_at(&h, &ann, "edit-sdk", 400, 20);
+    assert!(size_of(&grown, "A+") > small);
+    // a new start of the tile (a later visit) reads the size from the core's store
+    let again = runs_tile_named(&h, &ann, "edit-sdk", json!({"width": 480, "height": 480, "reset": true}));
+    assert_eq!(size_of(&again, "A+"), size_of(&grown, "A+"), "the size was kept");
+    // another person's tile has its own size
+    let bobs = runs_tile_named(&h, &bob, "edit-sdk", json!({"width": 480, "height": 480}));
+    assert_eq!(size_of(&bobs, "A+"), small);
+    let lines = h.accounts.lines().join("\n");
+    assert!(lines.contains("tile.call tile=edit-sdk tool=storage_set") && lines.contains("tile.call tile=edit-sdk tool=storage_get"), "{lines}");
+    assert!(!lines.contains("1200") && !lines.contains("text-size"), "no key or value in the audit");
+    assert!(!lines.contains("tile.refused tile=edit-sdk tool=dock_status") && lines.contains("tile.call tile=edit-sdk tool=dock_status"), "{lines}");
+}
+
+#[test]
+fn a_tile_without_the_storage_capability_keeps_nothing_and_the_refusal_is_audited() {
+    let h = harness("agent-api", |_| {});
+    let ann = h.ann();
+    h.svc.shared().tiles.register(TileDef { id: "edit-nostore".into(), title: "Edit".into(), wasm: Arc::new(iyakki_app_edit::TILE_WASM.to_vec()), caps: vec!["home".into(), "dock".into()], width: 480, height: 480, pictures: vec![] });
+    runs_tile_named(&h, &ann, "edit-nostore", json!({"width": 480, "height": 480}));
+    let grown = click_at(&h, &ann, "edit-nostore", 400, 20);
+    let again = runs_tile_named(&h, &ann, "edit-nostore", json!({"width": 480, "height": 480, "reset": true}));
+    assert!(size_of(&again, "A+") < size_of(&grown, "A+"), "nothing was kept");
+    let lines = h.accounts.lines().join("\n");
+    assert!(lines.contains("tile.denied tile=edit-nostore tool=storage_set") && !lines.contains("tile.call tile=edit-nostore tool=storage_"), "{lines}");
+}

@@ -1,0 +1,18 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha e711bc950eb47316; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-LOCK-03
+targets: qemu
+profile: ram
+feature-sha: e711bc950eb47316
+doc: Settings, Screen saver offers the automatic lock after idle minutes (read only)
+clause: 1 Settings, Screen saver offers Lock the screen when idle with its explanation
+not-covered: the choices Never, 5, 10, 15, 30 and 60 minutes and each person's own kept in the lock-screen file
+not-covered: the lock itself after idle time, music or a waiting approval holding it off
+key s
+wait app=Settings
+skip-unless-button Screen saver
+click-sidebar Screen saver
+wait app=Settings page="Screen saver"
+shot page
+expect-not-blank
+expect-text Lock the screen when idle
+expect-page Screen saver

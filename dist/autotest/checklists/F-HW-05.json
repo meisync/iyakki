@@ -1,0 +1,22 @@
+{
+ "schema": 1,
+ "row": "F-HW-05",
+ "feature_sha": "aa03d15d26889359",
+ "title": "the This computer page of Settings names the computer and the computer",
+ "clauses": [
+  {
+   "id": "computer-page",
+   "text": "the This computer page of Settings names the computer and the computers this install has seen (read only)",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, This computer. Read the label, the boot counts and the category switches, then press Reset this computer and answer No.",
+     "expect": "The page reads clearly at this screen size and nothing is reset after No.",
+     "runner_did": "Checked the page text first (when run through the runner)"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,11 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha b8356162bcf27620; honest subset only: everything not checked is under not-covered.
+row: F-WEB-48
+targets: browser
+feature-sha: b8356162bcf27620
+doc: web page Schedules: Pause is kept on the service and the page offers Resume
+clause: 1 Pause on the page calls the pause route, the service lists the schedule as paused and the page offers Resume; Resume undoes it
+not-covered: the state words (paused by the service with the reason, owner lost access, not published yet)
+not-covered: the form with the cron expression checked as typed and the next times in the tenant's zone
+not-covered: run now, change, delete, history link, the scheduler's counters
+not-covered: loading, empty, error and not-allowed states
+suite: run_pages.py --only more,functions

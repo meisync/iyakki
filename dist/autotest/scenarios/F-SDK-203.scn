@@ -1,0 +1,13 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha c018bec12dc95898; honest subset only: everything not checked is under not-covered.
+row: F-SDK-203
+targets: qemu
+profile: usb
+feature-sha: c018bec12dc95898
+doc: a USB mouse plugged into the guest and taken out reaches SAMPLE as usb added and removed
+clause: 1 a USB device plugged into the guest through the QEMU monitor, then taken out, reaches the app as usb added, then usb removed
+not-covered: an app's permission granted or revoked as an event
+not-covered: a clipboard or screen-share started
+not-covered: a location or timezone change from the network
+not-covered: storage quota of the app itself
+not-covered: an app asking to be woken at a time
+session-check: app_events_usb

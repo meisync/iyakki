@@ -2118,12 +2118,12 @@ impl BrowserApp {
 
     /// The person's Downloads folder: `/home/<name>/Downloads` when their account may write there (the other apps can then
     /// open what was saved), otherwise a private one next to their other browser data.
-    pub(crate) fn downloads_dir(cx: &AppCx) -> Result<std::path::PathBuf, String> {
-        let home = std::path::PathBuf::from(format!("/home/{}/Downloads", cx.session.user));
-        if cx.core.file_scope().check_write(&cx.session.policy, &cx.session.user, &home).is_ok() && std::fs::create_dir_all(&home).is_ok() {
+    pub(crate) fn downloads_dir(cx: &dyn super::chat_port::UserData) -> Result<std::path::PathBuf, String> {
+        let home = std::path::PathBuf::from(format!("/home/{}/Downloads", cx.acting_user()));
+        if cx.core_handle().file_scope().check_write(&cx.acting_policy(), &cx.acting_user(), &home).is_ok() && std::fs::create_dir_all(&home).is_ok() {
             return Ok(home);
         }
-        let own = cx.data_dir().join("downloads").join(super::browser_config::who(cx));
+        let own = cx.data_root().join("downloads").join(super::browser_config::who(cx));
         std::fs::create_dir_all(&own).map_err(|e| format!("{}: {e}", own.display()))?;
         Ok(own)
     }
@@ -6917,6 +6917,7 @@ mod tests {
 
     #[test]
     fn the_context_menu_has_link_actions_over_a_link_and_back_forward_reload_everywhere() {
+        let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
         use crate::apps::App;
         crate::ui::clipboard::clear();
         let web = site(vec![("https://a.org/", html(GUIDE)), ("https://a.org/more", html("<title>More</title><p>more text</p>"))]);

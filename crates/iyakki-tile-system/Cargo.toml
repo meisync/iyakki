@@ -1,0 +1,19 @@
+[package]
+name = "iyakki-tile-system"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The SYSTEM tile (what the machine is doing: processor, memory, load, disks, network, heat; processes; agent runs; hardware; the programs
+# started for the person). Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit`, `iyakki-tile-api` and the model
+# crates named in tests/data/tile_crate_deps.allow, never on the agent or the core API; its tests run against a fake `SystemPort`. The shell
+# adapter is `crates/iyakki-apps/src/apps/system.rs`, the real port `system_port.rs`.
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-tile-api = { path = "../iyakki-tile-api" }
+iyakki-sysinfo-model = { workspace = true }
+iyakki-clock = { workspace = true }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

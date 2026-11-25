@@ -1,0 +1,15 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 3a52b2f288eed4ef; honest subset only: everything not checked is under not-covered.
+# HONEST BLOCKER (lane Q8, 2026-11-24): the check SKIPs on every current image. Mounting needs root; the guest shell is the unprivileged scratch account, and the
+# image has no automounter that mounts a hot-plugged disk by itself (adding one would be a product feature, not a test change). The PCI hot-plug of the disk
+# itself is also limited (no ACPI PCI hot-plug in the image kernel; the `usb` profile carries the answer for a controller, a disk would need a bus the same way).
+# It becomes runnable when either an automounter for removable disks exists in the core, or the runner may start a root shell in a scratch guest. Until then a SKIP is the truth.
+row: F-SDK-197
+targets: qemu
+profile: ram
+feature-sha: 3a52b2f288eed4ef
+doc: a hot-plugged disk mounted and unmounted in the guest reaches SAMPLE as storage.volume
+clause: 1 storage.volume mounted, then unmounted, reaches the app when a disk is hot-plugged, mounted and unmounted in the guest
+not-covered: audio.devices added and removed (sound cards by name)
+not-covered: camera.devices added and removed
+not-covered: backup.finished for a scheduled backup
+session-check: app_events_volume

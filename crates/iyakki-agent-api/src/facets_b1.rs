@@ -388,13 +388,7 @@ impl SshHost for NoSsh {}
 
 // ------------------------------------------------------------------------------------------------ host speech engines
 
-/// A speech engine of this computer that speaks by itself (espeak, say, ...): its text-to-sound stage is empty and its sink speaks.
-pub trait DirectVoice: Send + Sync {
-    /// The synth of this engine (it makes no sound file; the sink speaks the text).
-    fn synth(&self) -> Arc<dyn iyakki_shared::story::Synth>;
-    /// The sink that speaks; `voice` replaces the engine's own voice when given.
-    fn sink(&self, voice: Option<&str>, lang: Option<&str>, speed: f32) -> Arc<dyn iyakki_shared::story::Sink>;
-}
+pub use iyakki_shared::story::{DirectVoice, LinkedPicture, NoReader, StoryReader};
 
 pub trait HostEnginesFacet: Send + Sync {
     /// The engine `engine` (id, program, voice of the setting) as a direct voice; `None` when it does not speak by itself or is not found here.
@@ -409,48 +403,6 @@ pub trait HostEnginesFacet: Send + Sync {
 
 // ------------------------------------------------------------------------------------------------ story reader
 
-/// Reads pieces aloud: while piece N plays, the next ones are made. All clones of the `Arc` are the same reader.
-pub trait StoryReader: Send + Sync {
-    /// Start reading `chunks` from piece `from`; `open`: more pieces follow through `append` (the story is still being written).
-    fn start(&self, _chunks: Vec<iyakki_shared::story::Chunk>, _from: usize, _open: bool, _voice_key: &str, _synth: Arc<dyn iyakki_shared::story::Synth>, _sink: Arc<dyn iyakki_shared::story::Sink>) {}
-    fn append(&self, _more: Vec<iyakki_shared::story::Chunk>) {}
-    fn close_input(&self) {}
-    fn pause(&self) {}
-    fn resume(&self) {}
-    fn stop(&self) {}
-    fn seek(&self, _chunk: usize) {}
-    fn is_active(&self) -> bool {
-        false
-    }
-    fn announce_holder(&self) {}
-    fn status(&self) -> iyakki_shared::story::Status {
-        iyakki_shared::story::Status::Idle
-    }
-    fn snapshot(&self) -> iyakki_shared::story::Snapshot {
-        iyakki_shared::story::Snapshot { status: iyakki_shared::story::Status::Idle, chunk: 0, unit: 0, range: (0, 0), chunks: 0, fraction: 0.0, ready: 0, word: None, word_exact: false, timing: Default::default() }
-    }
-    fn timeline_note(&self) -> String {
-        String::new()
-    }
-    fn now_ms(&self) -> f32 {
-        0.0
-    }
-    /// Replace the real clock (milliseconds): tests move time themselves.
-    fn set_time_source(&self, _time: Arc<dyn Fn() -> f32 + Send + Sync>) {}
-    fn set_words(&self, _on: bool) {}
-    fn set_speed(&self, _speed: f32) {}
-    fn level(&self) -> f32 {
-        0.0
-    }
-    fn sounds(&self) -> (Vec<iyakki_shared::story::Chunk>, Vec<Option<Arc<Vec<u8>>>>) {
-        (Vec::new(), Vec::new())
-    }
-}
-
-/// A reader that reads nothing.
-pub struct NoReader;
-impl StoryReader for NoReader {}
-
 pub trait StoryFacet: Send + Sync {
     fn new_reader(&self) -> Arc<dyn StoryReader> {
         Arc::new(NoReader)
@@ -458,13 +410,6 @@ pub trait StoryFacet: Send + Sync {
 }
 
 // ------------------------------------------------------------------------------------------------ scene (pictures from links in a reply)
-
-/// A picture accepted from a link.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LinkedPicture {
-    pub ext: String,
-    pub bytes: Vec<u8>,
-}
 
 pub trait SceneFacet: Send + Sync {
     /// The writer's reply asks the person to fetch a picture: the scene (0-based) and the address. `None` for any other message.

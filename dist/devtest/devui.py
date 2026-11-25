@@ -463,13 +463,39 @@ class Device:
         self.run(["input", "click", label], retries=0)
         time.sleep(self.pause)
 
+    def _side_button(self, label, st=None):
+        st = st or self._fresh()
+        side = [b for b in (st.buttons if st else []) if b.label == label and b.x < 320 and not b.secret]
+        return side[0] if side else None
+
+    def settings_clear_search(self):
+        """Empty the Settings search box (it keeps its text between visits) and leave it, so the sidebar lists every page again."""
+        self.key("/"); self.key("Ctrl+a"); self.key("Delete"); self.key("Esc")
+
+    def settings_find(self, label):
+        """The sidebar of Settings lists some thirty pages and the state reports the buttons on the screen, so a page below the fold is not in it. Returns the sidebar button
+        for LABEL: the list as it is, else with LABEL typed into the search box (the page is then the one match). The search text is left in the box: the caller clears it
+        with `settings_clear_search` once it has tapped the page (Q1, 2026-11-21: eight wave-2 scenarios skipped with 'no button in this build')."""
+        st = self._fresh()
+        b = self._side_button(label, st)
+        if b or not st or st.app.lower() != "settings":
+            return b
+        self.key("/"); self.key("Ctrl+a"); self.key("Delete"); self.text(label)
+        return self._side_button(label)
+
     def click_sidebar(self, label):
         """A Settings page in the sidebar (x < 320). The same words can also be a chip on the Overview page, which makes
-        `dev input click` refuse them as ambiguous; the sidebar button is tapped by its place instead."""
-        st = self._fresh()
-        side = [b for b in (st.buttons if st else []) if b.label == label and b.x < 320 and not b.secret]
-        if side:
-            return self.tap(*side[0].centre, label=label)
+        `dev input click` refuse them as ambiguous; the sidebar button is tapped by its place instead. A page below the fold is found through the search box."""
+        b = self._side_button(label)
+        searched = False
+        if not b:
+            b = self.settings_find(label)
+            searched = b is not None
+        if b:
+            self.tap(*b.centre, label=label)
+            if searched:
+                self.settings_clear_search()
+            return None
         return self.click(label)
 
     def tap_text(self, text, shot=None):

@@ -1,0 +1,11 @@
+[package]
+name = "iyakki-piclog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The picture log of TALES (one event per request, kinds, the readable text and the file the person copies). iyakki_shared::piclog re-exports it (alpha.9 P6, D-S2-01)."
+
+[dependencies]
+iyakki-provider-kind = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

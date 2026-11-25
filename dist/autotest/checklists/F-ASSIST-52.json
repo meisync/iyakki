@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-52",
+  "feature_sha": "d784ecdf90103b32",
+  "title": "Google Gemini chat provider (experimental)",
+  "clauses": [
+    {
+      "id": "gemini-consent",
+      "text": "Gemini is used only after a yes on the consent card",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Settings, Models: press g (Google Gemini, experimental) and read the consent card. Answer No first.",
+          "expect": "Nothing is sent to Google while the card says No."
+        }
+      ]
+    },
+    {
+      "id": "gemini-chat",
+      "text": "A chat with Gemini answers and can use a tool",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "With your key set by you (never in chat) and gemini chosen, ask a question that needs a tool.",
+          "expect": "The answer comes back and the tool is used."
+        }
+      ]
+    }
+  ]
+}

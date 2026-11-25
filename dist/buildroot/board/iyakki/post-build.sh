@@ -74,6 +74,14 @@ if [ -d "$MANUAL_SRC" ]; then
     [ -f "$f" ] && install -D -m 0644 "$f" "$TARGET_DIR/usr/share/iyakki/manual/$(basename "$f")"
   done
 fi
+# The autotest runner's checklists (dist/autotest/checklists/<ROW>.json, and the screenshots they name, relative to that folder) are read by the
+# same tab through its second parser; read-only data, evidence is written in the runner's own schema.
+CHECKLIST_SRC="${BR2_EXTERNAL_IYAKKI_PATH}/../autotest/checklists"
+if [ -d "$CHECKLIST_SRC" ]; then
+  (cd "$CHECKLIST_SRC" && find . -type f \( -name '*.json' -o -name '*.png' \) -print) | while read -r f; do
+    install -D -m 0644 "$CHECKLIST_SRC/$f" "$TARGET_DIR/usr/share/iyakki/manual/checklists/${f#./}"
+  done
+fi
 
 # Attribution: our license, notices, and the licenses of the statically linked Rust crates.
 DOC="$TARGET_DIR/usr/share/doc/iyakki"

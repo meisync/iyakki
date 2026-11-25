@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-26",
+  "feature_sha": "48bcbe7ba3634484",
+  "title": "Autopilot fixes instead of advising",
+  "clauses": [
+    {
+      "id": "fix-not-advice",
+      "text": "Autopilot acts on a failed build and reports only what ran",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Start Autopilot on a build that fails and watch the steps.",
+          "expect": "The next step begins with the diagnosis and the assistant changes the files and redeploys. The summary lists what ran, and advice-only commands under 'Suggested, not run'."
+        }
+      ]
+    }
+  ]
+}

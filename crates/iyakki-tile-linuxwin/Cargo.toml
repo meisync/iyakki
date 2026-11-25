@@ -1,0 +1,16 @@
+[package]
+name = "iyakki-tile-linuxwin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The LINUX WINDOW tile. Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit` and
+# `iyakki-tile-api` only, never on the agent, the shared crate or the RFB crate; the shell hands it the sandbox rig (spawner, process table, remote
+# screen), the install job and the policy through `LinuxWinPort` (a fake in tests).
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-tile-api = { path = "../iyakki-tile-api" }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

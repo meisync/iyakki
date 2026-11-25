@@ -9,6 +9,7 @@
 //! * Everything but the yes is also a chat tool (`alexa_status`, `alexa_set`).
 
 use super::*;
+use super::apps_port::UserPort;
 use iyakki_shared::alexa;
 
 const NO: &str = "No: keep my voice on this computer";
@@ -32,29 +33,29 @@ impl SettingsApp {
         Form::new("Send my voice to Amazon?").with_note(&alexa::consent_card()).choice("Your answer (Left/Right to change, Enter to confirm)", &[NO, YES], 0)
     }
 
-    pub(super) fn alexa_switch(&mut self, cx: &AppCx) {
-        if !cx.session.policy.manage_settings {
+    pub(super) fn alexa_switch(&mut self, p: &dyn UserPort) {
+        if !p.is_admin() {
             return self.fail("Only an administrator switches Alexa on or off.");
         }
-        let on = !alexa::load(cx.data_dir()).enabled;
-        match alexa::set_enabled(cx.data_dir(), on) {
+        let on = !alexa::load(&p.data_dir()).enabled;
+        match alexa::set_enabled(&p.data_dir(), on) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.alexa", if on { "switched on" } else { "switched off" });
+                p.audit("settings.alexa", if on { "switched on" } else { "switched off" });
                 self.ok(if on { "Alexa is available. Nothing is sent to Amazon until you say yes (key C) and start a turn." } else { "Alexa is off." });
             }
             Err(e) => self.fail(e),
         }
     }
 
-    pub(super) fn alexa_consent_key(&mut self, cx: &AppCx) {
-        if !alexa::configured(cx.data_dir()) {
+    pub(super) fn alexa_consent_key(&mut self, p: &dyn UserPort) {
+        if !alexa::configured(&p.data_dir()) {
             return self.fail(alexa::NO_CLIENT_ID);
         }
-        if alexa::consent_date(cx.data_dir(), &cx.session.user).is_some() {
+        if alexa::consent_date(&p.data_dir(), &p.user()).is_some() {
             // taking a yes back is always safe: no question
-            return match alexa::revoke(cx.data_dir(), &cx.session.user) {
+            return match alexa::revoke(&p.data_dir(), &p.user()) {
                 Ok(()) => {
-                    cx.audit.record(&cx.session.user, "settings.alexa", "consent taken back");
+                    p.audit("settings.alexa", "consent taken back");
                     self.ok("Your yes is taken back. Nothing goes to Amazon.");
                 }
                 Err(e) => self.fail(e),
@@ -64,20 +65,20 @@ impl SettingsApp {
     }
 
     /// The person answered the card (only a person at this page gets here; no assistant tool leads to it).
-    pub(super) fn alexa_consent_submit(&mut self, cx: &AppCx, form: &Form) {
+    pub(super) fn alexa_consent_submit(&mut self, p: &dyn UserPort, form: &Form) {
         if form.choice_idx(0) != 1 {
             return self.ok("Understood: your voice stays on this computer.");
         }
-        match alexa::grant(cx.data_dir(), &cx.session.user, &iyakki_clock::today()) {
+        match alexa::grant(&p.data_dir(), &p.user(), &iyakki_clock::today()) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.alexa", "consent given for the voice");
+                p.audit("settings.alexa", "consent given for the voice");
                 self.ok("Your yes is kept. Your voice goes to Amazon only during an Alexa turn you start. Press C to take it back.");
             }
             Err(e) => self.fail(e),
         }
     }
 
-    pub(super) fn handle_alexa(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_alexa(&mut self, k: &Key, p: &dyn UserPort) {
         let len = ROWS.len();
         let sel = self.sel().min(len - 1);
         match k {
@@ -87,11 +88,11 @@ impl SettingsApp {
             Key::End => self.move_sel(len as i32, len),
             Key::Enter => match ROWS[sel] {
                 AlexaRow::Status => {}
-                AlexaRow::Switch => self.alexa_switch(cx),
-                AlexaRow::Consent => self.alexa_consent_key(cx),
+                AlexaRow::Switch => self.alexa_switch(p),
+                AlexaRow::Consent => self.alexa_consent_key(p),
             },
-            Key::Char('o') => self.alexa_switch(cx),
-            Key::Char('C') | Key::Char('c') => self.alexa_consent_key(cx),
+            Key::Char('o') => self.alexa_switch(p),
+            Key::Char('C') | Key::Char('c') => self.alexa_consent_key(p),
             _ => {}
         }
     }
@@ -103,10 +104,10 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn alexa_row_text(&self, cx: &AppCx, row: AlexaRow) -> (String, String) {
-        let dir = cx.data_dir();
+    pub(super) fn alexa_row_text(&self, p: &dyn UserPort, row: AlexaRow) -> (String, String) {
+        let dir = &p.data_dir();
         match row {
-            AlexaRow::Status => ("Status".into(), alexa::status_text(dir, &cx.session.user)),
+            AlexaRow::Status => ("Status".into(), alexa::status_text(dir, &p.user())),
             AlexaRow::Switch => (
                 "Alexa on this computer".into(),
                 if !alexa::configured(dir) {
@@ -119,7 +120,7 @@ impl SettingsApp {
             ),
             AlexaRow::Consent => (
                 "Your yes to sending your voice".into(),
-                match alexa::consent_date(dir, &cx.session.user) {
+                match alexa::consent_date(dir, &p.user()) {
                     Some(d) => format!("Yes, on {d}. Your voice goes to Amazon only during a turn you start. Press C to take it back."),
                     None => "Not given: nothing is sent. Press C to read the card and answer it.".into(),
                 },
@@ -127,7 +128,7 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn render_alexa(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+    pub(super) fn render_alexa(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn UserPort) {
         let sel = self.sel().min(ROWS.len() - 1);
         let rh = 62.0 * s;
         let mut y = a.y;
@@ -138,7 +139,7 @@ impl SettingsApp {
             if i > 0 && y + rh > a.y + a.h {
                 break;
             }
-            let (title, detail) = self.alexa_row_text(cx, *row);
+            let (title, detail) = self.alexa_row_text(p, *row);
             let r = R::new(a.x, y, a.w, rh - 4.0 * s);
             crate::fx::row_at(g, r.x, r.y, r.w, r.h, 10.0 * s, i == sel, g.hovered(r), ACCENT);
             g.hit(r, Event::Row(i), &title);

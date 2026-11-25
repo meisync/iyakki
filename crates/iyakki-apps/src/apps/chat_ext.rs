@@ -2,6 +2,7 @@
 //! The agents themselves live in `iyakki_agent::extagent`; Settings → Agents configures them.
 
 use super::*;
+use crate::apps::chat_port::CxChat;
 
 impl ChatApp {
     /// The agent that answers this chat (`None`: the built-in model of Settings → Models). The first time it is asked, the
@@ -9,7 +10,7 @@ impl ChatApp {
     pub(super) fn ext_id(&mut self, cx: &AppCx) -> Option<String> {
         if self.ext_choice.is_none() {
             let remembered = self.project.as_ref().and_then(|p| std::fs::read_to_string(p.root.join(".iyakki/agent")).ok()).map(|s| s.trim().to_string());
-            let cfg = cx.agents_cfg();
+            let cfg = CxChat(cx).agents_cfg();
             // the file holds the agent id and, after a space, the model chosen with it
             let (remembered, model) = match remembered.as_deref().map(|r| r.split_once(' ').map_or((r, None), |(a, m)| (a, Some(m.trim())))) {
                 Some((a, m)) => (Some(a.to_string()), m.filter(|m| iyakki_extagentx::valid_model_id(m)).map(str::to_string)),
@@ -32,28 +33,28 @@ impl ChatApp {
     /// Claude Code signed in just works). Looked at each time, so it follows the status as it arrives; never when the person
     /// has a provider model.
     pub(super) fn auto_agent(&self, cx: &AppCx) -> Option<String> {
-        if cx.settings().lock().unwrap_or_else(|e| e.into_inner()).get().chat.is_some() || cx.session.policy.cli != iyakki_sec::policy::CliLevel::Full {
+        if CxChat(cx).settings().lock().unwrap_or_else(|e| e.into_inner()).get().chat.is_some() || CxChat(cx).policy().cli != iyakki_sec::policy::CliLevel::Full {
             return None;
         }
-        let cfg = cx.agents_cfg();
+        let cfg = CxChat(cx).agents_cfg();
         let all = cx.extagent_facet().entries();
-        if all.iter().any(|e| cx.ext_status().get(&e.id).is_none()) {
-            if !cx.ext_status().busy() {
-                cx.ext_status().refresh(cfg);
+        if all.iter().any(|e| CxChat(cx).ext_status().get(&e.id).is_none()) {
+            if !CxChat(cx).ext_status().busy() {
+                CxChat(cx).ext_status().refresh(cfg);
             }
             return None;
         }
-        let ready: Vec<_> = all.iter().filter(|e| e.ready && cx.ext_status().get(&e.id).is_some_and(|s| s.installed)).collect();
+        let ready: Vec<_> = all.iter().filter(|e| e.ready && CxChat(cx).ext_status().get(&e.id).is_some_and(|s| s.installed)).collect();
         (ready.len() == 1).then(|| ready[0].id.clone())
     }
 
     /// What the empty chat says, and whether a Login button goes with it: the real reason when the chosen agent is not ready.
     pub(super) fn empty_note(&mut self, cx: &AppCx) -> (String, Option<&'static str>) {
-        let configured = cx.settings().lock().unwrap_or_else(|e| e.into_inner()).get().chat.is_some();
+        let configured = CxChat(cx).settings().lock().unwrap_or_else(|e| e.into_inner()).get().chat.is_some();
         match self.ext_id(cx) {
             Some(id) => {
-                let label = cx.agents_cfg().agent(&id).map_or(id.clone(), |a| a.label());
-                let st = cx.ext_status().get(&id);
+                let label = CxChat(cx).agents_cfg().agent(&id).map_or(id.clone(), |a| a.label());
+                let st = CxChat(cx).ext_status().get(&id);
                 empty_text(&label, &id, st.as_ref())
             }
             None => (if configured { "Ask anything.".to_string() } else { "No chat model selected yet. Open Settings → Models, add a provider and pick a model, or install and sign in to Claude Code (CLI tile).".to_string() }, None),
@@ -64,7 +65,7 @@ impl ChatApp {
     pub(super) fn ext_model_of(&self, cx: &AppCx, agent: &str) -> String {
         match &self.ext_model {
             Some(m) => m.clone(),
-            None => cx.agents_cfg().agent(agent).map(|a| a.cfg_model()).unwrap_or_default(),
+            None => CxChat(cx).agents_cfg().agent(agent).map(|a| a.cfg_model()).unwrap_or_default(),
         }
     }
 
@@ -77,15 +78,15 @@ impl ChatApp {
                 (None, _) => "-".to_string(),
             };
             let _ = std::fs::write(p.root.join(".iyakki/agent"), line);
-        } else if cx.session.policy.manage_settings {
-            let _ = cx.settings().lock().unwrap_or_else(|e| e.into_inner()).update(|s| s.agents.default = id.map(str::to_string));
+        } else if CxChat(cx).policy().manage_settings {
+            let _ = CxChat(cx).settings().lock().unwrap_or_else(|e| e.into_inner()).update(|s| s.agents.default = id.map(str::to_string));
         }
     }
 
     /// The one-click chip "Built-in model" is offered: an external agent answers this chat, nothing is running, and a built-in model is
     /// set up to take over (Settings -> Models).
     pub(super) fn builtin_chip_shown(&mut self, cx: &AppCx) -> bool {
-        self.run.is_none() && self.pending.is_none() && self.models.is_none() && self.ext_id(cx).is_some() && cx.settings().lock().unwrap_or_else(|e| e.into_inner()).get().chat.is_some()
+        self.run.is_none() && self.pending.is_none() && self.models.is_none() && self.ext_id(cx).is_some() && CxChat(cx).settings().lock().unwrap_or_else(|e| e.into_inner()).get().chat.is_some()
     }
 
     /// The person picked a built-in model: this chat (and new chats of the workspace) use it again.
@@ -107,20 +108,20 @@ impl ChatApp {
 
     /// The person picked an agent in the model list. An agent that is not ready is still chosen; the exact fix is shown.
     pub(super) fn choose_agent(&mut self, cx: &AppCx, id: String) {
-        let p = &cx.session.policy;
+        let p = CxChat(cx).policy();
         if p.cli != iyakki_sec::policy::CliLevel::Full {
             self.error = Some("Your account may not run commands, so external coding agents are off for it.".into());
             return;
         }
         self.ext_choice = Some(Some(id.clone()));
         self.remember_agent(cx, Some(&id));
-        cx.audit.record(&cx.session.user, "chat.agent", &id);
-        let cfg = cx.agents_cfg();
-        match cx.ext_status().get(&id) {
+        CxChat(cx).audit("chat.agent", &id);
+        let cfg = CxChat(cx).agents_cfg();
+        match CxChat(cx).ext_status().get(&id) {
             Some(st) if !st.ready() => self.error = Some(st.fix),
             Some(_) => self.error = None,
             None => {
-                cx.ext_status().refresh(cfg);
+                CxChat(cx).ext_status().refresh(cfg);
                 self.error = None;
             }
         }
@@ -129,12 +130,12 @@ impl ChatApp {
     /// "agent: Claude Code · sonnet · session 1a2b3c4d" for the footer.
     pub(super) fn ext_footer(&mut self, cx: &AppCx) -> Option<String> {
         let id = self.ext_id(cx)?;
-        let cfg = cx.agents_cfg();
+        let cfg = CxChat(cx).agents_cfg();
         let a = cfg.agent(&id)?;
         let chosen = self.ext_model_of(cx, &id);
-        let model = if chosen.is_empty() || chosen == "default" { "Default".to_string() } else { iyakki_shared::extagent::models_with(cx.ext_status().cli_models(&a.as_ref().id()), a.as_ref()).into_iter().find(|m| m.id == chosen).map_or(chosen.clone(), |m| m.label.split(" (").next().unwrap_or(&m.label).to_string()) };
+        let model = if chosen.is_empty() || chosen == "default" { "Default".to_string() } else { iyakki_shared::extagent::models_with(CxChat(cx).ext_status().cli_models(&a.as_ref().id()), a.as_ref()).into_iter().find(|m| m.id == chosen).map_or(chosen.clone(), |m| m.label.split(" (").next().unwrap_or(&m.label).to_string()) };
         let sess = self.session.as_ref().and_then(|s| cx.ai().ext_session(&s.id, &id)).map_or("new session".to_string(), |s| format!("session {}", s.chars().take(8).collect::<String>()));
-        let state = cx.ext_status().get(&id).map_or(String::new(), |s| if s.ready() { String::new() } else { format!(" · {}", s.chip) });
+        let state = CxChat(cx).ext_status().get(&id).map_or(String::new(), |s| if s.ready() { String::new() } else { format!(" · {}", s.chip) });
         Some(format!("agent: {} · {model} · {sess}{state} · {}", a.label(), a.mode().label()))
     }
 
@@ -162,7 +163,7 @@ impl ChatApp {
 /// tools (Copilot advises only) is refused with the reason.
 pub(in crate::apps) fn task_executor(cx: &AppCx, id: &str, tools: Arc<dyn iyakki_shared::agent::Tools>, workspace: std::path::PathBuf, sid: String, model: String) -> iyakki_shared::autopilot::Executor {
     let (cx, id) = (cx.clone(), id.to_string());
-    let refusal = cx.agents_cfg().agent(&id).filter(|a| a.mode() != iyakki_extagentx::Mode::Bridged).map(|a| format!("{} can only advise here (it cannot use IYAKKI's tools), so it cannot run a task. Use the built-in model or Claude Code for tasks.", a.label()));
+    let refusal = CxChat(&cx).agents_cfg().agent(&id).filter(|a| a.mode() != iyakki_extagentx::Mode::Bridged).map(|a| format!("{} can only advise here (it cannot use IYAKKI's tools), so it cannot run a task. Use the built-in model or Claude Code for tasks.", a.label()));
     Arc::new(move |call: iyakki_shared::autopilot::StepCall| {
         let made = match &refusal {
             Some(r) => Err(r.clone()),

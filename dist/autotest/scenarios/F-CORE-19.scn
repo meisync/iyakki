@@ -1,0 +1,12 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 25904c4f3637f049; honest subset only: everything not checked is under not-covered.
+row: F-CORE-19
+targets: qemu
+profile: ram
+feature-sha: 25904c4f3637f049
+doc: dev info prints the compat report: versions, client protocol, the paired computer as a peer, deprecated names
+clause: 1 `dev info` prints the compat report with the core, contract and client protocol versions, the paired computer as a peer and the deprecated names list
+not-covered: both hello answers (typed contract and client session) carry a deprecations list
+not-covered: negotiate names the side that must update
+not-covered: Settings and the support bundle show the report
+not-covered: schemas in use
+session-check: dev_info_compat

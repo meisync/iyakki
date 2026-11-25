@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-24",
+  "feature_sha": "1ed8d8109218eab7",
+  "title": "voice recorder on real hardware",
+  "clauses": [
+    {
+      "id": "five-minute-speak",
+      "text": "A five-minute recording of your own speech plays back clearly and is in Recordings",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "With a USB microphone, record five minutes of your own speaking. Play it back next to the radio. Find the file in your Recordings folder.",
+          "expect": "All five minutes are there and clear. The file is in Recordings on the data volume."
+        }
+      ]
+    }
+  ]
+}

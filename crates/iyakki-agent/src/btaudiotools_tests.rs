@@ -314,3 +314,43 @@ fn the_last_headphones_are_remembered_to_break_the_tie_between_two_paired_sinks_
     assert!(t.remembered().is_none() && !file.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_route_lost_pauser_pauses_only_a_radio_that_plays_and_says_nothing_otherwise() {
+    struct Off;
+    impl iyakki_proxy::Upstream for Off {
+        fn request(&self, _: &str, _: &str, _: &[(String, String)], _: &[u8]) -> Result<iyakki_proxy::UpstreamResponse, String> {
+            Err("offline".into())
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("iyakki-btlost-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let svc = Arc::new(crate::services::Services::open(&dir.join("svc"), Arc::new(Off), Arc::new(Off)).unwrap());
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let s2 = seen.clone();
+    let pauser = route_lost_pauser(&svc, "alice", Arc::new(move |who, what| s2.lock().unwrap().push(format!("{who}: {what}"))));
+    assert!(!pauser(), "nothing plays: nothing paused");
+    assert!(seen.lock().unwrap().is_empty());
+    drop(svc);
+    assert!(!pauser(), "after the services are gone it does nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_media_route_lost_pauser_stops_a_playing_track_keeps_the_queue_and_says_one_line() {
+    use crate::media::tests::FakeLauncher;
+    let l = Arc::new(FakeLauncher::default());
+    let player = Arc::new(crate::media::MediaPlayer::new(l.clone()));
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let s2 = seen.clone();
+    let pauser = media_route_lost_pauser(&player, "alice", Arc::new(move |who, what| s2.lock().unwrap().push(format!("{who}: {what}"))));
+    assert!(!pauser(), "nothing plays: nothing stopped");
+    assert!(seen.lock().unwrap().is_empty());
+    player.set_queue("alice", vec!["/m/a.mp3".into(), "/m/b.mp3".into()], 0, true);
+    player.play("alice", "a", "/m/a.mp3").unwrap();
+    assert!(pauser());
+    assert!(!pauser(), "asked again: nothing is playing");
+    assert_eq!(*seen.lock().unwrap(), ["alice: bluetooth.route_lost stopped the music player (the queue is kept)"]);
+    assert!(player.queue_state().active, "the queue stays for the play key");
+}

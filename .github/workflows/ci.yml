@@ -19,23 +19,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { submodules: true }   # iyakki-boot (the boot loader) is a submodule: tests read its files
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: x86_64-unknown-linux-musl }
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config musl-tools
       - run: RUSTFLAGS="-D warnings" cargo check --workspace --all-targets --locked
       - run: ./run.sh warnings
-      - run: mkdir -p target/tmp
+      - run: mkdir -p target/tmp   # the log files below
       # The same layered tests as the release gate (dist/release/test-layer.sh): a test that fails in parallel is run again alone, so a load
       # flake is named as a flake and only a test that fails alone fails the job. Failing tests are printed as annotations below.
       - name: tests, core layer
         env:
-          TMPDIR: ${{ github.workspace }}/target/tmp
+          TMPDIR: ${{ runner.temp }}
         shell: bash
         run: ./run.sh test-core --no-stamps 2>&1 | tee target/tmp/core.log
       - name: tests, apps and ui layer
         if: ${{ !cancelled() }}
         env:
-          TMPDIR: ${{ github.workspace }}/target/tmp
+          TMPDIR: ${{ runner.temp }}
         shell: bash
         run: ./run.sh test-apps --no-stamps 2>&1 | tee target/tmp/apps.log
       - name: failing tests as annotations

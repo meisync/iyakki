@@ -13,6 +13,7 @@
 //! f put the integration branch into your own branch; r look again.
 
 use super::*;
+use crate::apps::settings::network_port::NetworkSettingsPort;
 
 pub(super) use iyakki_shared::fleetview::FleetAct;
 
@@ -44,9 +45,8 @@ pub(super) struct Snapshot {
 }
 
 impl SettingsApp {
-    pub(super) fn fleet_snapshot(&self, cx: &AppCx) -> Result<Snapshot, String> {
-        let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-        let st = cx.services.fleet_view(cx.os.clone(), cx.os.fleet(), Arc::new(move |a, d| audit.record(&user, a, d)))?;
+    pub(super) fn fleet_snapshot(&self, p: &dyn NetworkSettingsPort) -> Result<Snapshot, String> {
+        let st = p.fleet_view()?;
         let mut head = vec![format!("This computer: fingerprint {}; {}.", st.my_fingerprint, st.listening.map(|p| format!("listening on port {p}")).unwrap_or_else(|| "not listening (it starts when a fleet is made or joined)".into()))];
         head.push(format!("Work sent by other members: {}.", st.accept.label()));
         head.push(format!("Channel: {} (T changes it). {}", if st.tls { "TLS, the certificate pinned by the other computers" } else { "plain, for the local network" }, if st.relay.is_empty() { "Relay: off (u switches it on, for a member that cannot be reached directly).".to_string() } else { format!("Relay: on, this computer is reached at {} (u switches it off).", st.relay) }));
@@ -92,19 +92,19 @@ impl SettingsApp {
         Ok(Snapshot { head, rows, mode: st.accept.label().into(), fleets: st.fleets.len(), tls: st.tls, relay: st.relay.clone() })
     }
 
-    pub(super) fn fleet_len(&self, cx: &AppCx) -> usize {
-        self.fleet_snapshot(cx).map(|s| s.rows.len()).unwrap_or(0)
+    pub(super) fn fleet_len(&self, p: &dyn NetworkSettingsPort) -> usize {
+        self.fleet_snapshot(p).map(|s| s.rows.len()).unwrap_or(0)
     }
 
     fn fleet_ask(&mut self, act: FleetAct, text: String) {
         self.modal = Some(Modal::Confirm(ConfirmKind::Fleet(act), text));
     }
 
-    pub(super) fn handle_fleet(&mut self, k: &Key, cx: &AppCx) {
-        if !self.admin(cx) {
+    pub(super) fn handle_fleet(&mut self, k: &Key, p: &dyn NetworkSettingsPort) {
+        if !self.admin(p) {
             return;
         }
-        let snap = match self.fleet_snapshot(cx) {
+        let snap = match self.fleet_snapshot(p) {
             Ok(s) => s,
             Err(e) => return self.fail(e),
         };
@@ -129,7 +129,7 @@ impl SettingsApp {
                     m if m.starts_with("accept no") => "members",
                     _ => "ask",
                 };
-                self.fleet_ask(FleetAct::Mode(next.into()), format!("Work sent by other members: change to \"{}\"?", cx.services.fleet_accept_label(next)));
+                self.fleet_ask(FleetAct::Mode(next.into()), format!("Work sent by other members: change to \"{}\"?", p.fleet_accept_label(next)));
             }
             Key::Char('T') => self.fleet_ask(FleetAct::Tls(!snap.tls), if snap.tls { "Make the fleet channel plain again (local network only)? Members that pinned its certificate must be given a plain address.".into() } else { "Make the fleet channel use TLS with this computer's certificate? Another computer far away reaches it at tls://ADDRESS:PORT#FINGERPRINT after its person compared the fingerprint.".into() }),
             Key::Char('u') => self.fleet_ask(FleetAct::Relay(snap.relay.is_empty()), if snap.relay.is_empty() { "Switch the relay on? A member that cannot be reached directly can then be reached through a mailbox. Messages stay signed and sealed with the group key; the relay sees only who writes to which mailbox and when.".into() } else { "Switch the relay off? Members given a relay address are not reached until a direct address is set.".into() }),
@@ -178,8 +178,8 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn fleet_form_submit(&mut self, cx: &AppCx, kind: &FormKind, form: &Form) -> Result<(), String> {
-        let _ = cx;
+    pub(super) fn fleet_form_submit(&mut self, p: &dyn NetworkSettingsPort, kind: &FormKind, form: &Form) -> Result<(), String> {
+        let _ = p;
         let v = |i: usize| form.value(i).trim().to_string();
         match kind {
             FormKind::FleetAddress(fleet, member) => {
@@ -204,12 +204,11 @@ impl SettingsApp {
         Ok(())
     }
 
-    pub(super) fn fleet_confirm(&mut self, cx: &AppCx, act: FleetAct) {
-        if !self.admin(cx) {
+    pub(super) fn fleet_confirm(&mut self, p: &dyn NetworkSettingsPort, act: FleetAct) {
+        if !self.admin(p) {
             return;
         }
-        let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-        let r = cx.services.fleet_act(cx.os.clone(), cx.os.fleet(), Arc::new(move |a, d| audit.record(&user, a, d)), act);
+        let r = p.fleet_act(act);
         match r {
             Ok(m) => self.ok(m),
             Err(e) => self.fail(e),
@@ -221,7 +220,7 @@ impl SettingsApp {
         vec![("Create fleet", acc, 'c'), ("Join code", acc, 'o'), ("Join", acc, 'j'), ("Yes / accept", mu, 'y'), ("No / refuse", mu, 'n'), ("Remove", mu, 'x'), ("Trust", mu, 't'), ("Administrator", mu, 'A'), ("Accept work", mu, 'm'), ("TLS", mu, 'T'), ("Address", mu, 'a'), ("Relay", mu, 'u'), ("Integrate", mu, 'i'), ("Finalize", mu, 'f'), ("Leave", mu, 'l')]
     }
 
-    pub(super) fn render_fleet(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+    pub(super) fn render_fleet(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn NetworkSettingsPort) {
         let mut y = a.y;
         let intro = "Experimental. A fleet is a pair group of IYAKKI computers: they share their disk, load and memory every few seconds and can send each other work. Every change asks you first, and the other computer's person is asked too. Nothing travels that looks like a secret.";
         for w in g.wrap(13.0 * s, intro, Face::Sans, a.w) {
@@ -229,7 +228,7 @@ impl SettingsApp {
             y += 18.0 * s;
         }
         y += 8.0 * s;
-        let snap = match self.fleet_snapshot(cx) {
+        let snap = match self.fleet_snapshot(p) {
             Ok(s) => s,
             Err(e) => {
                 for w in g.wrap(14.0 * s, &e, Face::Sans, a.w) {

@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-45",
+  "feature_sha": "1ff2d3e666ed7f60",
+  "title": "word times from Indic voices",
+  "clauses": [
+    {
+      "id": "indic-word",
+      "text": "With a native-durations Indic voice server, the lit word lands on the spoken word",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "If a native-durations Indic voice server is set up, read a Hindi or Tamil piece and watch the lit word. If none is set up, mark cannot-test.",
+          "expect": "The lit word lands on the spoken word."
+        }
+      ]
+    }
+  ]
+}

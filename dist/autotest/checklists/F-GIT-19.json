@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-GIT-19",
+ "feature_sha": "2f7418ec9483f76f",
+ "title": "git_clone_repo asks every time on a card naming the connection and git",
+ "clauses": [
+  {
+   "id": "clone-card",
+   "text": "git_clone_repo asks every time on a card naming the connection and git_clones_list is read only",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant to clone a repository, then to list the clones.",
+     "expect": "The clone asks on a card that names the connection and its method but never a token, also in Auto mode; the list does not ask."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,11 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 576cfcbfee0cac8c; honest subset only: everything not checked is under not-covered.
+row: F-SDK-196
+targets: qemu
+profile: ram
+feature-sha: 576cfcbfee0cac8c
+doc: the screen lock and unlock reach SAMPLE as a session event
+clause: 1 the screen lock and the unlock reach the app as session.changed
+not-covered: session.changed for sign-in and sign-out (Services::on_login and on_logout)
+not-covered: vault.changed for the person's vault opened or closed
+not-covered: words only, never a password (not read)
+session-check: app_events_lock

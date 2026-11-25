@@ -84,7 +84,7 @@ PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name=
 body{background:var(--bg);color:var(--fg);font:16px system-ui,sans-serif;margin:0 auto;max-width:60rem;padding:0 16px}
 .clause{background:var(--card);border-radius:8px;padding:12px;margin:12px 0}img{max-width:100%%;height:auto}button{font:inherit;padding:6px 14px;margin:4px}
 .saved{font-weight:600}.note{width:min(24rem,100%%)}</style></head><body>
-<h1>Checklist: %(machine)s</h1><p>Image commit <input id="commit" value="%(commit)s" size="12"> Your name or id <input id="by" value="owner" size="12"> (nothing else is collected)</p>
+<h1>Checklist: %(machine)s</h1><p>Image commit <input id="commit" value="%(commit)s" size="12"> You are <select id="by"><option value="owner">the owner</option><option value="admin">a team member (admin)</option><option value="person">somebody else</option></select> (a role only, no name is collected)</p>
 %(sections)s
 <script>
 const MACHINE=%(machine_js)s;

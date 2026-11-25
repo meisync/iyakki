@@ -83,6 +83,9 @@ impl DiskEngine for LocalDiskEngine {
     fn at_sign_out(&self, who: &Actor, audit: AuditFn) -> Option<String> {
         self.disks.at_sign_out(who, audit)
     }
+    fn after_unplug(&self, who: &Actor, audit: AuditFn) -> Option<String> {
+        self.disks.after_unplug(who, audit)
+    }
     fn refusal(&self, who: &Actor, d: &Disk) -> Option<String> {
         self.disks.refusal(who, d)
     }

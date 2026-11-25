@@ -1,0 +1,12 @@
+[package]
+name = "iyakki-provider-kind"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The kinds of model provider (Ollama, OpenAI, Lemonade and the rest: label, default address, key rules), the picture-request trace for the picture log and an image model's own size and steps, as a leaf crate. iyakki_shared::providers and iyakki_shared::lemonade re-export them."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

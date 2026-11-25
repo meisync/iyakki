@@ -2,6 +2,7 @@
 //! welcome screen and the dialogs. The state and the events are in `ide.rs`.
 
 use super::ide::*;
+use crate::apps::ide_port::CxIde;
 use super::ide_bottom::Tab as BTab;
 use super::ide_chrome::{self as chrome, Metrics};
 use super::ide_layout::{self as lay, Div, Pane};
@@ -487,7 +488,7 @@ impl IdeApp {
         let y = r.y + 2.0 * s;
         let counts = w.board.file.as_ref().map(|f| f.board.len());
         let bounds = R::new(0.0, 0.0, g.width() as f32, g.height() as f32);
-        let git_ok = cx.session.policy.allows_app(iyakki_sec::policy::App::Git);
+        let git_ok = CxIde(cx).policy().allows_app(iyakki_sec::policy::App::Git);
         // the tab's click id is its place in MainTab::ALL, also when an account without the Git tile does not see it
         let items: Vec<(usize, MainTab, String, Glyph)> = MainTab::ALL
             .iter()
@@ -523,7 +524,7 @@ impl IdeApp {
             }
             MainTab::Board => w.board.draw(g, R::new(content.x + 4.0 * s, content.y + 2.0 * s, content.w - 8.0 * s, content.h - 4.0 * s), s, focused && no_dialog, accent, tick),
             MainTab::Browser => {
-                if !cx.session.policy.apps.contains(&iyakki_sec::policy::App::Browser) {
+                if !CxIde(cx).policy().apps.contains(&iyakki_sec::policy::App::Browser) {
                     let msg = "Your account may not use the browser.";
                     g.text(content.x + 14.0 * s, content.y + 14.0 * s, 14.0 * s, MUTED, msg, Face::Sans);
                 } else {
@@ -544,7 +545,7 @@ impl IdeApp {
                     g.text(content.x + 14.0 * s, content.y + 14.0 * s, 14.0 * s, MUTED, "Your account may not use Git.", Face::Sans);
                 } else {
                     let root = w.root();
-                    let v = w.gitview.get_or_insert_with(|| super::ide_gitview::GitTabView::new(cx, root, if crate::TESTING { super::git_tile::Rig::offline() } else { super::git_tile::Rig::system() }));
+                    let v = w.gitview.get_or_insert_with(|| super::ide_gitview::GitTabView::new(cx, root, if crate::TESTING { super::git_tile::Rig::offline() } else { super::git_port::system_rig() }));
                     super::component::route::render_slot(g, super::ide_gitview::GIT, |g| v.draw(g, content, s, cx, tick, focused && no_dialog));
                 }
             }
@@ -564,7 +565,7 @@ impl IdeApp {
         let mut x = r.x + 4.0 * s;
         let y = r.y + 1.0 * s;
         let bounds = R::new(0.0, 0.0, g.width() as f32, g.height() as f32);
-        let plan: Vec<super::ide_router::Row> = cx.services.router_plan_rows(&cx.session.user).into_iter().map(|(id, title, after, status, model)| super::ide_router::Row { id, title, after, status, model }).collect();
+        let plan: Vec<super::ide_router::Row> = cx.services.router_plan_rows(CxIde(cx).user()).into_iter().map(|(id, title, after, status, model)| super::ide_router::Row { id, title, after, status, model }).collect();
         let errors = w.problems.lines.iter().filter(|l| l.color == ERR).count();
         let items: Vec<(BTab, String, Glyph, Option<usize>)> = BTab::ALL
             .iter()

@@ -63,6 +63,19 @@ class EndToEnd(unittest.TestCase):
         devui.HAVE_TESSERACT = False
         self.addCleanup(lambda: setattr(devui, "HAVE_TESSERACT", old))
 
+    def test_a_sub_row_id_with_a_letter_is_a_row_and_the_shipped_scenarios_name_known_rows_with_a_current_feature_sha(self):
+        self.assertTrue(R.ROW_RE.match("F-CORE-20a"))
+        self.assertFalse(R.ROW_RE.match("F-CORE-20ab"))
+        self.assertFalse(R.ROW_RE.match("F-CORE-20A"))
+        idx = run.features_index()
+        entries = run.load_scenarios()
+        self.assertEqual(run.problems(entries, set(idx)), [])
+        for e in entries:
+            for row in e["rows"]:
+                want = e["meta"].get("feature-sha")
+                if want:
+                    self.assertEqual(want, R.feature_sha(idx[row]), "%s: the scenario was written for another Feature text" % row)
+
     def test_a_fake_run_writes_results_and_two_runs_raise_the_row(self):
         with tempfile.TemporaryDirectory() as tmp:
             scn_dir = os.path.join(tmp, "repo", "dist", "autotest", "scenarios")
@@ -77,12 +90,13 @@ class EndToEnd(unittest.TestCase):
             feats = {"F-T-1": FEATURE}
             for n, when in enumerate(("2026-11-21T10:00:00", "2026-11-22T02:30:00"), 1):
                 out = os.path.join(tmp, "out", "run%d" % n)
-                meta = {"run_id": "run%d" % n, "commit": "abc12345", "commit_source": "argument", "image": "img"}
+                meta = {"run_id": "run%d" % n, "commit": "abc12345", "commit_source": "argument", "image": "img", "base_commit": "abc12345"}
                 dev = FakeDev(out)
                 recs = run.run_entries(entries, dev, "qemu", out, meta, feats, {}, False)
                 self.assertEqual([r["status"] for r in recs], ["PASS"], recs)
                 self.assertTrue(recs[0]["clauses_attested"])
                 self.assertEqual(recs[0]["level"], "qemu")
+                self.assertEqual(recs[0]["base_commit"], "abc12345", "the base commit is recorded in every result")
                 self.assertTrue(recs[0]["screen_evidence"])
                 self.assertEqual(R.validate(recs[0]), [])
                 # make the time of the second run later

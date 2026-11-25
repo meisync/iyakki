@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-05",
+  "feature_sha": "7f3a8942b7b849c5",
+  "title": "reading aloud with no setup",
+  "clauses": [
+    {
+      "id": "natural-voice",
+      "text": "The voice found on a computer with no setup is understandable and natural enough to listen to",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "On a computer where no voice is set up, open VOICE, READ ALOUD, paste a paragraph and press Play.",
+          "expect": "The voice is understandable and natural enough to listen to for a few minutes. Say so if it sounds robotic or hard to follow."
+        }
+      ]
+    }
+  ]
+}

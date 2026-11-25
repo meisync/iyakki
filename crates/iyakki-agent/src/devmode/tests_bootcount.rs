@@ -159,3 +159,19 @@ fn boot_counter_steps_on_a_folder_for_a_real_grub_run() {
         other => panic!("unknown mode {other}"),
     }
 }
+
+#[test]
+fn a_folder_with_capital_letters_the_way_a_fat_volume_lists_a_pack_is_armed_and_read_in_the_folder_that_is_there() {
+    // Q6: the packs the green run writes name the menu folder `boot/GRUB` (and the file GRUB.CFG); on a case-sensitive folder the counter used to look for `boot/grub`,
+    // found nothing and refused to arm (the upgrade proof on real packs failed there, not on a FAT volume where both spellings are one folder).
+    let r = rig("bc-caps");
+    let _ = std::fs::remove_dir_all(r.boot.root.join("boot/grub"));
+    put(&r.boot.root, "boot/GRUB/GRUB.CFG", with_previous_entry(&board_cfg(), "a", "0.1.0-alpha.0").unwrap().as_bytes());
+    assert_eq!(read_state(&r.boot.root), State::Idle);
+    arm(&r.boot.root).unwrap();
+    assert_eq!(read_state(&r.boot.root), State::Armed);
+    assert!(r.boot.root.join("boot/GRUB/grubenv").is_file(), "the block went into the folder that exists");
+    assert!(!r.boot.root.join("boot/grub").exists(), "no second, lower-case folder was made");
+    assert!(mark_good(&r.boot.root).unwrap());
+    assert_eq!(read_state(&r.boot.root), State::Idle);
+}

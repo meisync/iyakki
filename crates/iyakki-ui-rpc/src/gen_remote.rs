@@ -595,21 +595,6 @@ mod g_facets_b4 {
             self.rpc.call::<Vec<String>>("SshTunnels", self.obj, "key_ids", serde_json::json!([])).unwrap_or_else(|e| <Vec<String> as Lost>::lost(&e))
         }
     }
-    /// `MineWorker` over the connection (object `obj` of the core).
-    pub struct RemoteMineWorker { pub(crate) rpc: Rpc, pub(crate) obj: u64 }
-    impl RemoteMineWorker { pub(crate) fn new(rpc: Rpc, obj: u64) -> Self { RemoteMineWorker { rpc, obj } } }
-    impl Drop for RemoteMineWorker { fn drop(&mut self) { self.rpc.release(self.obj); } }
-    impl MineWorker for RemoteMineWorker {
-        fn send(&self, cmd: iyakki_shared::voiceassist_ports::Cmd) {
-            self.rpc.call::<()>("MineWorker", self.obj, "send", serde_json::json!([cmd])).unwrap_or_else(|e| <() as Lost>::lost(&e))
-        }
-        fn status(&self) -> iyakki_shared::voiceassist::Status {
-            self.rpc.call::<iyakki_shared::voiceassist::Status>("MineWorker", self.obj, "status", serde_json::json!([])).unwrap_or_else(|e| <iyakki_shared::voiceassist::Status as Lost>::lost(&e))
-        }
-        fn wake(&self, text: &str) {
-            self.rpc.call::<()>("MineWorker", self.obj, "wake", serde_json::json!([text])).unwrap_or_else(|e| <() as Lost>::lost(&e))
-        }
-    }
     /// `ProjectKit` over the connection (object `obj` of the core).
     pub struct RemoteProjectKit { pub(crate) rpc: Rpc, pub(crate) obj: u64 }
     impl RemoteProjectKit { pub(crate) fn new(rpc: Rpc, obj: u64) -> Self { RemoteProjectKit { rpc, obj } } }
@@ -1020,18 +1005,6 @@ mod g_facets_b6 {
     impl Drop for RemoteGeminiLive { fn drop(&mut self) { self.rpc.release(self.obj); } }
     impl GeminiLive for RemoteGeminiLive {
     }
-    /// `SpeechKit` over the connection (object `obj` of the core).
-    pub struct RemoteSpeechKit { pub(crate) rpc: Rpc, pub(crate) obj: u64 }
-    impl RemoteSpeechKit { pub(crate) fn new(rpc: Rpc, obj: u64) -> Self { RemoteSpeechKit { rpc, obj } } }
-    impl Drop for RemoteSpeechKit { fn drop(&mut self) { self.rpc.release(self.obj); } }
-    impl SpeechKit for RemoteSpeechKit {
-        fn revise_target(&self, ctx: &iyakki_shared::revise::Context) -> iyakki_shared::dictfix::Target {
-            self.rpc.call::<iyakki_shared::dictfix::Target>("SpeechKit", self.obj, "revise_target", serde_json::json!([ctx])).unwrap_or_else(|e| <iyakki_shared::dictfix::Target as Lost>::lost(&e))
-        }
-        fn revise(&self, text: &str, kind: &iyakki_shared::revise::Kind, ctx: &iyakki_shared::revise::Context) -> iyakki_shared::revise::Proposal {
-            self.rpc.call::<iyakki_shared::revise::Proposal>("SpeechKit", self.obj, "revise", serde_json::json!([text, kind, ctx])).unwrap_or_else(|e| <iyakki_shared::revise::Proposal as Lost>::lost(&e))
-        }
-    }
     /// `RouterPanel` over the connection (object `obj` of the core).
     pub struct RemoteRouterPanel { pub(crate) rpc: Rpc, pub(crate) obj: u64 }
     impl RemoteRouterPanel { pub(crate) fn new(rpc: Rpc, obj: u64) -> Self { RemoteRouterPanel { rpc, obj } } }
@@ -1213,64 +1186,16 @@ mod g_facets_g {
     use iyakki_agent_api::*;
     use iyakki_agent_api::facets_g::*;
     use std::sync::Arc;
-    use iyakki_shared::hostengines::{Env, Report};
-    use iyakki_shared::hostvoice::HostVoice;
     use iyakki_shared::providers::TestReport;
     use iyakki_shared::storyillus::Cand;
     use iyakki_shared::vault::VaultError;
-    use iyakki_shared::voice::SpeechEngine;
-    use iyakki_shared::voicehelper::HelperState;
-    /// `HostTtsApi` over the connection (object `obj` of the core).
-    pub struct RemoteHostTtsApi { pub(crate) rpc: Rpc, pub(crate) obj: u64 }
-    impl RemoteHostTtsApi { pub(crate) fn new(rpc: Rpc, obj: u64) -> Self { RemoteHostTtsApi { rpc, obj } } }
-    impl Drop for RemoteHostTtsApi { fn drop(&mut self) { self.rpc.release(self.obj); } }
-    impl HostTtsApi for RemoteHostTtsApi {
-        fn is_enabled(&self) -> bool {
-            self.rpc.call::<bool>("HostTtsApi", self.obj, "is_enabled", serde_json::json!([])).unwrap_or_else(|e| <bool as Lost>::lost(&e))
-        }
-        fn configure(&self, env: Env) {
-            let _ = (&env, );
-            <() as Lost>::lost("this call is not served over the UI socket")
-        }
-        fn set_opener(&self, opener: Option<Vec<String>>) {
-            self.rpc.call::<()>("HostTtsApi", self.obj, "set_opener", serde_json::json!([opener])).unwrap_or_else(|e| <() as Lost>::lost(&e))
-        }
-        fn ensure(&self) {
-            self.rpc.call::<()>("HostTtsApi", self.obj, "ensure", serde_json::json!([])).unwrap_or_else(|e| <() as Lost>::lost(&e))
-        }
-        fn recheck(&self) {
-            self.rpc.call::<()>("HostTtsApi", self.obj, "recheck", serde_json::json!([])).unwrap_or_else(|e| <() as Lost>::lost(&e))
-        }
-        fn report(&self) -> Option<Arc<Report>> {
-            self.rpc.call::<Option<Arc<Report>>>("HostTtsApi", self.obj, "report", serde_json::json!([])).unwrap_or_else(|e| <Option<Arc<Report>> as Lost>::lost(&e))
-        }
-        fn scanning(&self) -> bool {
-            self.rpc.call::<bool>("HostTtsApi", self.obj, "scanning", serde_json::json!([])).unwrap_or_else(|e| <bool as Lost>::lost(&e))
-        }
-        fn scan_now(&self) -> Arc<Report> {
-            self.rpc.call::<Arc<Report>>("HostTtsApi", self.obj, "scan_now", serde_json::json!([])).unwrap_or_else(|e| <Arc<Report> as Lost>::lost(&e))
-        }
-        fn helper_open(&self, hv: Arc<HostVoice>, opener: Option<&[String]>) -> Result<String, String> {
-            let _ = (&hv, &opener, );
-            <Result<String, String> as Lost>::lost("this call is not served over the UI socket")
-        }
-        fn helper_state(&self) -> Option<HelperState> {
-            self.rpc.call::<Option<HelperState>>("HostTtsApi", self.obj, "helper_state", serde_json::json!([])).unwrap_or_else(|e| <Option<HelperState> as Lost>::lost(&e))
-        }
-        fn helper_stop(&self) {
-            self.rpc.call::<()>("HostTtsApi", self.obj, "helper_stop", serde_json::json!([])).unwrap_or_else(|e| <() as Lost>::lost(&e))
-        }
-        fn auto_engine(&self, lang: Option<&str>) -> Option<SpeechEngine> {
-            self.rpc.call::<Option<SpeechEngine>>("HostTtsApi", self.obj, "auto_engine", serde_json::json!([lang])).unwrap_or_else(|e| <Option<SpeechEngine> as Lost>::lost(&e))
-        }
-    }
     /// `AiRead` over the connection (object `obj` of the core).
     pub struct RemoteAiRead { pub(crate) rpc: Rpc, pub(crate) obj: u64 }
     impl RemoteAiRead { pub(crate) fn new(rpc: Rpc, obj: u64) -> Self { RemoteAiRead { rpc, obj } } }
     impl Drop for RemoteAiRead { fn drop(&mut self) { self.rpc.release(self.obj); } }
     impl AiRead for RemoteAiRead {
         fn host_tts(&self) -> Arc<dyn HostTtsApi> {
-            match self.rpc.call::<u64>("AiRead", self.obj, "host_tts", serde_json::json!([])) { Ok(id) => Arc::new(super::g_facets_g::RemoteHostTtsApi::new(self.rpc.clone(), id)), Err(_) => Arc::new(super::g_facets_g::RemoteHostTtsApi::new(self.rpc.clone(), u64::MAX)) }
+            match self.rpc.call::<u64>("AiRead", self.obj, "host_tts", serde_json::json!([])) { Ok(id) => Arc::new(super::g_iyakki_voice_model_hosttts::RemoteHostTtsApi::new(self.rpc.clone(), id)), Err(_) => Arc::new(super::g_iyakki_voice_model_hosttts::RemoteHostTtsApi::new(self.rpc.clone(), u64::MAX)) }
         }
         fn ext_session(&self, chat: &str, agent: &str) -> Option<String> {
             self.rpc.call::<Option<String>>("AiRead", self.obj, "ext_session", serde_json::json!([chat, agent])).unwrap_or_else(|e| <Option<String> as Lost>::lost(&e))
@@ -1584,30 +1509,6 @@ mod g_facets_s6b {
         }
         fn start_for_login(&self, user: &str, policy: &Policy) -> bool {
             self.rpc.call::<bool>("FlowsFacet", self.obj, "start_for_login", serde_json::json!([user, policy])).unwrap_or_else(|e| <bool as Lost>::lost(&e))
-        }
-    }
-    /// `VoiceDeskFacet` over the connection (object `obj` of the core).
-    pub struct RemoteVoiceDeskFacet { pub(crate) rpc: Rpc, pub(crate) obj: u64 }
-    impl RemoteVoiceDeskFacet { pub(crate) fn new(rpc: Rpc, obj: u64) -> Self { RemoteVoiceDeskFacet { rpc, obj } } }
-    impl Drop for RemoteVoiceDeskFacet { fn drop(&mut self) { self.rpc.release(self.obj); } }
-    impl VoiceDeskFacet for RemoteVoiceDeskFacet {
-        fn read_voices(&self) -> Vec<iyakki_shared::voicedesk::ReadVoice> {
-            self.rpc.call::<Vec<iyakki_shared::voicedesk::ReadVoice>>("VoiceDeskFacet", self.obj, "read_voices", serde_json::json!([])).unwrap_or_else(|e| <Vec<iyakki_shared::voicedesk::ReadVoice> as Lost>::lost(&e))
-        }
-        fn stt_engine(&self) -> Option<iyakki_shared::voice::SpeechEngine> {
-            self.rpc.call::<Option<iyakki_shared::voice::SpeechEngine>>("VoiceDeskFacet", self.obj, "stt_engine", serde_json::json!([])).unwrap_or_else(|e| <Option<iyakki_shared::voice::SpeechEngine> as Lost>::lost(&e))
-        }
-        fn where_text(&self, engine: &iyakki_shared::voice::SpeechEngine, what: &str) -> String {
-            self.rpc.call::<String>("VoiceDeskFacet", self.obj, "where_text", serde_json::json!([engine, what])).unwrap_or_else(|e| <String as Lost>::lost(&e))
-        }
-        fn consent_text(&self, engine: &iyakki_shared::voice::SpeechEngine, listening: bool) -> Option<(iyakki_shared::voicedesk::Dest, String)> {
-            self.rpc.call::<Option<(iyakki_shared::voicedesk::Dest, String)>>("VoiceDeskFacet", self.obj, "consent_text", serde_json::json!([engine, listening])).unwrap_or_else(|e| <Option<(iyakki_shared::voicedesk::Dest, String)> as Lost>::lost(&e))
-        }
-        fn transcribe(&self, engine: &iyakki_shared::voice::SpeechEngine, pcm: &[i16]) -> Result<String, String> {
-            self.rpc.call::<Result<String, String>>("VoiceDeskFacet", self.obj, "transcribe", serde_json::json!([engine, pcm])).unwrap_or_else(|e| <Result<String, String> as Lost>::lost(&e))
-        }
-        fn pieces(&self, text: &str) -> Vec<iyakki_shared::story::Chunk> {
-            self.rpc.call::<Vec<iyakki_shared::story::Chunk>>("VoiceDeskFacet", self.obj, "pieces", serde_json::json!([text])).unwrap_or_else(|e| <Vec<iyakki_shared::story::Chunk> as Lost>::lost(&e))
         }
     }
     /// `ExtAgentFacet` over the connection (object `obj` of the core).
@@ -3650,6 +3551,120 @@ mod g_study_calendar {
     }
 }
 
+mod g_iyakki_voice_model_facets {
+    use super::*;
+    use iyakki_agent_api::*;
+    use iyakki_voice_model::facets::*;
+    use std::sync::Arc;
+    use iyakki_story_model::{Chunk, Playing, Sink, Synth};
+    /// `SpeechKit` over the connection (object `obj` of the core).
+    pub struct RemoteSpeechKit { pub(crate) rpc: Rpc, pub(crate) obj: u64 }
+    impl RemoteSpeechKit { pub(crate) fn new(rpc: Rpc, obj: u64) -> Self { RemoteSpeechKit { rpc, obj } } }
+    impl Drop for RemoteSpeechKit { fn drop(&mut self) { self.rpc.release(self.obj); } }
+    impl SpeechKit for RemoteSpeechKit {
+        fn revise_target(&self, ctx: &iyakki_voice_model::revise::Context) -> iyakki_voice_model::dictfix::Target {
+            self.rpc.call::<iyakki_voice_model::dictfix::Target>("SpeechKit", self.obj, "revise_target", serde_json::json!([ctx])).unwrap_or_else(|e| <iyakki_voice_model::dictfix::Target as Lost>::lost(&e))
+        }
+        fn revise(&self, text: &str, kind: &iyakki_voice_model::revise::Kind, ctx: &iyakki_voice_model::revise::Context) -> iyakki_voice_model::revise::Proposal {
+            self.rpc.call::<iyakki_voice_model::revise::Proposal>("SpeechKit", self.obj, "revise", serde_json::json!([text, kind, ctx])).unwrap_or_else(|e| <iyakki_voice_model::revise::Proposal as Lost>::lost(&e))
+        }
+    }
+    /// `MineWorker` over the connection (object `obj` of the core).
+    pub struct RemoteMineWorker { pub(crate) rpc: Rpc, pub(crate) obj: u64 }
+    impl RemoteMineWorker { pub(crate) fn new(rpc: Rpc, obj: u64) -> Self { RemoteMineWorker { rpc, obj } } }
+    impl Drop for RemoteMineWorker { fn drop(&mut self) { self.rpc.release(self.obj); } }
+    impl MineWorker for RemoteMineWorker {
+        fn send(&self, cmd: iyakki_voice_model::voiceassist_ports::Cmd) {
+            self.rpc.call::<()>("MineWorker", self.obj, "send", serde_json::json!([cmd])).unwrap_or_else(|e| <() as Lost>::lost(&e))
+        }
+        fn status(&self) -> iyakki_voice_model::voiceassist::Status {
+            self.rpc.call::<iyakki_voice_model::voiceassist::Status>("MineWorker", self.obj, "status", serde_json::json!([])).unwrap_or_else(|e| <iyakki_voice_model::voiceassist::Status as Lost>::lost(&e))
+        }
+        fn wake(&self, text: &str) {
+            self.rpc.call::<()>("MineWorker", self.obj, "wake", serde_json::json!([text])).unwrap_or_else(|e| <() as Lost>::lost(&e))
+        }
+    }
+    /// `VoiceDeskFacet` over the connection (object `obj` of the core).
+    pub struct RemoteVoiceDeskFacet { pub(crate) rpc: Rpc, pub(crate) obj: u64 }
+    impl RemoteVoiceDeskFacet { pub(crate) fn new(rpc: Rpc, obj: u64) -> Self { RemoteVoiceDeskFacet { rpc, obj } } }
+    impl Drop for RemoteVoiceDeskFacet { fn drop(&mut self) { self.rpc.release(self.obj); } }
+    impl VoiceDeskFacet for RemoteVoiceDeskFacet {
+        fn read_voices(&self) -> Vec<iyakki_voice_model::voicedesk::ReadVoice> {
+            self.rpc.call::<Vec<iyakki_voice_model::voicedesk::ReadVoice>>("VoiceDeskFacet", self.obj, "read_voices", serde_json::json!([])).unwrap_or_else(|e| <Vec<iyakki_voice_model::voicedesk::ReadVoice> as Lost>::lost(&e))
+        }
+        fn stt_engine(&self) -> Option<iyakki_voice_model::voice::SpeechEngine> {
+            self.rpc.call::<Option<iyakki_voice_model::voice::SpeechEngine>>("VoiceDeskFacet", self.obj, "stt_engine", serde_json::json!([])).unwrap_or_else(|e| <Option<iyakki_voice_model::voice::SpeechEngine> as Lost>::lost(&e))
+        }
+        fn where_text(&self, engine: &iyakki_voice_model::voice::SpeechEngine, what: &str) -> String {
+            self.rpc.call::<String>("VoiceDeskFacet", self.obj, "where_text", serde_json::json!([engine, what])).unwrap_or_else(|e| <String as Lost>::lost(&e))
+        }
+        fn consent_text(&self, engine: &iyakki_voice_model::voice::SpeechEngine, listening: bool) -> Option<(iyakki_voice_model::voicedesk::Dest, String)> {
+            self.rpc.call::<Option<(iyakki_voice_model::voicedesk::Dest, String)>>("VoiceDeskFacet", self.obj, "consent_text", serde_json::json!([engine, listening])).unwrap_or_else(|e| <Option<(iyakki_voice_model::voicedesk::Dest, String)> as Lost>::lost(&e))
+        }
+        fn transcribe(&self, engine: &iyakki_voice_model::voice::SpeechEngine, pcm: &[i16]) -> Result<String, String> {
+            self.rpc.call::<Result<String, String>>("VoiceDeskFacet", self.obj, "transcribe", serde_json::json!([engine, pcm])).unwrap_or_else(|e| <Result<String, String> as Lost>::lost(&e))
+        }
+        fn pieces(&self, text: &str) -> Vec<Chunk> {
+            self.rpc.call::<Vec<Chunk>>("VoiceDeskFacet", self.obj, "pieces", serde_json::json!([text])).unwrap_or_else(|e| <Vec<Chunk> as Lost>::lost(&e))
+        }
+    }
+}
+
+mod g_iyakki_voice_model_hosttts {
+    use super::*;
+    use iyakki_agent_api::*;
+    use iyakki_voice_model::hosttts::*;
+    use std::sync::Arc;
+    use iyakki_voice_model::hostengines::{Env, Report};
+    use iyakki_voice_model::hostvoice::HostVoice;
+    use iyakki_voice_model::voice::SpeechEngine;
+    use iyakki_voice_model::voicehelper::HelperState;
+    /// `HostTtsApi` over the connection (object `obj` of the core).
+    pub struct RemoteHostTtsApi { pub(crate) rpc: Rpc, pub(crate) obj: u64 }
+    impl RemoteHostTtsApi { pub(crate) fn new(rpc: Rpc, obj: u64) -> Self { RemoteHostTtsApi { rpc, obj } } }
+    impl Drop for RemoteHostTtsApi { fn drop(&mut self) { self.rpc.release(self.obj); } }
+    impl HostTtsApi for RemoteHostTtsApi {
+        fn is_enabled(&self) -> bool {
+            self.rpc.call::<bool>("HostTtsApi", self.obj, "is_enabled", serde_json::json!([])).unwrap_or_else(|e| <bool as Lost>::lost(&e))
+        }
+        fn configure(&self, env: Env) {
+            let _ = (&env, );
+            <() as Lost>::lost("this call is not served over the UI socket")
+        }
+        fn set_opener(&self, opener: Option<Vec<String>>) {
+            self.rpc.call::<()>("HostTtsApi", self.obj, "set_opener", serde_json::json!([opener])).unwrap_or_else(|e| <() as Lost>::lost(&e))
+        }
+        fn ensure(&self) {
+            self.rpc.call::<()>("HostTtsApi", self.obj, "ensure", serde_json::json!([])).unwrap_or_else(|e| <() as Lost>::lost(&e))
+        }
+        fn recheck(&self) {
+            self.rpc.call::<()>("HostTtsApi", self.obj, "recheck", serde_json::json!([])).unwrap_or_else(|e| <() as Lost>::lost(&e))
+        }
+        fn report(&self) -> Option<Arc<Report>> {
+            self.rpc.call::<Option<Arc<Report>>>("HostTtsApi", self.obj, "report", serde_json::json!([])).unwrap_or_else(|e| <Option<Arc<Report>> as Lost>::lost(&e))
+        }
+        fn scanning(&self) -> bool {
+            self.rpc.call::<bool>("HostTtsApi", self.obj, "scanning", serde_json::json!([])).unwrap_or_else(|e| <bool as Lost>::lost(&e))
+        }
+        fn scan_now(&self) -> Arc<Report> {
+            self.rpc.call::<Arc<Report>>("HostTtsApi", self.obj, "scan_now", serde_json::json!([])).unwrap_or_else(|e| <Arc<Report> as Lost>::lost(&e))
+        }
+        fn helper_open(&self, hv: Arc<HostVoice>, opener: Option<&[String]>) -> Result<String, String> {
+            let _ = (&hv, &opener, );
+            <Result<String, String> as Lost>::lost("this call is not served over the UI socket")
+        }
+        fn helper_state(&self) -> Option<HelperState> {
+            self.rpc.call::<Option<HelperState>>("HostTtsApi", self.obj, "helper_state", serde_json::json!([])).unwrap_or_else(|e| <Option<HelperState> as Lost>::lost(&e))
+        }
+        fn helper_stop(&self) {
+            self.rpc.call::<()>("HostTtsApi", self.obj, "helper_stop", serde_json::json!([])).unwrap_or_else(|e| <() as Lost>::lost(&e))
+        }
+        fn auto_engine(&self, lang: Option<&str>) -> Option<SpeechEngine> {
+            self.rpc.call::<Option<SpeechEngine>>("HostTtsApi", self.obj, "auto_engine", serde_json::json!([lang])).unwrap_or_else(|e| <Option<SpeechEngine> as Lost>::lost(&e))
+        }
+    }
+}
+
 pub use self::exports::*;
 mod exports {
     pub use super::g_chatruns::RemoteChatRuns;
@@ -3677,7 +3692,6 @@ mod exports {
     pub use super::g_facets_b4::RemoteServicesFacetB4;
     pub use super::g_facets_b4::RemoteAgentFacetsB4;
     pub use super::g_facets_b4::RemoteSshTunnels;
-    pub use super::g_facets_b4::RemoteMineWorker;
     pub use super::g_facets_b4::RemoteProjectKit;
     pub use super::g_facets_b5::RemoteServicesFacetB5;
     pub use super::g_facets_b5::RemoteDownloadQueueApi;
@@ -3689,7 +3703,6 @@ mod exports {
     pub use super::g_facets_b5::RemoteSandboxCluster;
     pub use super::g_facets_b5::RemoteCliApi;
     pub use super::g_facets_b6::RemoteGeminiLive;
-    pub use super::g_facets_b6::RemoteSpeechKit;
     pub use super::g_facets_b6::RemoteRouterPanel;
     pub use super::g_facets_b6::RemoteGitKit;
     pub use super::g_facets_b6::RemoteContractLocal;
@@ -3699,14 +3712,12 @@ mod exports {
     pub use super::g_facets_b7::RemoteAgentFacetsB7;
     pub use super::g_facets_b8::RemoteAgentFacetsB8;
     pub use super::g_facets_dev::RemoteDevDeployFacet;
-    pub use super::g_facets_g::RemoteHostTtsApi;
     pub use super::g_facets_g::RemoteAiRead;
     pub use super::g_facets_g::RemoteVaultRead;
     pub use super::g_facets_h::RemoteComputeBackend;
     pub use super::g_facets_platform::RemotePlatformApi;
     pub use super::g_facets_s6b::RemoteFlowChatEnv;
     pub use super::g_facets_s6b::RemoteFlowsFacet;
-    pub use super::g_facets_s6b::RemoteVoiceDeskFacet;
     pub use super::g_facets_s6b::RemoteExtAgentFacet;
     pub use super::g_facets_s6b::RemoteDomainsMgr;
     pub use super::g_facets_s6b::RemoteAgentFacetsS6B;
@@ -3756,6 +3767,10 @@ mod exports {
     pub use super::g_store::RemoteStoreCatalog;
     pub use super::g_store_api::RemoteStoreApi;
     pub use super::g_study_calendar::RemoteStudyCalendarApi;
+    pub use super::g_iyakki_voice_model_facets::RemoteSpeechKit;
+    pub use super::g_iyakki_voice_model_facets::RemoteMineWorker;
+    pub use super::g_iyakki_voice_model_facets::RemoteVoiceDeskFacet;
+    pub use super::g_iyakki_voice_model_hosttts::RemoteHostTtsApi;
 }
 
 /// A remote object of the named trait (the `iface` the core knows it by), or `None` when that trait is not generated.
@@ -3786,7 +3801,6 @@ pub fn remote_any(iface: &str, rpc: &Rpc, obj: u64) -> Option<RemoteAny> {
         "ServicesFacetB4" => RemoteAny::ServicesFacetB4(Arc::new(RemoteServicesFacetB4::new(rpc.clone(), obj))),
         "AgentFacetsB4" => RemoteAny::AgentFacetsB4(Arc::new(RemoteAgentFacetsB4::new(rpc.clone(), obj))),
         "SshTunnels" => RemoteAny::SshTunnels(Arc::new(RemoteSshTunnels::new(rpc.clone(), obj))),
-        "MineWorker" => RemoteAny::MineWorker(Arc::new(RemoteMineWorker::new(rpc.clone(), obj))),
         "ProjectKit" => RemoteAny::ProjectKit(Arc::new(RemoteProjectKit::new(rpc.clone(), obj))),
         "ServicesFacetB5" => RemoteAny::ServicesFacetB5(Arc::new(RemoteServicesFacetB5::new(rpc.clone(), obj))),
         "DownloadQueueApi" => RemoteAny::DownloadQueueApi(Arc::new(RemoteDownloadQueueApi::new(rpc.clone(), obj))),
@@ -3798,7 +3812,6 @@ pub fn remote_any(iface: &str, rpc: &Rpc, obj: u64) -> Option<RemoteAny> {
         "SandboxCluster" => RemoteAny::SandboxCluster(Arc::new(RemoteSandboxCluster::new(rpc.clone(), obj))),
         "CliApi" => RemoteAny::CliApi(Arc::new(RemoteCliApi::new(rpc.clone(), obj))),
         "GeminiLive" => RemoteAny::GeminiLive(Arc::new(RemoteGeminiLive::new(rpc.clone(), obj))),
-        "SpeechKit" => RemoteAny::SpeechKit(Arc::new(RemoteSpeechKit::new(rpc.clone(), obj))),
         "RouterPanel" => RemoteAny::RouterPanel(Arc::new(RemoteRouterPanel::new(rpc.clone(), obj))),
         "GitKit" => RemoteAny::GitKit(Arc::new(RemoteGitKit::new(rpc.clone(), obj))),
         "ContractLocal" => RemoteAny::ContractLocal(Arc::new(RemoteContractLocal::new(rpc.clone(), obj))),
@@ -3808,14 +3821,12 @@ pub fn remote_any(iface: &str, rpc: &Rpc, obj: u64) -> Option<RemoteAny> {
         "AgentFacetsB7" => RemoteAny::AgentFacetsB7(Arc::new(RemoteAgentFacetsB7::new(rpc.clone(), obj))),
         "AgentFacetsB8" => RemoteAny::AgentFacetsB8(Arc::new(RemoteAgentFacetsB8::new(rpc.clone(), obj))),
         "DevDeployFacet" => RemoteAny::DevDeployFacet(Arc::new(RemoteDevDeployFacet::new(rpc.clone(), obj))),
-        "HostTtsApi" => RemoteAny::HostTtsApi(Arc::new(RemoteHostTtsApi::new(rpc.clone(), obj))),
         "AiRead" => RemoteAny::AiRead(Arc::new(RemoteAiRead::new(rpc.clone(), obj))),
         "VaultRead" => RemoteAny::VaultRead(Arc::new(RemoteVaultRead::new(rpc.clone(), obj))),
         "ComputeBackend" => RemoteAny::ComputeBackend(Arc::new(RemoteComputeBackend::new(rpc.clone(), obj))),
         "PlatformApi" => RemoteAny::PlatformApi(Arc::new(RemotePlatformApi::new(rpc.clone(), obj))),
         "FlowChatEnv" => RemoteAny::FlowChatEnv(Arc::new(RemoteFlowChatEnv::new(rpc.clone(), obj))),
         "FlowsFacet" => RemoteAny::FlowsFacet(Arc::new(RemoteFlowsFacet::new(rpc.clone(), obj))),
-        "VoiceDeskFacet" => RemoteAny::VoiceDeskFacet(Arc::new(RemoteVoiceDeskFacet::new(rpc.clone(), obj))),
         "ExtAgentFacet" => RemoteAny::ExtAgentFacet(Arc::new(RemoteExtAgentFacet::new(rpc.clone(), obj))),
         "DomainsMgr" => RemoteAny::DomainsMgr(Arc::new(RemoteDomainsMgr::new(rpc.clone(), obj))),
         "AgentFacetsS6B" => RemoteAny::AgentFacetsS6B(Arc::new(RemoteAgentFacetsS6B::new(rpc.clone(), obj))),
@@ -3865,6 +3876,10 @@ pub fn remote_any(iface: &str, rpc: &Rpc, obj: u64) -> Option<RemoteAny> {
         "StoreCatalog" => RemoteAny::StoreCatalog(Arc::new(RemoteStoreCatalog::new(rpc.clone(), obj))),
         "StoreApi" => RemoteAny::StoreApi(Arc::new(RemoteStoreApi::new(rpc.clone(), obj))),
         "StudyCalendarApi" => RemoteAny::StudyCalendarApi(Arc::new(RemoteStudyCalendarApi::new(rpc.clone(), obj))),
+        "SpeechKit" => RemoteAny::SpeechKit(Arc::new(RemoteSpeechKit::new(rpc.clone(), obj))),
+        "MineWorker" => RemoteAny::MineWorker(Arc::new(RemoteMineWorker::new(rpc.clone(), obj))),
+        "VoiceDeskFacet" => RemoteAny::VoiceDeskFacet(Arc::new(RemoteVoiceDeskFacet::new(rpc.clone(), obj))),
+        "HostTtsApi" => RemoteAny::HostTtsApi(Arc::new(RemoteHostTtsApi::new(rpc.clone(), obj))),
         _ => return None,
     })
 }
@@ -3895,7 +3910,6 @@ pub enum RemoteAny {
     ServicesFacetB4(Arc<dyn iyakki_agent_api::facets_b4::ServicesFacetB4>),
     AgentFacetsB4(Arc<dyn iyakki_agent_api::facets_b4::AgentFacetsB4>),
     SshTunnels(Arc<dyn iyakki_agent_api::facets_b4::SshTunnels>),
-    MineWorker(Arc<dyn iyakki_agent_api::facets_b4::MineWorker>),
     ProjectKit(Arc<dyn iyakki_agent_api::facets_b4::ProjectKit>),
     ServicesFacetB5(Arc<dyn iyakki_agent_api::facets_b5::ServicesFacetB5>),
     DownloadQueueApi(Arc<dyn iyakki_agent_api::facets_b5::DownloadQueueApi>),
@@ -3907,7 +3921,6 @@ pub enum RemoteAny {
     SandboxCluster(Arc<dyn iyakki_agent_api::facets_b5::SandboxCluster>),
     CliApi(Arc<dyn iyakki_agent_api::facets_b5::CliApi>),
     GeminiLive(Arc<dyn iyakki_agent_api::facets_b6::GeminiLive>),
-    SpeechKit(Arc<dyn iyakki_agent_api::facets_b6::SpeechKit>),
     RouterPanel(Arc<dyn iyakki_agent_api::facets_b6::RouterPanel>),
     GitKit(Arc<dyn iyakki_agent_api::facets_b6::GitKit>),
     ContractLocal(Arc<dyn iyakki_agent_api::facets_b6::ContractLocal>),
@@ -3917,14 +3930,12 @@ pub enum RemoteAny {
     AgentFacetsB7(Arc<dyn iyakki_agent_api::facets_b7::AgentFacetsB7>),
     AgentFacetsB8(Arc<dyn iyakki_agent_api::facets_b8::AgentFacetsB8>),
     DevDeployFacet(Arc<dyn iyakki_agent_api::facets_dev::DevDeployFacet>),
-    HostTtsApi(Arc<dyn iyakki_agent_api::facets_g::HostTtsApi>),
     AiRead(Arc<dyn iyakki_agent_api::facets_g::AiRead>),
     VaultRead(Arc<dyn iyakki_agent_api::facets_g::VaultRead>),
     ComputeBackend(Arc<dyn iyakki_agent_api::facets_h::ComputeBackend>),
     PlatformApi(Arc<dyn iyakki_agent_api::facets_platform::PlatformApi>),
     FlowChatEnv(Arc<dyn iyakki_agent_api::facets_s6b::FlowChatEnv>),
     FlowsFacet(Arc<dyn iyakki_agent_api::facets_s6b::FlowsFacet>),
-    VoiceDeskFacet(Arc<dyn iyakki_agent_api::facets_s6b::VoiceDeskFacet>),
     ExtAgentFacet(Arc<dyn iyakki_agent_api::facets_s6b::ExtAgentFacet>),
     DomainsMgr(Arc<dyn iyakki_agent_api::facets_s6b::DomainsMgr>),
     AgentFacetsS6B(Arc<dyn iyakki_agent_api::facets_s6b::AgentFacetsS6B>),
@@ -3974,4 +3985,8 @@ pub enum RemoteAny {
     StoreCatalog(Arc<dyn iyakki_agent_api::store::StoreCatalog>),
     StoreApi(Arc<dyn iyakki_agent_api::store_api::StoreApi>),
     StudyCalendarApi(Arc<dyn iyakki_agent_api::study_calendar::StudyCalendarApi>),
+    SpeechKit(Arc<dyn iyakki_voice_model::facets::SpeechKit>),
+    MineWorker(Arc<dyn iyakki_voice_model::facets::MineWorker>),
+    VoiceDeskFacet(Arc<dyn iyakki_voice_model::facets::VoiceDeskFacet>),
+    HostTtsApi(Arc<dyn iyakki_voice_model::hosttts::HostTtsApi>),
 }

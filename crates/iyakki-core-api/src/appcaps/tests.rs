@@ -10,13 +10,13 @@ fn the_catalogue_has_the_design_names_and_hard_asks() {
     for n in ["camera.view", "camera.record", "microphone.listen", "speaker.play", "bluetooth.use", "usb.use", "files.read", "files.write", "net.connect", "net.listen", "screen.capture", "input.inject", "notify", "notify.receive", "schedule.use", "web.request.headers", "web.content.script", "web.user.agent", "clipboard.client", "files.client", "client.camera.offer", "client.microphone.offer"] {
         assert!(names.contains(&n), "{n}");
     }
-    assert_eq!(names.len(), 65);
+    assert_eq!(names.len(), 66);
     let mut sorted = names.clone();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(sorted.len(), 65, "names are unique");
+    assert_eq!(sorted.len(), 66, "names are unique");
     let hard: Vec<&str> = CATALOGUE.iter().filter(|d| d.hard_ask).map(|d| d.name).collect();
-    assert_eq!(hard, ["camera.record", "microphone.listen", "net.listen", "screen.capture", "input.inject", "clipboard.client", "files.client", "client.camera.offer", "client.microphone.offer", "system.memory.set", "net.scan", "system.disk.install", "system.hostname.set", "router.use", "router.strategy.set", "fleet.join", "fleet.manage", "fleet.assign", "fleet.receive", "tools.request"]);
+    assert_eq!(hard, ["camera.record", "microphone.listen", "net.listen", "screen.capture", "input.inject", "clipboard.client", "files.client", "client.camera.offer", "client.microphone.offer", "system.memory.set", "net.scan", "system.disk.install", "system.hostname.set", "router.use", "router.strategy.set", "k8s.portforward", "fleet.join", "fleet.manage", "fleet.assign", "fleet.receive", "tools.request"]);
     assert!(is_hard_ask("not.a.capability"), "unknown fails closed");
     assert!(!is_hard_ask("notify.receive") && !is_hard_ask("schedule.use"));
     assert_eq!(CATALOGUE_VERSION, 0);

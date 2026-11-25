@@ -16,10 +16,14 @@ import devui, qemu_guest  # noqa: E402
 class SessionGuest(qemu_guest.Guest):
     """The devtest guest, with an optional extra QEMU argument list and no data disk when iyakki-usb is not at hand."""
 
-    def __init__(self, build_dir, client, extra_qemu=None, append="", data_disk=False, ram=3072, disk_gb=2):
+    # 4096 MB (was 3072): the unpacked root of a pc image is 1.3 GB and the 2026-11 program is 150 MB; the scratch account then ran out of space ("storage error: No space left", Q1)
+    def __init__(self, build_dir, client, extra_qemu=None, append="", data_disk=False, ram=4096, disk_gb=2, audio_wav=None):
         super().__init__(build_dir, client)
         self.extra, self.append, self.data_disk, self.ram, self.disk_gb = extra_qemu or [], append, data_disk, ram, disk_gb
         self.disk = False
+        # audio_wav: a path, then QEMU records the guest's playback there (-audiodev wav, the sound verbs of dist/autotest judge it);
+        # None keeps the default, the sound device with no output (-audiodev none)
+        self.audio_wav = audio_wav
 
     def _start(self):
         usb = os.environ.get("IYAKKI_USB") or os.path.join(os.path.dirname(self.client), "iyakki-usb")
@@ -47,7 +51,7 @@ class SessionGuest(qemu_guest.Guest):
             self.disk = True
         else:
             self.disk = False  # no data volume: the session lives in RAM (the checks that need a data volume say so and are skipped)
-        cmd = ["qemu-system-x86_64", "-accel", "kvm", "-accel", "tcg", "-m", str(self.ram), "-smp", "2", "-display", "none", "-vga", "std", "-no-reboot", "-audiodev", "none,id=snd0",
+        cmd = ["qemu-system-x86_64", "-accel", "kvm", "-accel", "tcg", "-m", str(self.ram), "-smp", "2", "-display", "none", "-vga", "std", "-no-reboot", "-audiodev", ("wav,id=snd0,path=" + self.audio_wav) if self.audio_wav else "none,id=snd0",
                "-smbios", "type=1,manufacturer=Acme,product=Example Laptop 7,version=1.0,serial=SECRET-SERIAL-1", "-device", "virtio-keyboard-pci",
                "-device", "intel-hda", "-device", "hda-duplex,audiodev=snd0",
                "-kernel", os.path.join(out, "images", "bzImage"), "-initrd", os.path.join(out, "images", "rootfs.cpio.zst"),
@@ -70,17 +74,55 @@ class SessionGuest(qemu_guest.Guest):
         return self.vm.mon if self.vm else None
 
 
-def _variants(code):
-    """The pairing code read by OCR may mix up look-alike characters: try the plausible readings."""
-    import itertools
-    alts = {"O": "0O", "0": "0O", "I": "1I", "1": "1I", "S": "S5", "5": "S5", "B": "B8", "8": "B8", "Z": "Z2", "2": "Z2"}
-    pools = [alts.get(c, c) for c in code]
+CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"   # crates/iyakki-agent/src/devmode/auth.rs: no I, L, O, 0, 1
+_LOOKALIKE = {"I": "JT", "1": "7J", "L": "E", "O": "DQ", "0": "DQ", "5": "S", "8": "B", "J": "T", "U": "V", "V": "U", "M": "N", "N": "M", "S": "5", "B": "8", "Z": "2", "2": "Z", "D": "Q", "Q": "D"}
+
+
+def _variants(code, limit=5):
+    """The pairing code read by OCR may mix up look-alike characters. The device allows five tries in all, so only the likeliest readings are returned: the reading itself
+    when every character is in the code alphabet, then the readings that change the characters outside the alphabet, then a single look-alike swap, nearest first."""
+    code = code.upper()
     out = []
-    for combo in itertools.product(*pools):
-        out.append("".join(combo))
-        if len(out) >= 24:
-            break
+
+    def add(c):
+        if c not in out and len(out) < limit and all(ch in CODE_ALPHABET or ch == "-" for ch in c):
+            out.append(c)
+    base = [i for i, ch in enumerate(code) if ch not in CODE_ALPHABET and ch != "-"]
+    first = list(code)
+    for i in base:                       # a character the device never prints: its most likely look-alike
+        first[i] = (_LOOKALIKE.get(code[i], "") + "?")[0]
+    add("".join(first))
+    for i in base:
+        for alt in _LOOKALIKE.get(code[i], ""):
+            c = list(first); c[i] = alt; add("".join(c))
+    for i, ch in enumerate(code):
+        for alt in _LOOKALIKE.get(ch, ""):
+            c = list(first); c[i] = alt; add("".join(c))
     return out
+
+
+def _read_code_zoomed(png):
+    """The pairing code read twice as carefully: find the word that looks like a code, cut it out, enlarge it three times, and read that line alone with only the code alphabet allowed.
+    None when no such word is on the screen (the caller falls back to the plain reading)."""
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return None
+    tsv = subprocess.run(["tesseract", png, "-", "--psm", "11", "tsv"], capture_output=True, text=True).stdout.splitlines()
+    for line in tsv[1:]:
+        f = line.split("\t")
+        if len(f) < 12 or not re.fullmatch(r"[A-Z0-9]{4,5}[-\u2013][A-Z0-9]{4,5}", f[11].strip()):
+            continue
+        l, t, w, h = (int(x) for x in f[6:10])
+        im = Image.open(png).convert("L").crop((max(0, l - 12), max(0, t - 8), l + w + 12, t + h + 8))
+        im = ImageOps.autocontrast(ImageOps.invert(im.resize((im.width * 3, im.height * 3), Image.LANCZOS)))
+        z = os.path.join(os.path.dirname(png), "code-zoom.png")
+        im.save(z)
+        said = subprocess.run(["tesseract", z, "-", "--psm", "7", "-c", "tessedit_char_whitelist=%s-" % CODE_ALPHABET], capture_output=True, text=True).stdout
+        m = re.search(r"([A-Z0-9]{5})-([A-Z0-9]{5})", said.replace(" ", ""))
+        if m:
+            return m.group(1) + "-" + m.group(2)
+    return None
 
 
 def _pair_by_screen_retrying(self):
@@ -109,6 +151,7 @@ def _pair_by_screen_retrying(self):
             m = re.search(r"\b([A-Z0-9]{4,5}) ?[-\u2013] ?([A-Z0-9]{4,5})\b", txt)
             if m:
                 found = m.group(1) + "-" + m.group(2)
+                found = _read_code_zoomed(png) or found
                 break
         if not found:
             g._cmd("sendkey n", 1.5)          # the time-zone card, if it covers the page
@@ -160,7 +203,15 @@ SessionGuest._pair_by_screen = _pair_by_screen_retrying
 class Session:
     """What a check gets: serial log, dev API, shell commands in the guest."""
 
-    def __init__(self, build_dir, client, log_dir, keep=False, **kw):
+    def __init__(self, build_dir, client, log_dir, keep=False, ui_process=False, **kw):
+        # ui_process: the UI runs as its own program (F-SPLIT-03, docs/development/UI-BOUNDARY.md "Booted proof"). The Settings page that switches developer
+        # mode on and shows the pairing code is not served over the UI socket, so the guest is paired in the usual mode on a data volume and then restarted with
+        # `iyakki.ui=process` on the SAME volume (the pairing, the grant and developer mode are kept); `iyakki.ssh=1` gives the checks a root shell (key in
+        # $IYAKKI_QEMU_ROOT_KEY, its public half in the image's /etc/iyakki/authorized_keys) for what the dev shell's unprivileged account cannot do.
+        if ui_process:
+            kw["data_disk"] = True
+        self.ui_process = ui_process
+        self.ssh_port = None
         self.guest = SessionGuest(build_dir, client, **kw)
         self.client, self.log_dir = client, log_dir
         self.shell_ok = False
@@ -185,7 +236,39 @@ class Session:
         if not g.paired:
             raise devui.DevError("the guest booted but could not be paired (tesseract missing or the pairing code was not read)")
         self.approve_shell()
+        if self.ui_process:
+            self.switch_to_ui_process()
         return self
+
+    def switch_to_ui_process(self):
+        """Restart the guest (same data volume) with the UI as its own program and a root SSH door for the checks that need one."""
+        g = self.guest
+        g.append = (g.append + " iyakki.ui=process iyakki.ssh=1").strip()
+        if not self.restart_guest(qemu_guest.SCRATCH_PASSWORD):
+            raise devui.DevError("the guest did not come back with developer mode on after the restart into iyakki.ui=process")
+        # restart_guest leaves Settings open on the Developer mode page with its search text (the same clean-up as the end of approve_shell)
+        g._cmd("sendkey n", 1.0); g._cmd("sendkey slash", 1.0); g._cmd("sendkey ctrl-a", 0.5); g._cmd("sendkey delete", 1.0); g._cmd("sendkey esc", 0.5)
+        for _ in range(3):
+            g._cmd("sendkey f11", 1.0)
+        self.shell_ok = True            # the 8 hour grant is on the data volume
+        if os.environ.get("IYAKKI_QEMU_ROOT_KEY"):
+            self.ssh_port = g.port + 1
+            g._cmd("hostfwd_add tcp:127.0.0.1:%d-:22" % self.ssh_port, 0.5)
+            end = time.time() + 90
+            while time.time() < end and self.root("true")[0] != 0:
+                time.sleep(3)
+
+    def root(self, command, timeout=60):
+        """One command line as root in the guest over SSH (only with $IYAKKI_QEMU_ROOT_KEY and a guest booted with iyakki.ssh=1); returns (exit code, output)."""
+        key = os.environ.get("IYAKKI_QEMU_ROOT_KEY")
+        if not key or not self.ssh_port:
+            raise devui.Skip("no root door: set IYAKKI_QEMU_ROOT_KEY (private key whose public half is the image's /etc/iyakki/authorized_keys) and run with ui_process")
+        try:
+            r = subprocess.run(["ssh", "-p", str(self.ssh_port), "-i", key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
+                                "-o", "ConnectTimeout=5", "root@127.0.0.1", command], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return 124, "timed out after %ss" % timeout
+        return r.returncode, r.stdout + r.stderr
 
     @property
     def home(self):
@@ -234,6 +317,11 @@ class Session:
         while time.time() < deadline and p.poll() is None:
             g._cmd("sendkey 8", 1.0)
             time.sleep(3)
+        # Settings keeps its search text ("developer mode", typed above): empty the box and go Home, or every scenario that opens Settings afterwards sees only the
+        # Developer mode page ("no button X in this build", Q1 2026-11-21)
+        g._cmd("sendkey n", 1.0); g._cmd("sendkey slash", 1.0); g._cmd("sendkey ctrl-a", 0.5); g._cmd("sendkey delete", 1.0); g._cmd("sendkey esc", 0.5)
+        for _ in range(3):
+            g._cmd("sendkey f11", 1.0)
         out = b""
         while select.select([mfd], [], [], 0.3)[0]:
             try:

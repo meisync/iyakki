@@ -4,16 +4,16 @@
 use serde_json::json;
 
 use super::chat_themes::{no_args, Entry, Env};
-use super::AppCx;
+use super::chat_port::ChatPort;
 
 pub const TOOLS: [&str; 3] = ["monitor_brightness", "monitor_choose", "monitor_brightness_set"];
 
 pub const PROMPT_RULE: &str = "\nEXTERNAL MONITORS: monitor_brightness lists the screens that can be set over DDC/CI (name, id, brightness in percent, or why one cannot be read; many monitors do not answer) and which one is chosen; it only reads. monitor_choose chooses the one screen that may be written to by its id (or none) and asks the person first. monitor_brightness_set sets the brightness (1 to 100, never fully dark) of the chosen screen and asks the person first; the value is read back. A machine whose kernel lacks the I2C driver says so.";
 
-pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
+pub fn entries(cx: &dyn ChatPort, env: &Env) -> Vec<Entry> {
     let mut v = Vec::new();
     {
-        let core = cx.core.clone();
+        let core = cx.core();
         v.push(Entry::read("Display", "monitor_brightness", "List the external monitors that can be set over DDC/CI: name, id, brightness in percent (or why it cannot be read) and which one is chosen. Reads only.", no_args(), move |_| {
             let list = core.monitors().list();
             if list.is_empty() {
@@ -31,7 +31,7 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let (core, e1) = (cx.core.clone(), env.clone());
+        let (core, e1) = (cx.core(), env.clone());
         let schema = json!({"type": "object", "properties": {"id": {"type": "string", "description": "The id of the screen from monitor_brightness; leave out or say none to choose no screen."}}});
         v.push(Entry::change("Display", "monitor_choose", "Choose the one external monitor whose brightness may be set over DDC/CI, by the id monitor_brightness shows (nothing else is ever written to). The person approves a card first.", schema, |a| format!("Allow setting the brightness of monitor {}", a["id"].as_str().unwrap_or("none")), move |a| {
             let id = a.get("id").and_then(|x| x.as_str()).map(str::trim).filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("none"));
@@ -44,7 +44,7 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let (core, e1) = (cx.core.clone(), env.clone());
+        let (core, e1) = (cx.core(), env.clone());
         let schema = json!({"type": "object", "properties": {"percent": {"type": "integer", "description": "Brightness from 1 to 100 (never fully dark)."}}, "required": ["percent"]});
         v.push(Entry::change("Display", "monitor_brightness_set", "Set the brightness of the chosen external monitor over DDC/CI (1 to 100). Fails when no screen is chosen. The value is read back. The person approves a card first.", schema, |a| format!("Set the monitor brightness to {}%", a["percent"].as_i64().unwrap_or(0)), move |a| {
             let p = a.get("percent").and_then(|x| x.as_i64()).ok_or("percent is a number from 1 to 100")?;

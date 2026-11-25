@@ -1,0 +1,112 @@
+{
+ "schema": 1,
+ "row": "F-RPI-08",
+ "feature_sha": "0d0c7b7375146bd9",
+ "title": "Raspberry Pi 5 first boot",
+ "clauses": [
+  {
+   "id": "eeprom-boot",
+   "text": "The board starts from the card",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Power the Pi 5 with the written card and the serial console open.",
+     "expect": "The bootloader prints lines on the serial console and the activity LED blinks."
+    }
+   ]
+  },
+  {
+   "id": "kernel-starts",
+   "text": "Our kernel starts",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Read the serial log.",
+     "expect": "`Linux version 6.12.115-iyakki-rpi5` and kernel messages follow the bootloader lines."
+    }
+   ]
+  },
+  {
+   "id": "stage1-volumes",
+   "text": "Stage 1 finds the volumes",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Read the serial log.",
+     "expect": "`stage1: volumes found` names an mmcblk or nvme boot and data volume, then `boot volume mounted`."
+    }
+   ]
+  },
+  {
+   "id": "system-starts",
+   "text": "The system starts from the seed root",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Read the serial log.",
+     "expect": "`root boot/root.sfs mounted`, `switching root`, then the IYAKKI system starts (banner or login)."
+    }
+   ]
+  },
+  {
+   "id": "data-kept",
+   "text": "The data volume is formatted once and kept",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Restart the board once.",
+     "expect": "The second start says `stage1: data volume mounted`."
+    }
+   ]
+  },
+  {
+   "id": "ethernet",
+   "text": "Ethernet gets an address",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Plug in Ethernet before power-on.",
+     "expect": "The board gets a DHCP address (serial console or router list)."
+    }
+   ]
+  },
+  {
+   "id": "hdmi",
+   "text": "The display (least certain)",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Connect HDMI before power-on.",
+     "expect": "The boot picture or the shell; a black screen with a working serial console is a valid answer: choose fail and say so."
+    }
+   ]
+  },
+  {
+   "id": "send-back",
+   "text": "What to send back",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Collect the serial log, a photo of the screen, boot/stage1.log from the card, the board revision line and the bootloader date.",
+     "expect": "Everything is sent to the project."
+    }
+   ]
+  }
+ ]
+}

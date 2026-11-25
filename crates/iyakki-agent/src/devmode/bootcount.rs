@@ -67,8 +67,16 @@ pub fn format_env(vars: &[(String, String)]) -> Option<Vec<u8>> {
     Some(b)
 }
 
+/// The environment block on this partition. A folder laid out from a pack on a case-sensitive file system can spell the folders in capitals (`boot/GRUB`, the way the
+/// FAT volume lists them); the spelling that is there is used, as it is for the menu file. A missing file or folder gets the lower-case path.
 fn env_path(root: &Path) -> PathBuf {
-    root.join(ENV_FILE)
+    if let Some(p) = super::update::find_ci(root, ENV_FILE) {
+        return p;
+    }
+    match super::update::find_ci(root, "boot/grub") {
+        Some(dir) => dir.join("grubenv"),
+        None => root.join(ENV_FILE),
+    }
 }
 
 /// The counter on the boot partition mounted at `root`.
@@ -77,7 +85,7 @@ pub fn read_state(root: &Path) -> State {
     state_of(vars.iter().find(|(k, _)| k == VAR).map(|(_, v)| v.as_str()))
 }
 
-fn write_state(root: &Path, value: &str) -> Result<(), String> {
+pub(super) fn write_state(root: &Path, value: &str) -> Result<(), String> {
     let p = env_path(root);
     let mut vars = std::fs::read(&p).map(|b| parse_env(&b)).unwrap_or_default();
     vars.retain(|(k, _)| k != VAR);

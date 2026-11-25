@@ -12,6 +12,7 @@
 //! Administrators change the machine; everyone with the page chooses their own profiles. Every change is audited by name, never by value.
 
 use super::*;
+use super::super::settings_device_port::DevClusterPort;
 use crate::apps::ScrollLog;
 use iyakki_shared::devcluster::{Choice};
 use iyakki_shared::devcluster::{self, ClusterProfile, Env as ClusterEnv, Resolution, Source};
@@ -150,12 +151,12 @@ impl SettingsApp {
         Some((crate::agent().exec().system(), ClusterEnv::real()))
     }
 
-    fn dc_ids(cx: &AppCx) -> (PathBuf, String) {
-        (cx.data_dir().to_path_buf(), cx.session.user.clone())
+    fn dc_ids(p: &dyn DevClusterPort) -> (PathBuf, String) {
+        (p.data_dir().to_path_buf(), p.user())
     }
 
-    pub(super) fn dc_visible(cx: &AppCx) -> bool {
-        cx.session.policy.manage_settings
+    pub(super) fn dc_visible(p: &dyn DevClusterPort) -> bool {
+        p.is_admin()
     }
 
     pub(super) fn dc_len(&self) -> usize {
@@ -167,16 +168,16 @@ impl SettingsApp {
     }
 
     /// Open Platform services on this page, optionally straight into the deploy wizard of one service.
-    pub fn dc_open_platform(&mut self, cx: &AppCx, service: Option<&str>) {
+    pub(super) fn dc_open_platform(&mut self, p: &dyn DevClusterPort, service: Option<&str>) {
         let (run, env) = self.dc_world().unwrap_or_else(|| (Arc::new(iyakki_shared::wsexec::FakeRunner::new(&[])), ClusterEnv::default()));
-        let pl = crate::apps::platform_services::platform_for(cx, run, env);
-        let mut p = crate::apps::platform_services::PlatformPanel::new(pl).with_services(cx.platform_handles());
+        let Some((pl, handles)) = p.platform(run, env) else { return self.fail("Platform services are not available here.") };
+        let mut pan = crate::apps::platform_services::PlatformPanel::new(pl).with_services(handles);
         match service {
-            Some("private-store:manage") => p.open_store_manage(),
-            Some(id) => p.open_wizard(id),
-            None => p.open_list(),
+            Some("private-store:manage") => pan.open_store_manage(),
+            Some(id) => pan.open_wizard(id),
+            None => pan.open_list(),
         }
-        self.dc.platform = Some(p);
+        self.dc.platform = Some(pan);
     }
 
     pub(super) fn dc_platform_open(&self) -> bool {
@@ -184,12 +185,12 @@ impl SettingsApp {
     }
 
     /// Open the Clusters page (the registry of local and remote clusters).
-    pub fn dc_open_clusters(&mut self, cx: &AppCx) {
-        let (dir, user) = Self::dc_ids(cx);
-        let svc = cx.services.clone();
-        let (v_svc, v_user) = (cx.vault(), user.clone());
-        let panel = crate::apps::clusters_panel::ClustersPanel::new(svc.fleet() as Arc<dyn iyakki_agent_api::FleetApi>, dir, &user, cx.session.role)
-            .with_streamer(svc.streamer())
+    pub(super) fn dc_open_clusters(&mut self, p: &dyn DevClusterPort) {
+        let (dir, user) = Self::dc_ids(p);
+        let Some(fleet) = p.fleet() else { return self.fail("The list of clusters is not available here.") };
+        let (v_svc, v_user) = (p.vault(), user.clone());
+        let panel = crate::apps::clusters_panel::ClustersPanel::new(fleet, dir, &user, p.role())
+            .with_streamer(p.streamer())
             .with_vault_delete(Arc::new(move |reference: &str| {
                 let result = match reference.split_once(':') {
                     Some(("uvault", name)) => v_svc.user_delete(&v_user, name),
@@ -230,7 +231,7 @@ impl SettingsApp {
     // ------------------------------------------------------------------ looking
 
     /// Look through the places clusters can be, in the background (never blocks the screen).
-    pub(super) fn dc_scan(&mut self, cx: &AppCx) {
+    pub(super) fn dc_scan(&mut self, p: &dyn DevClusterPort) {
         self.dc.asked = true;
         self.dc.rows_dirty = true;
         let Some((run, env)) = self.dc_world() else {
@@ -241,7 +242,7 @@ impl SettingsApp {
             self.dc.pending.store(true, Ordering::SeqCst);
             return;
         }
-        let (dir, user) = Self::dc_ids(cx);
+        let (dir, user) = Self::dc_ids(p);
         let ns = self.dc_namespace();
         let (res, nodes, scanning, scans) = (self.dc.res.clone(), self.dc.nodes.clone(), self.dc.scanning.clone(), self.dc.scans.clone());
         std::thread::spawn(move || {
@@ -267,37 +268,36 @@ impl SettingsApp {
         self.dc.ws.get(self.dc.ws_idx).map(|(name, _, cfg)| cfg.namespace(name)).unwrap_or_else(|| "default".into())
     }
 
-    fn dc_situation(&mut self, cx: &AppCx) -> Situation {
+    fn dc_situation(&mut self, p: &dyn DevClusterPort) -> Situation {
         if let Some((at, s)) = &self.dc.sit {
             if at.elapsed() < Duration::from_secs(2) {
                 return s.clone();
             }
         }
-        let s = cx.k3sdev().situation();
+        let s = p.k3sdev().situation();
         self.dc.sit = Some((Instant::now(), s.clone()));
         s
     }
 
     /// Keep the rows, the situation and the workspaces up to date; called by the heartbeat and before drawing.
-    pub(super) fn dc_prepare(&mut self, cx: &AppCx) {
+    pub(super) fn dc_prepare(&mut self, p: &dyn DevClusterPort) {
         // what the cluster supervisor does in the background (restarts, exits) and what this page starts is audited the same way
-        let audit = cx.audit.clone();
-        cx.k3sdev().set_audit(Arc::new(move |u, a, d| audit.record(u, a, d)));
+        p.k3sdev().set_audit(p.audit_sink());
         if !self.dc.scanning.load(Ordering::SeqCst) && self.dc.pending.swap(false, Ordering::SeqCst) {
             self.dc.asked = false;
         }
         if !self.dc.asked {
-            self.dc_scan(cx);
+            self.dc_scan(p);
         }
         let scans = self.dc.scans.load(Ordering::SeqCst);
         if self.dc.rows_dirty || scans != self.dc.rows_scans || self.dc.rows_at.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) {
-            self.dc_build_rows(cx);
+            self.dc_build_rows(p);
             self.dc.rows_scans = scans;
         }
     }
 
-    fn dc_build_rows(&mut self, cx: &AppCx) {
-        let (dir, user) = Self::dc_ids(cx);
+    fn dc_build_rows(&mut self, p: &dyn DevClusterPort) {
+        let (dir, user) = Self::dc_ids(p);
         self.dc.rows_dirty = false;
         self.dc.rows_at = Some(Instant::now());
         // the person's workspaces and what each one has chosen
@@ -306,7 +306,7 @@ impl SettingsApp {
         self.dc.ws = reg.ordered().into_iter().map(|w| (w.name.clone(), w.root_path(), ProjectConfig::load(&w.root_path()).unwrap_or_default())).collect();
         self.dc.ws_idx = keep.and_then(|k| self.dc.ws.iter().position(|w| w.1 == k)).unwrap_or(0);
         let choice = Choice::load(&dir, &user);
-        let managed = cx.k3sdev().layout().kubeconfig().display().to_string();
+        let managed = p.k3sdev().layout().kubeconfig().display().to_string();
         let res = lock(&self.dc.res).clone().unwrap_or_default();
         let nodes = lock(&self.dc.nodes).clone();
         let tests = lock(&self.dc.tests).clone();
@@ -401,8 +401,8 @@ impl SettingsApp {
 
     // ------------------------------------------------------------------ keys
 
-    pub(super) fn handle_devcluster(&mut self, k: &Key, cx: &AppCx) {
-        self.dc_prepare(cx);
+    pub(super) fn handle_devcluster(&mut self, k: &Key, p: &dyn DevClusterPort) {
+        self.dc_prepare(p);
         let len = self.dc.rows.len();
         match k {
             Key::Up => return self.move_sel(-1, len),
@@ -410,12 +410,12 @@ impl SettingsApp {
             Key::Char('r') => {
                 self.dc.asked = false;
                 self.dc.sit = None;
-                self.dc_scan(cx);
+                self.dc_scan(p);
                 return self.ok("Looking for clusters again…");
             }
-            Key::Char('t') => return self.dc_test(cx),
-            Key::Char('d') => return self.dc_default_me(cx),
-            Key::Char('w') => return self.dc_default_workspace(cx),
+            Key::Char('t') => return self.dc_test(p),
+            Key::Char('d') => return self.dc_default_me(p),
+            Key::Char('w') => return self.dc_default_workspace(p),
             Key::Char('k') => {
                 if self.dc.ws.is_empty() {
                     return self.fail("You have no workspace yet (the AI IDE makes them).");
@@ -425,35 +425,35 @@ impl SettingsApp {
                 let n = self.dc.ws[self.dc.ws_idx].0.clone();
                 return self.ok(format!("Workspace choices now apply to {n}."));
             }
-            Key::Char('h') => return self.dc_hide(cx),
-            Key::Char('x') => return self.dc_disconnect(cx),
-            Key::Char('v') => return self.dc_vault_form(cx),
+            Key::Char('h') => return self.dc_hide(p),
+            Key::Char('x') => return self.dc_disconnect(p),
+            Key::Char('v') => return self.dc_vault_form(p),
             Key::Char('V') => return self.dc_vault_remove(),
-            Key::Char('g') => return self.dc_registry_form(cx),
-            Key::Char('P') => return self.dc_open_platform(cx, None),
-            Key::Char('C') => return self.dc_open_clusters(cx),
+            Key::Char('g') => return self.dc_registry_form(p),
+            Key::Char('P') => return self.dc_open_platform(p, None),
+            Key::Char('C') => return self.dc_open_clusters(p),
             _ => {}
         }
         // the machine's own cluster: administrators only
-        let sit = self.dc_situation(cx);
+        let sit = self.dc_situation(p);
         match k {
-            Key::Char('s') => self.dc_setup_form(cx, &sit),
-            Key::Char('b') => self.dc_act_overlay(cx, DcAct::Start),
-            Key::Char('o') => self.dc_act_overlay(cx, DcAct::Stop),
-            Key::Char('e') => self.dc_act_overlay(cx, DcAct::Restart),
-            Key::Char('l') => self.dc_logs(cx),
-            Key::Char('p') => self.dc_upgrade(cx),
-            Key::Char('a') => self.dc_autostart(cx),
-            Key::Char('f') => self.dc_fixed_ip(cx),
-            Key::Char('n') => self.dc_offline(cx),
-            Key::Char('z') => self.dc_typed_form(cx, DcForm::Reset),
-            Key::Char('U') => self.dc_typed_form(cx, DcForm::Uninstall),
+            Key::Char('s') => self.dc_setup_form(p, &sit),
+            Key::Char('b') => self.dc_act_overlay(p, DcAct::Start),
+            Key::Char('o') => self.dc_act_overlay(p, DcAct::Stop),
+            Key::Char('e') => self.dc_act_overlay(p, DcAct::Restart),
+            Key::Char('l') => self.dc_logs(p),
+            Key::Char('p') => self.dc_upgrade(p),
+            Key::Char('a') => self.dc_autostart(p),
+            Key::Char('f') => self.dc_fixed_ip(p),
+            Key::Char('n') => self.dc_offline(p),
+            Key::Char('z') => self.dc_typed_form(p, DcForm::Reset),
+            Key::Char('U') => self.dc_typed_form(p, DcForm::Uninstall),
             _ => {}
         }
     }
 
     /// Events while the plan screen is up: scroll and select the text, Approve (y) or Cancel (Esc).
-    pub(super) fn dc_overlay_event(&mut self, ev: &Event, cx: &AppCx) {
+    pub(super) fn dc_overlay_event(&mut self, ev: &Event, p: &dyn DevClusterPort) {
         let Some(o) = self.dc.overlay.as_mut() else { return };
         match ev {
             Event::Key(Key::Esc) | Event::Key(Key::Char('n')) => self.dc.overlay = None,
@@ -463,7 +463,7 @@ impl SettingsApp {
                     return self.fail(why);
                 }
                 let o = self.dc.overlay.take().expect("overlay");
-                self.dc_approved(cx, o.act);
+                self.dc_approved(p, o.act);
             }
             Event::Key(Key::Enter) => self.dc.overlay = None,
             Event::Key(Key::Up) => o.log.scroll_by(1),
@@ -482,30 +482,30 @@ impl SettingsApp {
         self.dc.overlay = Some(Overlay { title: title.into(), log: lines_of(text), act, blocked });
     }
 
-    fn dc_approved(&mut self, cx: &AppCx, act: OverlayAct) {
-        let (svc, user) = (cx.k3sdev().clone(), cx.session.user.clone());
+    fn dc_approved(&mut self, p: &dyn DevClusterPort, act: OverlayAct) {
+        let (svc, user) = (p.k3sdev().clone(), p.user());
         match act {
             OverlayAct::Close => {}
-            OverlayAct::Run(a) => self.dc_run(cx, a),
+            OverlayAct::Run(a) => self.dc_run(p, a),
             OverlayAct::Setup(plan) => {
-                if !self.admin(cx) {
+                if !self.admin(p) {
                     return;
                 }
-                let Some(st) = cx.streamer() else { return self.fail("No network connection is set up for downloads.") };
+                let Some(st) = p.streamer() else { return self.fail("No network connection is set up for downloads.") };
                 self.start("setting up the local cluster", move || {
                     JobOut::Msg(svc.install(&plan, &*st, &user).and_then(|_| svc.clone().start(&user)).map(|_| format!("Installed {} {} in {} and started it. The first start takes a minute or two; SYSTEM and this page show when the node is Ready. The registry ({}) is the next step: press g.", plan.backend.label(), plan.version, svc.layout().root.display(), plan.registry)))
                 });
             }
             OverlayAct::Upgrade(plan) => {
-                if !self.admin(cx) {
+                if !self.admin(p) {
                     return;
                 }
-                let Some(st) = cx.streamer() else { return self.fail("No network connection is set up for downloads.") };
+                let Some(st) = p.streamer() else { return self.fail("No network connection is set up for downloads.") };
                 self.start("upgrading the cluster", move || JobOut::Msg(svc.upgrade(&plan, &*st, &user).map(|_| format!("Upgraded to {}. The old program is kept as k3s.prev next to it.", plan.version))));
             }
             OverlayAct::Registry(plan, ws) => {
                 let Some((run, _)) = self.dc_world() else { return self.fail("No cluster tools are available here.") };
-                cx.audit.record(&user, "devcluster.registry.apply", &format!("{} {ws}", plan.option.kind()));
+                p.audit("devcluster.registry.apply", &format!("{} {ws}", plan.option.kind()));
                 self.start("setting up the registry", move || {
                     JobOut::Msg(crate::agent().helpers_b6().deploy_kit().reg_apply(&plan, &*run, true).map(|a| {
                         let mut t = format!("Registry option {} for {ws}: {}.", plan.option.kind(), if a.done.is_empty() { "nothing to do".to_string() } else { a.done.join("; ") });
@@ -520,30 +520,30 @@ impl SettingsApp {
         }
     }
 
-    fn dc_run(&mut self, cx: &AppCx, a: DcAct) {
-        let (svc, user) = (cx.k3sdev().clone(), cx.session.user.clone());
+    fn dc_run(&mut self, p: &dyn DevClusterPort, a: DcAct) {
+        let (svc, user) = (p.k3sdev().clone(), p.user());
         match a {
             DcAct::Start => {
-                if self.admin(cx) {
+                if self.admin(p) {
                     self.start("starting the cluster", move || JobOut::Msg(svc.start(&user).map(|_| "Starting. The first start takes a minute or two.".to_string())));
                 }
             }
             DcAct::Stop => {
-                if self.admin(cx) {
+                if self.admin(p) {
                     self.start("stopping the cluster", move || JobOut::Msg(svc.stop(&user).map(|_| "Stopped. It starts again with Start (or at the next start of IYAKKI when Autostart is on).".to_string())));
                 }
             }
             DcAct::Restart => {
-                if self.admin(cx) {
+                if self.admin(p) {
                     self.start("restarting the cluster", move || JobOut::Msg(svc.restart(&user).map(|_| "Restarting.".to_string())));
                 }
             }
-            DcAct::Disconnect(id) => self.dc_do_disconnect(cx, &id),
+            DcAct::Disconnect(id) => self.dc_do_disconnect(p, &id),
             DcAct::RemoveVault(name) => {
-                let (dir, user) = Self::dc_ids(cx);
+                let (dir, user) = Self::dc_ids(p);
                 match kubeprofiles::vault_remove(&dir, &user, &name) {
                     Ok(()) => {
-                        cx.audit.record(&user, "devcluster.vault_profile.remove", &name);
+                        p.audit("devcluster.vault_profile.remove", &name);
                         self.dc.rows_dirty = true;
                         self.ok(format!("Removed the profile {name} (the vault entry itself is kept)."));
                     }
@@ -553,20 +553,20 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn dc_confirm(&mut self, cx: &AppCx, a: DcAct) {
-        self.dc_run(cx, a);
+    pub(super) fn dc_confirm(&mut self, p: &dyn DevClusterPort, a: DcAct) {
+        self.dc_run(p, a);
     }
 
     /// A job finished with a plan to show.
-    pub(super) fn dc_job_done(&mut self, cx: &AppCx, out: DcOut) {
+    pub(super) fn dc_job_done(&mut self, p: &dyn DevClusterPort, out: DcOut) {
         match out {
             DcOut::SetupPlan(Err(e)) | DcOut::RegistryPlan(Err(e)) | DcOut::UpgradePlan(Err(e)) => self.fail(e),
             DcOut::SetupPlan(Ok(plan)) => {
-                let mut text = cx.k3sdev().describe(&plan);
-                if plan.backend == Backend::Native && !cx.agent.wsexec_on_path("podman") {
+                let mut text = p.k3sdev().describe(&plan);
+                if plan.backend == Backend::Native && !p.on_path("podman") {
                     text.push_str("\n\nThe Podman variant is not offered here: podman is not installed. It would need the podman packages in the image (docs/K3S-DEV.md, \"The Podman variant\").");
                 }
-                let blocked = match cx.k3sdev().situation() {
+                let blocked = match p.k3sdev().situation() {
                     Situation::Free { problems } if problems.is_empty() => String::new(),
                     Situation::Free { problems } => format!("Cannot set up here: {}.", problems.join("; ")),
                     Situation::Managed => "IYAKKI already manages a cluster here.".into(),
@@ -578,8 +578,8 @@ impl SettingsApp {
             }
             DcOut::UpgradePlan(Ok(None)) => self.ok("The cluster already runs the latest k3s release."),
             DcOut::UpgradePlan(Ok(Some(plan))) => {
-                let cur = cx.k3sdev().installed().map(|s| s.version).unwrap_or_default();
-                let running = matches!(cx.k3sdev().state(), Svc::Starting | Svc::Running);
+                let cur = p.k3sdev().installed().map(|s| s.version).unwrap_or_default();
+                let running = matches!(p.k3sdev().state(), Svc::Starting | Svc::Running);
                 let text = format!("Upgrade k3s {cur} -> {}\n\n{}\n\n{}", plan.version, k3sdev::plan_text(&plan, true, false).split("\nWHERE IT IS INSTALLED").next().unwrap_or_default().lines().skip(1).collect::<Vec<_>>().join("\n"), if running { "The cluster is stopped while the program is replaced and started again. The download is verified first; if it does not match, nothing changes. The old program is kept as k3s.prev." } else { "The cluster is not running; the program is replaced and stays stopped. The download is verified first. The old program is kept as k3s.prev." });
                 self.dc_show("Upgrade the cluster: review, then approve", &text, OverlayAct::Upgrade(plan), String::new());
             }
@@ -592,13 +592,13 @@ impl SettingsApp {
 
     // ------------------------------------------------------------------ profile actions
 
-    fn dc_test(&mut self, cx: &AppCx) {
+    fn dc_test(&mut self, p: &dyn DevClusterPort) {
         let Some(row) = self.dc_row() else { return self.fail("No cluster is selected.") };
         if row.kind == RowKind::Hidden {
             return self.fail("A hidden cluster is never probed. Show it first (h), then test it.");
         }
         let Some((run, _)) = self.dc_world() else { return self.fail("No cluster tools are available here.") };
-        cx.audit.record(&cx.session.user, "devcluster.test", &row.id);
+        p.audit("devcluster.test", &row.id);
         let ns = self.dc_namespace();
         let tests = self.dc.tests.clone();
         let (id, ctx, source) = (row.id.clone(), row.context.clone(), row.source);
@@ -634,7 +634,7 @@ impl SettingsApp {
         self.dc.rows_dirty = true;
     }
 
-    fn dc_default_me(&mut self, cx: &AppCx) {
+    fn dc_default_me(&mut self, p: &dyn DevClusterPort) {
         let Some(row) = self.dc_row() else { return self.fail("No cluster is selected.") };
         if row.kind == RowKind::Hidden {
             return self.fail("That cluster is hidden. Show it first (h).");
@@ -644,10 +644,10 @@ impl SettingsApp {
                 return self.fail(if p.fix.is_empty() { p.problem.clone() } else { p.fix.clone() });
             }
         }
-        let (dir, user) = Self::dc_ids(cx);
+        let (dir, user) = Self::dc_ids(p);
         match (Choice { kubeconfig: row.id.clone(), context: row.context.clone() }).save(&dir, &user) {
             Ok(()) => {
-                cx.audit.record(&user, "devcluster.default.user", &row.id);
+                p.audit("devcluster.default.user", &row.id);
                 self.dc.rows_dirty = true;
                 self.dc.asked = false;
                 self.ok(format!("{} is now your default cluster (every workspace of yours without its own choice uses it).", row.title));
@@ -656,19 +656,19 @@ impl SettingsApp {
         }
     }
 
-    fn dc_default_workspace(&mut self, cx: &AppCx) {
+    fn dc_default_workspace(&mut self, p: &dyn DevClusterPort) {
         let Some(row) = self.dc_row() else { return self.fail("No cluster is selected.") };
         if row.kind == RowKind::Hidden {
             return self.fail("That cluster is hidden. Show it first (h).");
         }
         let Some((name, root, _)) = self.dc.ws.get(self.dc.ws_idx).cloned() else { return self.fail("You have no workspace yet (the AI IDE makes them).") };
-        let (dir, user) = Self::dc_ids(cx);
+        let (dir, user) = Self::dc_ids(p);
         // the workspace file is shared with other people of the project: a file this account may not read, or a vault entry, stays
         // in the person's own choice, as in the K8S panel
-        let shareable = !kubeprofiles::is_vault_ref(&row.id) && cx.session.policy.allows_read(&user, &row.id);
+        let shareable = !kubeprofiles::is_vault_ref(&row.id) && p.allows_read(&row.id);
         let _ = (Choice { kubeconfig: row.id.clone(), context: row.context.clone() }).save(&dir, &user);
         if !shareable {
-            cx.audit.record(&user, "devcluster.default.user", &row.id);
+            p.audit("devcluster.default.user", &row.id);
             self.dc.rows_dirty = true;
             return self.ok(format!("{} is kept as your own choice: it is a vault entry or a file outside your file scope, so it is not written into {name}'s project.json.", row.title));
         }
@@ -678,7 +678,7 @@ impl SettingsApp {
             c.save(&root)
         }) {
             Ok(()) => {
-                cx.audit.record(&user, "devcluster.default.workspace", &format!("{name} {}", row.id));
+                p.audit("devcluster.default.workspace", &format!("{name} {}", row.id));
                 self.dc.rows_dirty = true;
                 self.ok(format!("{} is now the cluster of workspace {name} (saved in its .iyakki/project.json).", row.title));
             }
@@ -686,14 +686,14 @@ impl SettingsApp {
         }
     }
 
-    fn dc_hide(&mut self, cx: &AppCx) {
+    fn dc_hide(&mut self, p: &dyn DevClusterPort) {
         let Some(row) = self.dc_row() else { return self.fail("No cluster is selected.") };
-        let (dir, user) = Self::dc_ids(cx);
+        let (dir, user) = Self::dc_ids(p);
         if row.kind == RowKind::Hidden {
             let l: Vec<String> = devcluster::hidden_load(&dir, &user).into_iter().filter(|h| *h != row.id).collect();
             return match devcluster::hidden_save(&dir, &user, &l) {
                 Ok(()) => {
-                    cx.audit.record(&user, "devcluster.show", &row.id);
+                    p.audit("devcluster.show", &row.id);
                     self.dc.asked = false;
                     self.ok("Shown again (the next look probes it).");
                 }
@@ -708,7 +708,7 @@ impl SettingsApp {
         }
         match devcluster::hide(&dir, &user, &row.id) {
             Ok(()) => {
-                cx.audit.record(&user, "devcluster.hide", &row.id);
+                p.audit("devcluster.hide", &row.id);
                 self.dc.asked = false;
                 self.ok("Hidden in IYAKKI: it is not probed, listed or used by any tool. The kubeconfig file is untouched; select the hidden row and press h to show it again.");
             }
@@ -716,9 +716,9 @@ impl SettingsApp {
         }
     }
 
-    fn dc_disconnect(&mut self, cx: &AppCx) {
+    fn dc_disconnect(&mut self, p: &dyn DevClusterPort) {
         let Some(row) = self.dc_row() else { return self.fail("No cluster is selected.") };
-        let (dir, user) = Self::dc_ids(cx);
+        let (dir, user) = Self::dc_ids(p);
         let mine = Choice::load(&dir, &user).is_some_and(|c| c.kubeconfig == row.id);
         let ws: Vec<String> = self.dc.ws.iter().filter(|(_, _, c)| c.k8s.kubeconfig == row.id).map(|w| w.0.clone()).collect();
         if !mine && ws.is_empty() {
@@ -728,8 +728,8 @@ impl SettingsApp {
         self.dc_show("Disconnect: review, then approve", &text, OverlayAct::Run(DcAct::Disconnect(row.id.clone())), String::new());
     }
 
-    fn dc_do_disconnect(&mut self, cx: &AppCx, id: &str) {
-        let (dir, user) = Self::dc_ids(cx);
+    fn dc_do_disconnect(&mut self, p: &dyn DevClusterPort, id: &str) {
+        let (dir, user) = Self::dc_ids(p);
         if Choice::load(&dir, &user).is_some_and(|c| c.kubeconfig == id) {
             let _ = Choice::default().save(&dir, &user);
         }
@@ -746,14 +746,14 @@ impl SettingsApp {
                 }
             }
         }
-        cx.audit.record(&user, "devcluster.disconnect", &format!("{id} {}", cleared.join(",")));
+        p.audit("devcluster.disconnect", &format!("{id} {}", cleared.join(",")));
         self.dc.rows_dirty = true;
         self.dc.asked = false;
         self.ok(format!("Disconnected{}.", if cleared.is_empty() { String::new() } else { format!(" (also workspace {})", cleared.join(", ")) }));
     }
 
-    fn dc_vault_form(&mut self, cx: &AppCx) {
-        let _ = cx;
+    fn dc_vault_form(&mut self, p: &dyn DevClusterPort) {
+        let _ = p;
         let f = Form::new("Add a kubeconfig held in a vault")
             .text("Profile name", "", "e.g. staging eks")
             .text("Vault entry", "", "the entry that holds the kubeconfig text (Settings \u{2192} Vault); the secret never leaves the vault")
@@ -770,8 +770,8 @@ impl SettingsApp {
 
     // ------------------------------------------------------------------ registry
 
-    fn dc_registry_form(&mut self, cx: &AppCx) {
-        let _ = cx;
+    fn dc_registry_form(&mut self, p: &dyn DevClusterPort) {
+        let _ = p;
         let Some((name, _, cfg)) = self.dc.ws.get(self.dc.ws_idx).cloned() else { return self.fail("The registry is chosen per workspace and you have none yet (the AI IDE makes them).") };
         let saved = regsetup::RegStatus::saved(&cfg.k8s);
         let names: Vec<&str> = regsetup::CHOICES.iter().map(|c| c.1).collect();
@@ -786,8 +786,8 @@ impl SettingsApp {
     }
 
     /// The cluster this workspace uses: its own choice, else yours, else the first one that answers.
-    fn dc_effective(&self, cfg: &ProjectConfig, cx: &AppCx) -> Option<ClusterProfile> {
-        let (dir, user) = Self::dc_ids(cx);
+    fn dc_effective(&self, cfg: &ProjectConfig, p: &dyn DevClusterPort) -> Option<ClusterProfile> {
+        let (dir, user) = Self::dc_ids(p);
         let key = if !cfg.k8s.kubeconfig.is_empty() { cfg.k8s.kubeconfig.clone() } else { Choice::load(&dir, &user).map(|c| c.kubeconfig).unwrap_or_default() };
         let res = lock(&self.dc.res).clone()?;
         if key.is_empty() { res.reachable().cloned() } else { res.profiles.iter().find(|p| p.kubeconfig == key).cloned() }
@@ -795,8 +795,8 @@ impl SettingsApp {
 
     // ------------------------------------------------------------------ the machine's cluster
 
-    fn dc_setup_form(&mut self, cx: &AppCx, sit: &Situation) {
-        if !self.admin(cx) {
+    fn dc_setup_form(&mut self, p: &dyn DevClusterPort, sit: &Situation) {
+        if !self.admin(p) {
             return;
         }
         match sit {
@@ -806,22 +806,22 @@ impl SettingsApp {
             Situation::Foreign(f) | Situation::Window { found: f } if !f.is_empty() => return self.fail(k3sdev::refusal_text(f)),
             _ => return self.fail("In a desktop window IYAKKI never installs a cluster: install k3s yourself, or connect a remote cluster."),
         }
-        let podman = cx.agent.wsexec_on_path("podman");
-        let engine = podman || cx.agent.wsexec_on_path("docker");
+        let podman = p.on_path("podman");
+        let engine = podman || p.on_path("docker");
         let f = Form::new("Set up a local cluster (you see the plan next)")
             .choice(if podman { "How to run k3s (podman found)" } else { "How to run k3s (podman not installed)" }, &["Native k3s (recommended)", "k3s in Podman"], 0)
             .choice(if engine { "Registry for images" } else { "Registry for images (B needs podman or docker)" }, &["A  Registry pod inside the cluster (recommended)", "B  System registry (registry:2 container)", "None for now"], 0);
         self.open_form(FormKind::Dc(DcForm::Setup), f);
     }
 
-    fn dc_typed_form(&mut self, cx: &AppCx, kind: DcForm) {
-        if !self.admin(cx) {
+    fn dc_typed_form(&mut self, p: &dyn DevClusterPort, kind: DcForm) {
+        if !self.admin(p) {
             return;
         }
-        if cx.k3sdev().installed().is_none() {
+        if p.k3sdev().installed().is_none() {
             return self.fail("IYAKKI has not installed a cluster here.");
         }
-        let root = cx.k3sdev().layout().root.display().to_string();
+        let root = p.k3sdev().layout().root.display().to_string();
         let f = if kind == DcForm::Reset {
             Form::new("Reset the dev cluster").text(&format!("Type {} to confirm", k3sdev::NODE_NAME), "", &format!("Deletes only {root}/data: every object, volume and image in the cluster. The program, the kubeconfig and the log stay."))
         } else {
@@ -830,11 +830,11 @@ impl SettingsApp {
         self.open_form(FormKind::Dc(kind), f);
     }
 
-    fn dc_act_overlay(&mut self, cx: &AppCx, act: DcAct) {
-        if !self.admin(cx) {
+    fn dc_act_overlay(&mut self, p: &dyn DevClusterPort, act: DcAct) {
+        if !self.admin(p) {
             return;
         }
-        let d = &cx.k3sdev();
+        let d = &p.k3sdev();
         let Some(st) = d.installed() else { return self.fail("IYAKKI has not installed a cluster here (Set up a local cluster first).") };
         let state = d.state();
         let (title, text) = match &act {
@@ -857,14 +857,14 @@ impl SettingsApp {
         self.dc_show(title, &text, OverlayAct::Run(act), String::new());
     }
 
-    fn dc_logs(&mut self, cx: &AppCx) {
-        if !self.admin(cx) {
+    fn dc_logs(&mut self, p: &dyn DevClusterPort) {
+        if !self.admin(p) {
             return;
         }
-        if cx.k3sdev().installed().is_none() {
+        if p.k3sdev().installed().is_none() {
             return self.fail("IYAKKI has not installed a cluster here, so there is no log of its own.");
         }
-        let t = cx.k3sdev().log_tail(400);
+        let t = p.k3sdev().log_tail(400);
         let text = if t.trim().is_empty() { "The log is empty.".to_string() } else { t };
         let mut o = Overlay { title: "The cluster's log (select text with the mouse; Ctrl+C copies)".into(), log: ScrollLog::default(), act: OverlayAct::Close, blocked: String::new() };
         for l in text.lines() {
@@ -873,55 +873,55 @@ impl SettingsApp {
         self.dc.overlay = Some(o);
     }
 
-    fn dc_upgrade(&mut self, cx: &AppCx) {
-        if !self.admin(cx) {
+    fn dc_upgrade(&mut self, p: &dyn DevClusterPort) {
+        if !self.admin(p) {
             return;
         }
-        if cx.k3sdev().installed().is_none() {
+        if p.k3sdev().installed().is_none() {
             return self.fail("IYAKKI has not installed a cluster here.");
         }
-        let Some(st) = cx.streamer() else { return self.fail("No network connection is set up for downloads.") };
-        let svc = cx.k3sdev().clone();
-        cx.audit.record(&cx.session.user, "devcluster.upgrade.lookup", "");
+        let Some(st) = p.streamer() else { return self.fail("No network connection is set up for downloads.") };
+        let svc = p.k3sdev().clone();
+        p.audit("devcluster.upgrade.lookup", "");
         self.start("looking for a newer k3s release", move || JobOut::Dc(DcOut::UpgradePlan(svc.upgrade_plan(&*st))));
     }
 
     /// "Use a fixed node address (experimental)": on tries it at the next start; k3s refusing it switches it off by itself.
-    fn dc_fixed_ip(&mut self, cx: &AppCx) {
-        if !self.admin(cx) {
+    fn dc_fixed_ip(&mut self, p: &dyn DevClusterPort) {
+        if !self.admin(p) {
             return;
         }
-        if cx.k3sdev().installed().is_none() {
+        if p.k3sdev().installed().is_none() {
             return self.fail("IYAKKI has not installed a cluster here.");
         }
-        let on = !cx.k3sdev().fixed_node_ip_enabled();
-        match cx.k3sdev().set_fixed_node_ip(on, &cx.session.user) {
+        let on = !p.k3sdev().fixed_node_ip_enabled();
+        match p.k3sdev().set_fixed_node_ip(on, &p.user()) {
             Ok(()) => self.ok(if on { "A fixed node address (experimental) is on: it is tried at the next start, and switched off again by itself if k3s refuses it." } else { "The fixed node address is off: k3s uses the network address from the next start." }),
             Err(e) => self.fail(e),
         }
     }
 
     /// "Offline on purpose": with no network at all, k3s is given a default route that goes nowhere so that it starts; a real route always wins.
-    fn dc_offline(&mut self, cx: &AppCx) {
-        if !self.admin(cx) {
+    fn dc_offline(&mut self, p: &dyn DevClusterPort) {
+        if !self.admin(p) {
             return;
         }
-        if cx.k3sdev().installed().is_none() {
+        if p.k3sdev().installed().is_none() {
             return self.fail("IYAKKI has not installed a cluster here.");
         }
-        let on = !cx.k3sdev().offline_on_purpose();
-        match cx.k3sdev().set_offline_on_purpose(on, &cx.session.user) {
+        let on = !p.k3sdev().offline_on_purpose();
+        match p.k3sdev().set_offline_on_purpose(on, &p.user()) {
             Ok(()) => self.ok(if on { "Offline is on: when this machine has no network at the next start, k3s gets a route that goes nowhere so that it can start. A real network is used whenever there is one." } else { "Offline is off: k3s waits for a real network." }),
             Err(e) => self.fail(e),
         }
     }
 
-    fn dc_autostart(&mut self, cx: &AppCx) {
-        if !self.admin(cx) {
+    fn dc_autostart(&mut self, p: &dyn DevClusterPort) {
+        if !self.admin(p) {
             return;
         }
-        let Some(s) = cx.k3sdev().installed() else { return self.fail("IYAKKI has not installed a cluster here.") };
-        match cx.k3sdev().set_autostart(!s.autostart, &cx.session.user) {
+        let Some(s) = p.k3sdev().installed() else { return self.fail("IYAKKI has not installed a cluster here.") };
+        match p.k3sdev().set_autostart(!s.autostart, &p.user()) {
             Ok(()) => self.ok(if s.autostart { "Autostart is off: the cluster only starts when you press Start." } else { "Autostart is on: the cluster starts when IYAKKI starts." }),
             Err(e) => self.fail(e),
         }
@@ -929,35 +929,35 @@ impl SettingsApp {
 
     // ------------------------------------------------------------------ forms
 
-    pub(super) fn dc_submit(&mut self, cx: &AppCx, kind: &DcForm, form: &Form) -> Result<String, String> {
-        let (dir, user) = Self::dc_ids(cx);
+    pub(super) fn dc_submit(&mut self, p: &dyn DevClusterPort, kind: &DcForm, form: &Form) -> Result<String, String> {
+        let (dir, user) = Self::dc_ids(p);
         match kind {
             DcForm::Vault => {
                 let system = form.choice_idx(2) == 1;
-                if system && !cx.session.policy.manage_settings {
+                if system && !p.is_admin() {
                     return Err("Only administrators use the system vault.".into());
                 }
                 let entry = form.value(1);
-                let names = if system { cx.vault().system_names() } else { cx.vault().user_names(&user) };
+                let names = if system { p.vault().system_names() } else { p.vault().user_names(&user) };
                 match names {
                     Ok(n) if !n.iter().any(|x| *x == entry) => return Err(format!("There is no entry named `{entry}` in {}. Add the kubeconfig text there first (Settings \u{2192} Vault).", if system { "the system vault" } else { "your vault" })),
                     Err(_) => return Err("The vault is locked, so the entry cannot be checked.".into()),
                     _ => {}
                 }
                 kubeprofiles::vault_add(&dir, &user, &form.value(0), &format!("{}{entry}", if system { "vault:" } else { "uvault:" }))?;
-                cx.audit.record(&user, "devcluster.vault_profile.add", &format!("{} {}{entry}", form.value(0), if system { "vault:" } else { "uvault:" }));
+                p.audit("devcluster.vault_profile.add", &format!("{} {}{entry}", form.value(0), if system { "vault:" } else { "uvault:" }));
                 self.dc.rows_dirty = true;
                 Ok(format!("Added the profile {}. The kubeconfig stays in the vault; select it and press t to test it.", form.value(0)))
             }
             DcForm::Reset | DcForm::Uninstall => {
-                if !self.admin(cx) {
+                if !self.admin(p) {
                     return Ok(String::new());
                 }
                 let typed = form.value(0);
                 if typed != k3sdev::NODE_NAME {
                     return Err(format!("Type {} exactly to confirm; nothing was changed.", k3sdev::NODE_NAME));
                 }
-                let (svc, u) = (cx.k3sdev().clone(), user.clone());
+                let (svc, u) = (p.k3sdev().clone(), user.clone());
                 let reset = *kind == DcForm::Reset;
                 self.start(if reset { "resetting the cluster" } else { "uninstalling the cluster" }, move || {
                     JobOut::Msg(if reset { svc.reset(&typed, &u).map(|_| "Reset: the cluster's data folder is empty again; Start brings up a fresh cluster.".to_string()) } else { svc.uninstall(&typed, &u).map(|_| "Uninstalled: the cluster and its folder are gone.".to_string()) })
@@ -966,21 +966,21 @@ impl SettingsApp {
                 Ok(String::new())
             }
             DcForm::Setup => {
-                if !self.admin(cx) {
+                if !self.admin(p) {
                     return Ok(String::new());
                 }
                 let podman_wanted = form.choice_idx(0) == 1;
-                if podman_wanted && !cx.agent.wsexec_on_path("podman") {
+                if podman_wanted && !p.on_path("podman") {
                     return Err("podman is not installed on this machine, so the Podman variant is not available. The image needs the podman packages (docs/K3S-DEV.md); use the native variant.".into());
                 }
                 let registry = ["in-cluster", "system", "none"][form.choice_idx(1).min(2)];
-                if registry == "system" && !(cx.agent.wsexec_on_path("podman") || cx.agent.wsexec_on_path("docker")) {
+                if registry == "system" && !(p.on_path("podman") || p.on_path("docker")) {
                     return Err("The system registry (B) needs podman or docker, and neither is installed. Choose A or None.".into());
                 }
-                let Some(st) = cx.streamer() else { return Err("No network connection is set up for downloads.".into()) };
-                let (svc, backend) = (cx.k3sdev().clone(), if podman_wanted { Backend::Podman } else { Backend::Native });
-                let svc_b5 = cx.b5();
-                cx.audit.record(&user, "devcluster.setup.lookup", backend.label());
+                let Some(st) = p.streamer() else { return Err("No network connection is set up for downloads.".into()) };
+                let (svc, backend) = (p.k3sdev().clone(), if podman_wanted { Backend::Podman } else { Backend::Native });
+                let svc_b5 = p.b5();
+                p.audit("devcluster.setup.lookup", backend.label());
                 self.start("looking up the latest k3s release", move || JobOut::Dc(DcOut::SetupPlan(svc_b5.k3s_lookup(&*st, svc.layout(), backend, registry, None))));
                 Ok(String::new())
             }
@@ -989,7 +989,7 @@ impl SettingsApp {
                 let (opt, hostport) = (["in-cluster", "system", "remote"][form.choice_idx(0).min(2)], form.value(1));
                 let node_port = form.value(3);
                 let option = regsetup::RegistryOption::parse(opt, if opt == "in-cluster" { &node_port } else { &hostport }, if form.choice_idx(2) == 1 { "https" } else { "http" }, false)?;
-                let profile = self.dc_effective(&cfg, cx).ok_or("No cluster is chosen for this workspace yet: make one the default first (d or w).")?;
+                let profile = self.dc_effective(&cfg, p).ok_or("No cluster is chosen for this workspace yet: make one the default first (d or w).")?;
                 if !profile.reachable {
                     return Err(format!("The cluster {} does not answer right now; test it first (t).", profile.chip()));
                 }
@@ -1006,7 +1006,7 @@ impl SettingsApp {
                 let mut env = regsetup::PlanEnv::real(engine, Some(&root));
                 env.api_host = if profile.local { String::new() } else { profile.server.split("://").nth(1).unwrap_or("").split(['/', ':']).next().unwrap_or("").to_string() };
                 let kube = regsetup::KubeCtx { kubeconfig: profile.kubeconfig.clone(), context: profile.context.clone() };
-                cx.audit.record(&user, "devcluster.registry.plan", &format!("{} {name}", option.kind()));
+                p.audit("devcluster.registry.plan", &format!("{} {name}", option.kind()));
                 self.start("planning the registry", move || {
                     if matches!(option, regsetup::RegistryOption::InCluster { .. }) {
                         env.facts = crate::agent().helpers_b6().deploy_kit().reg_probe(&*run, &kube);
@@ -1021,8 +1021,8 @@ impl SettingsApp {
 
     // ------------------------------------------------------------------ drawing
 
-    pub(super) fn render_devcluster(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        self.dc_prepare(cx);
+    pub(super) fn render_devcluster(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn DevClusterPort) {
+        self.dc_prepare(p);
         if let Some(p) = self.dc.clusters.as_mut() {
             p.draw(g, a, s);
             return;
@@ -1031,12 +1031,12 @@ impl SettingsApp {
             p.draw(g, a, s);
             return;
         }
-        let admin = cx.session.policy.manage_settings;
-        let sit = self.dc_situation(cx);
-        let health = cx.k3sdev().health();
+        let admin = p.is_admin();
+        let sit = self.dc_situation(p);
+        let health = p.k3sdev().health();
         // keep the health snapshot fresh while the cluster runs (a few kubectl calls, off the screen's thread)
         if health.installed && !matches!(health.state.as_str(), "stopped" | "not installed") && health.checked_at < iyakki_clock::now_unix() - 15 && !self.dc.health_busy.swap(true, Ordering::SeqCst) {
-            let (svc, busy) = (cx.k3sdev().clone(), self.dc.health_busy.clone());
+            let (svc, busy) = (p.k3sdev().clone(), self.dc.health_busy.clone());
             std::thread::spawn(move || {
                 svc.refresh_health();
                 busy.store(false, Ordering::SeqCst);

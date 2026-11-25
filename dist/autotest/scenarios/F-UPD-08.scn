@@ -1,0 +1,11 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha e18fbfbadc4d2296; honest subset only: everything not checked is under not-covered.
+row: F-UPD-08
+targets: qemu
+profile: data
+feature-sha: e18fbfbadc4d2296
+doc: a binary delta between two versions of a file is applied on the device (through dev patch)
+clause: 1 a delta between two versions of a file is made and applied on the device through dev patch, and a wrong old version is refused
+not-covered: the trailer check on damaged input (unit tests only)
+not-covered: a code change ships a few MB (measured 12 to 13 MB on two real builds days apart is not repeated)
+not-covered: the memory needed to apply a delta (about three times the binary) is not measured
+session-check: dev_patch_delta

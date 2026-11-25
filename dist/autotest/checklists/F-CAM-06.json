@@ -1,0 +1,56 @@
+{
+ "schema": 1,
+ "row": "F-CAM-06",
+ "feature_sha": "ca47e32f083897bd",
+ "title": "CAMERA tile enabled by a connected camera (manual until automated)",
+ "clauses": [
+  {
+   "id": "greyed",
+   "text": "With no camera connected the CAMERA tile is greyed out and says Connect a camera; choosing it says Connect a USB camera.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "With no USB camera plugged in, look at the CAMERA tile on the home screen (Web & Media).",
+     "expect": "The tile is greyed out and says Connect a camera. Choosing it says Connect a USB camera. Say what you see on a Mac, where a built-in camera is not reachable."
+    }
+   ]
+  },
+  {
+   "id": "hot-plug",
+   "text": "Plugging a camera in enables the tile without a restart; the home screen checks about every two seconds.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "With the tile greyed, plug in a USB webcam and wait on the home screen.",
+     "expect": "The tile becomes enabled by itself within a few seconds."
+    }
+   ]
+  },
+  {
+   "id": "roles",
+   "text": "Admins, operators and users get the tile; guests do not.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Sign in as a guest and look at the home screen, then sign in as a user and look again.",
+     "expect": "The guest does not get the tile. The user does, when a camera is connected."
+    }
+   ]
+  }
+ ]
+}

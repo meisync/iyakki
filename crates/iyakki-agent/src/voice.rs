@@ -49,6 +49,17 @@ fn kill_tree(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// Every microphone process that runs (a [`Recorder`]) and every speaker of this module (a [`Player`]), for the end-of-session hooks
+/// `voice-recorders` and `voice-players` (D-SESSION-END): a sign-out, a lock or a suspend cuts them even when the app that holds them is alive.
+pub static RECORDER_STOPS: iyakki_shared::sessionend::StopSet = iyakki_shared::sessionend::StopSet::new();
+pub static PLAYER_STOPS: iyakki_shared::sessionend::StopSet = iyakki_shared::sessionend::StopSet::new();
+
+/// Cut a child's whole process group from another thread (the owner reaps it the next time it looks).
+fn kill_group_of(pid: u32) {
+    // SAFETY: signalling a process group the child made for itself with `process_group(0)`; a pid that is gone is harmless (ESRCH).
+    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+}
+
 /// Whether this process is a test binary (cargo puts them in `target/<profile>/deps`; the product never runs from there).
 pub(crate) fn is_test_binary() -> bool {
     static IS: OnceLock<bool> = OnceLock::new();
@@ -165,6 +176,8 @@ pub struct Recorder {
     stderr: Option<std::thread::JoinHandle<String>>,
     /// The most seconds kept (`MAX_RECORD_SECS` unless started with [`Recorder::start_max`]).
     max_secs: usize,
+    /// The session-end handle: the recording process is killed when it is cut, and `is_alive` says so.
+    ended: iyakki_shared::sessionend::StopGuard,
 }
 
 impl Recorder {
@@ -174,6 +187,11 @@ impl Recorder {
 
     /// [`Recorder::start`] with another longest recording (the VOICE tile takes five minutes).
     pub fn start_max(record_cmd: &str, max_secs: usize) -> Result<Recorder, String> {
+        Recorder::start_in(&RECORDER_STOPS, record_cmd, max_secs)
+    }
+
+    /// [`Recorder::start_max`] in a given set of cuttable things (the product uses [`RECORDER_STOPS`]; a test uses its own).
+    pub fn start_in(set: &iyakki_shared::sessionend::StopSet, record_cmd: &str, max_secs: usize) -> Result<Recorder, String> {
         let args = split_command(record_cmd)?;
         let prog = args.first().ok_or("record command is empty")?;
         let mut child = command_for(&args, None)
@@ -204,7 +222,9 @@ impl Recorder {
             let _ = se.by_ref().take(1 << 16).read_to_end(&mut v);
             String::from_utf8_lossy(&v).into_owned()
         });
-        Ok(Recorder { child, buf, started: Instant::now(), reader: Some(reader), stderr: Some(stderr), max_secs })
+        let pid = child.id();
+        let ended = set.enter(move || kill_group_of(pid));
+        Ok(Recorder { child, buf, started: Instant::now(), reader: Some(reader), stderr: Some(stderr), max_secs, ended })
     }
 
     pub fn elapsed(&self) -> Duration {
@@ -235,7 +255,7 @@ impl Recorder {
 
     /// Whether the recording process is still running (it exits early if the device is missing/busy).
     pub fn is_alive(&mut self) -> bool {
-        iyakki_core_api::child_status(&mut self.child).is_running()
+        !self.ended.stopped() && iyakki_core_api::child_status(&mut self.child).is_running()
     }
 
     /// Stop recording and return the samples.
@@ -355,6 +375,8 @@ pub struct Player {
     stop_cmd: Option<Vec<String>>,
     /// A speech process that has not ended by then is killed (an engine that hangs must not hold the speaker forever).
     deadline: Option<Instant>,
+    /// The session-end handle: a cut makes `is_playing` stop the sound and say no.
+    ended: iyakki_shared::sessionend::StopGuard,
 }
 
 /// Whether the play command is `aplay` (possibly with options, or given by path).
@@ -378,25 +400,31 @@ impl Player {
             return Player::start(play_cmd, wav);
         }
         let out = crate::audiosink::play_wav_streamed(crate::mixer::SourceKind::Speech, "speech", wav, play_cmd)?;
-        Ok(Player { child: None, out: Some(out), stop_cmd: None, deadline: None })
+        Ok(Player { child: None, out: Some(out), stop_cmd: None, deadline: None, ended: PLAYER_STOPS.enter(|| {}) })
     }
 
     /// The same for another kind of sound (it fixes the priority when sounds are mixed).
     pub fn start_as(kind: crate::mixer::SourceKind, play_cmd: &str, wav: &[u8]) -> Result<Player, String> {
         let out = crate::audiosink::play_wav(kind, kind.label(), wav, play_cmd)?;
-        Ok(Player { child: None, out: Some(out), stop_cmd: None, deadline: None })
+        Ok(Player { child: None, out: Some(out), stop_cmd: None, deadline: None, ended: PLAYER_STOPS.enter(|| {}) })
     }
 
     /// A process that speaks by itself (a host speech engine): the text goes to its standard input, which is then closed.
     /// `stop_cmd` is run, without a shell, when it is stopped while still speaking; `max` is the longest it may take.
     /// (Its own sound is not mixed: the engine opens the speaker itself.)
-    pub fn from_speech(mut child: Child, text: Vec<u8>, stop_cmd: Option<Vec<String>>, max: Duration) -> Player {
+    pub fn from_speech(child: Child, text: Vec<u8>, stop_cmd: Option<Vec<String>>, max: Duration) -> Player {
+        Player::from_speech_in(&PLAYER_STOPS, child, text, stop_cmd, max)
+    }
+
+    /// [`Player::from_speech`] in a given set of cuttable things (the product uses [`PLAYER_STOPS`]; a test uses its own).
+    pub fn from_speech_in(set: &iyakki_shared::sessionend::StopSet, mut child: Child, text: Vec<u8>, stop_cmd: Option<Vec<String>>, max: Duration) -> Player {
         if let Some(mut si) = child.stdin.take() {
             std::thread::spawn(move || {
                 let _ = si.write_all(&text);
             });
         }
-        Player { child: Some(child), out: None, stop_cmd, deadline: Some(Instant::now() + max) }
+        let pid = child.id();
+        Player { child: Some(child), out: None, stop_cmd, deadline: Some(Instant::now() + max), ended: set.enter(move || kill_group_of(pid)) }
     }
 
     /// How much of the sound was heard, ms (mixer only; None when the player reports nothing).
@@ -405,6 +433,10 @@ impl Player {
     }
 
     pub fn is_playing(&mut self) -> bool {
+        if self.ended.stopped() {
+            self.stop();
+            return false;
+        }
         if let Some(o) = self.out.as_mut() {
             return o.is_playing();
         }

@@ -391,6 +391,10 @@ if [ -n "$KFROM" ]; then
   for f in grub.img grub-eltorito.img; do [ -f "$KFROM/images/$f" ] && cp -f "$KFROM/images/$f" "$STAGE/bin/$f"; done
   if [ -d "$KFROM/images/efi-part" ]; then rm -rf "$STAGE/bin/efi-part"; cp -a "$KFROM/images/efi-part" "$STAGE/bin/"; fi
 fi
+# ...and the lists of the defconfig decide what those images contain, not the age of the donor: a donor built before `loadenv` was added (2026-11-14) gave every repacked
+# image a GRUB without load_env/save_env, and the update boot counter never stepped (Q6, docs/development/UPDATE-FAULTS.md). grub-refresh.sh makes them again from the
+# donor's GRUB build tree (seconds) and leaves a signed or shim-chained UEFI file alone.
+sh "$HERE/grub-refresh.sh" "${KFROM:-$BASE}" "$STAGE/bin" || die "the GRUB images could not be made with the defconfig's module lists"
 cp -a "$BLD/buildroot-fs/rootfs.iso9660.tmp" "$STAGE/build/buildroot-fs/"
 # the ISO's 1 MB EFI partition image (fat.efi) is the same GRUB build as the donor's
 if [ -n "$KFROM" ] && [ -f "$KFROM/build/buildroot-fs/rootfs.iso9660.tmp/boot/fat.efi" ]; then

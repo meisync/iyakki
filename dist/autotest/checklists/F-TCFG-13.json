@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-TCFG-13",
+ "feature_sha": "fc7e3581f2ce89c1",
+ "title": "safety warnings read clearly",
+ "clauses": [
+  {
+   "id": "warning-texts",
+   "text": "the safety warnings are returned with a stable code and a plain text that carries no secret",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "On the tenant settings page, enter a setting that triggers a warning and read the text of the warning.",
+     "expect": "The warning says in plain words what is at risk and what to do, with no secret in it. Report any text that is unclear."
+    }
+   ]
+  }
+ ]
+}

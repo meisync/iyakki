@@ -2,6 +2,7 @@
 //! See `docs/PARALLEL-TASKS.md`. Tests put a fake runner in with [`use_runner`].
 
 use std::path::Path;
+use crate::apps::ide_port::CxIde;
 use std::sync::{Arc, Mutex};
 
 use iyakki_shared::agent::{RunLimits};
@@ -22,12 +23,11 @@ pub fn make_runner(cx: &AppCx, root: &Path) -> Runner {
     if let Some(r) = OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         return r;
     }
-    let (user, base, svc, host, mcp) = (cx.session.user.clone(), cx.session.policy.clone(), cx.services.clone(), cx.host.clone(), cx.mcp_servers.clone());
+    let (user, base, svc, host, mcp) = (CxIde(cx).user().to_string(), CxIde(cx).policy().clone(), cx.services.clone(), cx.host.clone(), cx.mcp_servers.clone());
     let root_s = root.display().to_string();
-    let price = cx.settings().lock().unwrap_or_else(|e| e.into_inner()).get().token_price_cents_per_mtok;
+    let price = CxIde(cx).settings().lock().unwrap_or_else(|e| e.into_inner()).get().token_price_cents_per_mtok;
     let reminder = iyakki_shared::toolblock::ReminderCtx { agent_on: true, browser_policy: "off".into(), engine_installed: false, screen_available: false, loaded: None };
-    let (cx2, audit) = (cx.clone(), cx.audit.clone());
-    let user2 = user.clone();
+    let (cx2, audit) = (cx.clone(), CxIde(cx).audit_sink());
     let tools_user = user.clone();
     let parts = TaskRunnerIn {
         backend: cx.chat.clone(),
@@ -39,30 +39,30 @@ pub fn make_runner(cx: &AppCx, root: &Path) -> Runner {
             p.fs_write = if base.allows_write(&tools_user, &root_s) { vec![tree] } else { vec![] };
             svc.user_tools(&tools_user, p, host.clone(), mcp.clone(), Some(&spec.prompt), Some(&spec.tree))
         }),
-        limits: RunLimits::for_budget(&cx.session.policy.budget, price),
+        limits: RunLimits::for_budget(&CxIde(cx).policy().budget, price),
         assist: iyakki_shared::assistrun::Assist::standard(reminder),
         executor: Some(Arc::new(move |spec, tools| {
             let agent = spec.task.agent.as_str();
             (agent != "builtin" && !agent.is_empty()).then(|| super::chat::ext::task_executor(&cx2, agent, tools, spec.tree.clone(), spec.task.session.clone(), spec.task.model.clone()))
         })),
-        audit: Some(Arc::new(move |k, d| audit.record(&user2, k, d))),
+        audit: Some(audit),
         cluster: None,
     };
-    cx.tasks_facet().autopilot_runner(parts).expect("the real core makes task runners")
+    CxIde(cx).tasks_facet().autopilot_runner(parts).expect("the real core makes task runners")
 }
 
 /// The hooks that put a task's events in the audit log and the inbox of the person.
 pub fn hooks(cx: &AppCx, workspace: &str) -> TaskHooksIn {
-    let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-    let (svc, user2, ws) = (cx.services.clone(), cx.session.user.clone(), workspace.to_string());
-    let (runs, user3) = (cx.runs().clone(), cx.session.user.clone());
+    let audit = CxIde(cx).audit_sink();
+    let (svc, user2, ws) = (cx.services.clone(), CxIde(cx).user().to_string(), workspace.to_string());
+    let (runs, user3) = (CxIde(cx).runs().clone(), CxIde(cx).user().to_string());
     TaskHooksIn {
-        audit: Some(Arc::new(move |k, d| audit.record(&user, k, d))),
+        audit: Some(audit),
         notify: Some(Arc::new(move |title, text| {
             let _ = svc.inbox().add(&user2, iyakki_shared::inbox::Kind::Agent, &format!("[{ws}] {title}"), text, "tasks", Some(iyakki_shared::inbox::Link::new("inbox", "")), iyakki_clock::now_unix());
         })),
         // a task gets its own namespace in the machine's cluster when that cluster runs (made when the task is made, deleted with it)
-        cluster: cx.tasks_facet().cluster(),
+        cluster: CxIde(cx).tasks_facet().cluster(),
         // every run of a task is kept as a run log with the task, row and agent, so RUNS lists and opens it
         record: Some(Arc::new(move |r| {
             if r.run_id.is_empty() {
@@ -82,17 +82,17 @@ static LIVE: std::sync::Mutex<Vec<(String, std::path::PathBuf, std::sync::Weak<d
 pub fn shared_manager(cx: &AppCx, root: &Path, features: &Path, name: &str) -> Arc<dyn TaskMgr> {
     let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
     live.retain(|(_, _, w)| w.strong_count() > 0);
-    if let Some(m) = live.iter().find(|(u, r, _)| *u == cx.session.user && r == root).and_then(|(_, _, w)| w.upgrade()) {
+    if let Some(m) = live.iter().find(|(u, r, _)| *u == CxIde(cx).user() && r == root).and_then(|(_, _, w)| w.upgrade()) {
         return m;
     }
     let m = manager(cx, root, features, name);
-    live.push((cx.session.user.clone(), root.to_path_buf(), Arc::downgrade(&m)));
+    live.push((CxIde(cx).user().to_string(), root.to_path_buf(), Arc::downgrade(&m)));
     m
 }
 
 /// A manager for a workspace, with its runner and hooks (the IDE owns it; the workspace chat gets a clone).
 pub fn manager(cx: &AppCx, root: &Path, features: &Path, name: &str) -> Arc<dyn TaskMgr> {
-    let m = cx.tasks_facet().open(root, features).expect("the real core opens task managers");
+    let m = CxIde(cx).tasks_facet().open(root, features).expect("the real core opens task managers");
     m.set_hooks(hooks(cx, name));
     m.set_runner(make_runner(cx, root));
     // the Tasks tab tests must not depend on how full the machine is; tests of the cap set their own source
@@ -112,7 +112,7 @@ impl IdeApp {
     /// The agents a task may use: (id, model), in the order of the New task form's choice.
     pub(super) fn task_agents(&self, cx: &AppCx) -> Vec<(String, String)> {
         let mut v = vec![("builtin".to_string(), String::new())];
-        let cfg = cx.agents_cfg();
+        let cfg = CxIde(cx).agents_cfg();
         for a in cfg.all() {
             v.push((a.id(), a.cfg_model()));
         }
@@ -133,7 +133,7 @@ impl IdeApp {
         if self.active_ws().is_some_and(|w| w.ro.is_some()) {
             return Err("Read-only: another session has this workspace open.".into());
         }
-        if cx.session.policy.cli != iyakki_sec::policy::CliLevel::Full {
+        if CxIde(cx).policy().cli != iyakki_sec::policy::CliLevel::Full {
             return Err("Tasks run commands in their own folder: your account needs the full command-line permission.".into());
         }
         self.refresh_task_runner(cx);
@@ -157,7 +157,7 @@ impl IdeApp {
     pub(super) fn open_new_task_form(&mut self, cx: &AppCx, rows: &str, title: &str) {
         let agents = self.task_agents(cx);
         let labels: Vec<String> = {
-            let cfg = cx.agents_cfg();
+            let cfg = CxIde(cx).agents_cfg();
             std::iter::once("Built-in assistant".to_string()).chain(cfg.all().iter().map(|a| a.label())).collect()
         };
         let opts: Vec<&str> = labels.iter().map(String::as_str).collect();

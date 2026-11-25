@@ -7,47 +7,47 @@ How to read it: **uses** counts, in the non-test code of the app's files, the pl
 
 | Order | App | Files | Lines | AppCx | services | host | web | chat | store | session/audit | uses | agent paths | ratchet | chat tools | settings page | port to write | effort | state |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | Firewall (`FirewallApp`) | firewall_tile.rs | 106 | 6 | 0 | 0 | 0 | 0 | 0 | 4 | 4 | 0 | 0 | yes | yes | `FirewallPort` | S | to do |
-| 2 | Disks (`DisksApp`) | disks_tile.rs, disks_tile_ui.rs | 1951 | 25 | 0 | 0 | 0 | 0 | 0 | 8 | 8 | 0 | 0 | yes | no | `DisksPort` | S | to do |
-| 3 | Dash (`DashApp`) | dash.rs, dash_charts.rs, dash_query.rs and 1 more | 5073 | 25 | 1 | 0 | 0 | 0 | 1 | 6 | 8 | 0 | 0 | no | no | `DashPort` | S | to do |
-| 4 | DevTools (`DevToolsApp`) | devtools/mod.rs, devtools/net.rs, devtools/page.rs and 2 more | 1224 | 10 | 0 | 0 | 0 | 0 | 0 | 9 | 9 | 0 | 0 | no | no | `DevToolsPort` | S | to do |
-| 5 | K8s (`K8sApp`) | k8s_tile.rs, k8s_tile_ui.rs | 2987 | 21 | 0 | 0 | 0 | 0 | 0 | 9 | 9 | 0 | 0 | yes | no | `K8sPort` | S | to do |
-| 6 | Learn (`LearnApp`) | learn.rs, learn_lesson.rs, learn_ui.rs | 1539 | 26 | 3 | 0 | 0 | 2 | 0 | 8 | 13 | 0 | 0 | no | no | `LearnPort` | S | to do |
-| 7 | Flows (`FlowsApp`) | flows.rs, flows_assist.rs, flows_board.rs and 11 more | 7319 | 21 | 1 | 0 | 0 | 0 | 0 | 6 | 7 | 0 | 0 | yes | no | `FlowsPort` | M | to do |
-| 8 | Git (`GitApp`) | git_tile.rs, git_tile_repo.rs, git_tile_repo_ui.rs and 1 more | 3961 | 36 | 1 | 0 | 0 | 0 | 0 | 16 | 17 | 0 | 0 | yes | no | `GitPort` | M | to do |
-| 9 | System (`SystemApp`) | system.rs | 979 | 14 | 0 | 1 | 0 | 0 | 0 | 18 | 19 | 0 | 0 | yes | no | `SystemPort` | M | to do |
-| 10 | Mesh (`MeshApp`) | mesh.rs | 605 | 4 | 20 | 0 | 0 | 0 | 0 | 0 | 20 | 0 | 0 | no | no | `MeshPort` | M | to do |
-| 11 | Rag (`RagApp`) | rag.rs | 620 | 13 | 4 | 0 | 0 | 2 | 0 | 14 | 20 | 0 | 0 | yes | yes | `RagPort` | M | to do |
-| 12 | Lab (`LabApp`) | lab.rs, lab_pic.rs, lab_ui.rs | 2350 | 27 | 9 | 0 | 0 | 0 | 0 | 27 | 36 | 0 | 0 | no | no | `LabPort` | M | to do |
-| 13 | Inbox (`InboxApp`) | inbox.rs | 1049 | 16 | 2 | 0 | 0 | 0 | 0 | 47 | 49 | 0 | 0 | no | no | `InboxPort` | M | to do |
-| 14 | Edit (`EditApp`) | edit.rs, edit_preview.rs | 2326 | 27 | 1 | 1 | 0 | 1 | 0 | 47 | 50 | 0 | 0 | yes | no | `EditPort` | M | to do |
-| 15 | Cli (`CliApp`) | cli.rs, cli_conn.rs, cli_term.rs | 1701 | 25 | 3 | 3 | 0 | 0 | 0 | 53 | 59 | 0 | 0 | yes | no | `CliPort` | M | to do |
-| 16 | Tales (`StoryApp`) | story.rs | 5772 | 98 | 11 | 0 | 1 | 1 | 0 | 46 | 59 | 0 | 0 | no | no | `StoryPort` | M | to do |
-| 17 | Voice (`VoiceApp`) | voice.rs, voice_assist.rs, voice_fix.rs and 4 more | 3192 | 65 | 16 | 1 | 0 | 1 | 0 | 57 | 75 | 0 | 0 | yes | yes | `VoicePort` | L | to do |
-| 18 | Store (`StoreApp`) | store.rs, store_drivers.rs, store_manage.rs and 4 more | 8333 | 107 | 15 | 1 | 0 | 0 | 0 | 137 | 153 | 0 | 0 | yes | no | `StorePort` | L | to do |
-| 19 | Chat (`ChatApp`) | chat.rs, chat_appevents.rs, chat_browser_data.rs and 15 more | 8271 | 117 | 8 | 1 | 0 | 2 | 0 | 149 | 160 | 0 | 0 | yes | no | `ChatPort` | L | to do |
-| 20 | Ide (`IdeApp`) | ide.rs, ide_bottom.rs, ide_browser.rs and 15 more | 13939 | 144 | 29 | 1 | 0 | 1 | 0 | 169 | 200 | 0 | 0 | yes | no | `IdePort` | L | to do |
-| 21 | Browser (`BrowserApp`) | browser.rs, browser/pdfhost.rs, browser_a11y.rs and 38 more | 17235 | 211 | 2 | 0 | 13 | 1 | 0 | 201 | 217 | 0 | 0 | yes | yes | `BrowserPort` | L | to do |
-| 22 | Settings (`SettingsApp`) | settings.rs, settings_access.rs, settings_agents.rs and 74 more | 20419 | 534 | 20 | 0 | 2 | 0 | 5 | 714 | 741 | 0 | 0 | yes | no | `SettingsPort` | L | to do |
+| 1 | Chat (`ChatApp`) | chat.rs, chat_appevents.rs, chat_browser_data.rs and 15 more | 6497 | 95 | 8 | 1 | 0 | 2 | 0 | 0 | 11 | 0 | 0 | yes | no | `ChatPort` | M | to do |
+| 2 | Edit (`EditApp`) | edit.rs, edit_preview.rs | 2326 | 27 | 1 | 1 | 0 | 1 | 0 | 47 | 50 | 0 | 0 | yes | no | `EditPort` | M | to do |
+| 3 | Ide (`IdeApp`) | ide.rs, ide_bottom.rs, ide_browser.rs and 13 more | 13669 | 144 | 29 | 1 | 0 | 1 | 0 | 0 | 31 | 0 | 0 | yes | no | `IdePort` | L | to do |
 | done | Auth (`AuthApp`) | auth/mod.rs, auth/page.rs, auth/port.rs | 1040 | 6 | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | yes | no | `AuthPort` | - | migrated (port) |
-| done | Calendar (`CalendarApp`) | calendar.rs | 151 | 5 | 0 | 0 | 0 | 0 | 0 | 3 | 3 | 0 | 0 | yes | no | `CalendarPort` | - | extracted crate (adapter in the shell) |
+| done | Browser (`BrowserApp`) | browser.rs, browser/pdfhost.rs, browser_a11y.rs and 38 more | 17191 | 161 | 2 | 0 | 9 | 1 | 0 | 185 | 197 | 0 | 0 | yes | yes | `BrowserPort` | - | migrated (port) |
+| done | Calendar (`CalendarApp`) | calendar.rs | 198 | 5 | 0 | 0 | 0 | 0 | 0 | 3 | 3 | 0 | 0 | yes | no | `CalendarPort` | - | extracted crate (adapter in the shell) |
 | done | Camera (`CameraApp`) | camera.rs | 1345 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | no | `CameraPort` | - | migrated (port) |
 | done | Cameras (`CamerasApp`) | cameras.rs | 228 | 9 | 0 | 0 | 0 | 0 | 1 | 5 | 6 | 0 | 0 | yes | no | `CamerasPort` | - | extracted crate (adapter in the shell) |
-| done | Checkup (`CheckupApp`) | checkup.rs, checkup_ui.rs | 814 | 8 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | no | `CheckupPort` | - | migrated (port) |
+| done | Checkup (`CheckupApp`) | checkup.rs | 152 | 6 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | no | `CheckupPort` | - | migrated (port) |
+| done | Cli (`CliApp`) | cli.rs, cli_conn.rs, cli_term.rs | 1717 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | no | `CliPort` | - | migrated (port) |
+| done | Dash (`DashApp`) | dash.rs | 186 | 9 | 1 | 0 | 0 | 0 | 1 | 6 | 8 | 0 | 0 | no | no | `DashPort` | - | extracted crate (adapter in the shell) |
 | done | Data (`DataApp`) | data.rs | 1492 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | no | `DataPort` | - | migrated (port) |
-| done | Doctor (`DoctorApp`) | doctor.rs, doctor_facts.rs, doctor_ui.rs | 620 | 14 | 0 | 0 | 0 | 0 | 0 | 4 | 4 | 0 | 0 | yes | no | `DoctorPort` | - | migrated (port) |
-| done | LinuxWin (`LinuxWinApp`) | linuxwin.rs | 1045 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | no | no | `LinuxWinPort` | - | migrated (port) |
+| done | DevTools (`DevToolsApp`) | devtools/mod.rs, devtools/net.rs, devtools/qrcode.rs and 1 more | 636 | 6 | 0 | 0 | 0 | 0 | 0 | 4 | 4 | 0 | 0 | no | no | `DevToolsPort` | - | extracted crate (adapter in the shell) |
+| done | Disks (`DisksApp`) | disks_tile.rs | 129 | 8 | 0 | 0 | 0 | 0 | 0 | 6 | 6 | 0 | 0 | yes | no | `DisksPort` | - | extracted crate (adapter in the shell) |
+| done | Doctor (`DoctorApp`) | doctor.rs, doctor_facts.rs, doctor_manual.rs and 1 more | 1056 | 13 | 0 | 0 | 0 | 0 | 0 | 6 | 6 | 0 | 0 | yes | no | `DoctorPort` | - | migrated (port) |
+| done | Firewall (`FirewallApp`) | firewall_tile.rs | 106 | 6 | 0 | 0 | 0 | 0 | 0 | 4 | 4 | 0 | 0 | yes | yes | `FirewallPort` | - | extracted crate (adapter in the shell) |
+| done | Flows (`FlowsApp`) | flows.rs | 224 | 11 | 1 | 0 | 0 | 0 | 0 | 4 | 5 | 0 | 0 | yes | no | `FlowsPort` | - | extracted crate (adapter in the shell) |
+| done | Git (`GitApp`) | git_tile.rs | 81 | 6 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | no | `GitPort` | - | extracted crate (adapter in the shell) |
+| done | Inbox (`InboxApp`) | inbox.rs | 71 | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | no | no | `InboxPort` | - | extracted crate (adapter in the shell) |
+| done | K8s (`K8sApp`) | k8s_tile.rs | 85 | 6 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | no | `K8sPort` | - | migrated (port) |
+| done | Lab (`LabApp`) | lab.rs | 68 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | no | no | `LabPort` | - | extracted crate (adapter in the shell) |
+| done | Learn (`LearnApp`) | learn.rs | 89 | 7 | 0 | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 | no | no | `LearnPort` | - | extracted crate (adapter in the shell) |
+| done | LinuxWin (`LinuxWinApp`) | linuxwin.rs | 105 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | no | no | `LinuxWinPort` | - | migrated (port) |
 | done | Mcp (`McpApp`) | mcp.rs | 447 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | no | `McpPort` | - | migrated (port) |
 | done | Media (`MediaApp`) | media.rs | 2198 | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | no | `MediaPort` | - | migrated (port) |
+| done | Mesh (`MeshApp`) | mesh.rs | 75 | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | no | no | `MeshPort` | - | migrated (port) |
 | done | Pdf (`PdfApp`) | pdfview.rs | 157 | 10 | 0 | 0 | 0 | 0 | 0 | 5 | 5 | 0 | 0 | yes | no | `PdfPort` | - | extracted crate (adapter in the shell) |
 | done | Radio (`RadioApp`) | radio.rs | 70 | 5 | 0 | 0 | 0 | 0 | 0 | 2 | 2 | 0 | 0 | yes | yes | `RadioPort` | - | extracted crate (adapter in the shell) |
+| done | Rag (`RagApp`) | rag.rs | 64 | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | yes | `RagPort` | - | migrated (port) |
 | done | Remote (`RemoteFilesApp`) | remotefiles.rs | 79 | 6 | 1 | 0 | 0 | 0 | 0 | 5 | 6 | 0 | 0 | yes | yes | `RemoteFilesPort` | - | extracted crate (adapter in the shell) |
-| done | Runs (`RunsApp`) | runs.rs | 487 | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | no | `RunsPort` | - | migrated (port) |
-| done | Scan (`ScanApp`) | scan.rs | 675 | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | no | no | `ScanPort` | - | migrated (port) |
+| done | Runs (`RunsApp`) | runs.rs | 82 | 6 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | no | `RunsPort` | - | migrated (port) |
+| done | Scan (`ScanApp`) | scan.rs, scan_models.rs | 204 | 6 | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | no | no | `ScanPort` | - | migrated (port) |
+| done | Settings (`SettingsApp`) | settings.rs, settings_access.rs, settings_account.rs and 93 more | 23914 | 18 | 2 | 1 | 0 | 0 | 1 | 37 | 41 | 0 | 3 | yes | no | `SettingsPort` | - | migrated (port) |
 | done | Skills (`SkillsApp`) | skills.rs | 500 | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | yes | `SkillsPort` | - | migrated (port) |
+| done | Store (`StoreApp`) | store.rs, store_drivers.rs, store_manage.rs and 4 more | 8374 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | no | `StorePort` | - | migrated (port) |
+| done | System (`SystemApp`) | system.rs | 101 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | no | `SystemPort` | - | extracted crate (adapter in the shell) |
+| done | Tales (`StoryApp`) | story.rs | 126 | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | no | no | `StoryPort` | - | extracted crate (adapter in the shell) |
 | done | Usage (`UsageApp`) | usage.rs | 71 | 6 | 0 | 0 | 0 | 0 | 0 | 2 | 2 | 0 | 0 | no | no | `UsagePort` | - | extracted crate (adapter in the shell) |
 | done | Users (`UsersApp`) | users.rs | 433 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | no | no | `UsersPort` | - | migrated (port) |
+| done | Voice (`VoiceApp`) | voice.rs | 112 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | yes | yes | `VoicePort` | - | extracted crate (adapter in the shell) |
 
-Totals: 40 apps, 18 migrated or extracted, 22 to do (S 6, M 10, L 6); 1933 uses of the services and the context in the apps still to do.
+Totals: 40 apps, 37 migrated or extracted, 3 to do (S 0, M 2, L 1); 92 uses of the services and the context in the apps still to do.
 
 Notes: the count is by occurrence and the file list is by name prefix, so a helper module shared by two apps is counted for the app whose name is the longer prefix; read the numbers as a size class, not as an exact work estimate. An app whose crate was already extracted (`iyakki-tile-*`) shows `an extracted crate`: its source traits are in `iyakki-tile-api` already.

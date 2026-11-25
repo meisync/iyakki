@@ -109,6 +109,16 @@ impl Fake {
         s.base_mounts.push(format!("{n} 1 0:{n} / {} {opts} - {fstype} /dev/{name} rw", mp.replace(' ', "\\040")));
     }
 
+    /// The drive is pulled out: its entries in `/sys/block` and its `/dev` nodes are gone; a mount of it stays in the table (the kernel keeps it).
+    pub fn remove_disk(&self, name: &str) {
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let b = format!("/sys/block/{name}");
+        s.files.retain(|k, _| !k.starts_with(&format!("{b}/")));
+        s.dirs.retain(|d| d != &b && !d.starts_with(&format!("{b}/")));
+        s.canon.remove(&b);
+        s.devs.retain(|k, _| !k.starts_with(&format!("/dev/{name}")));
+    }
+
     pub fn add_process(&self, pid: u32, comm: &str, cwd: &str, fds: &[&str]) {
         let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.files.insert(format!("/proc/{pid}/comm"), format!("{comm}\n"));
@@ -252,6 +262,16 @@ impl DiskEnv for Fake {
             let t = target.replace(' ', "\\040");
             s.base_mounts.retain(|l| !l.split_whitespace().nth(4).is_some_and(|mp| mp == t));
         }
+        Ok(())
+    }
+
+    fn umount_detach(&self, target: &str) -> Result<(), String> {
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        s.calls.push(format!("umount-detach {target}"));
+        let t = target.replace(' ', "\\040");
+        s.mounted.retain(|m| m.1 != target);
+        s.base_mounts.retain(|l| !l.split_whitespace().nth(4).is_some_and(|mp| mp == t));
+        s.busy.remove(target);
         Ok(())
     }
 

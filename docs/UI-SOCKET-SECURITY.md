@@ -77,16 +77,13 @@ of the remote objects) and fails when a method decodes a `Policy`, `Role`, `Poli
 named like a right (`admin`, `admins`, `is_admin`, `can_*`, `approved`, `allowed`), that is neither a rule in `RULES` nor a reviewed entry in `ALLOWED`. Each
 `ALLOWED` entry says why: `Data` (the thing asked for, not a right) or `Open` (a known gap, listed below). The audit is itself tested on synthetic text.
 
-**Open, on purpose (owner decisions in `docs/development/ALPHA-7-DECISIONS.md`):**
+**Alpha.8 (SEC3, `crates/iyakki-ui-rpc/src/served_login.rs`, tests `crates/iyakki-ui-rpc/tests/served_login.rs`):**
 
-* **D-SEC1-SHARED.** The skill and package calls for the SHARED scope (`SkillApi::add`/`remove`, `PackageApi::install`/`remove`) carry `can_shared`, and the
-  shared scope names no person, so the core cannot read the account. A UI can claim the right. Closing it needs the core to know the acting person of the
-  connection (bind the socket to the login), or a name argument added to those four calls.
-* **D-SEC1-APPROVED.** The `approved` flag of the platform calls (deploy, upgrade, back up, remove, connect, push, power) and of `PackageApi::install` is
-  the card the person tapped; it is the UI's word. The core still checks the plan it made and the broker's table still decides each change.
-* **The account name itself.** A call that names an account is believed about WHICH account it is about (the UI knows who signed in). A UI that names another
-  account gets that account's rights, never more. This is the same one-trust-level limit as above.
-* The story store runs in the UI program and judges paths locally over the roots the core gave; the process that runs it is the trust base.
+* **The acting person is bound to the connection.** The core records, per connection, the account that signed in over it: a password the core checked itself (`AccountsApi::authenticate`, or `ServicesHandle::on_login` while nobody is bound), or `resume_session` / `on_resume` (no password, the limit below). A served call that names an account in a rule of `RULES` must name that account; another name is refused and audited, except `on_logout` by an administrator (`ADMIN_ACTS`). The five accounts calls must carry the session of the signed-in account. A connection signed in as one person cannot sign in or resume as another until `on_logout`. A connection nobody signed in on may not act as anyone. The binding ends at `on_logout` of that account or when the connection closes. It is on for the UI socket (`with_login_binding` in `iyakki-compose::rpc`).
+* **The shared-scope skill right is read from the signed-in account** (`manage_skills`; `skills` for the personal flag), so `can_shared` is no longer a claim. The audit allow-list has no `Open` entries any more (a test keeps it so).
+* **`approved` is a one-time ticket.** After the person approves on the card, the UI asks the core for a ticket (`Approval::issue`) and sends it as one trailing argument. The core removes it, then checks that it exists, is unspent, is not past 60 seconds on the host's clock, was issued to this account on this connection, for this call, with this canonical hash of the arguments. It is spent either way. An approved call without a valid ticket is refused (never run as "not approved"). Issue, use and refusal are audited (`ui.approval.*`, `ui.login.*`).
+
+**Still true:** a compromised UI program can ask for a ticket for any plan it likes (the ticket makes approval a bounded, audited act of a known account, not a hardware proof), `resume_session` needs no password, and the story store judges paths locally over the roots the core gave. Closing these needs the approval to be shown by the core itself (a core-drawn confirm), which is not built.
 
 **Not yet done:** a run on a booted device with the core supervising the `iyakki-ui` program (Manual: needed).
 

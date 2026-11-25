@@ -2448,6 +2448,7 @@ mod tests {
 
     #[test]
     fn a_picture_on_top_of_the_clipboard_history_becomes_a_png_beside_a_saved_markdown_file_and_a_picture_line() {
+        let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
         let (cx, home) = world("pastepic");
         crate::ui::clipboard::clear();
         let mut a = app_with(&cx, &home, "notes.md", "# Notes\n");
@@ -2474,6 +2475,7 @@ mod tests {
 
     #[test]
     fn typing_selection_clipboard_and_undo_through_keys() {
+        let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
         let (cx, home) = world("e3");
         let mut a = app_with(&cx, &home, "t.txt", "alpha beta\ngamma\n");
         crate::ui::clipboard::clear();
@@ -2505,6 +2507,7 @@ mod tests {
 
     #[test]
     fn the_context_menu_has_cut_copy_paste_select_all_and_comment_line_by_what_applies() {
+        let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
         use crate::apps::App;
         let _g = iyakki_shared::hostfiles::test_guard();
         iyakki_shared::hostfiles::set_enabled(false);

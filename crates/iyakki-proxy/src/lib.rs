@@ -437,6 +437,12 @@ pub mod https {
         std::sync::Arc::new(crate::guard::Preflight::new(crate::guard::Guarded::new(UreqStreamer::default(), crate::guard::Limits::DOWNLOAD), std::time::Duration::from_secs(4)))
     }
 
+    /// The transport of the chat: [`UreqStreamer`] that waits `first_byte` for an answer to start (a local model may need minutes to load)
+    /// and ends a stream that goes quiet in the middle for [`crate::guard::CHAT_STALL`] with a plain network problem (F-LIFE-19).
+    pub fn chat_streamer(first_byte: std::time::Duration) -> std::sync::Arc<dyn crate::Streamer> {
+        std::sync::Arc::new(crate::guard::IdleGuard::new(UreqStreamer::with_response_timeout(first_byte), first_byte, crate::guard::CHAT_STALL))
+    }
+
     /// Streams over HTTP/HTTPS with no overall time limit (only connecting and the first answer are bounded).
     pub struct UreqStreamer {
         agent: ureq::Agent,

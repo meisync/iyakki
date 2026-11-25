@@ -61,6 +61,12 @@ zstd -dc "$IMG/rootfs.cpio.zst" | cpio -idm --quiet --no-absolute-filenames
 rm -f boot/bzImage
 # a newer iyakki program (test builds): IYAKKI_BIN=/path/to/iyakki replaces /usr/bin/iyakki
 [ -z "${IYAKKI_BIN:-}" ] || { cp "$IYAKKI_BIN" usr/bin/iyakki; chmod 0755 usr/bin/iyakki; }
+# the UI as its own program (F-SPLIT-03, docs/development/UI-BOUNDARY.md "Booted proof"): IYAKKI_UI_BIN=/path/to/iyakki-ui (built by
+# dist/buildroot/ui-program.sh) is placed at /usr/bin/iyakki-ui, which the layer rules give to the ui layer. It does nothing by itself: the core
+# starts it only for `iyakki.ui=process` on the kernel command line or the flag file /etc/iyakki/ui-process.enabled, and IYAKKI_UI_PROCESS=1
+# writes that flag file (test images only: the default image never has it).
+[ -z "${IYAKKI_UI_BIN:-}" ] || { mkdir -p usr/bin; cp "$IYAKKI_UI_BIN" usr/bin/iyakki-ui; chmod 0755 usr/bin/iyakki-ui; }
+[ "${IYAKKI_UI_PROCESS:-0}" != 1 ] || { [ -x usr/bin/iyakki-ui ] || { echo "lean-image: IYAKKI_UI_PROCESS=1 needs IYAKKI_UI_BIN (or an image that has usr/bin/iyakki-ui)" >&2; exit 1; }; mkdir -p etc/iyakki; : > etc/iyakki/ui-process.enabled; chmod 0644 etc/iyakki/ui-process.enabled; }
 # the keys that may sign in over SSH on the diagnostics entries are baked into the image at /etc/iyakki/authorized_keys; IYAKKI_AUTH_KEYS=FILE
 # replaces that file in the lean tree (public keys only), so the machine that will connect to the stick can be named at build time
 [ -z "${IYAKKI_AUTH_KEYS:-}" ] || { cp "$IYAKKI_AUTH_KEYS" etc/iyakki/authorized_keys; chmod 0644 etc/iyakki/authorized_keys; }

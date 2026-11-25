@@ -31,6 +31,14 @@ use iyakki_ui_sdk::zoom::ZoomChange;
 #[cfg(all(target_arch = "wasm32", feature = "tile"))]
 mod guest;
 
+/// `tile.wasm`: the wasm32 build of this app (`cargo build --release --lib --target wasm32-unknown-unknown -p iyakki-app-edit --features tile`,
+/// recorded in `tile.wasm.sha256`), the module the browser host serves as the EDIT tile. `tests/wasm32_guest.rs` builds it again and checks it behaves like this file.
+#[cfg(not(target_arch = "wasm32"))]
+pub const TILE_WASM: &[u8] = include_bytes!("../tile.wasm");
+
+/// The capabilities the tile asks for, the same as `tile_caps` in `app.toml`: the browser host checks them before any call reaches the core.
+pub const TILE_CAPS: [&str; 4] = ["home", "assistant", "storage", "dock"];
+
 /// The app id the launcher, the dock and the policy know it by.
 pub const ID: &str = "edit";
 /// The storage key of the text size.

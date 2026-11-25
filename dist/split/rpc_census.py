@@ -16,10 +16,33 @@ def strip(s):
     return re.sub(r'/\*.*?\*/', '', s, flags=re.S)
 
 EXTRA_FILES = []  # traits of other crates a generator wants parsed too (gen_unserved.py); the census itself never sets it
+# Facet traits that moved out of iyakki-agent-api into a leaf crate (the tile-crate moves keep the old paths by re-export, but the trait text is now elsewhere):
+# always parsed, so the generated remote objects of a moved trait do not vanish. One line per moved file.
+MOVED_FILES = [ROOT + '/crates/iyakki-voice-model/src/facets.rs',  # SpeechKit, MineWorker, VoiceDeskFacet, PendingWaker (lane AP1, D-AP1-02)
+               ROOT + '/crates/iyakki-voice-model/src/hosttts.rs',  # HostTtsApi
+               ROOT + '/crates/iyakki-story-model/src/reading_api.rs']  # StoryReader, DirectVoice
+
+FILE_PATHS = {}  # file key -> path, for the files outside iyakki-agent-api/src (a key never has a slash: generators write it into comments and names)
+
+def file_key(f):
+    """The name a trait's file goes by: the plain file name inside iyakki-agent-api/src, `<crate>_<file>` (underscores) for a moved file."""
+    if os.path.dirname(f) == ROOT + '/crates/iyakki-agent-api/src':
+        return os.path.basename(f)
+    parts = f.replace(ROOT + '/crates/', '').split('/')
+    key = (parts[0] + '_' + os.path.basename(f)).replace('-', '_')
+    FILE_PATHS[key] = f
+    return key
+
+def path_of(key):
+    """The source file of a trait file key (see file_key): a moved or extra file by its key, else a file of iyakki-agent-api/src."""
+    for f in list(MOVED_FILES) + list(EXTRA_FILES):
+        if file_key(f) == key:
+            return f
+    return ROOT + '/crates/iyakki-agent-api/src/' + key
 
 def parse():
     res = []
-    for f in sorted(glob.glob(ROOT + '/crates/iyakki-agent-api/src/*.rs')) + list(EXTRA_FILES):
+    for f in sorted(glob.glob(ROOT + '/crates/iyakki-agent-api/src/*.rs')) + list(EXTRA_FILES) + [m for m in MOVED_FILES if m not in EXTRA_FILES and os.path.exists(m)]:
         t = strip(open(f).read())
         for m in re.finditer(r'^pub trait (\w+)[^{;]*\{', t, flags=re.M):
             name = m.group(1); i = m.end(); d = 1; j = i
@@ -49,7 +72,7 @@ def parse():
                 fn, gen = mm.group(1), mm.group(2)
                 args = t_[mm.end():k_ - 1]; rest_ = t_[k_:].strip()
                 ret = rest_[2:].strip() if rest_.startswith('->') else None
-                res.append(dict(file=os.path.basename(f), path=f, trait=name, fn=fn, gen=gen or '', args=' '.join(args.split()), ret=' '.join((ret or '').split()), body=body_))
+                res.append(dict(file=file_key(f), path=f, trait=name, fn=fn, gen=gen or '', args=' '.join(args.split()), ret=' '.join((ret or '').split()), body=body_))
     return res
 
 # classes, in the order the design document explains them

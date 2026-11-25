@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-15",
+  "feature_sha": "094251cd3898950b",
+  "title": "word times from the sound",
+  "clauses": [
+    {
+      "id": "aligned-word",
+      "text": "With a speech-to-text server, the lit word lands on the word being spoken",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "With a speech-to-text server set, Word timing from the sound (key w), read a TALES piece and watch the lit word.",
+          "expect": "The lit word lands on the word being spoken, not a sentence early or late."
+        }
+      ]
+    }
+  ]
+}

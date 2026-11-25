@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use iyakki_web::blocker_lists::{FetchSource, ListStore, KNOWN};
 use iyakki_web::blocker_state::Filter;
 
-use super::AppCx;
+use super::chat_port::UserData;
 
 /// The person's choices.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,20 +29,20 @@ impl Default for BlockConfig {
     }
 }
 
-fn who(cx: &AppCx) -> String {
+fn who(cx: &dyn UserData) -> String {
     super::browser_config::who(cx)
 }
 
-fn config_path(cx: &AppCx) -> PathBuf {
-    cx.data_dir().join(format!("browser-block-{}.json", who(cx)))
+fn config_path(cx: &dyn UserData) -> PathBuf {
+    cx.data_root().join(format!("browser-block-{}.json", who(cx)))
 }
 
 /// The folder of this person's lists.
-pub fn lists_dir(cx: &AppCx) -> PathBuf {
-    cx.data_dir().join("browser-lists").join(who(cx))
+pub fn lists_dir(cx: &dyn UserData) -> PathBuf {
+    cx.data_root().join("browser-lists").join(who(cx))
 }
 
-pub fn store(cx: &AppCx) -> ListStore {
+pub fn store(cx: &dyn UserData) -> ListStore {
     ListStore::open(lists_dir(cx))
 }
 
@@ -50,7 +50,7 @@ fn clean_hosts(list: impl IntoIterator<Item = String>) -> BTreeSet<String> {
     list.into_iter().map(|h| h.to_ascii_lowercase()).filter(|h| !h.is_empty() && h.len() < 254 && h.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))).take(500).collect()
 }
 
-pub fn load(cx: &AppCx) -> BlockConfig {
+pub fn load(cx: &dyn UserData) -> BlockConfig {
     let mut c = BlockConfig::default();
     if let Some(text) = super::browser_config::read_checked("browser blocker settings", &config_path(cx)) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -61,7 +61,7 @@ pub fn load(cx: &AppCx) -> BlockConfig {
     c
 }
 
-pub fn save(cx: &AppCx, c: &BlockConfig) {
+pub fn save(cx: &dyn UserData, c: &BlockConfig) {
     let json = serde_json::json!({ "enabled": c.enabled, "allow": c.allow });
     super::browser_config::write_checked("browser blocker settings", &config_path(cx), &json.to_string());
 }
@@ -74,7 +74,7 @@ fn signature(dir: &Path) -> String {
 }
 
 /// Put this person's choices and lists into the shared filter. Cheap when nothing changed; compiles the lists when they did.
-pub fn apply(cx: &AppCx) {
+pub fn apply(cx: &dyn UserData) {
     #[cfg(any(test, feature = "testing"))]
     {
         // a test that looks at the shared filter pins it to its own folder; other tests browsing meanwhile leave it alone
@@ -107,7 +107,7 @@ pub fn forget_loaded() {
 
 /// Write (or remove) the rule list the full web engine loads, and return the variables that point the helper at it. Called
 /// before the engine starts; unchanged rules keep their identifier, so WebKit's compiled copy is reused.
-pub fn prepare_full_engine(cx: &AppCx, profile: &Path) -> Vec<(String, String)> {
+pub fn prepare_full_engine(cx: &dyn UserData, profile: &Path) -> Vec<(String, String)> {
     let c = load(cx);
     let json_path = profile.join("content-filter.json");
     let id_path = profile.join("content-filter.id");
@@ -143,7 +143,7 @@ pub fn prepare_full_engine(cx: &AppCx, profile: &Path) -> Vec<(String, String)> 
         let _ = std::fs::remove_dir_all(profile.join("content-filter-store"));
         let _ = std::fs::write(&id_path, &id);
     }
-    cx.agent.webengine_filter_env(profile)
+    cx.agent().webengine_filter_env(profile)
 }
 
 /// What a background job (download, update) is doing, for Settings.
@@ -262,11 +262,11 @@ fn summary(done: &[String], failed: &[String]) -> String {
 
 /// The weekly refresh: at the first page load after start, lists with an address that are a week old are fetched again, on a
 /// thread, once per run. Nothing happens for a person with no lists or with blocking off.
-pub fn weekly_refresh(cx: &AppCx) {
+pub fn weekly_refresh(cx: &dyn UserData) {
     static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if load(cx).enabled && !DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
         let dir = lists_dir(cx);
-        let web = cx.web.for_user(&cx.session.user).unwrap_or_else(|| cx.web.clone());
+        let web = cx.web_for_user();
         let now = now_secs();
         if ListStore::open(&dir).list().iter().any(|m| !m.url.is_empty() && m.enabled && now.saturating_sub(m.updated) >= iyakki_web::blocker_lists::REFRESH_AFTER) {
             let _ = std::thread::Builder::new().name("iyakki-block-weekly".into()).spawn(move || {
@@ -278,8 +278,8 @@ pub fn weekly_refresh(cx: &AppCx) {
 }
 
 /// The address of a list source for a real download: the browser's own network, as this person.
-pub fn source(cx: &AppCx) -> Arc<dyn iyakki_web::blocker_lists::ListSource> {
-    Arc::new(FetchSource(cx.web.for_user(&cx.session.user).unwrap_or_else(|| cx.web.clone())))
+pub fn source(cx: &dyn UserData) -> Arc<dyn iyakki_web::blocker_lists::ListSource> {
+    Arc::new(FetchSource(cx.web_for_user()))
 }
 
 /// "7 days ago" for a time in seconds since 1970.
@@ -294,7 +294,7 @@ pub fn ago(then: u64, now: u64) -> String {
 }
 
 /// Toggle "allow on this site" for `host` (which must be a plain host name); the new state.
-pub fn toggle_allow(cx: &AppCx, host: &str) -> bool {
+pub fn toggle_allow(cx: &dyn UserData, host: &str) -> bool {
     let mut c = load(cx);
     let host = host.to_ascii_lowercase();
     let on = if c.allow.remove(&host) {
@@ -321,7 +321,7 @@ pub(crate) struct Pin;
 
 #[cfg(any(test, feature = "testing"))]
 impl Pin {
-    pub(crate) fn to(cx: &AppCx) -> Pin {
+    pub(crate) fn to(cx: &dyn UserData) -> Pin {
         if let Ok(mut p) = PIN.lock() {
             *p = Some(lists_dir(cx));
         }

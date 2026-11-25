@@ -3,6 +3,7 @@
 //! the dependants), the progress and result, the retry, and the card at four sizes. Fakes only: no cluster, no network.
 use super::remove::*;
 use super::*;
+use crate::apps::store_port::CxPort;
 use iyakki_agent::quickinstall as qi;
 use crate::apps::store::{Section, StoreApp};
 use crate::apps::{App, AppCx};
@@ -23,10 +24,10 @@ fn rig(tag: &str, role: Role, present: &[Item]) -> (StoreApp, AppCx) {
     let mut a = StoreApp::new(&cx);
     a.setup.set_machine(Machine { ram_mb: 16_000, ..Default::default() });
     a.setup.set_facts(facts_with(present));
-    a.setup.launch = Some(qi::Launch { exe: "/usr/bin/true".into(), data: cx.data_dir().join("qi") });
+    a.setup.launch = Some(iyakki_tile_api::store_qi::Launch { exe: "/usr/bin/true".into(), data: cx.data_dir().join("qi") });
     a.handle(&Event::Tab(4), &cx);
     assert!(a.section == Section::Setup);
-    a.setup.enter(&cx);
+    a.setup.enter(&CxPort(&cx));
     (a, cx)
 }
 
@@ -71,7 +72,7 @@ fn every_installed_item_has_a_remove_button_for_an_administrator_and_nobody_else
     let (mut v, cx) = rig("rm-btn-viewer", Role::User, &[Item::Elasticsearch]);
     v.setup.open_popup(Item::Elasticsearch);
     assert!(!v.setup.popup_button_list(Item::Elasticsearch).iter().any(|(l, _)| l.starts_with("Remove")));
-    v.setup.open_remove(Item::Elasticsearch, &cx);
+    v.setup.open_remove(Item::Elasticsearch, &CxPort(&cx));
     assert!(v.setup.rm.is_none() && v.setup.note.is_some(), "a viewer is told to ask an administrator");
 }
 
@@ -91,7 +92,7 @@ fn a_cluster_found_elsewhere_is_never_offered_for_removal() {
 #[test]
 fn the_card_keeps_the_data_by_default_and_a_removal_ends_with_the_item_not_installed() {
     let (mut a, cx) = rig("rm-flow", Role::Admin, &[Item::Elasticsearch]);
-    qi::mark_done(cx.data_dir(), Item::Elasticsearch, "up").unwrap();
+    qi::mark_done(cx.data_dir(), crate::apps::store_port::item_from_mirror(Item::Elasticsearch), "up").unwrap();
     a.setup.open_popup(Item::Elasticsearch);
     press(&mut a, &cx, RM_OPEN + idx(Item::Elasticsearch));
     let c = a.setup.rm.as_ref().expect("the review card opened");
@@ -104,7 +105,7 @@ fn the_card_keeps_the_data_by_default_and_a_removal_ends_with_the_item_not_insta
     a.handle(&Event::Key(Key::Char('d')), &cx);
     assert!(!a.setup.rm.as_ref().unwrap().delete_data);
     a.handle(&Event::Key(Key::Esc), &cx);
-    assert!(a.setup.rm.is_none() && qi::marked(cx.data_dir(), Item::Elasticsearch).is_some());
+    assert!(a.setup.rm.is_none() && qi::marked(cx.data_dir(), crate::apps::store_port::item_from_mirror(Item::Elasticsearch)).is_some());
     // Enter does not confirm: only the Remove button or y
     press(&mut a, &cx, RM_OPEN + idx(Item::Elasticsearch));
     a.handle(&Event::Key(Key::Enter), &cx);
@@ -115,7 +116,7 @@ fn the_card_keeps_the_data_by_default_and_a_removal_ends_with_the_item_not_insta
         Phase::Done(m) => assert!(m.contains("Elasticsearch removed") && m.contains("kept"), "{m}"),
         p => panic!("{p:?}"),
     }
-    assert!(qi::marked(cx.data_dir(), Item::Elasticsearch).is_none());
+    assert!(qi::marked(cx.data_dir(), crate::apps::store_port::item_from_mirror(Item::Elasticsearch)).is_none());
     assert!(!a.setup.present(Item::Elasticsearch), "the item shows as not installed afterwards");
     a.handle(&Event::Key(Key::Esc), &cx);
     assert!(a.setup.rm.is_none());

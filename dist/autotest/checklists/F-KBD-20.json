@@ -1,0 +1,40 @@
+{
+ "schema": 1,
+ "row": "F-KBD-20",
+ "feature_sha": "257787deeab34176",
+ "title": "pointer speed for mouse and touchpad",
+ "clauses": [
+  {
+   "id": "mouse-speed",
+   "text": "the Mouse slower and faster buttons change the mouse speed at once and the value is kept after a restart",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "In Settings, Keyboard, row Pointer speed, press the Mouse faster key ( . ) a few times, then the slower key ( , ).",
+     "expect": "The pointer speed changes at each press, in steps of 5 percent."
+    },
+    {
+     "do": "Restart the computer and check the Pointer speed row.",
+     "expect": "The value is the same as before the restart."
+    }
+   ]
+  },
+  {
+   "id": "touchpad-speed",
+   "text": "the Touchpad slower and faster buttons change the pad's speed at once",
+   "machines": [
+    "macbook-pro",
+    "lenovo",
+    "hp"
+   ],
+   "steps": [
+    {
+     "do": "In Settings, Keyboard, Pointer speed, press the Touchpad faster button, then move one finger across the trackpad.",
+     "expect": "The pointer moves faster than before, and the Touchpad value on the row goes up."
+    }
+   ]
+  }
+ ]
+}

@@ -168,6 +168,9 @@ struct Job {
 
 /// The speaker: the chosen reading voice, played through the shared audio entry point (`Services::play_wav_output`) so the
 /// system volume and the output choice apply. One sentence at a time on a helper thread.
+/// The sentences of the voice assistant being spoken, for the end-of-session hook `voice-assistant-speaker` (D-SESSION-END).
+pub static SPEAKER_STOPS: iyakki_shared::sessionend::StopSet = iyakki_shared::sessionend::StopSet::new();
+
 pub struct SystemSpeaker {
     svc: Arc<Services>,
     job: Option<Job>,
@@ -210,6 +213,33 @@ pub fn cloud_ports(svc: &Arc<Services>) -> Option<(Box<dyn AudioIn>, Box<dyn Spe
     Some((Box::new(ear), Box::new(crate::cloudvoice::CloudSpeaker::new(cloud_synth(svc.clone()), Arc::new(move || l2.return_target())))))
 }
 
+/// One sentence on its helper thread: made into sound, played, and cut short by the speaker's own stop or by the end of the session
+/// (`ended`, the guard of [`SPEAKER_STOPS`]). `busy` goes false when it is over, whatever way it ended.
+pub(crate) fn speak_sentence(synth: &dyn crate::story::Synth, sink: &dyn crate::story::Sink, text: &str, echo: bool, busy: &AtomicBool, stop: &AtomicBool, ended: &iyakki_shared::sessionend::StopGuard) {
+    let done = || busy.store(false, Ordering::SeqCst);
+    let Ok(wav) = synth.synth(text) else { return done() };
+    if stop.load(Ordering::SeqCst) || ended.stopped() {
+        return done();
+    }
+    let Ok(mut playing) = sink.play(&wav) else { return done() };
+    // what is being played is the reference for taking its echo out of the next capture (only when the person switched that on)
+    if echo {
+        if let Ok(w) = crate::voice::parse_wav(&wav) {
+            let pcm: Vec<f32> = crate::voice::to_mono_16k(&w).iter().map(|s| f32::from(*s) / 32768.0).collect();
+            echo_ref().add(echo_ms(), pcm);
+        }
+    }
+    while playing.is_playing() {
+        if stop.load(Ordering::SeqCst) || ended.stopped() {
+            playing.stop();
+            echo_ref().stop_all(echo_ms());
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    done();
+}
+
 impl Speaker for SystemSpeaker {
     fn say(&mut self, text: &str) -> Result<(), String> {
         use crate::story::{Sink, Synth};
@@ -231,30 +261,8 @@ impl Speaker for SystemSpeaker {
         self.job = Some(Job { busy: busy.clone(), stop: stop.clone() });
         let text = text.to_string();
         let echo = self.svc.voice_settings().echo_cancel;
-        std::thread::spawn(move || {
-            let done = || busy.store(false, Ordering::SeqCst);
-            let Ok(wav) = synth.synth(&text) else { return done() };
-            if stop.load(Ordering::SeqCst) {
-                return done();
-            }
-            let Ok(mut playing) = sink.play(&wav) else { return done() };
-            // what is being played is the reference for taking its echo out of the next capture (only when the person switched that on)
-            if echo {
-                if let Ok(w) = crate::voice::parse_wav(&wav) {
-                    let pcm: Vec<f32> = crate::voice::to_mono_16k(&w).iter().map(|s| f32::from(*s) / 32768.0).collect();
-                    echo_ref().add(echo_ms(), pcm);
-                }
-            }
-            while playing.is_playing() {
-                if stop.load(Ordering::SeqCst) {
-                    playing.stop();
-                    echo_ref().stop_all(echo_ms());
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(30));
-            }
-            done();
-        });
+        let ended = SPEAKER_STOPS.enter(|| {});
+        std::thread::spawn(move || speak_sentence(&*synth, &*sink, &text, echo, &busy, &stop, &ended));
         Ok(())
     }
     fn busy(&mut self) -> bool {

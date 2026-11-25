@@ -376,5 +376,40 @@ pub fn load_typed<T: serde::de::DeserializeOwned + Default>(spec: &Spec, path: &
     (out, val.unwrap_or_default(), note)
 }
 
+/// The process id in a leftover temp name made by [`write_atomic`] (`name.tmp<pid>-<n>`), or by the flow store.
+pub fn stale_tmp_pid(file_name: &str) -> Option<u32> {
+    let tail = &file_name[file_name.rfind(".tmp")? + 4..];
+    let (pid, n) = tail.split_once('-')?;
+    (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit())).then(|| pid.parse().ok())?
+}
+
+/// Remove the temp files a crash or a power cut left under `root` (down to `depth` folders): `name.tmp<pid>-<n>` whose process is not
+/// alive. Returns the paths removed. `alive` says whether a process id is running (the real one looks at `/proc`).
+pub fn sweep_stale_tmp(root: &Path, depth: u32, alive: &dyn Fn(u32) -> bool) -> Vec<PathBuf> {
+    let mut gone = Vec::new();
+    let Ok(rd) = fs::read_dir(root) else { return gone };
+    for e in rd.flatten() {
+        let path = e.path();
+        let Ok(ft) = e.file_type() else { continue };
+        if ft.is_dir() {
+            if depth > 0 {
+                gone.extend(sweep_stale_tmp(&path, depth - 1, alive));
+            }
+        } else if ft.is_file() {
+            if let Some(pid) = stale_tmp_pid(&e.file_name().to_string_lossy()) {
+                if pid != std::process::id() && !alive(pid) && fs::remove_file(&path).is_ok() {
+                    gone.push(path);
+                }
+            }
+        }
+    }
+    gone
+}
+
+/// Is this process id running (a folder under `/proc`)?
+pub fn pid_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
 #[cfg(test)]
 mod tests;

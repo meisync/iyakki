@@ -1,0 +1,76 @@
+{
+ "schema": 1,
+ "row": "F-RADIO-17",
+ "feature_sha": "bb1ebdf21a9eaaa6",
+ "title": "radio recovery: reconnect, then the next station (manual until automated)",
+ "clauses": [
+  {
+   "id": "reconnect",
+   "text": "When a live station drops, the sound already on its way plays out and the same station is retried (status: Reconnecting 1 of 2).",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Play a live station, then drop the network for about five seconds (turn the Wi-Fi off and on, or unplug the cable).",
+     "expect": "The sound already on its way plays out, the status line says Reconnecting 1 of 2, and when the station comes back it plays on."
+    }
+   ]
+  },
+  {
+   "id": "next-station",
+   "text": "When the retries fail, the radio goes on to the next station of your list (status: Switched to NAME).",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Have two stations in My stations. Play the first, then keep the network off until the retries are used up.",
+     "expect": "The status line says Switched to the second station's name, and the second station plays."
+    }
+   ]
+  },
+  {
+   "id": "stops-after-pass",
+   "text": "After one full pass without success, the radio stops and says so in plain words.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "With the network still off, let the radio go through the whole list.",
+     "expect": "It stops and shows a plain message. It does not loop forever."
+    }
+   ]
+  },
+  {
+   "id": "settings",
+   "text": "Settings, Radio sets the reconnect tries (0 to 5, two by default) and the next-station switch (on by default).",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Radio and read Reconnect tries and Go on to the next station. Change them, leave, and come back.",
+     "expect": "Reconnect tries shows 2 and Go on to the next station is on by default. The changes are kept."
+    }
+   ]
+  }
+ ]
+}

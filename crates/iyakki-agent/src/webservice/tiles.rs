@@ -210,6 +210,9 @@ pub fn builtin() -> Vec<TileDef> {
         // the Settings overview, the scratch editor and the chat as tiles (F-WEB-56, F-WEB-54, F-WEB-53): first slices, see the rows
         TileDef { id: "settings".into(), title: "Settings (overview)".into(), wasm: Arc::new(iyakki_tile_settings::TILE_WASM.to_vec()), caps: iyakki_tile_settings::CAPS.iter().map(|s| s.to_string()).collect(), width: 360, height: 480, pictures: vec![] },
         TileDef { id: "edit".into(), title: "Edit (scratch)".into(), wasm: Arc::new(iyakki_tile_edit::TILE_WASM.to_vec()), caps: iyakki_tile_edit::CAPS.iter().map(|s| s.to_string()).collect(), width: 480, height: 360, pictures: vec![] },
+        // EDIT and CLI written on the UI SDK, built as wasm32 tiles (F-SDK-34): files, the assistant and the terminal reach the core only through the domains `home`, `assistant`, `terminal`, `dock` and `storage`, each named in the manifest; the scratch editor above keeps its id and title
+        TileDef { id: "edit-sdk".into(), title: "Edit (files)".into(), wasm: Arc::new(iyakki_app_edit::TILE_WASM.to_vec()), caps: iyakki_app_edit::TILE_CAPS.iter().map(|s| s.to_string()).collect(), width: 480, height: 480, pictures: vec![] },
+        TileDef { id: "cli".into(), title: "CLI".into(), wasm: Arc::new(iyakki_app_terminal::TILE_WASM.to_vec()), caps: iyakki_app_terminal::TILE_CAPS.iter().map(|s| s.to_string()).collect(), width: 480, height: 480, pictures: vec![] },
         TileDef { id: "chat".into(), title: "Chat".into(), wasm: Arc::new(iyakki_tile_chat::TILE_WASM.to_vec()), caps: iyakki_tile_chat::CAPS.iter().map(|s| s.to_string()).collect(), width: 360, height: 480, pictures: vec![] },
         TileDef { id: "runs".into(), title: "Runs".into(), wasm: Arc::new(iyakki_tile_runs::TILE_WASM.to_vec()), caps: iyakki_tile_runs::CAPS.iter().map(|s| s.to_string()).collect(), width: 360, height: 480, pictures: vec![] },
     ]
@@ -303,6 +306,8 @@ struct TileBackend {
     /// `cameras.*`: the core's camera views for this tile's id; `cameras_own` is the views this tile opened and the cards it was shown.
     cameras: Arc<dyn iyakki_core_api::Cameras>,
     cameras_own: Mutex<super::tilecameras::Own>,
+    /// `storage.*` (F-SDK-34): where this tile's per-person key/value store lives (`tilestore.rs`).
+    store_dir: std::path::PathBuf,
     /// `terminal.*` (F-SDK-34): the core's terminal facet for this tile's id; `terminal_own` is the sessions this tile opened and the cards it was shown.
     terminal: Arc<dyn iyakki_core_api::Terminal>,
     terminal_own: Mutex<super::tileterminal::Own>,
@@ -915,7 +920,7 @@ impl TileBackend {
         if domain == "dock" && method == "status" {
             // a tile sets only its own icon: no tool, no question (it changes nothing but a number and a short line on that icon)
             let (app, badge, line) = super::tiledock::parse_status(json).inspect_err(|_| self.note("refused", "dock_status"))?;
-            if app != self.tile {
+            if app != self.tile && app != own_app_id(&self.tile) {
                 self.note("refused", "dock_status");
                 return Err("a tile sets the status of its own icon only; not allowed for another app".into());
             }
@@ -1242,6 +1247,12 @@ impl ServiceBackend for TileBackend {
         if domain == "terminal" {
             return self.terminal_call(method, json);
         }
+        if domain == "storage" {
+            let out = super::tilestore::call(&self.store_dir, &self.user, &self.tile, method, json);
+            // the audit names the call, never a key or a value
+            self.note(if out.is_ok() { "call" } else { "refused" }, &format!("storage_{}", method.chars().take(10).collect::<String>()));
+            return out;
+        }
         if domain == "dock" || domain == "wallpaper" {
             return self.dock_call(domain, method, json);
         }
@@ -1373,6 +1384,15 @@ fn tile_failure(e: &TileError) -> Fail {
     match e {
         TileError::VersionMismatch { .. } | TileError::MissingExport(_) | TileError::Load(_) => Fail::new(501, "unsupported", &e.to_string()),
         _ => Fail::new(502, "unavailable", &e.to_string()),
+    }
+}
+
+/// The app id a tile's icon carries when it differs from the tile id: the SDK apps keep the ids of the old screens (`edit`), while the tile
+/// `edit-sdk` sits beside the scratch editor `edit`.
+fn own_app_id(tile: &str) -> &str {
+    match tile {
+        "edit-sdk" => "edit",
+        t => t,
     }
 }
 
@@ -1785,6 +1805,7 @@ fn tile_backend(c: &Ctx, p: &iyakki_core_api::Principal, def_id: &str, host: &Ti
         cameras_own: Default::default(),
         terminal: c.sh.deps.extras.terminal(),
         terminal_own: Default::default(),
+        store_dir: super::tilestore::store_dir(&c.data_dir()),
         status: {
             let (extras, who, tile) = (c.sh.deps.extras.clone(), p.clone(), def_id.to_string());
             Arc::new(move |badge: Option<u32>, line: &str| extras.set_tile_status(&who, &tile, badge, line))
@@ -1890,6 +1911,8 @@ fn today_ymd() -> String {
 fn remove(c: &Ctx) -> Out {
     let id = c.params.first().map(String::as_str).unwrap_or("");
     c.sh.tiles.remove_package(&packages_dir(&c.sh.cfg.data_dir), id)?;
+    // what the tile kept for the people who used it goes with it
+    super::tilestore::clear_tile(&super::tilestore::store_dir(&c.data_dir()), id);
     Ok((200, json!({"ok": true}), format!("tile={id}")))
 }
 
@@ -1930,6 +1953,7 @@ fn bundle_json(b: &super::webbundle::Bundle) -> Value {
 fn bundle_remove(c: &Ctx) -> Out {
     let id = c.params.first().map(String::as_str).unwrap_or("");
     c.sh.tiles.bundles.remove(&super::webbundle::bundles_dir(&c.sh.cfg.data_dir), id)?;
+    super::tilestore::clear_tile(&super::tilestore::store_dir(&c.data_dir()), id);
     Ok((200, json!({"ok": true}), format!("bundle={id}")))
 }
 

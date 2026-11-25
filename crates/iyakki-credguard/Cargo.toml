@@ -1,0 +1,8 @@
+[package]
+name = "iyakki-credguard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Spotting a credential in text before it is sent to the assistant: a pure detector with no I/O, split out of iyakki-shared so the FLOWS model crate and tile do not pull in the shared crate."
+
+[dependencies]

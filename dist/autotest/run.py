@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """./run.sh autotest: the test-automation runner (docs/development/AUTOTEST.md).
 
-  ./run.sh autotest [--profile qemu|browser|machine NAME] [--rows F-A-1,F-B-2] [--checklist] [--image BUILD_DIR] [--out DIR]
+  ./run.sh autotest [--profile qemu|browser|machine NAME] [--rows F-A-1,F-B-2] [--checklist] [--image BUILD_DIR] [--out DIR] [--ui-process]
                     [--update-golden] [--list] [--dry-run] [--image-commit SHA] [--client PATH]
 
 Reads dist/autotest/scenarios/*.scn (the dist/devtest text format plus the autotest headers and verbs), runs the ones for the profile, and writes
@@ -38,7 +38,10 @@ LOCK = os.environ.get("IYAKKI_AUTOTEST_LOCK", os.path.join(WORK, ".autotest.lock
 GATE_LOCK = os.environ.get("IYAKKI_GREEN_LOCK", os.path.join(WORK, ".release-green.lock"))
 # the same boot profiles as dist/qemu/session-checks.py (that file has a hyphen and keeps them inside main())
 PROFILES = {"ram": {}, "data": {"data_disk": True}, "idle": {}, "full": {"data_disk": True, "ram": 6144, "disk_gb": 16},
-            "clock": {"extra_qemu": ["-rtc", "base=2024-01-01T00:00:00"], "append": "no-kvmclock"}}
+            "clock": {"extra_qemu": ["-rtc", "base=2024-01-01T00:00:00"], "append": "no-kvmclock"},
+            "usb": {"extra_qemu": ["-device", "qemu-xhci,id=evxhci"]},
+            # the UI as its own program (F-SPLIT-03): paired in the usual mode on a data volume, then restarted with iyakki.ui=process (session_lib.Session.switch_to_ui_process)
+            "ui_process": {"ui_process": True}}
 TARGET_OF_PROFILE = {"qemu": "qemu", "browser": "browser", "machine": "real"}
 
 
@@ -81,6 +84,8 @@ def problems(entries, known_rows=None):
         for t in e["targets"]:
             if t not in R.TARGETS and not t.startswith("hw:"):
                 bad.append("%s: unknown target %r" % (n, t))
+        if verbs.uses_sound(e.get("steps", [])) and [t for t in e["targets"] if t != "qemu"]:
+            bad.append("%s: sound verbs judge the QEMU guest's recording; the scenario must name only targets: qemu" % n)
     return bad
 
 
@@ -152,6 +157,7 @@ def build_results(entry, target, status, reason, meta, feat_idx, evidence_by_row
                          needs_human=[h.split("|")[0].strip() for h in human], reason=reason,
                          scenario_file=os.path.relpath(entry["file"], ROOT))
         r["feature_sha"] = fsha
+        r["base_commit"] = meta.get("base_commit") or meta["commit"]
         r["screen_evidence"] = screen_evidence(entry)
         if device_ok is not None:
             r["device_ok"] = device_ok
@@ -271,20 +277,28 @@ def run_session_checks(entries, sess, out_root, meta, feat_idx, log=print):
     import session_checks_defs as d0
     import session_checks_ui_defs as d1
     allr = []
+    done = {}   # a check changes the guest (it takes a permission away, it removes a disk): it runs ONCE per boot and every scenario that names it gets that one outcome (Q1, 2026-11-21: the second run of app_events_permissions found no row left)
     for e in entries:
         name = e["meta"]["session-check"]
         fn = getattr(d0, "check_" + name, None) or getattr(d1, "check_" + name, None)
         first = e["rows"][0]
         folder = os.path.join(out_root, first, "qemu", os.path.splitext(os.path.basename(e["file"]))[0])
         os.makedirs(folder, exist_ok=True)
-        try:
-            if fn is None:
-                raise devui.Skip("no function check_%s" % name)
-            ev, status, why = fn(sess), "PASS", ""
-        except devui.Skip as ex:
-            ev, status, why = "skipped: %s" % ex, "SKIP", str(ex)
-        except Exception as ex:  # noqa: BLE001
-            ev, status, why = "%s: %s" % (type(ex).__name__, ex), "FAIL", str(ex)[:200]
+        if name in done:
+            ev, status, why = done[name]
+            ev = "%s\n(one run of this check serves every scenario that names it: %s)" % (ev, ", ".join(done[name + "\0rows"]))
+            done[name + "\0rows"].append(first)
+        else:
+            try:
+                if fn is None:
+                    raise devui.Skip("no function check_%s" % name)
+                ev, status, why = fn(sess), "PASS", ""
+            except devui.Skip as ex:
+                ev, status, why = "skipped: %s" % ex, "SKIP", str(ex)
+            except Exception as ex:  # noqa: BLE001
+                ev, status, why = "%s: %s" % (type(ex).__name__, ex), "FAIL", str(ex)[:200]
+            done[name] = (ev, status, why)
+            done[name + "\0rows"] = [first]
         with open(os.path.join(folder, "session-check-%s.txt" % name), "w") as fh:
             fh.write(ev + "\n")
         rel = os.path.join(os.path.basename(folder), "session-check-%s.txt" % name)
@@ -297,6 +311,34 @@ def run_session_checks(entries, sess, out_root, meta, feat_idx, log=print):
             R.write_result(out_root, rec)
             allr.append(rec)
         log("[qemu] session check %s: %s" % (name, status))
+    return allr
+
+
+def run_host_scripts(entries, out_root, args=(), log=print):
+    """The qemu target for scenarios that carry their own machines: the script is run with `--out OUT` and its result.json (written by the script through
+    results.write_result) is read back. A script that wrote none is a BLOCKED record naming its exit code. One run per distinct script."""
+    allr, done = [], {}
+    for e in entries:
+        script = e["meta"]["host-script"].split()
+        first = e["rows"][0]
+        key = " ".join(script)
+        if key not in done:
+            try:
+                p = subprocess.run([sys.executable, os.path.join(ROOT, script[0])] + script[1:] + list(args) + ["--out", out_root], capture_output=True, text=True, timeout=7200)
+                done[key] = (p.returncode, p.stdout[-3000:] + p.stderr[-1000:])
+            except (OSError, subprocess.TimeoutExpired) as ex:
+                done[key] = (-1, "could not run: %s" % ex)
+        rc, text = done[key]
+        for r in e["rows"]:
+            path = os.path.join(out_root, r, "qemu", "result.json")
+            if os.path.isfile(path):
+                with open(path) as fh:
+                    allr.append(json.load(fh))
+                continue
+            rec = R.new_result(r, os.path.basename(e["file"]), "qemu", "BLOCKED" if rc in (2, -1) else "FAIL", reason="script exit %d: %s" % (rc, text[-120:].replace("\n", " ")))
+            R.write_result(out_root, rec)
+            allr.append(rec)
+        log("[qemu] host script %s: exit %d" % (key, rc))
     return allr
 
 
@@ -392,12 +434,14 @@ def main(argv=None):
     ap.add_argument("--results", help="with --checklist alone: read the results of this folder")
     ap.add_argument("--image", metavar="BUILD_DIR", help="the build folder with images/bzImage and rootfs.cpio.zst (qemu profile)")
     ap.add_argument("--image-commit")
+    ap.add_argument("--base-commit", help="the commit the kernel and root file system under the program were built from, when it is not --image-commit (a program laid over an older base image); recorded in every result as base_commit")
     ap.add_argument("--client", help="the iyakki client binary")
     ap.add_argument("--out")
     ap.add_argument("--update-golden", action="store_true")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--dry-run", action="store_true", help="print the plan, boot nothing")
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--ui-process", action="store_true", help="boot every guest with the UI as its own program (iyakki.ui=process): the same scenarios, compared with a run without the flag")
     a = ap.parse_args(argv)
     entries = load_scenarios()
     feat_idx = features_index()
@@ -440,7 +484,7 @@ def main(argv=None):
         return 3
     os.makedirs(out, exist_ok=True)
     commit, src = image_commit(a.image, a.image_commit)
-    meta = {"run_id": os.path.basename(out), "commit": commit, "commit_source": src, "image": os.path.abspath(a.image) if a.image else "", "profile": a.profile,
+    meta = {"run_id": os.path.basename(out), "commit": commit, "commit_source": src, "base_commit": a.base_commit or commit, "image": os.path.abspath(a.image) if a.image else "", "profile": a.profile,
             "started": datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")}
     recs = []
     q = quarantined()
@@ -456,13 +500,23 @@ def main(argv=None):
             import session_lib
             import qemu_guest  # noqa: F401
             by_prof = {}
+            # `host-script: dist/qemu/X.py ARGS` (fault injection, upgrade): a script that boots its own machines and writes its own result record in this format
+            recs += run_host_scripts([e for e in run if e["meta"].get("host-script")], out, args=[os.path.abspath(a.image)], log=print)
+            run = [e for e in run if not e["meta"].get("host-script")]
             for e in run:
                 by_prof.setdefault(e["meta"].get("profile", "ram"), []).append(e)
             for prof, group in by_prof.items():
                 if prof not in PROFILES:
                     print("unknown boot profile %s" % prof, file=sys.stderr)
                     continue
-                sess = session_lib.Session(os.path.abspath(a.image), client, out, keep=a.keep, **PROFILES[prof])
+                kw0 = dict(PROFILES[prof])
+                if a.ui_process:
+                    kw0["ui_process"] = True
+                # a group with a sound verb records the guest's playback (-audiodev wav); the other groups keep -audiodev none
+                if any(verbs.uses_sound(e["steps"]) for e in group):
+                    os.makedirs(os.path.join(out, "audio-%s" % prof), exist_ok=True)
+                    kw0["audio_wav"] = os.path.join(out, "audio-%s" % prof, "guest.wav")
+                sess = session_lib.Session(os.path.abspath(a.image), client, out, keep=a.keep, **kw0)
                 try:
                     sess.boot()
                 except Exception as ex:  # noqa: BLE001
@@ -473,7 +527,7 @@ def main(argv=None):
                     sess.stop()
                     continue
                 try:
-                    kw = {"sh": sess.sh, "serial": sess.serial}
+                    kw = {"sh": sess.sh, "serial": sess.serial, "wav_path": kw0.get("audio_wav")}
                     plain = [e for e in group if not e["meta"].get("session-check")]
                     chk = [e for e in group if e["meta"].get("session-check")]
                     recs += run_entries(plain, sess.ui(), "qemu", out, meta, feat_idx, kw, a.update_golden)

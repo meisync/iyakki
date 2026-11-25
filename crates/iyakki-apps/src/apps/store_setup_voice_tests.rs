@@ -3,6 +3,7 @@
 //! before anything starts, the cluster rule, and Remove (Undo). Fakes only: no cluster, no download, no model.
 use iyakki_agent::facets_h::RealServices as _;
 use super::*;
+use crate::apps::store_port::CxPort;
 use crate::apps::store::{Section, StoreApp};
 use crate::apps::{App, AppCx};
 use iyakki_shared::clusters::{Kind};
@@ -18,6 +19,7 @@ fn facts_with(present: &[Item]) -> Facts {
 }
 
 fn machine(voice: Option<bool>) -> Machine {
+    crate::apps::store_port::install_table();
     Machine { ram_mb: 16_000, voice_engines: voice, ..Default::default() }
 }
 
@@ -36,7 +38,7 @@ fn rig(tag: &str, role: Role, m: Machine, present: &[Item], other_cluster: bool)
     a.setup.launch = Some(qi::Launch { exe: "/usr/bin/true".into(), data: cx.data_dir().join("qi") });
     a.handle(&Event::Tab(4), &cx);
     assert!(a.section == Section::Setup);
-    a.setup.enter(&cx);
+    a.setup.enter(&CxPort(&cx));
     (a, cx)
 }
 
@@ -70,7 +72,7 @@ fn it_is_recommended_only_where_no_speech_engine_is_set_up_yet() {
 fn pressing_install_opens_the_review_with_both_licences_and_starts_nothing_until_it_is_confirmed() {
     let (mut a, cx) = rig("svp-review", Role::Admin, machine(Some(false)), &[Item::K3s], false);
     a.setup.open_popup(Item::VoicePack);
-    a.setup.press(Item::VoicePack, &cx);
+    a.setup.press(Item::VoicePack, &CxPort(&cx));
     let c = a.setup.confirm.as_ref().expect("the review is open");
     assert_eq!(c.steps, [Item::Lemonade, Item::VoicePack]);
     let t = c.review.join("\n");
@@ -101,7 +103,7 @@ fn pressing_install_opens_the_review_with_both_licences_and_starts_nothing_until
     a.handle(&Event::Key(Key::Esc), &cx);
     assert!(a.setup.confirm.is_none() && a.setup.jobs.is_empty() && !audit(&cx).contains("quickinstall.start"));
     // confirming starts Lemonade (not there) and the pack as jobs, audited with the cluster
-    a.setup.press(Item::VoicePack, &cx);
+    a.setup.press(Item::VoicePack, &CxPort(&cx));
     a.handle(&Event::Key(Key::Char('y')), &cx);
     assert!(a.setup.confirm.is_none());
     let au = audit(&cx);
@@ -112,13 +114,13 @@ fn pressing_install_opens_the_review_with_both_licences_and_starts_nothing_until
 #[test]
 fn another_active_cluster_and_a_viewer_are_refused_before_the_review_opens() {
     let (mut a, cx) = rig("svp-cluster", Role::Admin, machine(Some(false)), &[Item::K3s], true);
-    a.setup.press(Item::VoicePack, &cx);
+    a.setup.press(Item::VoicePack, &CxPort(&cx));
     let note = a.setup.note.clone().unwrap();
     assert!(!note.1 && note.0.contains("cluster \"gpu-box\" (remote)") && note.0.contains("\"This machine\""), "{note:?}");
     assert!(a.setup.confirm.is_none() && a.setup.jobs.is_empty());
     assert!(a.setup.deploy_text(Item::VoicePack).is_some_and(|t| t.starts_with("Deploy Voice: Whisper tiny + Kokoro to cluster")), "the popup's Deploys to row exists for it");
     let (mut v, cxv) = rig("svp-viewer", Role::User, machine(Some(false)), &[Item::K3s], false);
-    v.setup.press(Item::VoicePack, &cxv);
+    v.setup.press(Item::VoicePack, &CxPort(&cxv));
     assert!(v.setup.confirm.is_none() && v.setup.note.as_ref().is_some_and(|n| !n.1 && n.0.contains("administrator")));
 }
 
@@ -142,10 +144,10 @@ fn remove_is_offered_to_an_administrator_once_installed_and_undoes_through_the_p
     iyakki_agent::voicepack::configure(cx.services.real(), &id).unwrap();
     let deleted = Arc::new(Mutex::new(Vec::<String>::new()));
     let log = deleted.clone();
-    a.setup.lemonade_delete = Arc::new(move |m: &str| {
+    a.setup.lemonade_delete = Some(Arc::new(move |m: &str| {
         log.lock().unwrap().push(m.to_string());
         Ok(())
-    });
+    }));
     a.handle(&Event::Tab(REMOVE + idx_of(Item::VoicePack)), &cx);
     assert_eq!(*deleted.lock().unwrap(), ["Whisper-Tiny", "kokoro-v1"]);
     let note = a.setup.note.clone().unwrap();
@@ -154,7 +156,7 @@ fn remove_is_offered_to_an_administrator_once_installed_and_undoes_through_the_p
     assert!(audit(&cx).contains("quickinstall.voicepack.remove"));
     // a standard user cannot
     let (mut v, cxv) = rig("svp-remove3", Role::User, machine(Some(false)), &[Item::K3s, Item::Lemonade, Item::VoicePack], false);
-    v.setup.remove_voice_pack(&cxv);
+    v.setup.remove_voice_pack(&CxPort(&cxv));
     assert!(v.setup.note.as_ref().is_some_and(|n| !n.1 && n.0.contains("administrator")));
 }
 

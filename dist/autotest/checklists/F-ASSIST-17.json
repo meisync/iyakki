@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-17",
+  "feature_sha": "6817d39b79662251",
+  "title": "board status tracker",
+  "clauses": [
+    {
+      "id": "tracker",
+      "text": "Rows the assistant added move as its tools really work",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Ask the assistant to build and deploy a small app while the Board tab is open.",
+          "expect": "Its rows move to partial when work begins and to done only on success. A failed step leaves the row partial with an auto note. Rows you typed are not moved by the model."
+        }
+      ]
+    }
+  ]
+}

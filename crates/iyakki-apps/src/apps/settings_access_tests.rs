@@ -180,3 +180,80 @@ fn every_clickable_region_of_every_settings_page_is_in_the_keyboard_walk() {
     }
     eprintln!("{}\npages with controls that only the walk reaches: {walk_only_pages:?}", report.join("\n"));
 }
+
+/// The page on the lane's fake port: no shell context, no services, no hardware.
+mod on_a_fake_port {
+    use super::*;
+    use crate::apps::settings_device_port::FakeDevicePort;
+    use crate::apps::settings_port::PagePort;
+    use std::sync::atomic::Ordering;
+
+    fn app() -> SettingsApp {
+        let cx = admin("acc-fake");
+        SettingsApp::new(&cx).on(Tab::Accessibility)
+    }
+
+    #[test]
+    fn a_switch_saves_for_this_person_and_is_audited_without_any_administrator() {
+        let p = FakeDevicePort::new(false, "acc-save");
+        let mut a = app();
+        a.handle_access(&Key::Char('m'), &p);
+        assert!(acc::load(&p.data_dir(), "amy").reduce_motion, "kept in this person's own file");
+        assert!(!acc::load(&p.data_dir(), "root").reduce_motion);
+        assert_eq!(p.audited(), vec![("settings.accessibility".to_string(), "reduce motion".to_string())]);
+        assert!(a.status().is_some_and(|s| s.1 && s.0.contains("Reduced motion on")));
+    }
+
+    #[test]
+    fn the_screen_reader_says_when_no_voice_is_installed() {
+        let p = FakeDevicePort::new(false, "acc-voice");
+        let mut a = app();
+        p.voice.store(false, Ordering::SeqCst);
+        a.handle_access(&Key::Char('r'), &p);
+        assert!(acc::load(&p.data_dir(), "amy").screen_reader, "the choice is kept anyway");
+        assert!(a.status().is_some_and(|s| !s.1 && s.0.contains("no reading voice")));
+        a.handle_access(&Key::Char('r'), &p);
+        p.voice.store(true, Ordering::SeqCst);
+        a.handle_access(&Key::Char('r'), &p);
+        assert!(a.status().is_some_and(|s| s.1 && s.0.contains("Screen reader on")));
+    }
+
+    #[test]
+    fn the_voice_test_speaks_a_sentence_or_shows_why_it_could_not() {
+        let p = FakeDevicePort::new(false, "acc-say");
+        let mut a = app();
+        a.handle_access(&Key::Char('t'), &p);
+        assert_eq!(p.spoken.lock().unwrap().len(), 1);
+        assert!(a.status().is_some_and(|s| s.1 && s.0.contains("Speaking")));
+        *p.speak_error.lock().unwrap() = Some("no sound card".into());
+        a.handle_access(&Key::Char('t'), &p);
+        assert_eq!(p.spoken.lock().unwrap().len(), 1, "nothing more was said");
+        assert!(a.status().is_some_and(|s| !s.1 && s.0.contains("no sound card")));
+    }
+
+    #[test]
+    fn braille_shows_what_the_link_answers_and_text_size_changes_through_the_port() {
+        let p = FakeDevicePort::new(false, "acc-braille");
+        let mut a = app();
+        *p.braille.lock().unwrap() = "Found a display with 40 cells.".into();
+        a.handle_access(&Key::Char('b'), &p);
+        assert!(acc::load(&p.data_dir(), "amy").braille);
+        assert!(a.status().is_some_and(|s| s.0.contains("40 cells")));
+        a.handle_access(&Key::Char('u'), &p);
+        assert_eq!(crate::uisize::load(&p.data_dir(), "amy"), crate::uisize::NORMAL + 1);
+        crate::uisize::apply(None);
+    }
+
+    #[test]
+    fn the_page_draws_from_the_fake_at_several_sizes() {
+        let p = FakeDevicePort::new(false, "acc-draw");
+        let mut a = app();
+        for (w, h) in [(640u32, 480u32), (1024, 600), (1280, 720), (1920, 1080)] {
+            let mut g = Gfx::new(w, h);
+            g.clear(rgb(0, 0, 0));
+            let s = crate::ui::scale_for(w, h);
+            a.render_access(&mut g, R::new(0.0, 46.0 * s, w as f32, h as f32 - 46.0 * s), s, &p);
+            assert!(g.hits.iter().any(|h| h.ev == Event::Key(Key::Char('r'))), "{w}x{h}: the screen reader switch");
+        }
+    }
+}

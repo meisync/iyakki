@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-GEMVOICE-12",
+  "feature_sha": "13aebb4f9e73851c",
+  "title": "latency log (experimental)",
+  "clauses": [
+    {
+      "id": "delay-feel",
+      "text": "The turns feel prompt, and the status row shows the delay",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "After a few turns, read the status row in Settings, Gemini voice and note the last and median delay. Say whether replies felt quick.",
+          "expect": "The delay figures are shown and the replies felt prompt."
+        }
+      ]
+    }
+  ]
+}

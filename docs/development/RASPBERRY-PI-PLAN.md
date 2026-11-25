@@ -1,6 +1,6 @@
 # Raspberry Pi (and a note on NVIDIA Jetson): design and plan
 
-**For:** the owner and whoever builds it. **You will get:** what each Pi model can run, how a Pi boots and what that means for our image, the kernel choice, a feature-by-feature list of what works or needs work on a Pi 5, the external-GPU experiment, the "IYAKKI lite" plan for the Pi 3, the build plan with what QEMU can and cannot test, licences, phases in days, numbered owner decisions with recommendations, and a hardware test sheet. **Status:** plan only, nothing built, nothing booted on a Pi (2026-10-26). No code, image or drive was touched to write this. Request: run IYAKKI on the owner's Raspberry Pi 5 (16 GB) and a second, lower Pi; possibly an external GPU on the Pi 5; NVIDIA Jetson later, separately.
+**For:** the owner and whoever builds it. **You will get:** what each Pi model can run, how a Pi boots and what that means for our image, the kernel choice, a feature-by-feature list of what works or needs work on a Pi 5, the external-GPU experiment, the "IYAKKI lite" plan for the Pi 3, the build plan with what QEMU can and cannot test, licences, phases in days, numbered owner decisions with recommendations, and a hardware test sheet. **Status:** the plan of 2026-10-26; since 2026-11-21 (alpha.8, lane ARM1) the Pi 5 target is built as far as a PC can take it, see section 13 (nothing booted on a real Pi yet). The Pi 3 target stays a design. No code, image or drive was touched to write this. Request: run IYAKKI on the owner's Raspberry Pi 5 (16 GB) and a second, lower Pi; possibly an external GPU on the Pi 5; NVIDIA Jetson later, separately.
 
 Today (`docs/HARDWARE.md`): Raspberry Pi is **not supported**. This plan does not change that. The row may say "planned, see plan" and nothing more.
 
@@ -304,3 +304,32 @@ Record card model, adapter, PSU, kernel tag and patch source; `lspci -vv` link s
 * Token speeds: one community leaderboard (Pi 5 8 GB) for 8B Q4_K_M (about 2.1 tokens/s) and a 3.8B model (about 4.4); all other speeds, memory budgets for the Pi 3 lite, and image sizes are estimates. The 14B-on-16-GB figure is derived, not measured.
 * Jetson boot and userspace statements are from memory and were not searched.
 * Nothing was built, booted or downloaded into the repository.
+
+## 13. Alpha.8 update (2026-11-21): the Pi 5 as built, the Pi 3 "IYAKKI lite" as a design
+
+### 13.1 What was decided and built for the Pi 5
+
+| Plan item | Built as | Where |
+|---|---|---|
+| Direct boot, stage 1 does GRUB's job (1.3) | `config.txt` (ours, ends with `include iyakki-boot.txt`, then the person's `config-user.txt`), `iyakki-boot.txt` (one line: `initramfs initrd-lean followkernel`), `cmdline.txt`, one `cmdline-<mode>.txt` per boot-menu entry (hwcheck, safegraphics, selftest, ssh, web, seed-only), a `board` file | `crates/iyakki-usb/src/rpiboot.rs` (`iyakki-usb rpi files`) |
+| Failed fast start falls back (1.3) | stage 1 writes `iyakki-lean-failed` at the volume root and rewrites `iyakki-boot.txt` to the full `initrd` (temporary file and rename) when a full RAM disk exists | `crates/iyakki-stage1` (`pi_boot_txt_after_failure`, `lean_marker`) |
+| Wrong board refused (1.5 safeguard 5) | stage 1 compares the volume's `board` file with `/proc/device-tree/model`; a non-Pi machine (QEMU) is let through | `iyakki_stage1::board_check` |
+| Partition layout (1.4) | MBR, partition 1 FAT32 LBA `IYAKKI-BOOT` (at least 256 MiB, 4 MiB in), partition 2 the 1 MiB `IYAKKI-FORMAT-ME-v1` marker. The disk signature is the install template's, so the existing writer stretches partition 2 to the card and verifies | `rpiboot::mbr_sector`, `iyakki-usb --image` |
+| Never write the EEPROM (1.5 safeguard 3) | `mtd*` devices are never offered as drives; no EEPROM or boot blob may be on the volume (`rpiboot::forbidden`, `iyakki-usb rpi check`) | `drives.rs`, `rpiboot.rs` |
+| `tryboot` (1.3) | a plan only: staged names, `tryboot.txt`, promote and roll back renames, `reboot "0 tryboot"`. **Not tried; whether the firmware reads `tryboot.txt` as the plan assumes is unverified** | `rpiboot::tryboot` |
+| Kernel (2) | Raspberry Pi tree tag `oldstable_20261103` (6.12.115), `bcm2712_defconfig` + the aarch64 fragment + `board/iyakki-rpi5/linux.fragment`; **4 KiB pages**; vc4, v3d, RP1, MACB, MMC, squashfs, overlay built in; the fragment is checked against kconfig (`dist/rpi/verify-pi-kernel-config.sh`: it caught that vc4 as built-in needs the sound core and the firmware mailbox built in too). Fetched at build time at the pin in `dist/rpi/kernel.pin` (GPL-2.0), never stored here | `dist/rpi/build-pi-kernel.sh`, `dist/buildroot/configs/iyakki_rpi5.fragment` (the Buildroot variant `ARCH=aarch64 build.sh rpi5`; the kernel-only route is what was run) |
+| Image (6.1) | `dist/rpi/make-pi-image.sh`: userland of the existing aarch64 build + this kernel's modules, lean initrd with the aarch64 stage 1, seed `root.sfs`, full `initrd`, the card image | `dist/rpi/` |
+| Firmware by button (6.2, 6.3) | pinned packs with licence first, acceptance, size and SHA-256 per file, delete on one wrong byte: `rpi5-wifi` (CYW43455 Wi-Fi) is offered; `rpi3-boot` is pinned but cannot be fetched. The Pi 5 itself needs no boot blob. Rows in `legal/downloads.txt` | `crates/iyakki-usb/src/rpifirmware.rs` |
+| QEMU proof (6.4) | `dist/rpi/qemu-pi-boot-test.sh`: the same files booted in `virt` the way the firmware hands them over | `dist/rpi/` |
+| Owner's test | `docs/BOARD-RPI5-FIRST-BOOT.md`, checklist `dist/autotest/checklists/F-RPI-08.json` | |
+
+What works and what does not (honest): nothing is proven on a real Pi 5. By design the headless start (serial, Ethernet) comes first; the framebuffer shell depends on the vendor vc4 driver bringing up HDMI, which the QEMU run cannot show. Not done: the running system installing the Wi-Fi pack, a chat tool to choose a start mode or to run a trial boot, the Bluetooth patch file, CSI cameras, a Pi row in the AI hardware profile, the arm64 audit of the Store, an aarch64 web engine.
+
+### 13.2 The Pi 3 "IYAKKI lite": design only (not built; the owner asked for the Pi 5 first)
+
+* **Target:** Pi 3B+ (and 3B, 2.4 GHz Wi-Fi only), 1 GB RAM. Headless: the `iyakki` service in a profile without the shell, the built-in browser, k3s, local models, TTS, audio and camera. Everything in section 5 stays.
+* **Boot:** the ROM reads `bootcode.bin` from the FAT partition (MBR only), which loads `start.elf` and `fixup.dat`. These three files are the `rpi3-boot` pack of `rpifirmware.rs`: pinned (raspberrypi/firmware tag 1.20260915, sizes and SHA-256 in the code), licence `LICENCE.broadcom` shown first, downloaded at the person's click when the target is built, never shipped. The pack is marked not ready and `fetch` refuses it today.
+* **What changes in the code for the Pi 3 (all small, none written):** `Board::Pi3` in `rpiboot.rs` (kernel `kernel8.img`, `bcm2710-rpi-3-b-plus.dtb`, the serial console `ttyS0`/`ttyAMA0` to be checked on the board, `arm_64bit=1`, no `vc4-kms-v3d`); `board_of_model` already names `rpi3`; a boot volume list that adds the three blobs from the pack; a trimmed kernel fragment (no DRM, no PCIe, no NVMe); a lean root profile under 90 MB.
+* **Memory plan:** unchanged from section 5 (kernel 40 to 60 MB, root under 90 MB, service 60 to 150 MB, zram, 500 MB free).
+* **Open:** the headless web-service profile (`MINIMAL-WEBSERVICE.md`) must exist first; without it the Pi 3 image is SSH and CLI only.
+* **Decision for the owner:** build the Pi 3 only after the Pi 5 first boot is reported; the Pi 3 shares the card layout, stage 1, the writer and the firmware-pack code, so the extra work is about two days plus the headless profile.

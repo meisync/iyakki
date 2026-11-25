@@ -183,6 +183,40 @@ pub struct Reader {
     sh: Arc<Shared>,
 }
 
+/// The readers one service hands out, held weakly: a sign-out stops them all (D-SESSION-END), also those whose app is gone (the
+/// reading threads hold their own handle, so dropping the app does not end the reading).
+#[derive(Default)]
+pub struct ReaderGroup {
+    live: iyakki_shared::sessionend::LiveSet<Shared>,
+}
+
+impl ReaderGroup {
+    /// A new reader that belongs to the group.
+    pub fn reader(&self) -> Reader {
+        let r = Reader::new();
+        self.live.add(&r.sh);
+        r
+    }
+
+    /// Stop every reader that is reading, waiting or paused; returns how many were. (The end-of-session hook of the readers.)
+    pub fn stop_all_active(&self) -> usize {
+        self.live.each(|sh| {
+            let r = Reader { sh: sh.clone() };
+            let active = matches!(r.lock().status, Status::Playing | Status::Buffering | Status::Paused);
+            if active {
+                r.stop();
+            }
+            active
+        })
+    }
+}
+
+/// The group the product's readers belong to (the story facet's `new_reader`; the end-of-session hook stops it).
+pub fn shared_readers() -> Arc<ReaderGroup> {
+    static G: std::sync::OnceLock<Arc<ReaderGroup>> = std::sync::OnceLock::new();
+    G.get_or_init(Default::default).clone()
+}
+
 /// How many pieces are made ahead of the one that plays.
 pub const LOOKAHEAD: usize = 2;
 const POLL: Duration = Duration::from_millis(15);

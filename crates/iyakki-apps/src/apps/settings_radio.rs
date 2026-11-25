@@ -6,34 +6,34 @@
 //! Starting the first station always needs the person.
 
 use super::*;
+use super::super::settings_port::SettingsDataPort;
 use iyakki_shared::radiorecover::{RadioRecover, MAX_RETRIES};
 
 impl SettingsApp {
-    fn rr_settings(cx: &AppCx) -> RadioRecover {
-        cx.settings().lock().map(|s| s.get().radio.clone()).unwrap_or_default()
+    fn rr_settings(p: &dyn SettingsDataPort) -> RadioRecover {
+        p.settings_get().radio
     }
 
-    fn rr_save(&mut self, cx: &AppCx, what: &str, f: impl FnOnce(&mut RadioRecover)) {
-        let r = cx.settings().lock().map(|mut s| s.update(|s| f(&mut s.radio)));
-        match r {
-            Ok(Ok(_)) => {
-                cx.audit.record(&cx.session.user, "settings.radio", what);
+    fn rr_save(&mut self, p: &dyn SettingsDataPort, what: &str, f: impl FnOnce(&mut RadioRecover)) {
+        let mut f = Some(f);
+        match p.settings_update(&mut |s| if let Some(f) = f.take() { f(&mut s.radio) }) {
+            Ok(()) => {
+                p.audit("settings.radio", what);
                 self.ok("Saved.");
             }
-            Ok(Err(e)) => self.fail(e.to_string()),
-            Err(_) => self.fail("The settings are busy; try again."),
+            Err(e) => self.fail(e.message()),
         }
     }
 
-    pub(super) fn handle_radio(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_radio(&mut self, k: &Key, p: &dyn SettingsDataPort) {
         let Key::Char(c) = k else { return };
         if !matches!(c, 'r' | '+' | '-' | 'a') {
             return;
         }
-        if !self.admin(cx) {
+        if !self.admin(p) {
             return self.fail("Only administrators change these.");
         }
-        let cur = Self::rr_settings(cx);
+        let cur = Self::rr_settings(p);
         match c {
             'r' | '+' | '-' => {
                 let n = match c {
@@ -41,11 +41,11 @@ impl SettingsApp {
                     '-' => cur.retries().saturating_sub(1),
                     _ => (cur.retries() + 1) % (MAX_RETRIES + 1),
                 };
-                self.rr_save(cx, &format!("retries={n}"), |s| s.retries = Some(n));
+                self.rr_save(p, &format!("retries={n}"), |s| s.retries = Some(n));
             }
             _ => {
                 let off = cur.auto_switch();
-                self.rr_save(cx, &format!("auto_switch={}", !off), |s| s.no_auto_switch = off);
+                self.rr_save(p, &format!("auto_switch={}", !off), |s| s.no_auto_switch = off);
             }
         }
     }
@@ -54,9 +54,9 @@ impl SettingsApp {
         vec![("Reconnect tries", ACCENT, 'r'), ("More", TEXT, '+'), ("Fewer", TEXT, '-'), ("Next station", TEXT, 'a')]
     }
 
-    pub(super) fn render_radio(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let cur = Self::rr_settings(cx);
-        let admin = self.admin(cx);
+    pub(super) fn render_radio(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn SettingsDataPort) {
+        let cur = Self::rr_settings(p);
+        let admin = self.admin(p);
         let mut y = a.y;
         let rh = 62.0 * s;
         let n = cur.retries();

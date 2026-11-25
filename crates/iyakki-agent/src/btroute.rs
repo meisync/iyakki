@@ -3,7 +3,9 @@
 //! and a worker thread writes them to the sender of [`iyakki_core_local::devctl::a2dp_send`] (which converts, encodes in SBC and paces to the speed of the
 //! sound), so the mixer's own clock is never held up by the headphones. The route can silence the machine's own speakers while it runs
 //! ("headphones only"); if the stream fails or the headphones go away the route removes itself and the speakers come back, with the reason
-//! kept for Settings and the assistant.
+//! kept for Settings and the assistant. When the route is lost that way, playback is PAUSED instead of moving on to the room speakers
+//! (F-LIFE-14, owner decision P-05: as on macOS and Windows); the registered pausers ([`BtRoute::on_lost`]) do it, and the person
+//! presses play to carry on (a setting to move the sound to the speakers instead is parked).
 //!
 //! The queue holds at most [`MAX_QUEUE_MS`] of sound; when the headphones fall behind the oldest sound is dropped and counted, so a slow
 //! link makes gaps, not a growing delay or memory.
@@ -38,6 +40,8 @@ struct State {
     /// Bumped on every attach and detach, so a worker of an earlier attach ends.
     generation: u64,
     failed: String,
+    /// The route was lost by itself and playback was paused (cleared by the next attach).
+    paused_on_loss: bool,
 }
 
 struct Attached {
@@ -52,7 +56,12 @@ pub struct BtRoute {
     /// Lock-free copies for the mixer's tee, which asks every period.
     on: AtomicBool,
     mute: AtomicBool,
+    /// Called (with the reason) when the route was lost by itself: each pauses one kind of playback and says whether it did.
+    pausers: Mutex<Vec<(String, Pauser)>>,
 }
+
+/// Pauses one kind of playback; true when something was playing and is now paused.
+pub type Pauser = Arc<dyn Fn() -> bool + Send + Sync>;
 
 impl Default for BtRoute {
     fn default() -> Self {
@@ -62,7 +71,7 @@ impl Default for BtRoute {
 
 impl BtRoute {
     pub fn new() -> BtRoute {
-        BtRoute { state: Mutex::new(State::default()), wake: Condvar::new(), attached: Mutex::new(None), on: AtomicBool::new(false), mute: AtomicBool::new(false) }
+        BtRoute { state: Mutex::new(State::default()), wake: Condvar::new(), attached: Mutex::new(None), on: AtomicBool::new(false), mute: AtomicBool::new(false), pausers: Mutex::new(Vec::new()) }
     }
 
     fn st(&self) -> std::sync::MutexGuard<'_, State> {
@@ -80,6 +89,7 @@ impl BtRoute {
             s.dropped_ms = 0;
             s.sent_ms = 0;
             s.failed.clear();
+            s.paused_on_loss = false;
             s.generation
         };
         *self.attached.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Attached { mute_local });
@@ -103,6 +113,18 @@ impl BtRoute {
         self.wake.notify_all();
     }
 
+    /// Register what pauses one kind of playback when the headphones leave (a name replaces an earlier one of the same name).
+    pub fn on_lost(&self, name: &str, p: Pauser) {
+        let mut v = self.pausers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        v.retain(|(n, _)| n != name);
+        v.push((name.to_string(), p));
+    }
+
+    /// Forget a registered pauser (sign-out).
+    pub fn forget_pauser(&self, name: &str) {
+        self.pausers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|(n, _)| n != name);
+    }
+
     fn fail(&self, generation: u64, why: String) {
         let mut s = self.st();
         if s.generation != generation {
@@ -111,6 +133,12 @@ impl BtRoute {
         s.failed = why;
         drop(s);
         self.detach_keep_reason();
+        // the speakers do not take over: whatever was playing is paused, and the status says so
+        let ps: Vec<Pauser> = self.pausers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().map(|(_, p)| p.clone()).collect();
+        let paused = ps.iter().filter(|p| p()).count();
+        if paused > 0 {
+            self.st().paused_on_loss = true;
+        }
     }
 
     fn detach_keep_reason(&self) {
@@ -189,7 +217,7 @@ impl BtRoute {
             let local = self.attached.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().is_some_and(|a| a.mute_local);
             format!("this computer's sound goes to the headphones ({}; {} s sent{}; {} ms waiting{})", if local { "the speakers are silent" } else { "the speakers play too" }, s.sent_ms / 1000, if s.dropped_ms > 0 { format!(", {} ms dropped because the headphones fell behind", s.dropped_ms) } else { String::new() }, s.queued_ms, "")
         } else if !s.failed.is_empty() {
-            format!("not routed: {}; the speakers play again", s.failed)
+            if s.paused_on_loss { format!("not routed: {}; playback is paused, press play to carry on on the speakers", s.failed) } else { format!("not routed: {}; the speakers play again", s.failed) }
         } else {
             "this computer's sound is not routed to headphones".into()
         }
@@ -313,6 +341,56 @@ mod tests {
         r.attach(rec(0, None), false);
         assert!(r.listening() && !r.status().contains("link lost"));
         r.detach();
+    }
+
+    #[test]
+    fn when_the_headphones_leave_playback_is_paused_and_the_speakers_do_not_take_over() {
+        use std::sync::atomic::AtomicUsize;
+        let r = Arc::new(BtRoute::new());
+        let paused = Arc::new(AtomicUsize::new(0));
+        let idle = Arc::new(AtomicUsize::new(0));
+        let p = paused.clone();
+        r.on_lost("radio", Arc::new(move || {
+            p.fetch_add(1, Ordering::SeqCst);
+            true
+        }));
+        let i = idle.clone();
+        r.on_lost("music", Arc::new(move || {
+            i.fetch_add(1, Ordering::SeqCst);
+            false
+        }));
+        r.attach(rec(0, Some(0)), true);
+        r.tap(48_000, 2, &[1; PERIOD]);
+        iyakki_testkit::wait_until(iyakki_testkit::BUDGET, || !r.listening() && r.status().contains("paused"));
+        assert_eq!((paused.load(Ordering::SeqCst), idle.load(Ordering::SeqCst)), (1, 1), "every pauser was asked once");
+        assert!(!r.muted());
+        let t = r.status();
+        assert!(t.contains("link lost") && t.contains("playback is paused") && !t.contains("speakers play again"), "{t}");
+        // a new route starts clean
+        r.attach(rec(0, None), false);
+        assert!(!r.status().contains("paused"));
+        r.detach();
+    }
+
+    #[test]
+    fn nothing_is_paused_when_nothing_was_playing_and_a_replaced_pauser_is_asked_once() {
+        let r = Arc::new(BtRoute::new());
+        r.on_lost("radio", Arc::new(|| false));
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = n.clone();
+        r.on_lost("radio", Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+            false
+        }));
+        r.attach(rec(0, Some(0)), true);
+        r.tap(48_000, 2, &[1; PERIOD]);
+        iyakki_testkit::wait_until(iyakki_testkit::BUDGET, || !r.listening() && n.load(Ordering::SeqCst) == 1);
+        assert!(r.status().contains("the speakers play again"), "nothing was paused, so the old words stay: {}", r.status());
+        r.forget_pauser("radio");
+        r.attach(rec(0, Some(0)), true);
+        r.tap(48_000, 2, &[1; PERIOD]);
+        iyakki_testkit::wait_until(iyakki_testkit::BUDGET, || !r.listening());
+        assert_eq!(n.load(Ordering::SeqCst), 1, "a forgotten pauser is not asked");
     }
 
     #[test]

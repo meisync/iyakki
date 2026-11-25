@@ -6,6 +6,7 @@
 //! **Save for next boots** writes `/var/lib/iyakki/system.conf`. Settings fixed by a kernel boot option are shown as locked.
 //! In a desktop window the page shows the host's state and changes nothing. Logic: the `iyakki-zram` crate.
 
+use super::super::settings_port::PagePort;
 use super::*;
 use iyakki_core_api::memory::config::{self, human, Config, Resolved, ZramMode};
 use iyakki_core_api::memory::{bootspeed::{self, BootSpeed}, compressed::{self, Experiment}, Memory, MemStats};
@@ -20,7 +21,7 @@ pub(super) enum MemField {
 }
 
 pub(super) struct MemPanel {
-    /// The machine's compressed memory, swap and `system.conf`: `cx.os.memory()`.
+    /// The machine's compressed memory, swap and `system.conf`: the core's memory handle.
     pub(super) memory: std::sync::Arc<dyn Memory>,
     pub(super) cmdline: String,
     /// What the kernel command line and `system.conf` say now.
@@ -142,12 +143,12 @@ impl SettingsApp {
         self.mem.report.handle(ev)
     }
 
-    pub(super) fn handle_memory(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_memory(&mut self, k: &Key, p: &dyn PagePort) {
         if let Key::Char('r') = k {
             self.mem_load(false);
             return self.ok("Memory figures read again.");
         }
-        if !self.admin(cx) {
+        if !self.admin(p) {
             return;
         }
         if !self.mem.writable {
@@ -211,7 +212,7 @@ impl SettingsApp {
                     .and_then(|_| if self.mem.bs_saved.prefetch_locked { Ok(()) } else { self.mem.memory.set_conf_key(bootspeed::KEY_PREFETCH, Some(bootspeed::conf_value(bs.prefetch))) });
                 match saved {
                     Ok(()) => {
-                        cx.audit.record(&cx.session.user, "memory.save", &format!("zram={} swappiness={} swapfile={:?} zswap={} compressed-memory={} boot-record={} boot-prefetch={}", d.zram_value(), d.swappiness, d.swapfile, d.zswap, exp.id(), bs.record, bs.prefetch));
+                        p.audit("memory.save", &format!("zram={} swappiness={} swapfile={:?} zswap={} compressed-memory={} boot-record={} boot-prefetch={}", d.zram_value(), d.swappiness, d.swapfile, d.zswap, exp.id(), bs.record, bs.prefetch));
                         self.mem_load(true);
                         let locked: Vec<&str> = [MemField::Zram, MemField::Swappiness, MemField::Swapfile].iter().filter_map(|f| self.mem_locked(*f)).collect();
                         self.ok(if locked.is_empty() { "Saved. These settings are used from the next boot.".to_string() } else { format!("Saved, but the boot option{} {} still override{} at boot.", if locked.len() > 1 { "s" } else { "" }, locked.join(", "), if locked.len() > 1 { "" } else { "s" }) });
@@ -264,9 +265,9 @@ impl SettingsApp {
         Ok("Changed here only. Press Preview, then Apply now and/or Save for next boots.".into())
     }
 
-    pub(super) fn mem_apply(&mut self, cx: &AppCx) {
+    pub(super) fn mem_apply(&mut self, p: &dyn PagePort) {
         let (memory, cfg, ram) = (self.mem.memory.clone(), self.mem_effective().config, self.mem_ram());
-        cx.audit.record(&cx.session.user, "memory.apply", &format!("zram={} swappiness={} swapfile={:?}", cfg.zram_value(), cfg.swappiness, cfg.swapfile));
+        p.audit("memory.apply", &format!("zram={} swappiness={} swapfile={:?}", cfg.zram_value(), cfg.swappiness, cfg.swapfile));
         let on_disk = self.mem_on_disk();
         // the press that confirmed the change goes with the job: the job thread is not inside the dispatch
         let press = iyakki_core_api::guarded::gesture_ticket();
@@ -308,8 +309,7 @@ impl SettingsApp {
         ]
     }
 
-    pub(super) fn render_memory(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let _ = cx;
+    pub(super) fn render_memory(&mut self, g: &mut Gfx, a: R, s: f32, _p: &dyn PagePort) {
         if !self.mem.loaded {
             self.mem_load(true);
         }

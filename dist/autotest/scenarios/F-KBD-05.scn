@@ -1,0 +1,11 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 7dfe33537b55275e; honest subset only: everything not checked is under not-covered.
+row: F-KBD-05
+targets: qemu
+profile: ram
+feature-sha: 7dfe33537b55275e
+doc: QEMU's ACPI power button opens the Lock, Restart, Sleep, Power off, Cancel card on Home
+clause: 1 the Power/Sleep key opens the Power off / Restart / Cancel card on Home and nothing happens until a choice
+not-covered: the card before sign-in (F-SHELL-35)
+not-covered: accounts that may not power off
+not-covered: WiFi, Bluetooth and airplane keys switch rfkill with a visible notice (hardware keys)
+session-check: power_key_card

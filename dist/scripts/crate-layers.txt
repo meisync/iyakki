@@ -8,6 +8,9 @@ iyakki-tile-*     apps
 iyakki-shell      ui
 iyakki-apps       apps
 iyakki-uikit      ui
+iyakki-querybox   ui   # the query box of the DASH and FLOWS tiles (uikit + the text engine); alpha.8 N1
+iyakki-ide-model  ui   # the AI IDE pane layout and router panel (uikit only); alpha.10 Q5
+iyakki-chatview   ui   # the chat transcript view + picture cache (uikit, chat-model, web); alpha.10 Q3
 iyakki-ui-sdk     ui
 iyakki-app-sample apps
 iyakki-app-edit apps
@@ -26,6 +29,7 @@ iyakki-remote     core
 iyakki-memx        core   # the knowledge base, embedder and history (F-SPLIT-03), below the agent
 iyakki-disksx      core   # re-export of the disk engine in iyakki-core-local
 iyakki-flowsx      core   # pure FLOWS parts (F-SPLIT-03), below the agent; same layer as the engine it builds on
+iyakki-flows-model base   # the FLOWS tile's data and job traits as a leaf crate; iyakki-flowsx and iyakki-shared re-export the old paths (alpha.8 N1)
 iyakki-flow*      core
 iyakki-usb        core
 iyakki-connect    core
@@ -46,6 +50,26 @@ iyakki-bindelta           base
 iyakki-camdetect          base
 iyakki-client-engine      base
 iyakki-board-model        base
+iyakki-k8s-model          base
+iyakki-cluster-model      base
+iyakki-study-model        base
+iyakki-inbox-model        base
+iyakki-story-model        base
+iyakki-voice-model        base
+iyakki-store-model        base   # the pure STORE model (packages, skills, catalog, trust, lifecycle, organize, ratings, licence, update check); iyakki-shared re-exports the old paths (alpha.10 AP2)
+iyakki-story-kit          base
+iyakki-chat-model         base
+iyakki-sysinfo-model      base
+iyakki-scene              base
+iyakki-piclog             base
+iyakki-hostrules          base
+iyakki-speechtime         base
+iyakki-lab-model          base
+iyakki-serde-static       base
+iyakki-frames             base
+iyakki-provider-kind      base
+iyakki-git-model          base   # the GIT tile's data and read-only engine (gitsite, gitconn, gitbrowse, gitjobs data); iyakki-shared re-exports the old paths (alpha.8 N1)
+iyakki-credguard          base   # the credential detector (pure); iyakki-shared re-exports it (alpha.8 N1)
 iyakki-clock              base
 iyakki-devtools-engine    base   # the DEV TOOLS tile's thirteen tools as plain functions (alpha.7 SDK batch 1)
 iyakki-testkit            base   # test support only (locks, ports, waits, gated children); a dev-dependency, never shipped
@@ -53,6 +77,7 @@ iyakki-clockfloor         base
 iyakki-data               base
 iyakki-devctl             base
 iyakki-diskcrypt          base
+iyakki-disks-model        base
 iyakki-drivers            base
 iyakki-edit               base
 iyakki-edit-wasm          base

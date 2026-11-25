@@ -297,6 +297,9 @@ fn the_file_scope_is_asked_of_the_core_and_answers_as_the_cores_own_rules_do() {
     store.add_local("ann", "annpass12345", iyakki_sec::policy::Role::User).unwrap();
     let accounts: Arc<dyn iyakki_agent_api::AccountsApi> = Arc::new(Arc::new(Mutex::new(store)));
     let m = machine_with("scope", move |r| r.with_accounts(accounts));
+    // the person signs in over the socket: the calls that name an account are held to it (alpha.8 SEC3)
+    let session: serde_json::Value = m.rpc.call("AccountsApi", 0, "authenticate", serde_json::json!(["ann", "annpass12345"])).unwrap();
+    assert!(session.get("Ok").is_some(), "{session}");
     let (h, svc) = (&m.remote, &m.svc);
     let policy = iyakki_sec::policy::Role::User.template();
     let data = m.dir.join("svc");

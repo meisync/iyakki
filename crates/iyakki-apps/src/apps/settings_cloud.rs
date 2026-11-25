@@ -3,33 +3,32 @@
 //! why, and what is hidden. The mode is read when someone signs in; the sound and camera services follow it at the next start.
 
 use super::*;
+use super::system_port::CloudPort;
 
 impl SettingsApp {
-    pub(super) fn handle_cloud(&mut self, k: &Key, cx: &AppCx) {
-        if matches!(k, Key::Char('a')) && self.admin(cx) {
-            let svc = Self::svc(cx);
-            let next = !svc.show_all_ai();
-            match svc.set_show_all_ai(next) {
+    pub(super) fn handle_cloud(&mut self, k: &Key, p: &dyn CloudPort) {
+        if matches!(k, Key::Char('a')) && self.admin(p) {
+            let next = !p.show_all_ai();
+            match p.set_show_all_ai(next) {
                 Ok(()) => {
-                    cx.audit.record(&cx.session.user, "settings.show_all_ai", if next { "on" } else { "off" });
+                    p.audit("settings.show_all_ai", if next { "on" } else { "off" });
                     self.ok(format!("Show all AI tools: {}. {}", if next { "on" } else { "off" }, if next { "Tools this machine's hardware does not suit are listed as not recommended." } else { "Tools this machine's hardware does not suit are hidden again." }));
                 }
                 Err(e) => self.fail(e),
             }
             return;
         }
-        if !matches!(k, Key::Char('c') | Key::Enter | Key::Char(' ')) || !self.admin(cx) {
+        if !matches!(k, Key::Char('c') | Key::Enter | Key::Char(' ')) || !self.admin(p) {
             return;
         }
         if iyakki_cloudmode::window_mode() {
             self.ok(format!("{} The setting does not apply here.", iyakki_cloudmode::WINDOW_WHY));
             return;
         }
-        let svc = Self::svc(cx);
-        let next = svc.cloud_setting().next();
-        match svc.set_cloud_setting(next) {
+        let next = p.cloud_setting().next();
+        match p.set_cloud_setting(next) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.cloud", next.label());
+                p.audit("settings.cloud", next.label());
                 self.ok(format!("Cloud mode: {}. The menus follow it when someone signs in; the sound and camera services at the next start.", next.label()));
             }
             Err(e) => self.fail(e),
@@ -37,27 +36,27 @@ impl SettingsApp {
     }
 
     /// (label, value) rows of the page.
-    pub(super) fn cloud_rows(&self, cx: &AppCx) -> Vec<(String, String)> {
+    pub(super) fn cloud_rows(&self, p: &dyn CloudPort) -> Vec<(String, String)> {
         let c = &self.cloud;
         let join = |v: Vec<String>| if v.is_empty() { "nothing".to_string() } else { v.join(", ") };
         vec![
-            ("Setting".into(), if iyakki_cloudmode::window_mode() { "Fixed: off in the window".to_string() } else { Self::svc(cx).cloud_setting().label().into() }),
+            ("Setting".into(), if iyakki_cloudmode::window_mode() { "Fixed: off in the window".to_string() } else { p.cloud_setting().label().into() }),
             ("Mode now".into(), if c.on { "Cloud mode is on".into() } else { "Desktop (cloud mode is off)".to_string() }),
             ("Why".into(), c.why.clone()),
             ("Hidden apps".into(), join(c.hidden_apps.iter().map(|a| a.label()).collect())),
             ("Hidden Settings pages".into(), join(c.hidden_settings_pages.iter().map(|s| s.to_string()).collect())),
             ("Hidden Devices rows".into(), join(c.hidden_device_rows.iter().map(|s| s.to_string()).collect())),
             ("Fn and media keys".into(), if c.fn_keys_off { "off".into() } else { "on".to_string() }),
-            ("This machine (AI)".into(), cx.agent.ai_profile().machine(cx.data_dir()).summary()),
-            ("Show all AI tools".into(), format!("{} (press a to change). AI tools this hardware does not suit are hidden unless this is on.", if Self::svc(cx).show_all_ai() { "On" } else { "Off" })),
+            ("This machine (AI)".into(), p.ai_machine_summary()),
+            ("Show all AI tools".into(), format!("{} (press a to change). AI tools this hardware does not suit are hidden unless this is on.", if p.show_all_ai() { "On" } else { "Off" })),
             ("Boot parameter".into(), "iyakki.mode=cloud or iyakki.mode=desktop beats the setting".into()),
         ]
     }
 
-    pub(super) fn render_cloud(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+    pub(super) fn render_cloud(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn CloudPort) {
         let mut y = a.y;
         let label_w = (210.0 * s).min(a.w * 0.38);
-        for (label, value) in self.cloud_rows(cx) {
+        for (label, value) in self.cloud_rows(p) {
             g.text(a.x, y, 14.0 * s, MUTED, &label, Face::Sans);
             // a label wider than its column (a narrow window, big text) puts the value on the line below it
             let stacked = g.text_width(14.0 * s, &label, Face::Sans) + 10.0 * s > label_w;

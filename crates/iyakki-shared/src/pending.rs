@@ -25,11 +25,4 @@ impl Default for Settings {
     }
 }
 
-/// What the waker hands the chat.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Wake {
-    /// Start a turn with this text.
-    Turn { text: String, ids: Vec<String> },
-    /// The daily chain limit was reached: say so plainly, start nothing.
-    Limit { text: String },
-}
+pub use iyakki_voice_model::facets::Wake;

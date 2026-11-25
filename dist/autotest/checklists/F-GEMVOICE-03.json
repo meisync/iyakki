@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-GEMVOICE-03",
+  "feature_sha": "d6b8ab533d47cf7f",
+  "title": "Gemini thinks, IYAKKI speaks (experimental)",
+  "clauses": [
+    {
+      "id": "reply-natural",
+      "text": "The reply is read aloud by the local voice in natural-sounding language",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "In a session with the local voice, ask a question out loud.",
+          "expect": "The reply is spoken naturally. Your words and the reply are both in the chat as text."
+        }
+      ]
+    }
+  ]
+}

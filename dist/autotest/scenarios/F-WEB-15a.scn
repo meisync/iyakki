@@ -1,0 +1,17 @@
+# autotest alpha.10 batch F (lane Q8, 2026-11-24); split into sub-row F-WEB-15a on 2026-11-24 (lane SC2): this scenario covers the whole visible clause, the API and rule clauses are F-WEB-15b.
+row: F-WEB-15a
+targets: qemu
+profile: ram
+feature-sha: 541dc698f9c2f73e
+doc: Settings, Remote access shows the status of serving this desktop to browsers, the addresses to open and the certificate fingerprint (read only, nothing is changed)
+clause: 1 Settings, Remote access shows the status of serving this desktop to browsers, the addresses to open and the certificate fingerprint
+key s
+wait app=Settings
+skip-unless-button Remote access
+click-sidebar Remote access
+wait app=Settings page="Remote access"
+skip-unless-button Serve this desktop to browsers
+shot page
+expect-not-blank
+expect-text Use this desktop from a browser
+expect-page Remote access

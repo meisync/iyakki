@@ -1,9 +1,9 @@
 //! STORE -> Setup: removing a Quick install item. The popup's Remove button opens a review card: what goes, what stays, how much space
 //! the data deletion frees (and that it cannot be undone), the data tick (off by default), the tick to remove what needs the item
-//! first, and an explicit Remove. Then progress, then the result; a failure shows Retry. Engine: `iyakki_agent::quickinstall::uninstall`.
+//! first, and an explicit Remove. Then progress, then the result; a failure shows Retry. Engine: the quick-install port (uninstall).
 
 use super::*;
-use iyakki_shared::quickinstall::uninstall as un;
+use iyakki_tile_api::store_qi as un;
 
 use crate::ui::ACCENT_MAIN;
 
@@ -27,7 +27,7 @@ pub enum Phase {
 
 pub struct RemoveCard {
     pub item: Item,
-    pub plan: un::Plan,
+    pub plan: un::UnPlan,
     /// Installed items that need this one (listed; removed first only with the tick).
     pub deps: Vec<Item>,
     pub warn: Vec<String>,
@@ -85,37 +85,37 @@ impl Setup {
     }
 
     /// Open the review card of an item.
-    pub fn open_remove(&mut self, item: Item, cx: &AppCx) {
+    pub fn open_remove(&mut self, item: Item, cx: &dyn StorePort) {
         if !self.admin {
-            self.say(format!("Only an administrator can remove software (your role is {}). Ask an administrator.", cx.session.role.name()), false);
+            self.say(format!("Only an administrator can remove software (your role is {}). Ask an administrator.", cx.role_name()), false);
             return;
         }
         if !self.can_remove(item) {
             self.say(format!("{} is not something IYAKKI can remove right now.", item.title()), false);
             return;
         }
-        let (plan, cli_warning) = cx.b0().qi_uninstall_plan(item, &cx.session.user);
+        let (plan, cli_warning) = cx.qi().uninstall_plan(item, &cx.user());
         let installed = |i: Item| matches!(self.presence(i), Some(Presence::Installed(_)) | Some(Presence::Earlier(_)));
-        let (deps, warn) = un::dependency_lines(item, &installed);
+        let (deps, warn) = cx.qi().dependency_lines(item, &installed);
         let warn = warn.into_iter().chain(cli_warning).collect::<Vec<_>>();
         self.rm = Some(RemoveCard { item, plan, deps, warn, delete_data: false, with_deps: false, phase: Phase::Review, scroll: 0 });
     }
 
     /// Start the removal on a thread (tests run it at once).
-    fn start_remove(&mut self, cx: &AppCx) {
+    fn start_remove(&mut self, cx: &dyn StorePort) {
         let Some(c) = self.rm.as_mut() else { return };
         if c.blocked().is_some() {
             return;
         }
         c.phase = Phase::Running;
-        let (item, o) = (c.item, un::Opts { delete_data: c.delete_data, with_dependants: c.with_deps });
-        cx.audit.record(&cx.session.user, "quickinstall.uninstall", &format!("{} data={}", item.id(), if o.delete_data { "deleted" } else { "kept" }));
-        let (svc, user, slot, prog) = (cx.services.clone(), cx.session.user.clone(), self.rm_slot.clone(), self.rm_progress.clone());
+        let (item, o) = (c.item, un::UnOpts { delete_data: c.delete_data, with_dependants: c.with_deps });
+        cx.record("quickinstall.uninstall", &format!("{} data={}", item.id(), if o.delete_data { "deleted" } else { "kept" }));
+        let (svc, user, slot, prog) = (cx.qi(), cx.user(), self.rm_slot.clone(), self.rm_progress.clone());
         *prog.lock().unwrap_or_else(|e| e.into_inner()) = "Starting\u{2026}".into();
         let run = move || {
-            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(svc.b0().qi_uninstall(item, &user, o, Some(prog)));
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(svc.uninstall(item, &user, o, Some(prog)));
         };
-        if crate::TESTING {
+        if cx.testing() {
             run();
             self.take_remove_result(cx);
         } else if std::thread::Builder::new().name("iyakki-quickinstall-remove".into()).spawn(run).is_err() {
@@ -126,7 +126,7 @@ impl Setup {
     }
 
     /// The thread finished: show the result, and read what is installed again so the item shows as not installed.
-    pub(super) fn take_remove_result(&mut self, cx: &AppCx) -> bool {
+    pub(super) fn take_remove_result(&mut self, cx: &dyn StorePort) -> bool {
         let Some(r) = self.rm_slot.lock().ok().and_then(|mut x| x.take()) else { return false };
         let ok = r.is_ok();
         if let Some(c) = self.rm.as_mut() {
@@ -143,7 +143,7 @@ impl Setup {
     }
 
     /// Everything while the card is open: it is modal.
-    pub(super) fn remove_event(&mut self, ev: &Event, cx: &AppCx) -> Option<Flow> {
+    pub(super) fn remove_event(&mut self, ev: &Event, cx: &dyn StorePort) -> Option<Flow> {
         let phase = self.rm.as_ref()?.phase.clone();
         let close = |s: &mut Setup| s.rm = None;
         match (&phase, ev) {

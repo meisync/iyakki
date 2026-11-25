@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-08",
+  "feature_sha": "819f134dba490053",
+  "title": "the word being said is lit",
+  "clauses": [
+    {
+      "id": "word-follows",
+      "text": "The lit word follows the spoken word while a story is read",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "In TALES, read a story with Settings, Voice, Highlight set to Sentence + word. Watch the lit word while you listen. Press pause, then resume.",
+          "expect": "The lit word follows the spoken word without running far ahead or lagging far behind. After resume it carries on in step."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+ "schema": 1,
+ "row": "F-KBD-07",
+ "feature_sha": "db49aa5206d9954a",
+ "title": "Apple keyboard Function keys mode reaches the Apple driver",
+ "clauses": [
+  {
+   "id": "fnmode",
+   "text": "the Function keys mode choice is written to the Apple keyboard driver and the keys follow it",
+   "machines": [
+    "macbook-pro",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "On an Apple keyboard, choose the Function keys mode, then press the top row keys (F1 to F12) in a text field.",
+     "expect": "The keys behave as the choice says. If a choice of ISO layout or Option/Command swap was changed, unplug the keyboard and plug it in again, and check the keys once more."
+    }
+   ]
+  }
+ ]
+}

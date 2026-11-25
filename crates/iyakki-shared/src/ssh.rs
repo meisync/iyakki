@@ -11,7 +11,7 @@ pub enum Mode {
 }
 
 
-use sha2::{Digest, Sha256};
+
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -19,27 +19,7 @@ use serde::{Deserialize, Serialize};
 
 pub const KEY_PREFIX: &str = "ssh.";
 
-/// One line of a `known_hosts` file.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct HostKey {
-    /// `host`, or `[host]:port` when the port is not 22.
-    pub pattern: String,
-    pub kind: String,
-    pub b64: String,
-}
-
-impl HostKey {
-    /// `SHA256:…`, as OpenSSH prints it.
-    pub fn fingerprint(&self) -> String {
-        let blob = crate::b64::b64_decode(&self.b64).unwrap_or_default();
-        let digest = Sha256::digest(&blob);
-        format!("SHA256:{}", crate::b64::base64_encode(&digest).trim_end_matches('='))
-    }
-
-    pub fn line(&self) -> String {
-        format!("{} {} {}", self.pattern, self.kind, self.b64)
-    }
-}
+pub use iyakki_git_model::hostkey::HostKey;
 
 pub fn pattern(host: &str, port: u16) -> String {
     if port == 22 { host.to_ascii_lowercase() } else { format!("[{}]:{port}", host.to_ascii_lowercase()) }

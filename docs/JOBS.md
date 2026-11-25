@@ -27,8 +27,9 @@ is known even when the shell was not there to see it end). A new shell finds run
 ### How it is started, and what survives
 
 The command starts in its **own session and process group** (`setsid`), with standard input closed and output and errors going to
-the log. It does not belong to the chat, the run or the shell: ending the chat, signing out or restarting the shell does not end
-it. A restart finds it again: the state is worked out from the files and from `/proc` (the process is alive, matched by its
+the log. It does not belong to the chat, the run or the shell: ending the chat or restarting the shell does not end it. **Signing out
+does** (D-SESSION-END, `docs/development/SESSION-END-AUDIT.md`): the hooks `ide-task-runs` and `lab-jobs` stop the person's running jobs, except a job
+the person marked to continue (`keep_after_sign_out` on `job_start`, or the chat tool `job_keep`; both ask) and the installs of the system. A restart finds it again: the state is worked out from the files and from `/proc` (the process is alive, matched by its
 process id **and** start time, so a reused process id is not taken for the job). A machine restart ends the job; it is then
 `lost` (nothing says why it ended), unless the wrapper had already recorded an exit code.
 

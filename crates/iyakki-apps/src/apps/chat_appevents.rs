@@ -8,7 +8,7 @@ use iyakki_shared::agent::Tools;
 use serde_json::json;
 use std::sync::Arc;
 
-use super::AppCx;
+use super::chat_port::ChatPort;
 
 pub const TOOLS: [&str; 10] = ["app_events_list", "app_events_catalogue", "app_events_register", "app_events_unregister", "app_events_switch", "app_events_replay_missed", "app_actions_pending", "app_actions_decide", "app_permissions_status", "app_permissions_set"];
 
@@ -18,10 +18,10 @@ fn app_arg(a: &serde_json::Value) -> Result<String, String> {
     arg_str(a, "app")
 }
 
-pub fn entries(cx: &AppCx, _env: &Env, inner: Arc<dyn Tools>) -> Vec<Entry> {
+pub fn entries(cx: &dyn ChatPort, _env: &Env, inner: Arc<dyn Tools>) -> Vec<Entry> {
     let mut v = Vec::new();
     {
-        let (core, user) = (cx.core.clone(), cx.session.user.clone());
+        let (core, user) = (cx.core(), cx.user().to_string());
         v.push(Entry::read("App events", "app_events_list", "List which events each app listens to: the app, the event, what it lets the app hear, how many wait, and whether it is switched off. Read only; no payloads.", no_args(), move |_| {
             let apps = core.app_events().apps(&user);
             if apps.is_empty() {
@@ -38,7 +38,7 @@ pub fn entries(cx: &AppCx, _env: &Env, inner: Arc<dyn Tools>) -> Vec<Entry> {
         }));
     }
     {
-        let core = cx.core.clone();
+        let core = cx.core();
         v.push(Entry::read("App events", "app_events_catalogue", "List the events an app can register for, with the permission each needs and its fields (never values). Read only.", no_args(), move |_| {
             let c = core.app_events().catalogue();
             if c.is_empty() {
@@ -49,7 +49,7 @@ pub fn entries(cx: &AppCx, _env: &Env, inner: Arc<dyn Tools>) -> Vec<Entry> {
     }
     let schema_reg = json!({"type": "object", "properties": {"app": {"type": "string"}, "event": {"type": "string"}, "filter": {"type": "string", "description": "a settings key prefix or a folder in the home, for the events that take one"}}, "required": ["app", "event"]});
     {
-        let (core, user) = (cx.core.clone(), cx.session.user.clone());
+        let (core, user) = (cx.core(), cx.user().to_string());
         v.push(Entry::change("App events", "app_events_register", "Let an app hear an event. It must hold the event's permission. The person approves a card first.", schema_reg.clone(), |a| format!("Let {} hear {}", a["app"].as_str().unwrap_or("an app"), a["event"].as_str().unwrap_or("an event")), move |a| {
             let (app, ev) = (app_arg(a)?, arg_str(a, "event")?);
             let filter = a.get("filter").and_then(|f| f.as_str()).unwrap_or("");
@@ -58,7 +58,7 @@ pub fn entries(cx: &AppCx, _env: &Env, inner: Arc<dyn Tools>) -> Vec<Entry> {
         }));
     }
     {
-        let (core, user) = (cx.core.clone(), cx.session.user.clone());
+        let (core, user) = (cx.core(), cx.user().to_string());
         v.push(Entry::change("App events", "app_events_unregister", "Stop an app hearing an event; what waited for it is dropped. The person approves a card first.", schema_reg, |a| format!("Stop {} hearing {}", a["app"].as_str().unwrap_or("an app"), a["event"].as_str().unwrap_or("an event")), move |a| {
             let (app, ev) = (app_arg(a)?, arg_str(a, "event")?);
             core.app_events().unregister(&user, &app, &ev, a.get("filter").and_then(|f| f.as_str()).unwrap_or(""))?;
@@ -66,7 +66,7 @@ pub fn entries(cx: &AppCx, _env: &Env, inner: Arc<dyn Tools>) -> Vec<Entry> {
         }));
     }
     {
-        let (core, user) = (cx.core.clone(), cx.session.user.clone());
+        let (core, user) = (cx.core(), cx.user().to_string());
         let schema = json!({"type": "object", "properties": {"app": {"type": "string"}, "event": {"type": "string"}, "filter": {"type": "string"}, "on": {"type": "boolean"}}, "required": ["app", "event", "on"]});
         v.push(Entry::change("App events", "app_events_switch", "Switch one event of one app off or on without removing the app's registration (the switch on Settings -> App events). The person approves a card first.", schema, |a| format!("Turn {} for {} {}", a["event"].as_str().unwrap_or("an event"), a["app"].as_str().unwrap_or("an app"), if a["on"].as_bool().unwrap_or(true) { "on" } else { "off" }), move |a| {
             let (app, ev, on) = (app_arg(a)?, arg_str(a, "event")?, arg_bool(a, "on")?);
@@ -75,7 +75,7 @@ pub fn entries(cx: &AppCx, _env: &Env, inner: Arc<dyn Tools>) -> Vec<Entry> {
         }));
     }
     {
-        let (core, user) = (cx.core.clone(), cx.session.user.clone());
+        let (core, user) = (cx.core(), cx.user().to_string());
         let schema = json!({"type": "object", "properties": {"app": {"type": "string"}, "after": {"type": "integer", "description": "hand over the events after this sequence number again (0 = all that are kept)"}}, "required": ["app"]});
         v.push(Entry::change("App events", "app_events_replay_missed", "Give an app the events it was already delivered again (up to the last 50), marked late, for an app that crashed before it handled them. Dropped events cannot come back. The person approves a card first.", schema, |a| format!("Give {} its recent events again", a["app"].as_str().unwrap_or("an app")), move |a| {
             let app = app_arg(a)?;
@@ -85,7 +85,7 @@ pub fn entries(cx: &AppCx, _env: &Env, inner: Arc<dyn Tools>) -> Vec<Entry> {
         }));
     }
     {
-        let (core, user) = (cx.core.clone(), cx.session.user.clone());
+        let (core, user) = (cx.core(), cx.user().to_string());
         let schema = json!({"type": "object", "properties": {"app": {"type": "string", "description": "one app; leave out for every app that has registrations or a permission change"}}});
         v.push(Entry::read("App events", "app_permissions_status", "List what an app may do now (the names of its capabilities and scopes) and the last change of that told to it: when, who changed it, what was granted and taken away, which registrations ended, whether it must restart. Names only, no payload values. Read only.", schema, move |a| {
             let ev = core.app_events();
@@ -103,7 +103,7 @@ pub fn entries(cx: &AppCx, _env: &Env, inner: Arc<dyn Tools>) -> Vec<Entry> {
         }));
     }
     {
-        let (core, user) = (cx.core.clone(), cx.session.user.clone());
+        let (core, user) = (cx.core(), cx.user().to_string());
         let schema = json!({"type": "object", "properties": {"app": {"type": "string"}, "permission": {"type": "string", "description": "the permission's name, for example events.network or files.read"}, "allow": {"type": "boolean", "description": "false takes it away, true gives back one that was taken away"}}, "required": ["app", "permission", "allow"]});
         v.push(Entry::change("App events", "app_permissions_set", "Take one permission away from an app, or give back one the person took away. The app is told at once. It cannot give an app more than it was approved for. The person approves a card first.", schema, |a| format!("{} {} {}", if a["allow"].as_bool().unwrap_or(false) { "Give back" } else { "Take away" }, a["permission"].as_str().unwrap_or("a permission"), if a["allow"].as_bool().unwrap_or(false) { format!("to {}", a["app"].as_str().unwrap_or("an app")) } else { format!("from {}", a["app"].as_str().unwrap_or("an app")) }), move |a| {
             let (app, scope, allow) = (app_arg(a)?, arg_str(a, "permission")?, arg_bool(a, "allow")?);
@@ -112,7 +112,7 @@ pub fn entries(cx: &AppCx, _env: &Env, inner: Arc<dyn Tools>) -> Vec<Entry> {
         }));
     }
     {
-        let (core, user) = (cx.core.clone(), cx.session.user.clone());
+        let (core, user) = (cx.core(), cx.user().to_string());
         v.push(Entry::read("App events", "app_actions_pending", "List the chat tool requests apps made after hearing an event and that wait for the person: the id, the app and the tool. Read only; arguments are shown on the card of app_actions_decide.", no_args(), move |_| {
             let p = core.app_actions().pending(&user);
             if p.is_empty() {
@@ -122,8 +122,8 @@ pub fn entries(cx: &AppCx, _env: &Env, inner: Arc<dyn Tools>) -> Vec<Entry> {
         }));
     }
     {
-        let (core, user, tools) = (cx.core.clone(), cx.session.user.clone(), inner);
-        let (core2, user2) = (cx.core.clone(), cx.session.user.clone());
+        let (core, user, tools) = (cx.core(), cx.user().to_string(), inner);
+        let (core2, user2) = (cx.core(), cx.user().to_string());
         let schema = json!({"type": "object", "properties": {"id": {"type": "string"}, "approve": {"type": "boolean"}}, "required": ["id", "approve"]});
         v.push(Entry::change("App events", "app_actions_decide", "Answer a chat tool request an app made after hearing an event: approve runs the tool with the arguments the app gave, decline drops the request. The person approves a card that names the app, the tool and its arguments.", schema, move |a| {
             let id = a["id"].as_str().unwrap_or("");
@@ -178,7 +178,7 @@ mod tests {
         cx.core = core.clone();
         let user = cx.session.user.clone();
         let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.settings(), audit: Arc::new(|_, _| {}) };
-        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env, Arc::new(NoTools)));
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&crate::apps::chat_port::CxChat(&cx), &env, Arc::new(NoTools)));
         let defs = t.defs();
         let risk = |n: &str| defs.iter().find(|d| d.spec.name == n).unwrap_or_else(|| panic!("{n}")).risk;
         for n in ["app_events_list", "app_events_catalogue"] {
@@ -233,7 +233,7 @@ mod tests {
         cx.core = core.clone();
         let user = cx.session.user.clone();
         let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.settings(), audit: Arc::new(|_, _| {}) };
-        let t = SettingsTools::new(Arc::new(One), true, entries(&cx, &env, Arc::new(One)));
+        let t = SettingsTools::new(Arc::new(One), true, entries(&crate::apps::chat_port::CxChat(&cx), &env, Arc::new(One)));
         let defs = t.defs();
         let risk = |n: &str| defs.iter().find(|d| d.spec.name == n).unwrap_or_else(|| panic!("{n}")).risk;
         assert_eq!((risk("app_actions_pending"), risk("app_actions_decide")), (Risk::Safe, Risk::Ask));
@@ -264,7 +264,7 @@ mod tests {
         cx.core = core.clone();
         let user = cx.session.user.clone();
         let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.settings(), audit: Arc::new(|_, _| {}) };
-        let t = SettingsTools::new(Arc::new(One), true, entries(&cx, &env, Arc::new(One)));
+        let t = SettingsTools::new(Arc::new(One), true, entries(&crate::apps::chat_port::CxChat(&cx), &env, Arc::new(One)));
         assert!(t.call("app_permissions_status", &json!({})).unwrap().contains("No app has"));
         let f = core.app_events_fake();
         f.grant("notes", "events.network");
@@ -282,7 +282,7 @@ mod tests {
         cx.core = core.clone();
         let user = cx.session.user.clone();
         let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.services.settings(), audit: Arc::new(|_, _| {}) };
-        let t = SettingsTools::new(Arc::new(One), true, entries(&cx, &env, Arc::new(One)));
+        let t = SettingsTools::new(Arc::new(One), true, entries(&crate::apps::chat_port::CxChat(&cx), &env, Arc::new(One)));
         let f = core.app_events_fake();
         f.grant("sample", "events.network");
         f.register(&user, "sample", "connectivity.changed", "").unwrap();

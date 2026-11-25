@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-tile-mesh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The MESH tile (a Consul cluster in the shell). Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit` and
+# `iyakki-tile-api` only, never on the agent or the shared crate; the shell hands it the cluster, the vault and the audit log through `MeshPort` (a fake in tests).
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-tile-api = { path = "../iyakki-tile-api" }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

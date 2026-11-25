@@ -7,6 +7,7 @@
 //! (larger text, reduced motion, High contrast) overrules a Look, and the sign-in screen is always the default Dark look.
 
 use super::*;
+use super::super::settings_device_port::AppearancePort;
 use iyakki_uikit::look::{self, BarItem, Columns, Density, DockPos, IconShape, IconSize, IconStyle, LauncherLayout, Look};
 use iyakki_uikit::look_registry;
 use iyakki_uikit::wallpaper as wp;
@@ -28,18 +29,18 @@ fn column_steps() -> Vec<Columns> {
 
 impl SettingsApp {
     /// The Look in force for this person.
-    pub(super) fn ap_look(cx: &AppCx) -> Look {
-        look_registry::current(cx.data_dir(), &cx.session.user).look
+    pub(super) fn ap_look(p: &dyn AppearancePort) -> Look {
+        look_registry::current(&p.data_dir(), &p.user()).look
     }
 
     /// Change the Look in force with `f`, keep it as the person's own Look and tell the shell. `what` goes to the access log.
-    pub(super) fn ap_edit(&mut self, cx: &AppCx, what: &str, f: impl FnOnce(&mut Look)) -> Option<Look> {
-        let mut l = Self::ap_look(cx);
+    pub(super) fn ap_edit(&mut self, p: &dyn AppearancePort, what: &str, f: impl FnOnce(&mut Look)) -> Option<Look> {
+        let mut l = Self::ap_look(p);
         f(&mut l);
         l.name = MINE.into();
-        match look_registry::save_custom(cx.data_dir(), &cx.session.user, &l) {
+        match look_registry::save_custom(&p.data_dir(), &p.user(), &l) {
             Ok(a) => {
-                cx.audit.record(&cx.session.user, "settings.display.look", what);
+                p.audit("settings.display.look", what);
                 look_registry::notify_changed();
                 Some(a.look)
             }
@@ -51,28 +52,28 @@ impl SettingsApp {
     }
 
     /// The Looks this person can choose that pass the check, in list order.
-    fn ap_choices(cx: &AppCx) -> Vec<(String, String)> {
-        look_registry::available(cx.data_dir(), &cx.session.user).into_iter().filter_map(|e| e.result.ok().map(|a| (e.key, a.look.name))).collect()
+    fn ap_choices(p: &dyn AppearancePort) -> Vec<(String, String)> {
+        look_registry::available(&p.data_dir(), &p.user()).into_iter().filter_map(|e| e.result.ok().map(|a| (e.key, a.look.name))).collect()
     }
 
     /// Line height (`l`), letter spacing (`m`) or tabular figures (`u`): kept for this person, applied at once, logged.
-    fn ap_type(&mut self, cx: &AppCx, c: char) {
+    fn ap_type(&mut self, p: &dyn AppearancePort, c: char) {
         use iyakki_uikit::typeset;
         let back = c.is_uppercase();
-        let mut p = typeset::current();
+        let mut pr = typeset::current();
         match c.to_ascii_lowercase() {
-            'l' => p.line = next(&typeset::LINE_ALL, p.line, back),
-            'm' => p.tracking = next(&typeset::TRACKING_ALL, p.tracking, back),
-            _ => p.tabular = !p.tabular,
+            'l' => pr.line = next(&typeset::LINE_ALL, pr.line, back),
+            'm' => pr.tracking = next(&typeset::TRACKING_ALL, pr.tracking, back),
+            _ => pr.tabular = !pr.tabular,
         }
-        typeset::save(cx.data_dir(), &cx.session.user, p);
-        typeset::set_current(p);
-        cx.audit.record(&cx.session.user, "settings.display.type", &typeset::describe(p));
-        self.ok(format!("Type: {}.", typeset::describe(p)));
+        typeset::save(&p.data_dir(), &p.user(), pr);
+        typeset::set_current(pr);
+        p.audit("settings.display.type", &typeset::describe(pr));
+        self.ok(format!("Type: {}.", typeset::describe(pr)));
     }
 
     /// Choose the next (or, with a capital, the previous) text font (`f`) or code font (`p`): kept for this person, applied at once, logged.
-    fn ap_font(&mut self, cx: &AppCx, c: char) {
+    fn ap_font(&mut self, p: &dyn AppearancePort, c: char) {
         use iyakki_uikit::fonts;
         let back = c.is_uppercase();
         let (mut ui, mut code) = (fonts::current_ui(), fonts::current_code());
@@ -81,30 +82,30 @@ impl SettingsApp {
         } else {
             code = next(&fonts::CODE_ALL, code, back);
         }
-        fonts::save_choice(cx.data_dir(), &cx.session.user, ui, code);
+        fonts::save_choice(&p.data_dir(), &p.user(), ui, code);
         fonts::set_ui(ui);
         fonts::set_code(code);
-        cx.audit.record(&cx.session.user, "settings.display.font", &format!("{} {}", ui.key(), code.key()));
+        p.audit("settings.display.font", &format!("{} {}", ui.key(), code.key()));
         self.ok(format!("Fonts: {}.", fonts::describe()));
     }
 
-    pub(super) fn handle_appearance(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_appearance(&mut self, k: &Key, p: &dyn AppearancePort) {
         let Key::Char(c) = k else { return };
         let c = *c;
         match c {
             '[' | ']' => {
-                let list = Self::ap_choices(cx);
-                let cur = look_registry::load_choice(cx.data_dir(), &cx.session.user).unwrap_or_else(|| "default".into());
+                let list = Self::ap_choices(p);
+                let cur = look_registry::load_choice(&p.data_dir(), &p.user()).unwrap_or_else(|| "default".into());
                 let at = list.iter().position(|(k, _)| *k == cur).unwrap_or(0);
                 if list.is_empty() {
                     return;
                 }
                 let (key, name) = list[if c == ']' { (at + 1) % list.len() } else { (at + list.len() - 1) % list.len() }].clone();
-                match look_registry::choose(cx.data_dir(), &cx.session.user, &key) {
+                match look_registry::choose(&p.data_dir(), &p.user(), &key) {
                     Ok(a) => {
-                        wp::save(cx.data_dir(), &cx.session.user, a.look.wallpaper);
+                        wp::save(&p.data_dir(), &p.user(), a.look.wallpaper);
                         wp::set_current(a.look.wallpaper);
-                        cx.audit.record(&cx.session.user, "settings.display.look", &format!("choose {key}"));
+                        p.audit("settings.display.look", &format!("choose {key}"));
                         look_registry::notify_changed();
                         self.ok(format!("Look: {name}."));
                     }
@@ -118,91 +119,91 @@ impl SettingsApp {
                     'W' => next(&all, wp::current(), true),
                     d => all[d as usize - '1' as usize],
                 };
-                wp::save(cx.data_dir(), &cx.session.user, id);
+                wp::save(&p.data_dir(), &p.user(), id);
                 wp::set_current(id);
-                if self.ap_edit(cx, &format!("wallpaper {}", id.key()), |l| l.wallpaper = id).is_some() {
+                if self.ap_edit(p, &format!("wallpaper {}", id.key()), |l| l.wallpaper = id).is_some() {
                     self.ok(format!("Wallpaper: {}.", id.name()));
                 }
             }
-            'f' | 'F' | 'p' | 'P' => self.ap_font(cx, c),
-            'l' | 'L' | 'm' | 'M' | 'u' => self.ap_type(cx, c),
+            'f' | 'F' | 'p' | 'P' => self.ap_font(p, c),
+            'l' | 'L' | 'm' | 'M' | 'u' => self.ap_type(p, c),
             's' | 'S' => {
-                let st = next(IconStyle::ALL, Self::ap_look(cx).icons.style, c == 'S');
-                if self.ap_edit(cx, &format!("icon style {}", st.key()), |l| l.icons.style = st).is_some() {
+                let st = next(IconStyle::ALL, Self::ap_look(p).icons.style, c == 'S');
+                if self.ap_edit(p, &format!("icon style {}", st.key()), |l| l.icons.style = st).is_some() {
                     self.ok(format!("Icon style: {}.", st.key()));
                 }
             }
             'h' | 'H' => {
-                let sh = next(IconShape::ALL, Self::ap_look(cx).icons.shape, c == 'H');
-                if self.ap_edit(cx, &format!("icon shape {}", sh.key()), |l| l.icons.shape = sh).is_some() {
+                let sh = next(IconShape::ALL, Self::ap_look(p).icons.shape, c == 'H');
+                if self.ap_edit(p, &format!("icon shape {}", sh.key()), |l| l.icons.shape = sh).is_some() {
                     self.ok(format!("Icon shape: {}.", sh.key()));
                 }
             }
             'z' | 'Z' => {
-                let sz = next(&[IconSize::S, IconSize::M, IconSize::L], match Self::ap_look(cx).icons.size { IconSize::Px(_) => IconSize::M, o => o }, c == 'Z');
-                if self.ap_edit(cx, &format!("icon size {}", sz.text()), |l| l.icons.size = sz).is_some() {
+                let sz = next(&[IconSize::S, IconSize::M, IconSize::L], match Self::ap_look(p).icons.size { IconSize::Px(_) => IconSize::M, o => o }, c == 'Z');
+                if self.ap_edit(p, &format!("icon size {}", sz.text()), |l| l.icons.size = sz).is_some() {
                     self.ok(format!("Icon size: {}.", sz.text()));
                 }
             }
             'i' => {
-                if let Some(l) = self.ap_edit(cx, "icon labels", |l| l.icons.labels = !l.icons.labels) {
+                if let Some(l) = self.ap_edit(p, "icon labels", |l| l.icons.labels = !l.icons.labels) {
                     self.ok(format!("Icon names {}.", if l.icons.labels { "shown" } else { "hidden" }));
                 }
             }
             'y' | 'Y' => {
-                let ly = next(LauncherLayout::ALL, Self::ap_look(cx).launcher.layout, c == 'Y');
-                if self.ap_edit(cx, &format!("launcher {}", ly.key()), |l| l.launcher.layout = ly).is_some() {
+                let ly = next(LauncherLayout::ALL, Self::ap_look(p).launcher.layout, c == 'Y');
+                if self.ap_edit(p, &format!("launcher {}", ly.key()), |l| l.launcher.layout = ly).is_some() {
                     self.ok(format!("Launcher layout: {}.", ly.key()));
                 }
             }
             'c' | 'C' => {
                 let steps = column_steps();
-                let cl = next(&steps, Self::ap_look(cx).launcher.columns, c == 'C');
-                if self.ap_edit(cx, "columns", |l| l.launcher.columns = cl).is_some() {
+                let cl = next(&steps, Self::ap_look(p).launcher.columns, c == 'C');
+                if self.ap_edit(p, "columns", |l| l.launcher.columns = cl).is_some() {
                     self.ok(format!("Columns: {}.", Self::ap_columns_text(cl)));
                 }
             }
             'e' | 'E' => {
-                let d = next(Density::ALL, Self::ap_look(cx).launcher.density, c == 'E');
-                if self.ap_edit(cx, &format!("density {}", d.key()), |l| l.launcher.density = d).is_some() {
+                let d = next(Density::ALL, Self::ap_look(p).launcher.density, c == 'E');
+                if self.ap_edit(p, &format!("density {}", d.key()), |l| l.launcher.density = d).is_some() {
                     self.ok(format!("Spacing: {}.", d.key()));
                 }
             }
             'd' | 'D' => {
-                let p = next(DockPos::ALL, Self::ap_look(cx).dock.position, c == 'D');
-                if self.ap_edit(cx, &format!("dock {}", p.key()), |l| l.dock.position = p).is_some() {
-                    self.ok(format!("Dock: {}.", p.key()));
+                let pos = next(DockPos::ALL, Self::ap_look(p).dock.position, c == 'D');
+                if self.ap_edit(p, &format!("dock {}", pos.key()), |l| l.dock.position = pos).is_some() {
+                    self.ok(format!("Dock: {}.", pos.key()));
                 }
             }
             'r' => {
-                if let Some(l) = self.ap_edit(cx, "dock running dots", |l| l.dock.running = !l.dock.running) {
+                if let Some(l) = self.ap_edit(p, "dock running dots", |l| l.dock.running = !l.dock.running) {
                     self.ok(format!("A dot under running apps: {}.", if l.dock.running { "on" } else { "off" }));
                 }
             }
-            'a' => self.ap_pin_next(cx),
-            'x' => self.ap_unpin_last(cx),
+            'a' => self.ap_pin_next(p),
+            'x' => self.ap_unpin_last(p),
             't' | 'T' => {
                 // EDIT (t) and CLI (T): the version written on the UI SDK or the usual screen, the person's own choice (experimental)
                 let app = if c == 't' { "edit" } else { "cli" };
-                let on = !crate::apps::sdk_apps::chosen(cx, app);
-                match crate::apps::sdk_apps::set_chosen(&*cx.core, &cx.session.user, app, on) {
+                let on = !p.sdk_app_chosen(app);
+                match p.sdk_app_set(app, on) {
                     Ok(said) => {
-                        cx.audit.record(&cx.session.user, "settings.display.sdk_apps", &format!("{app} {}", if on { "on" } else { "off" }));
+                        p.audit("settings.display.sdk_apps", &format!("{app} {}", if on { "on" } else { "off" }));
                         self.ok(format!("{said} It applies the next time the app is opened."));
                     }
                     Err(e) => self.fail(e),
                 }
             }
             'o' => {
-                iyakki_uikit::look_registry::save_dock(cx.data_dir(), &cx.session.user, &[]);
-                iyakki_uikit::look_registry::clear_dock(cx.data_dir(), &cx.session.user);
-                cx.audit.record(&cx.session.user, "settings.display.dock", "default");
+                iyakki_uikit::look_registry::save_dock(&p.data_dir(), &p.user(), &[]);
+                iyakki_uikit::look_registry::clear_dock(&p.data_dir(), &p.user());
+                p.audit("settings.display.dock", "default");
                 look_registry::notify_changed();
                 self.ok("Dock: the usual apps again.");
             }
             c if BAR_KEYS.iter().any(|(k, _, _)| *k == c) => {
                 let (_, item, name) = BAR_KEYS.iter().find(|(k, _, _)| *k == c).copied().unwrap_or(BAR_KEYS[0]);
-                if let Some(l) = self.ap_edit(cx, &format!("top bar {}", item.key()), |l| {
+                if let Some(l) = self.ap_edit(p, &format!("top bar {}", item.key()), |l| {
                     if l.topbar.items.contains(&item) {
                         l.topbar.items.retain(|i| *i != item);
                     } else {
@@ -228,23 +229,23 @@ impl SettingsApp {
     }
 
     /// The apps this person may pin (on the home screen for them), in tile order: (id, label).
-    pub(super) fn ap_pinnable(cx: &AppCx) -> Vec<(String, String)> {
-        crate::apps::pinnable(&cx.session.policy).into_iter().map(|(a, l)| (a.to_string(), l.to_string())).collect()
+    pub(super) fn ap_pinnable(p: &dyn AppearancePort) -> Vec<(String, String)> {
+        p.pinnable()
     }
 
     /// The ids in the dock now: the person's own list, else the Look's, else the shell's default set.
-    pub(super) fn ap_pinned(cx: &AppCx) -> Vec<String> {
-        look_registry::load_dock(cx.data_dir(), &cx.session.user).or_else(|| Some(Self::ap_look(cx).dock.items).filter(|v| !v.is_empty())).unwrap_or_else(|| ["chat", "browser", "ide", "edit", "cli", "system"].iter().map(|s| s.to_string()).collect())
+    pub(super) fn ap_pinned(p: &dyn AppearancePort) -> Vec<String> {
+        look_registry::load_dock(&p.data_dir(), &p.user()).or_else(|| Some(Self::ap_look(p).dock.items).filter(|v| !v.is_empty())).unwrap_or_else(|| ["chat", "browser", "ide", "edit", "cli", "system"].iter().map(|s| s.to_string()).collect())
     }
 
-    fn ap_pin_next(&mut self, cx: &AppCx) {
-        let pinned = Self::ap_pinned(cx);
-        match Self::ap_pinnable(cx).into_iter().find(|(id, _)| !pinned.contains(id)) {
+    fn ap_pin_next(&mut self, p: &dyn AppearancePort) {
+        let pinned = Self::ap_pinned(p);
+        match Self::ap_pinnable(p).into_iter().find(|(id, _)| !pinned.contains(id)) {
             Some((id, label)) if pinned.len() < 10 => {
                 let mut v = pinned;
                 v.push(id);
-                look_registry::save_dock(cx.data_dir(), &cx.session.user, &v);
-                cx.audit.record(&cx.session.user, "settings.display.dock", &v.join(","));
+                look_registry::save_dock(&p.data_dir(), &p.user(), &v);
+                p.audit("settings.display.dock", &v.join(","));
                 look_registry::notify_changed();
                 self.ok(format!("{label} is in the dock."));
             }
@@ -252,11 +253,11 @@ impl SettingsApp {
         }
     }
 
-    fn ap_unpin_last(&mut self, cx: &AppCx) {
-        let mut v = Self::ap_pinned(cx);
+    fn ap_unpin_last(&mut self, p: &dyn AppearancePort) {
+        let mut v = Self::ap_pinned(p);
         if v.pop().is_some() {
-            look_registry::save_dock(cx.data_dir(), &cx.session.user, &v);
-            cx.audit.record(&cx.session.user, "settings.display.dock", &v.join(","));
+            look_registry::save_dock(&p.data_dir(), &p.user(), &v);
+            p.audit("settings.display.dock", &v.join(","));
             look_registry::notify_changed();
             self.ok("The last app is out of the dock.");
         }
@@ -326,12 +327,12 @@ impl SettingsApp {
         });
     }
 
-    pub(super) fn render_appearance(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let l = Self::ap_look(cx);
-        let chosen = look_registry::load_choice(cx.data_dir(), &cx.session.user);
-        let wall = wp::load(cx.data_dir(), &cx.session.user);
-        let pinned = Self::ap_pinned(cx);
-        let labels = Self::ap_pinnable(cx);
+    pub(super) fn render_appearance(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn AppearancePort) {
+        let l = Self::ap_look(p);
+        let chosen = look_registry::load_choice(&p.data_dir(), &p.user());
+        let wall = wp::load(&p.data_dir(), &p.user());
+        let pinned = Self::ap_pinned(p);
+        let labels = Self::ap_pinnable(p);
         let pinned_names: Vec<String> = pinned.iter().filter_map(|id| labels.iter().find(|(i, _)| i == id).map(|(_, n)| n.clone())).collect();
         let wide = a.w >= 700.0 * s;
         // the preview: beside the rows on a wide page, above them on a narrow one
@@ -339,7 +340,7 @@ impl SettingsApp {
         let pw = if wide { (a.w * 0.36).min(380.0 * s) } else { a.w };
         let preview = R::new(if wide { a.x + a.w - pw } else { a.x }, a.y, pw, ph);
         Self::ap_preview(g, preview, s, &l);
-        let who = chosen.as_deref().map_or("Default".to_string(), |k| look_registry::available(cx.data_dir(), &cx.session.user).into_iter().find(|e| e.key == k).and_then(|e| e.result.ok().map(|a| a.look.name)).unwrap_or_else(|| k.to_string()));
+        let who = chosen.as_deref().map_or("Default".to_string(), |k| look_registry::available(&p.data_dir(), &p.user()).into_iter().find(|e| e.key == k).and_then(|e| e.result.ok().map(|a| a.look.name)).unwrap_or_else(|| k.to_string()));
         let rows_w = if wide { a.w - pw - 12.0 * s } else { a.w };
         let mut y = a.y;
         if !wide {
@@ -386,8 +387,8 @@ impl SettingsApp {
         at(g, &mut y, "Spacing", l.launcher.density.key(), 'e', "compact, comfortable or roomy");
         at(g, &mut y, "Dock", l.dock.position.key(), 'd', "bottom, left, right or off");
         at(g, &mut y, "Dot under running apps", if l.dock.running { "on" } else { "off" }, 'r', "in the dock");
-        at(g, &mut y, "EDIT version (experimental)", if crate::apps::sdk_apps::chosen(cx, "edit") { "the SDK version" } else { "the usual screen" }, 't', "the editor written on the UI SDK: pinch changes the text size; the usual one stays");
-        at(g, &mut y, "CLI version (experimental)", if crate::apps::sdk_apps::chosen(cx, "cli") { "the SDK version" } else { "the usual screen" }, 'T', "the command line written on the UI SDK, with the whole-session terminal; the usual one stays");
+        at(g, &mut y, "EDIT version (experimental)", if p.sdk_app_chosen("edit") { "the SDK version" } else { "the usual screen" }, 't', "the editor written on the UI SDK: pinch changes the text size; the usual one stays");
+        at(g, &mut y, "CLI version (experimental)", if p.sdk_app_chosen("cli") { "the SDK version" } else { "the usual screen" }, 'T', "the command line written on the UI SDK, with the whole-session terminal; the usual one stays");
         at(g, &mut y, "Pinned apps", &format!("{} in the dock", pinned_names.len()), 'a', "A pins the next app, X takes the last out, O puts the usual ones back");
         let names = pinned_names.join(", ");
         for line in g.wrap(13.0 * s, &names, Face::Sans, rows_w).into_iter().take(3) {

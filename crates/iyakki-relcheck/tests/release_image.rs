@@ -207,3 +207,10 @@ fn an_ui_only_change_moves_only_the_ui_layer() {
     assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(String::from_utf8_lossy(&out.stdout).contains(" 0 failed"));
 }
+
+#[test]
+fn the_ui_program_recipe_builds_and_places_the_socket_shell_program() {
+    let out = std::process::Command::new("bash").arg(root().join("dist/buildroot/test-ui-program.sh")).output().expect("run the script");
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains(" 0 failed"));
+}

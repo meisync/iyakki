@@ -3,7 +3,7 @@
 //! buttons at the bottom). On a narrow screen the list and the canvas take turns. Every size follows the UI scale `s`; nothing is drawn
 //! or made clickable outside the area it was given, and the answer buttons are big enough for a finger.
 
-use iyakki_shared::manualtest::{State, Verdict};
+use iyakki_shared::manualtest::{self as mt, State, Verdict};
 
 use crate::safeclamp::SafeClamp;
 use super::doctor::ACCENT;
@@ -77,6 +77,7 @@ impl ManualTab {
         let items = vec![
             (if self.filter.this_machine { "This machine only: on" } else { "This machine only: off" }.to_string(), if self.filter.this_machine { ACCENT } else { TEXT }, Event::Tab(T_F_MACHINE)),
             (if self.filter.open_only { "Needs a person: on" } else { "Needs a person: off" }.to_string(), if self.filter.open_only { ACCENT } else { TEXT }, Event::Tab(T_F_OPEN)),
+            (if self.who.machine.is_empty() { "Pick this computer (k)".to_string() } else { format!("Computer: {} (k)", mt::kind_label(&self.who.machine)) }, if self.who.machine.is_empty() { ACCENT } else { TEXT }, Event::Tab(T_PICK)),
             ("Export (e)".to_string(), TEXT, Event::Tab(T_EXPORT)),
             ("Import (i)".to_string(), TEXT, Event::Tab(T_IMPORT)),
         ];
@@ -85,7 +86,9 @@ impl ManualTab {
 
         let msg_h = if self.msg.is_some() { 30.0 * s } else { 0.0 };
         let body = R::new(area.x, y, area.w, (area.y + area.h - y - msg_h - 4.0 * s).max(0.0));
-        if self.scenarios.is_empty() {
+        if self.picking {
+            self.draw_pick(g, R::new(x, body.y, w, body.h), s);
+        } else if self.scenarios.is_empty() {
             self.draw_empty(g, R::new(x, body.y, w, body.h), s);
         } else {
             self.narrow = area.w < 720.0 * s;
@@ -107,6 +110,36 @@ impl ManualTab {
             fx::status_line(g, x, my, w, s, &m, ok);
             g.hit(R::new(x, my, w, msg_h - 2.0 * s), Event::Tab(T_DISMISS), "dismiss message");
         }
+    }
+
+    /// The list of computers: one big button each (a finger can hit it), the cursor row marked, the first line says why it is asked.
+    fn draw_pick(&mut self, g: &mut Gfx, view: R, s: f32) {
+        let mut y = view.y;
+        let say = if self.who.machine.is_empty() { "Which computer is this? Pick once; your answers are filed under that name. The program does not guess it." } else { "Which computer is this? Your answers from now on are filed under the one you pick." };
+        for l in g.wrap(14.5 * s, say, Face::Sans, view.w) {
+            if y + 20.0 * s > view.y + view.h {
+                return;
+            }
+            g.text(view.x, y, 14.5 * s, TEXT, &l, Face::Sans);
+            y += 20.0 * s;
+        }
+        y += 6.0 * s;
+        let (bh, gap) = (36.0 * s, 6.0 * s);
+        g.clipped(view, |g| {
+            for (i, k) in mt::PICK_KINDS.iter().enumerate() {
+                if y + bh > view.y + view.h {
+                    break;
+                }
+                let r = R::new(view.x, y, view.w, bh);
+                let chosen = i == self.pick_sel;
+                fx::row_at(g, r.x, r.y, r.w, r.h, 8.0 * s, chosen, g.hovered(r), if *k == self.who.machine { OK } else { ACCENT });
+                hit_in(g, r, view, Event::Tab(T_KIND + i), "computer");
+                let label = format!("{}  {}", i + 1, mt::kind_label(k));
+                let t = g.fit(15.0 * s, &label, Face::Bold, r.w - 20.0 * s);
+                g.text(r.x + 10.0 * s, r.y + 9.0 * s, 15.0 * s, TEXT, &t, Face::Bold);
+                y += bh + gap;
+            }
+        });
     }
 
     fn draw_empty(&mut self, g: &mut Gfx, view: R, s: f32) {
@@ -289,7 +322,19 @@ impl ManualTab {
             let t_lines = g.wrap(15.0 * s, &step.text, Face::Sans, tw);
             let e_lines = g.wrap(14.0 * s, &format!("Expect: {}", step.expect), Face::Sans, tw);
             let mut extra = 0.0;
+            // the example screenshot, drawn when the file is on this computer (otherwise only its name is shown)
+            let pic = self.shots.get(&(self.sel, i)).cloned().flatten().and_then(|b| {
+                let id = ((self.sel as u64) << 32) | i as u64;
+                self.pics.draw_bytes(g, id, &b, tw, s).ok()
+            });
+            let pic_h = pic.as_ref().map_or(0.0, |r| r.pm.height() as f32 * r.k);
             if !step.shot.is_empty() {
+                extra += 17.0 * s;
+            }
+            if pic.is_some() {
+                extra += pic_h + 6.0 * s;
+            }
+            if !step.runner_did.is_empty() {
                 extra += 17.0 * s;
             }
             if !step.clause.is_empty() {
@@ -324,10 +369,22 @@ impl ManualTab {
                     g.text(tx, ty, 14.0 * s, MUTED, l, Face::Sans);
                     ty += 19.0 * s;
                 }
-                if !step.shot.is_empty() {
-                    let l = g.fit(12.0 * s, &format!("Example screenshot: {}", step.shot), Face::Sans, tw);
+                if !step.runner_did.is_empty() {
+                    let l = g.fit(12.0 * s, &format!("The runner already did: {}", step.runner_did), Face::Sans, tw);
                     g.text(tx, ty, 12.0 * s, DIM, &l, Face::Sans);
                     ty += 17.0 * s;
+                }
+                if !step.shot.is_empty() {
+                    let label = if pic.is_some() { format!("Example screenshot: {}", step.shot) } else { format!("Example screenshot (not on this computer): {}", step.shot) };
+                    let l = g.fit(12.0 * s, &label, Face::Sans, tw);
+                    g.text(tx, ty, 12.0 * s, DIM, &l, Face::Sans);
+                    ty += 17.0 * s;
+                }
+                if let Some(r) = &pic {
+                    let (dw, dh) = (r.pm.width() as f32 * r.k, pic_h);
+                    g.rrect(tx, ty, dw, dh, 4.0 * s, crate::gfx::rgb(247, 248, 251));
+                    g.rgba_picture(tx, ty, dw, dh, r.pm.width(), r.pm.height(), r.pm.data());
+                    ty += dh + 6.0 * s;
                 }
                 if !step.clause.is_empty() {
                     let l = g.fit(12.0 * s, &format!("Evidence for: {}", step.clause), Face::Mono, tw);

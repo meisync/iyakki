@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use iyakki_web::SearchEngine;
 
-use super::AppCx;
+use super::chat_port::UserData;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BrowserConfig {
@@ -69,12 +69,12 @@ pub fn smooth_now() -> bool {
     SMOOTH.with(|s| s.get())
 }
 
-pub(super) fn who(cx: &AppCx) -> String {
-    cx.session.user.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect()
+pub(super) fn who(cx: &dyn UserData) -> String {
+    cx.acting_user().chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect()
 }
 
-pub(crate) fn path(cx: &AppCx) -> std::path::PathBuf {
-    cx.data_dir().join(format!("browser-{}.json", who(cx)))
+pub(crate) fn path(cx: &dyn UserData) -> std::path::PathBuf {
+    cx.data_root().join(format!("browser-{}.json", who(cx)))
 }
 
 /// The text of a person's browser file. A file that is not valid JSON is moved to `<file>.corrupt-<time>` first (at most three are
@@ -100,8 +100,8 @@ pub(super) fn write_checked(what: &str, p: &std::path::Path, text: &str) {
     }
 }
 
-fn old_sites_path(cx: &AppCx) -> std::path::PathBuf {
-    cx.data_dir().join(format!("browser-js-{}.json", who(cx)))
+fn old_sites_path(cx: &dyn UserData) -> std::path::PathBuf {
+    cx.data_root().join(format!("browser-js-{}.json", who(cx)))
 }
 
 fn clean_hosts<I: IntoIterator<Item = String>>(list: I) -> BTreeSet<String> {
@@ -116,7 +116,7 @@ pub fn cap_words(h: u32) -> String {
     if h == 0 { "Automatic (no limit)".into() } else { format!("up to {h} pixels tall") }
 }
 
-pub fn load(cx: &AppCx) -> BrowserConfig {
+pub fn load(cx: &dyn UserData) -> BrowserConfig {
     let mut c = BrowserConfig::default();
     if let Some(text) = read_checked("browser settings", &path(cx)) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -125,7 +125,7 @@ pub fn load(cx: &AppCx) -> BrowserConfig {
             c.styles = v["styles"].as_bool().unwrap_or(c.styles);
             c.cookies = v["cookies"].as_bool().unwrap_or(c.cookies);
             c.search = v["search"].as_str().and_then(SearchEngine::from_id).unwrap_or(c.search);
-            c.player = v["player"].as_str().filter(|p| cx.agent.voice_validate_command(p).is_ok()).unwrap_or("").to_string();
+            c.player = v["player"].as_str().filter(|p| cx.agent().voice_validate_command(p).is_ok()).unwrap_or("").to_string();
             c.cache = v["cache"].as_str().map(iyakki_web::net::CacheSize::from_id).unwrap_or(c.cache);
             c.smooth = v["smooth"].as_bool().unwrap_or(c.smooth);
             c.video_max_height = v["video_max_height"].as_u64().map(|h| h as u32).filter(|h| VIDEO_CAPS.contains(h)).unwrap_or(0);
@@ -144,7 +144,7 @@ pub fn load(cx: &AppCx) -> BrowserConfig {
     c
 }
 
-pub fn save(cx: &AppCx, c: &BrowserConfig) {
+pub fn save(cx: &dyn UserData, c: &BrowserConfig) {
     let p = path(cx);
     let json = serde_json::json!({ "js_all": c.js_all, "js_sites": c.js_sites, "images": c.images, "styles": c.styles, "cookies": c.cookies, "search": c.search.id(), "player": c.player, "cache": c.cache.id(), "smooth": c.smooth, "video_max_height": c.video_max_height, "codecs": c.codecs, "short_words": c.short_words });
     SMOOTH.with(|s| s.set(c.smooth));

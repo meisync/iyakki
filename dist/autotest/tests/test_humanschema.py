@@ -33,11 +33,16 @@ class Human(unittest.TestCase):
             self.assertEqual(json.load(open(p))["verdict"], "pass")
 
     def test_each_bad_field_is_refused(self):
-        for kw in ({"verdict": "ok"}, {"row": "x"}, {"clause": "a b"}, {"machine": ""}, {"image_commit": "zz"}, {"by": ""}, {"date": "yesterday"},
+        for kw in ({"verdict": "ok"}, {"row": "x"}, {"clause": "a b"}, {"machine": ""}, {"image_commit": "zz"}, {"by": ""}, {"by": "ana"}, {"by": "Owner"}, {"date": "yesterday"},
                    {"schema": 2}, {"photo": "/etc/passwd"}, {"photo": "../x.png"}, {"extra": 1}, {"note": "x" * 3000}):
             self.assertTrue(H.validate_human(good_human(**kw)), kw)
         with tempfile.TemporaryDirectory() as d, self.assertRaises(ValueError):
             H.write_human(d, good_human(verdict="maybe"))
+
+    def test_every_role_is_accepted_and_the_list_is_the_documented_one(self):
+        self.assertEqual(H.BY_ROLES, ("owner", "admin", "person"))
+        for role in H.BY_ROLES:
+            self.assertEqual(H.validate_human(good_human(by=role)), [], role)
 
     def test_cannot_test_is_a_valid_verdict_and_is_not_a_pass(self):
         self.assertEqual(H.validate_human(good_human(verdict="cannot-test")), [])

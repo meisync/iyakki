@@ -127,8 +127,8 @@ fn chat_rig(cx0: &AppCx) -> (AppCx, iyakki_shared::settingstools::SettingsTools)
     let dir = cx.data_dir().to_path_buf();
     let settings = Arc::new(std::sync::Mutex::new(iyakki_shared::settings::SettingsStore::open(&dir.join("settings.json")).unwrap()));
     let env = Env { dir: dir.clone(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(|_, _| {}) };
-    let mut entries = crate::apps::chat_browser_data::entries(&cx, &env);
-    entries.extend(crate::apps::chat_camvision::entries(&cx, &env));
+    let mut entries = crate::apps::chat_browser_data::entries(&crate::apps::chat_port::CxChat(&cx), &env);
+    entries.extend(crate::apps::chat_camvision::entries(&crate::apps::chat_port::CxChat(&cx), &env));
     let t = SettingsTools::new(Arc::new(NoTools), true, entries);
     (cx, t)
 }

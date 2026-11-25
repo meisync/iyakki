@@ -31,6 +31,7 @@ fn drag(log: &mut ScrollLog, x: f32, y: f32) {
 
 #[test]
 fn press_and_drag_select_text_across_lines_and_ctrl_c_copies_it() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     crate::ui::clipboard::clear();
     let (mut log, _g) = log_with(&["alpha beta", "gamma delta", "epsilon"]);
     let g = Gfx::new(400, 220);
@@ -56,6 +57,7 @@ fn press_and_drag_select_text_across_lines_and_ctrl_c_copies_it() {
 
 #[test]
 fn double_click_selects_a_word_and_triple_click_a_whole_entry_even_when_it_wraps() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     crate::ui::clipboard::clear();
     let mut g = Gfx::new(400, 220);
     let adv = g.text_width(14.0, "0", Face::Mono);
@@ -72,6 +74,7 @@ fn double_click_selects_a_word_and_triple_click_a_whole_entry_even_when_it_wraps
 
 #[test]
 fn a_selection_survives_scrolling_and_a_drag_past_the_edge_scrolls_the_log() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     crate::ui::clipboard::clear();
     let lines: Vec<String> = (0..60).map(|i| format!("line {i}")).collect();
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
@@ -101,6 +104,7 @@ fn a_selection_survives_scrolling_and_a_drag_past_the_edge_scrolls_the_log() {
 
 #[test]
 fn the_terminal_selects_all_with_an_empty_input_and_offers_copy_and_select_all_in_the_menu() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     use crate::apps::App;
     crate::ui::clipboard::clear();
     let (cx, _d) = cx_with_backend("clisel", iyakki_shared::chat::Unconfigured);

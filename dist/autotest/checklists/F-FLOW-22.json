@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-FLOW-22",
+ "feature_sha": "b2586fbcf986b211",
+ "title": "ask_form asks for a missing flow input with a form in the chat",
+ "clauses": [
+  {
+   "id": "ask-form",
+   "text": "ask_form asks for a missing flow input with a form in the chat",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant to build a flow step that needs an input it does not have.",
+     "expect": "A form with 1 to 6 fields opens over the conversation; the answers arrive as the next message and a secret field is masked."
+    }
+   ]
+  }
+ ]
+}

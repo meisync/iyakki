@@ -1,0 +1,18 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 6dc95311ece43c0a; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-CLUSTER-03
+targets: qemu
+profile: ram
+feature-sha: 6dc95311ece43c0a
+doc: Settings, Clusters is the page of the cluster switcher (read only)
+clause: 1 Settings, Clusters is a page of its own that shows the active cluster
+not-covered: the drop-down with the active cluster's name and a status dot
+not-covered: switching between clusters (a scratch guest has no cluster)
+key s
+wait app=Settings
+skip-unless-button Clusters
+click-sidebar Clusters
+wait app=Settings page="Clusters"
+shot page
+expect-not-blank
+expect-text Clusters
+expect-page Clusters

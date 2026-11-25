@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-12",
+  "feature_sha": "3b9617258d55e283",
+  "title": "screen capture by the assistant",
+  "clauses": [
+    {
+      "id": "asks-each-time",
+      "text": "The assistant asks before taking a picture of the screen, and the picture appears when allowed",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Ask the assistant to take a picture of my screen. Answer no first; ask again and answer yes.",
+          "expect": "No picture is taken on no. On yes the picture of the current IYAKKI screen appears in the chat. The question offers Allow for 5 minutes."
+        }
+      ]
+    }
+  ]
+}

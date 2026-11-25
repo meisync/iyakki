@@ -1,0 +1,18 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 8d6f19b79753d268; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-EXTA-10
+targets: qemu
+profile: ram
+feature-sha: 8d6f19b79753d268
+doc: Settings, Agents shows the one home for coding agents (read only)
+clause: 1 Settings, Agents is the one page that shows the coding agents, with Copilot among them
+not-covered: the Copilot token kept in the person's vault
+not-covered: the one home for every look at a coding agent beyond this page
+key s
+wait app=Settings
+skip-unless-button Agents
+click-sidebar Agents
+wait app=Settings page="Agents"
+shot page
+expect-not-blank
+expect-text Copilot
+expect-page Agents

@@ -147,6 +147,13 @@ impl iyakki_ui_sdk::terminal::TerminalPort for CoreTerminalPort {
         self.screen = Some(o.id);
         Ok(iyakki_ui_sdk::terminal::Question { call: o.approval.call, summary: o.approval.summary })
     }
+    fn screen_open_pod(&mut self, cols: usize, rows: usize, pod: &iyakki_ui_sdk::terminal::PodSession) -> Result<iyakki_ui_sdk::terminal::Question, iyakki_ui_sdk::terminal::TermError> {
+        self.screen_close();
+        let exec = iyakki_core_api::terminal::PtyExec { kubeconfig: pod.kubeconfig.clone(), context: pod.context.clone(), namespace: pod.namespace.clone(), pod: pod.pod.clone(), container: pod.container.clone(), shell: pod.shell.clone() };
+        let o = self.core.terminal().pty_open_exec(&self.user, self.app, cols, rows, &exec).map_err(term_err)?;
+        self.screen = Some(o.id);
+        Ok(iyakki_ui_sdk::terminal::Question { call: o.approval.call, summary: o.approval.summary })
+    }
     fn screen_decide(&mut self, call: &str, approve: bool) -> Result<(), iyakki_ui_sdk::terminal::TermError> {
         let id = self.screen_id()?;
         let r = self.core.terminal().pty_decide(&self.user, &id, call, approve).map_err(term_err);

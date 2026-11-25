@@ -4,6 +4,7 @@
 //! Everything that sends, installs or changes the cluster waits for a click on a review card, in every mode.
 
 use std::path::PathBuf;
+use crate::apps::ide_port::CxIde;
 
 use iyakki_shared::store_catalog::{HttpFetch};
 use iyakki_shared::store_catalog::{SourceCfg};
@@ -164,7 +165,7 @@ impl IdeApp {
             Ok((plan, msg)) => {
                 let w = &mut self.ws[i];
                 w.cfg = ProjectConfigExt::reload(&root, w.cfg.clone());
-                cx.audit.record(&cx.session.user, "ide.target", &format!("{} -> {}", plan.from.map_or("none", |f| f.id()), t.id()));
+                CxIde(cx).audit("ide.target", &format!("{} -> {}", plan.from.map_or("none", |f| f.id()), t.id()));
                 w.prefs.chat_open = true;
                 w.set_focus(super::ide_layout::Pane::Chat);
                 w.compact_pane = super::ide_layout::Pane::Chat;
@@ -189,14 +190,14 @@ impl IdeApp {
             self.notice = Some(("There is no tile app in this workspace yet: ask the assistant to build one, or use New app.".into(), false));
             return true;
         };
-        if !iyakki_shared::store_tilehub::allowed(&cx.session.policy) {
+        if !iyakki_shared::store_tilehub::allowed(CxIde(cx).policy()) {
             self.notice = Some(("Your account may not run tile apps.".into(), false));
             return true;
         }
-        cx.audit.record(&cx.session.user, "ide.tile.run", &dir.display().to_string());
+        CxIde(cx).audit("ide.tile.run", &dir.display().to_string());
         // beside the editor when there is room (F-IDE-25); full screen in a compact window or a narrow one
         if self.can_dock() {
-            match cx.storeapi().preview_tile(&cx.session.user, &dir) {
+            match CxIde(cx).storeapi().preview_tile(CxIde(cx).user(), &dir) {
                 Ok(e) => {
                     let app = super::tile::open_entry(e, cx);
                     self.preview_dir = Some(dir);
@@ -219,9 +220,9 @@ impl IdeApp {
             self.notice = Some(("There is no tile app in this workspace yet.".into(), false));
             return;
         };
-        match cx.storeapi().add_dev_tile(&cx.session.policy, &cx.session.user, &dir) {
+        match CxIde(cx).storeapi().add_dev_tile(CxIde(cx).policy(), CxIde(cx).user(), &dir) {
             Ok(e) => {
-                cx.audit.record(&cx.session.user, "ide.tile.add", &format!("{} (dev)", e.name));
+                CxIde(cx).audit("ide.tile.add", &format!("{} (dev)", e.name));
                 self.notice = Some((format!("“{}” is on your launcher under {} as an unsigned dev app. It reloads when you change the files.", e.title, e.group), true));
             }
             Err(m) => self.notice = Some((m, false)),
@@ -279,10 +280,10 @@ impl IdeApp {
         }
         let store = store_of(cx);
         let list = store.pf_stores();
-        let fetch = HttpFetch(cx.quick_upstream());
+        let fetch = HttpFetch(CxIde(cx).quick_upstream());
         // a private store deployed from this device and not yet added comes first: choosing it adds it (key checked) and publishes
-        let offer = store.pp_offer(&cx.session.user, &fetch);
-        let deployed = store.pp_deployed_all(&cx.session.user);
+        let offer = store.pp_offer(CxIde(cx).user(), &fetch);
+        let deployed = store.pp_deployed_all(CxIde(cx).user());
         let mut options: Vec<String> = offer.iter().map(|o| store.pp_option_label(o)).collect();
         options.extend(list.iter().map(|s| format!("{}{} · {}{}", if s.is_default { "★ " } else { "" }, s.name, s.address, if s.fingerprint.is_empty() { String::new() } else { format!(" · key {}", s.fingerprint.split(' ').take(2).collect::<Vec<_>>().join(" ")) })));
         options.push(match deployed.first() {
@@ -300,7 +301,7 @@ impl IdeApp {
         let ahead = remote.as_deref().is_none_or(|r| cx.agent.pkg_newer(&p.version, r));
         let b = |k| store.pf_bumped(&p.version, k).unwrap_or_default();
         let vopts = [format!("Keep {}", p.version), format!("Patch to {}", b(pf::Bump::Patch)), format!("Minor to {}", b(pf::Bump::Minor)), format!("Major to {}", b(pf::Bump::Major))];
-        let klist = store_of(cx).keys_list(&cx.session.user);
+        let klist = store_of(cx).keys_list(CxIde(cx).user());
         let mut kopts: Vec<String> = klist.iter().map(|k| format!("{} · {}", k.label, k.fingerprint.split(' ').take(2).collect::<Vec<_>>().join(" "))).collect();
         kopts.push(if klist.is_empty() { "Create my publisher key".into() } else { "Create another key".into() });
         let f = Form::new(&format!("Publish {} {}", p.name, p.version))
@@ -336,13 +337,13 @@ impl IdeApp {
         let raw = f.choice_idx(0);
         let add_sel = off == 1 && raw == 0;
         let sel = raw.saturating_sub(off);
-        let user = cx.session.user.clone();
+        let user = CxIde(cx).user().to_string();
         // what cannot work is said before anything is written (a version bump, a key)
         if add_sel {
             if let Some(Err(why)) = offer.as_ref().map(|o| o.probe.clone()) {
                 return fail(self, f, why);
             }
-            let actor = Actor::from_policy(&user, &cx.session.policy);
+            let actor = Actor::from_policy(&user, CxIde(cx).policy());
             if !(actor.allowed && actor.admin) {
                 return fail(self, f, store.pp_need_admin_text());
             }
@@ -363,7 +364,7 @@ impl IdeApp {
                 return fail(self, f, e);
             }
         } else if !line.trim().is_empty() {
-            let v = cx.storeapi().project_version(&dir);
+            let v = CxIde(cx).storeapi().project_version(&dir);
             let _ = store.pf_add_changelog(&dir, &v, &line, &iyakki_clock::today());
         }
         // the signing key: an existing one, or a new one made now (the private half stays in the person's folder of the data directory)
@@ -383,7 +384,7 @@ impl IdeApp {
             }
         };
         let Some(key) = key else { return fail(self, f, "The signing key could not be read.".into()) };
-        cx.audit.record(&user, "ide.publish.key", &format!("signing key {}", key.1));
+        CxIde(cx).audit("ide.publish.key", &format!("signing key {}", key.1));
         if add_sel {
             // the person looks at the key before anything is trusted: the card shows the fingerprint, and Approve adds and goes on
             let Some(Ok(p)) = offer.map(|o| o.probe) else { return fail(self, f, "The private store cannot be read now.".into()) };
@@ -436,7 +437,7 @@ impl IdeApp {
             match deploy_dev(cx, &t, &dir, &key.0) {
                 Ok((name, kind, said)) => {
                     self.publish = None;
-                    cx.audit.record(&user, "ide.deploy.dev", &said);
+                    CxIde(cx).audit("ide.deploy.dev", &said);
                     let c = Card::new("Installed in developer mode", self.accent())
                         .line(&said, Tone::Good)
                         .line("Labelled Developer (local): not reviewed, never updated from a store. Remove it from the STORE, or with iyakki dev uninstall.", Tone::Dim)
@@ -464,7 +465,7 @@ impl IdeApp {
     /// With the store and key chosen: ask for the publish token when there is none in the vault (a store deployed here has one), else the review.
     fn token_or_review(&mut self, cx: &AppCx) {
         let Some(src) = self.publish.as_ref().and_then(|p| p.src.clone()) else { return };
-        if !store_of(cx).pf_token_present(&cx.session.user, &src.id) {
+        if !store_of(cx).pf_token_present(CxIde(cx).user(), &src.id) {
             let f = Form::new(&format!("Publish token for {}", src.name)).secret("Token", "from the store's administrator; it goes into your vault and is never shown to the assistant");
             self.modal = Some(Modal::Form(FormKind::PublishToken, f));
             return;
@@ -476,12 +477,12 @@ impl IdeApp {
     fn add_store_then_publish(&mut self, cx: &AppCx) {
         let Some(p) = self.publish.as_ref().and_then(|s| s.adding.clone()) else { return };
         let store = store_of(cx);
-        let actor = Actor::from_policy(&cx.session.user, &cx.session.policy);
-        let fetch = HttpFetch(cx.quick_upstream());
+        let actor = Actor::from_policy(CxIde(cx).user(), CxIde(cx).policy());
+        let fetch = HttpFetch(CxIde(cx).quick_upstream());
         match store.pp_add_and_target(&actor, &fetch, &p, &p.name) {
             Ok(src) => {
-                cx.audit.record(&cx.session.user, "store.pin", &format!("{} {}", p.url, p.fingerprint));
-                cx.audit.record(&cx.session.user, "ide.publish.addstore", &format!("{} added from Publish and chosen as the target", src.name));
+                CxIde(cx).audit("store.pin", &format!("{} {}", p.url, p.fingerprint));
+                CxIde(cx).audit("ide.publish.addstore", &format!("{} added from Publish and chosen as the target", src.name));
                 if let Some(st) = self.publish.as_mut() {
                     st.src = Some(src);
                     st.unadded = None;
@@ -499,9 +500,9 @@ impl IdeApp {
 
     pub fn submit_publish_token(&mut self, f: Form, cx: &AppCx) {
         let Some(src) = self.publish.as_ref().and_then(|p| p.src.clone()) else { return };
-        match store_of(cx).pf_save_token(&cx.session.user, &src.id, &f.value(0)) {
+        match store_of(cx).pf_save_token(CxIde(cx).user(), &src.id, &f.value(0)) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "ide.publish.token", &format!("stored for {}", src.name));
+                CxIde(cx).audit("ide.publish.token", &format!("stored for {}", src.name));
                 self.show_publish_review(cx);
             }
             Err(e) => {
@@ -515,8 +516,8 @@ impl IdeApp {
     fn show_publish_review(&mut self, cx: &AppCx) {
         let Some(st) = self.publish.as_ref() else { return };
         let (Some(src), Some(key)) = (st.src.clone(), st.key.clone()) else { return };
-        let fetch = HttpFetch(cx.quick_upstream());
-        match store_of(cx).pf_card(&cx.session.user, &st.dir, &src, &key, &fetch) {
+        let fetch = HttpFetch(CxIde(cx).quick_upstream());
+        match store_of(cx).pf_card(CxIde(cx).user(), &st.dir, &src, &key, &fetch) {
             Ok((c, text)) => {
                 let mut card = Card::new(&format!("Publish {} {} to {}?", c.name, c.version, c.store), self.accent());
                 card = card.line(&format!("Server: {}", c.server), Tone::Bold);
@@ -583,7 +584,7 @@ impl IdeApp {
             (CardAction::PublishReview, Key::Char('k')) => {
                 // the key line goes on the clipboard; the card stays
                 if let Some(st) = &self.publish {
-                    if let Some(k) = st.key.as_ref().and_then(|k| store_of(cx).keys_list(&cx.session.user).into_iter().find(|i| i.public == iyakki_shared::pkg::public_key_hex(&k.0))) {
+                    if let Some(k) = st.key.as_ref().and_then(|k| store_of(cx).keys_list(CxIde(cx).user()).into_iter().find(|i| i.public == iyakki_shared::pkg::public_key_hex(&k.0))) {
                         crate::ui::clipboard::copy(&k.admin_line());
                         self.notice = Some(("Copied: send this line to the store's administrator for trusted-keys.txt.".into(), true));
                     }
@@ -600,10 +601,10 @@ impl IdeApp {
             (CardAction::PublishDone, _) => self.publish = None,
             (CardAction::InstallReview(r), Key::Char('y')) => {
                 let store = store_of(cx);
-                let actor = Actor::from_policy(&cx.session.user, &cx.session.policy);
+                let actor = Actor::from_policy(CxIde(cx).user(), CxIde(cx).policy());
                 match store.pf_install_reviewed(&actor, &r) {
                     Ok(said) => {
-                        cx.audit.record(&cx.session.user, "ide.publish.install", &said);
+                        CxIde(cx).audit("ide.publish.install", &said);
                         let (name, kind) = self.publish.as_ref().map(|p| (p.name.clone(), p.kind.clone())).unwrap_or_default();
                         self.publish = None;
                         self.notice = Some((said, true));
@@ -624,11 +625,11 @@ impl IdeApp {
     fn do_publish(&mut self, cx: &AppCx) {
         let Some(st) = self.publish.as_ref() else { return };
         let (Some(src), key, dir) = (st.src.clone(), st.key.clone(), st.dir.clone()) else { return };
-        let fetch = HttpFetch(cx.quick_upstream());
-        let user = cx.session.user.clone();
+        let fetch = HttpFetch(CxIde(cx).quick_upstream());
+        let user = CxIde(cx).user().to_string();
         match store_of(cx).pf_publish(&user, &dir, &src, key.as_ref(), &fetch, iyakki_clock::now_unix()) {
             Ok(r) => {
-                cx.audit.record(&user, "ide.publish", &format!("{} {} to {} ({})", r.name, r.version, src.name, r.trust));
+                CxIde(cx).audit("ide.publish", &format!("{} {} to {} ({})", r.name, r.version, src.name, r.trust));
                 let c = Card::new("Published", self.accent())
                     .line(&format!("{} {} is listed in {} as {} (catalog number {}).", r.name, r.version, src.name, r.trust, r.serial), Tone::Good)
                     .line("People who added that store see it after they check for updates.", Tone::Normal)
@@ -654,8 +655,8 @@ impl IdeApp {
         let Some(st) = self.publish.as_ref() else { return };
         let name = st.name.clone();
         let store = store_of(cx);
-        let actor = Actor::from_policy(&cx.session.user, &cx.session.policy);
-        let fetch = HttpFetch(cx.quick_upstream());
+        let actor = Actor::from_policy(CxIde(cx).user(), CxIde(cx).policy());
+        let fetch = HttpFetch(CxIde(cx).quick_upstream());
         match store.pf_review_published(&actor, &fetch, &name, actor.default_scope()) {
             Ok(r) => {
                 let mut c = Card::new(&format!("Install {name} from the store?"), self.accent());
@@ -730,10 +731,10 @@ impl DevTarget {
 /// paired devices.
 pub fn dev_targets(cx: &AppCx) -> Vec<DevTarget> {
     let mut v = Vec::new();
-    if crate::agent().host_probe().devmode_is_on(cx.data_dir()) && Actor::from_policy(&cx.session.user, &cx.session.policy).allowed {
+    if crate::agent().host_probe().devmode_is_on(CxIde(cx).data_dir()) && Actor::from_policy(CxIde(cx).user(), CxIde(cx).policy()).allowed {
         v.push(DevTarget::ThisDevice);
     }
-    v.extend(cx.services.dev_deploy().paired_devices(&cx.session.user).into_iter().map(DevTarget::Paired));
+    v.extend(cx.services.dev_deploy().paired_devices(CxIde(cx).user()).into_iter().map(DevTarget::Paired));
     v
 }
 
@@ -743,7 +744,7 @@ pub fn deploy_dev(cx: &AppCx, t: &DevTarget, dir: &std::path::Path, key: &keys::
         DevTarget::ThisDevice => None,
         DevTarget::Paired(d) => Some(d.name.as_str()),
     };
-    cx.services.dev_deploy().deploy(&cx.session.user, &cx.session.policy, paired, dir, key)
+    cx.services.dev_deploy().deploy(CxIde(cx).user(), CxIde(cx).policy(), paired, dir, key)
 }
 
 fn refs(v: &[String]) -> Vec<&str> {

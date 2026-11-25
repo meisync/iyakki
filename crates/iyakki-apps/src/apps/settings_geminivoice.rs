@@ -11,6 +11,7 @@
 
 use crate::safeclamp::SafeClamp;
 use super::*;
+use super::apps_port::SecretsPort;
 use iyakki_shared::gemini::{ConsentState};
 use iyakki_shared::gemini::{self};
 use iyakki_shared::geminilive::{LiveChange, VoiceOut};
@@ -50,21 +51,21 @@ const DAY_STEPS: [u32; 8] = [60, 300, 600, 1800, 3600, 7200, 18_000, 36_000];
 const SPOKEN_STEPS: [u32; 7] = [100, 200, 400, 600, 900, 1400, 2000];
 
 impl SettingsApp {
-    fn gv_cfg(cx: &AppCx) -> geminilive::LiveCfg {
-        gemini::load(cx.data_dir()).voice
+    fn gv_cfg(p: &dyn SecretsPort) -> geminilive::LiveCfg {
+        gemini::load(&p.data_dir()).voice
     }
 
     pub(super) fn gv_rows(&self) -> &'static [GvRow] {
         &ROWS
     }
 
-    fn gv_apply(&mut self, cx: &AppCx, ch: LiveChange, said: String) {
-        if !cx.session.policy.manage_settings {
+    fn gv_apply(&mut self, p: &dyn SecretsPort, ch: LiveChange, said: String) {
+        if !p.is_admin() {
             return self.fail("Only an administrator changes the Gemini voice assistant.");
         }
-        match geminilive::apply(cx.data_dir(), &ch) {
+        match geminilive::apply(&p.data_dir(), &ch) {
             Ok(_) => {
-                cx.audit.record(&cx.session.user, "settings.gemini_voice", &said);
+                p.audit("settings.gemini_voice", &said);
                 self.ok(said);
             }
             Err(e) => self.fail(e),
@@ -72,63 +73,63 @@ impl SettingsApp {
     }
 
     /// The card, "No" first: only a person on this page can answer it.
-    pub(super) fn gv_consent_form(cx: &AppCx) -> Form {
-        let tier = gemini::load(cx.data_dir()).tier;
+    pub(super) fn gv_consent_form(p: &dyn SecretsPort) -> Form {
+        let tier = gemini::load(&p.data_dir()).tier;
         Form::new("Send my microphone to Google? (EXPERIMENTAL)").with_note(&geminilive::consent_card_live(tier)).choice("Your answer (Left/Right to change, Enter to confirm)", &[NO, YES], 0)
     }
 
-    pub(super) fn gv_consent_key(&mut self, cx: &AppCx) {
-        match gemini::live_consent_state(cx.data_dir(), &cx.session.user) {
+    pub(super) fn gv_consent_key(&mut self, p: &dyn SecretsPort) {
+        match gemini::live_consent_state(&p.data_dir(), &p.user()) {
             ConsentState::Given { date } => {
                 self.modal = Some(Modal::Confirm(ConfirmKind::GeminiRevoke, format!("You said yes on {date}. Take your yes back? Nothing goes to Google after that: not the microphone, not speech-to-text, not the assistant's messages.")));
             }
-            _ => self.open_form(FormKind::GeminiLiveConsent, Self::gv_consent_form(cx)),
+            _ => self.open_form(FormKind::GeminiLiveConsent, Self::gv_consent_form(p)),
         }
     }
 
     /// The person answered the card (only a person at this page gets here; no assistant tool leads to it).
-    pub(super) fn gv_consent_submit(&mut self, cx: &AppCx, form: &Form) {
+    pub(super) fn gv_consent_submit(&mut self, p: &dyn SecretsPort, form: &Form) {
         if form.choice_idx(0) != 1 {
             return self.ok("Understood: your microphone stays on this computer.");
         }
-        match gemini::grant_live_on(cx.data_dir(), &cx.session.user, &iyakki_clock::today()) {
+        match gemini::grant_live_on(&p.data_dir(), &p.user(), &iyakki_clock::today()) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.gemini_voice", &format!("consent given for the microphone ({} tier)", gemini::load(cx.data_dir()).tier.label()));
+                p.audit("settings.gemini_voice", &format!("consent given for the microphone ({} tier)", gemini::load(&p.data_dir()).tier.label()));
                 self.ok("Your yes is kept. A session sends your microphone to Google only while it is open (red sign). You can take it back here at any time.");
             }
             Err(e) => self.fail(e),
         }
     }
 
-    fn gv_act(&mut self, cx: &AppCx, row: GvRow, dir: i32) {
-        let c = Self::gv_cfg(cx);
+    fn gv_act(&mut self, p: &dyn SecretsPort, row: GvRow, dir: i32) {
+        let c = Self::gv_cfg(p);
         let up = dir >= 0;
         match row {
             GvRow::Status => {}
             GvRow::Switch => {
                 let on = !c.enabled;
-                self.gv_apply(cx, LiveChange { enabled: Some(on), ..Default::default() }, if on { "The Gemini voice assistant (EXPERIMENTAL) is available. Nothing is sent until you say yes (key C) and start a session.".into() } else { "The Gemini voice assistant is off.".into() });
+                self.gv_apply(p, LiveChange { enabled: Some(on), ..Default::default() }, if on { "The Gemini voice assistant (EXPERIMENTAL) is available. Nothing is sent until you say yes (key C) and start a session.".into() } else { "The Gemini voice assistant is off.".into() });
             }
-            GvRow::Consent => self.gv_consent_key(cx),
+            GvRow::Consent => self.gv_consent_key(p),
             GvRow::VoiceOut => {
                 let next = if c.voice_out == VoiceOut::Local { VoiceOut::Gemini } else { VoiceOut::Local };
-                self.gv_apply(cx, LiveChange { voice_out: Some(next), ..Default::default() }, format!("Who speaks: {}.", next.label()));
+                self.gv_apply(p, LiveChange { voice_out: Some(next), ..Default::default() }, format!("Who speaks: {}.", next.label()));
             }
             GvRow::SessionLen => {
                 let v = step(c.max_session_secs, up, &LEN_STEPS);
-                self.gv_apply(cx, LiveChange { max_session_secs: Some(v), ..Default::default() }, format!("A session ends after {v} seconds."));
+                self.gv_apply(p, LiveChange { max_session_secs: Some(v), ..Default::default() }, format!("A session ends after {v} seconds."));
             }
             GvRow::Quiet => {
                 let v = step(c.idle_secs, up, &QUIET_STEPS);
-                self.gv_apply(cx, LiveChange { idle_secs: Some(v), ..Default::default() }, format!("The microphone closes after {v} seconds of quiet."));
+                self.gv_apply(p, LiveChange { idle_secs: Some(v), ..Default::default() }, format!("The microphone closes after {v} seconds of quiet."));
             }
             GvRow::DayCap => {
                 let v = step(c.day_cap_secs, up, &DAY_STEPS);
-                self.gv_apply(cx, LiveChange { day_cap_secs: Some(v), ..Default::default() }, format!("Your daily cap of microphone time sent to Google is {v} seconds."));
+                self.gv_apply(p, LiveChange { day_cap_secs: Some(v), ..Default::default() }, format!("Your daily cap of microphone time sent to Google is {v} seconds."));
             }
             GvRow::SpokenCap => {
                 let v = step(c.spoken_cap_chars, up, &SPOKEN_STEPS);
-                self.gv_apply(cx, LiveChange { spoken_cap_chars: Some(v), ..Default::default() }, format!("At most {v} characters of a reply are read aloud."));
+                self.gv_apply(p, LiveChange { spoken_cap_chars: Some(v), ..Default::default() }, format!("At most {v} characters of a reply are read aloud."));
             }
             GvRow::Language => {
                 // automatic first, then the list (English first); the ends do not wrap
@@ -136,28 +137,28 @@ impl SettingsApp {
                 let n = (at + if up { 1 } else { -1 }).clamp_safe(0, geminilive::LANGUAGES.len() as i32) as usize;
                 let code = if n == 0 { "auto" } else { geminilive::LANGUAGES[n - 1].0 };
                 let said = if n == 0 { "The language is automatic: Gemini decides from the speech.".to_string() } else { format!("The language is {}.", geminilive::language_name(code)) };
-                self.gv_apply(cx, LiveChange { language: Some(code.to_string()), ..Default::default() }, said);
+                self.gv_apply(p, LiveChange { language: Some(code.to_string()), ..Default::default() }, said);
             }
             GvRow::Shortcut => {
                 let i = KEYS.iter().position(|k| *k == c.key).map_or(0, |i| if up { (i + 1) % KEYS.len() } else { (i + KEYS.len() - 1) % KEYS.len() });
-                self.gv_apply(cx, LiveChange { key: Some(KEYS[i].to_string()), ..Default::default() }, format!("The start key is {}.", KEYS[i]));
+                self.gv_apply(p, LiveChange { key: Some(KEYS[i].to_string()), ..Default::default() }, format!("The start key is {}.", KEYS[i]));
             }
             GvRow::Wake => {
                 let on = !c.wake_handoff;
-                self.gv_apply(cx, LiveChange { wake_handoff: Some(on), ..Default::default() }, if on { "The wake phrase (experimental, opt-in) may open a Gemini voice session. Nothing is sent before the phrase is heard on this computer; the wake phrase itself must be on (Settings -> Voice).".into() } else { "The wake phrase no longer opens a Gemini voice session.".into() });
+                self.gv_apply(p, LiveChange { wake_handoff: Some(on), ..Default::default() }, if on { "The wake phrase (experimental, opt-in) may open a Gemini voice session. Nothing is sent before the phrase is heard on this computer; the wake phrase itself must be on (Settings -> Voice).".into() } else { "The wake phrase no longer opens a Gemini voice session.".into() });
             }
-            GvRow::Stop => self.gv_stop(cx),
+            GvRow::Stop => self.gv_stop(p),
         }
     }
 
     /// Stop now: every open session ends and the microphone closes. Free for everyone (a plain person may always stop their own microphone).
-    pub(super) fn gv_stop(&mut self, cx: &AppCx) {
+    pub(super) fn gv_stop(&mut self, p: &dyn SecretsPort) {
         let was = geminilive::request_stop();
-        cx.audit.record(&cx.session.user, "settings.gemini_voice", if was { "stopped an open session" } else { "stop asked, none was open" });
+        p.audit("settings.gemini_voice", if was { "stopped an open session" } else { "stop asked, none was open" });
         self.ok(if was { "The Gemini voice session is being closed: the microphone is shut and nothing more is sent." } else { "No Gemini voice session was open. Nothing is being sent." });
     }
 
-    pub(super) fn handle_geminivoice(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_geminivoice(&mut self, k: &Key, p: &dyn SecretsPort) {
         let len = ROWS.len();
         let sel = self.sel().min(len - 1);
         match k {
@@ -165,16 +166,16 @@ impl SettingsApp {
             Key::Down => self.move_sel(1, len),
             Key::Home => self.move_sel(-(len as i32), len),
             Key::End => self.move_sel(len as i32, len),
-            Key::Enter => self.gv_act(cx, ROWS[sel], 1),
-            Key::Char('+') | Key::Right => self.gv_act(cx, ROWS[sel], 1),
-            Key::Char('-') | Key::Left => self.gv_act(cx, ROWS[sel], -1),
-            Key::Char('C') | Key::Char('c') => self.gv_consent_key(cx),
-            Key::Char('v') => self.gv_act(cx, GvRow::VoiceOut, 1),
-            Key::Char('k') => self.gv_act(cx, GvRow::Shortcut, 1),
-            Key::Char('l') => self.gv_act(cx, GvRow::Language, 1),
-            Key::Char('w') => self.gv_act(cx, GvRow::Wake, 1),
-            Key::Char('o') => self.gv_act(cx, GvRow::Switch, 1),
-            Key::Char('x') | Key::Char('X') => self.gv_stop(cx),
+            Key::Enter => self.gv_act(p, ROWS[sel], 1),
+            Key::Char('+') | Key::Right => self.gv_act(p, ROWS[sel], 1),
+            Key::Char('-') | Key::Left => self.gv_act(p, ROWS[sel], -1),
+            Key::Char('C') | Key::Char('c') => self.gv_consent_key(p),
+            Key::Char('v') => self.gv_act(p, GvRow::VoiceOut, 1),
+            Key::Char('k') => self.gv_act(p, GvRow::Shortcut, 1),
+            Key::Char('l') => self.gv_act(p, GvRow::Language, 1),
+            Key::Char('w') => self.gv_act(p, GvRow::Wake, 1),
+            Key::Char('o') => self.gv_act(p, GvRow::Switch, 1),
+            Key::Char('x') | Key::Char('X') => self.gv_stop(p),
             _ => {}
         }
     }
@@ -195,17 +196,17 @@ impl SettingsApp {
         b
     }
 
-    pub(super) fn gv_row_text(&self, cx: &AppCx, row: GvRow) -> (String, String) {
-        let c = Self::gv_cfg(cx);
+    pub(super) fn gv_row_text(&self, p: &dyn SecretsPort, row: GvRow) -> (String, String) {
+        let c = Self::gv_cfg(p);
         let today = iyakki_clock::today();
-        let key_present = cx.secrets_api().has_ref(gemini::KEY_REF);
+        let key_present = p.secret_has_ref(gemini::KEY_REF);
         match row {
             GvRow::Status => {
                 let live = if geminilive::mic_open() { "A session is open: the microphone is open (red sign)." } else { "No session is open." };
                 ("Status (EXPERIMENTAL)".into(), format!("{live} {} {}", geminilive::latency_text(), geminilive::meter_text(&c, &today)))
             }
             GvRow::Switch => ("Gemini voice assistant (EXPERIMENTAL)".into(), if c.enabled { format!("On. Start it with {} or the microphone button. Key: {}.", c.key, if key_present { "stored" } else { "not stored (Settings -> Models, key g)" }) } else { "Off (the default). Nothing is sent to Google.".into() }),
-            GvRow::Consent => ("Your yes to sending the microphone".into(), match gemini::live_consent_state(cx.data_dir(), &cx.session.user) {
+            GvRow::Consent => ("Your yes to sending the microphone".into(), match gemini::live_consent_state(&p.data_dir(), &p.user()) {
                 ConsentState::Given { date } => format!("Yes, on {date}. The microphone goes to Google only while a session is open. Press C to take it back."),
                 ConsentState::OtherTier { date, .. } => format!("You said yes on {date} for the other tier: the question is asked again. Press C."),
                 ConsentState::Missing => "Not given: nothing is sent. Press C to read the card and answer it.".into(),
@@ -222,7 +223,7 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn render_geminivoice(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+    pub(super) fn render_geminivoice(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn SecretsPort) {
         let sel = self.sel().min(ROWS.len() - 1);
         let rh = 62.0 * s;
         let mut y = a.y;
@@ -236,7 +237,7 @@ impl SettingsApp {
             if i > first && y + rh > a.y + a.h {
                 break;
             }
-            let (title, detail) = self.gv_row_text(cx, *row);
+            let (title, detail) = self.gv_row_text(p, *row);
             let r = R::new(a.x, y, a.w, rh - 4.0 * s);
             crate::fx::row_at(g, r.x, r.y, r.w, r.h, 10.0 * s, i == sel, g.hovered(r), ACCENT);
             g.hit(r, Event::Row(i), &title);

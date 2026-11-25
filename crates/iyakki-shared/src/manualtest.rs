@@ -4,7 +4,12 @@
 //! the chat tools give it the person's home folder), so everything here is tested with [`MemStore`].
 //!
 //! Levels stay apart: unit tests, QEMU runs, machine runs and human evidence are four different things. This module only ever makes the
-//! human level: `human/<ROW>.<clause>.json` (the file name the runner's migrator reads), one file per row and clause.
+//! human level, in the runner's own schema and file names: `human/<ROW>.<clause>.<machine>.json` (docs/development/AUTOTEST.md, "Human
+//! checklist contract"; the same fields `dist/autotest/humanschema.py` validates, no field outside that list).
+//!
+//! Two sources of checklists are read side by side: the in-house `.chk` files (`dist/manual`) and the runner's checklist files
+//! (`dist/autotest/checklists/<ROW>.json`, [`RunnerParser`]). Answers from the first H1 layout (`iyakki.human-evidence.1`, no machine in the
+//! file name) are still read; only the runner's schema is written.
 //!
 //! The checklist format (one scenario per file, `dist/manual/*.chk`; lines `key: value`, `#` comments, a line that starts with two
 //! spaces continues the line before):
@@ -35,14 +40,18 @@ pub const EXPORT_DIR: &str = "manual-tests/export";
 pub const IMPORT_DIR: &str = "manual-tests/import";
 /// Where the image keeps the checklists (read-only data; the Doctor app asks its port for them).
 pub const BUNDLED_DIR: &str = "/usr/share/iyakki/manual";
+/// The runner's checklists (`dist/autotest/checklists/*.json`) and the screenshots they name, next to the `.chk` files.
+pub const BUNDLED_CHECKLIST_DIR: &str = "/usr/share/iyakki/manual/checklists";
 pub const HUMAN_DIR: &str = "manual-tests/human";
-pub const EVIDENCE_SCHEMA: &str = "iyakki.human-evidence.1";
+pub const EVIDENCE_SCHEMA: u32 = 1;
+/// The first layout of the tab, still read.
+pub const LEGACY_EVIDENCE_SCHEMA: &str = "iyakki.human-evidence.1";
 pub const BUNDLE_SCHEMA: &str = "iyakki.human-evidence-bundle.1";
 /// The biggest note kept with a verdict.
 pub const MAX_NOTE: usize = 600;
 
 /// What the lead assistant is told about the manual-test tools.
-pub const PROMPT_RULE: &str = "\nMANUAL TESTS: manual_tests_list and manual_test_open show the checklists a person goes through on this computer (sound by ear, touch, Bluetooth, camera, hotspot, ...). manual_test_record writes the person's own answer, and always asks: record ONLY what the person told you they saw or heard, never a guess, never a result you inferred from a log; a skip writes nothing. manual_tests_export writes all answers as one file for the team. These answers are the human level of evidence, separate from unit tests and machine runs.";
+pub const PROMPT_RULE: &str = "\nMANUAL TESTS: manual_tests_list and manual_test_open show the checklists a person goes through on this computer (sound by ear, touch, Bluetooth, camera, hotspot, ...). manual_test_record writes the person's own answer, and always asks: record ONLY what the person told you they saw or heard, never a guess, never a result you inferred from a log; a skip writes nothing. manual_tests_export writes all answers as one file for the team and manual_tests_import merges the files other machines sent (it asks too). manual_machine_set keeps which computer this is (only the kind the person names, it asks; answers are refused until it is set, never guess it from the hardware). These answers are the human level of evidence, separate from unit tests and machine runs.";
 
 // ------------------------------------------------------------------------------------------------ scenarios
 
@@ -53,6 +62,27 @@ pub struct Step {
     /// `ROW.clause` (that row only) or a bare clause (every row of the scenario). Empty: the step is guidance, no evidence is written.
     pub clause: String,
     pub shot: String,
+    /// What the runner already did for this step (runner checklists only; shown, never needed).
+    pub runner_did: String,
+}
+
+/// Where a checklist comes from; both are shown in the left navigation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Source {
+    /// `dist/manual/*.chk`.
+    #[default]
+    Chk,
+    /// `dist/autotest/checklists/<ROW>.json`, written by the autotest runner's side of the contract.
+    Runner,
+}
+
+impl Source {
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::Chk => "manual checklist",
+            Source::Runner => "autotest checklist",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -66,6 +96,9 @@ pub struct Scenario {
     pub needs_person: bool,
     pub prereq: Vec<String>,
     pub steps: Vec<Step>,
+    pub source: Source,
+    /// The hash of the Feature text the clauses were written for (runner checklists).
+    pub feature_sha: String,
 }
 
 impl Scenario {
@@ -99,9 +132,15 @@ pub trait ScenarioParser {
 /// The in-house `.chk` format.
 pub struct ChkParser;
 
+/// A row id: `F-AREA-12`, or a split sub-row `F-AREA-12a` (one lowercase letter after the number, as FEATURES.md names the parts of a split row;
+/// the same rule as `ROW_RE` in `dist/autotest/humanschema.py`).
 fn row_ok(r: &str) -> bool {
     let mut p = r.split('-');
-    p.next() == Some("F") && p.next().is_some_and(|a| !a.is_empty() && a.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())) && p.next().is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) && p.next().is_none()
+    let number_ok = |n: &str| {
+        let digits = n.strip_suffix(|c: char| c.is_ascii_lowercase()).unwrap_or(n);
+        !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+    };
+    p.next() == Some("F") && p.next().is_some_and(|a| !a.is_empty() && a.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())) && p.next().is_some_and(number_ok) && p.next().is_none()
 }
 
 fn shot_ok(p: &str) -> bool {
@@ -201,6 +240,140 @@ impl ScenarioParser for ChkParser {
         }
         Ok(out)
     }
+}
+
+/// The machine kinds a runner checklist may name (`dist/autotest/humanschema.py`, MACHINE_KINDS).
+pub const MACHINE_KINDS: [&str; 9] = ["any", "qemu", "mac-mini-2014", "mac-mini-2018", "macbook-pro", "lenovo", "hp", "t7-ssd", "other"];
+/// The longest text of a runner checklist field.
+pub const MAX_TEXT: usize = 2000;
+/// The area the runner's checklists are listed under in the left navigation.
+pub const RUNNER_AREA: &str = "Autotest checklists";
+
+/// The words of the hardware text that stand for a machine kind (the "this machine" filter looks for them); kinds that no hardware text can
+/// show (`t7-ssd`, `other`) apply everywhere.
+fn kind_words(kind: &str) -> Option<&'static str> {
+    match kind {
+        "qemu" => Some("qemu"),
+        "mac-mini-2014" | "mac-mini-2018" => Some("mac mini"),
+        "macbook-pro" => Some("macbook"),
+        "lenovo" => Some("lenovo"),
+        "hp" => Some("hp"),
+        _ => None,
+    }
+}
+
+/// The runner's checklist file, `dist/autotest/checklists/<ROW>.json` (contract: docs/development/AUTOTEST.md). One scenario per file, named by
+/// its row. Each clause becomes its steps; the LAST step of a clause is the one that answers it (the person gives one verdict per clause, which
+/// is what the runner's evidence file holds), the earlier ones are guidance.
+pub struct RunnerParser;
+
+fn plain_id(x: &str) -> bool {
+    !x.is_empty() && x.len() <= 48 && x.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) && x.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+pub fn rel_ok(p: &str) -> bool {
+    !p.is_empty() && shot_ok(p) && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
+}
+
+fn text_of(v: &serde_json::Value, key: &str, at: &str, required: bool) -> Result<String, String> {
+    match v.get(key) {
+        Some(serde_json::Value::String(t)) if t.chars().count() <= MAX_TEXT && (!required || !t.trim().is_empty()) => Ok(t.trim().to_string()),
+        Some(serde_json::Value::String(t)) if t.chars().count() > MAX_TEXT => Err(format!("{at}.{key} is longer than {MAX_TEXT}")),
+        None if !required => Ok(String::new()),
+        _ => Err(format!("{at}.{key} must be a non-empty text")),
+    }
+}
+
+impl ScenarioParser for RunnerParser {
+    fn parse(&self, name: &str, text: &str) -> Result<Vec<Scenario>, String> {
+        let bad = |m: String| format!("{name}: {m}");
+        let c: serde_json::Value = serde_json::from_str(text).map_err(|e| bad(format!("not JSON ({e})")))?;
+        if c.get("schema").and_then(|v| v.as_u64()) != Some(1) {
+            return Err(bad("schema must be 1".into()));
+        }
+        let row = c.get("row").and_then(|v| v.as_str()).unwrap_or("");
+        if !row_ok(row) {
+            return Err(bad("row is not a row id".into()));
+        }
+        let sha = c.get("feature_sha").and_then(|v| v.as_str()).unwrap_or("");
+        if sha.len() != 16 || !sha.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) {
+            return Err(bad("feature_sha must be the 16 hex digits of the Feature text hash".into()));
+        }
+        let title = text_of(&c, "title", "checklist", true).map_err(&bad)?;
+        let clauses = c.get("clauses").and_then(|v| v.as_array()).filter(|a| !a.is_empty()).ok_or_else(|| bad("clauses must be a non-empty list".into()))?;
+        let mut sc = Scenario { id: row.to_string(), title: format!("{row} {title}"), area: RUNNER_AREA.into(), rows: vec![row.to_string()], needs_person: true, source: Source::Runner, feature_sha: sha.to_string(), ..Scenario::default() };
+        let mut seen: Vec<String> = Vec::new();
+        let mut any = false;
+        let mut kinds: Vec<&'static str> = Vec::new();
+        for (i, cl) in clauses.iter().enumerate() {
+            let w = format!("clauses[{i}]");
+            let id = cl.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            if !plain_id(id) {
+                return Err(bad(format!("{w}.id is not a plain id")));
+            }
+            if seen.iter().any(|s| s == id) {
+                return Err(bad(format!("{w}.id `{id}` is used twice")));
+            }
+            seen.push(id.to_string());
+            let ctext = text_of(cl, "text", &w, true).map_err(&bad)?;
+            let ms: Vec<&str> = cl.get("machines").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|m| m.as_str()).collect()).unwrap_or_default();
+            let named = cl.get("machines").and_then(|v| v.as_array()).map_or(0, Vec::len);
+            if ms.is_empty() || ms.len() != named {
+                return Err(bad(format!("{w}.machines must be a non-empty list of {}", MACHINE_KINDS.join(", "))));
+            }
+            for m in &ms {
+                match MACHINE_KINDS.iter().find(|k| *k == m) {
+                    None => return Err(bad(format!("{w}.machines has `{m}`, which is not one of {}", MACHINE_KINDS.join(", ")))),
+                    Some(k) => match kind_words(k) {
+                        Some(words) => kinds.push(words),
+                        None => any = true,
+                    },
+                }
+            }
+            let steps = cl.get("steps").and_then(|v| v.as_array()).filter(|a| !a.is_empty()).ok_or_else(|| bad(format!("{w}.steps must be a non-empty list")))?;
+            sc.prereq.push(format!("Clause {id}: {ctext} (on: {})", ms.join(", ")));
+            for (j, st) in steps.iter().enumerate() {
+                let sw = format!("{w}.steps[{j}]");
+                let mut step = Step { text: text_of(st, "do", &sw, true).map_err(&bad)?, expect: text_of(st, "expect", &sw, true).map_err(&bad)?, runner_did: text_of(st, "runner_did", &sw, false).map_err(&bad)?, ..Step::default() };
+                if let Some(p) = st.get("screenshot") {
+                    match p.as_str() {
+                        Some(p) if rel_ok(p) => step.shot = p.to_string(),
+                        _ => return Err(bad(format!("{sw}.screenshot must be a relative path of plain characters, not {p}"))),
+                    }
+                }
+                if j + 1 == steps.len() {
+                    step.clause = id.to_string();
+                }
+                sc.steps.push(step);
+            }
+        }
+        if !any {
+            kinds.sort_unstable();
+            kinds.dedup();
+            sc.machines = kinds.into_iter().map(str::to_string).collect();
+        }
+        Ok(vec![sc])
+    }
+}
+
+/// Parse several sources at once, each with its own parser (the in-house `.chk` files and the runner's JSON checklists): one list, sorted by
+/// area then id, a duplicate id keeps the first (the `.chk` source is given first).
+pub fn load_sources(sources: &[(&dyn ScenarioParser, &[(String, String)])]) -> (Vec<Scenario>, Vec<String>) {
+    let mut all: Vec<Scenario> = Vec::new();
+    let mut bad = Vec::new();
+    for (parser, files) in sources {
+        let (v, b) = load_all(*parser, files);
+        bad.extend(b);
+        for s in v {
+            if all.iter().any(|a| a.id == s.id) {
+                bad.push(format!("the id {} is already used", s.id));
+            } else {
+                all.push(s);
+            }
+        }
+    }
+    all.sort_by(|a, b| (a.area.as_str(), a.id.as_str()).cmp(&(b.area.as_str(), b.id.as_str())));
+    (all, bad)
 }
 
 /// Parse every (file name, text) pair; a file that does not parse is named in the second list and skipped. Sorted by area, then id; a
@@ -303,30 +476,203 @@ pub fn scenario_state(verdicts: &[Option<Verdict>]) -> State {
 
 // ------------------------------------------------------------------------------------------------ evidence
 
-/// One person's answer for one clause of one row on one machine. The file name is `<ROW>.<clause>.json`.
+/// One person's answer for one clause of one row on one machine, in the runner's schema (`dist/autotest/humanschema.py`, validate_human):
+/// exactly these fields, none else (a file with another field is refused). The file name is `<ROW>.<clause>.<machine>.json`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Evidence {
-    pub schema: String,
+    pub schema: u32,
     pub row: String,
     pub clause: String,
-    pub scenario: String,
     pub machine: String,
+    /// The commit of the image under test: 7 to 40 hex digits.
     pub image_commit: String,
-    /// The signed-in person's account.
-    pub who: String,
-    /// `owner` for an administrator, `person` for anybody else (the runner's migrator accepts `owner`).
+    /// The role of the person answering: `owner`, `admin` or `person` ([`BY_ROLES`]); never a name.
     pub by: String,
     /// `pass`, `fail` or `cannot-test`; a skip is not evidence and is never written.
-    pub result: String,
-    /// The same word again, under the name the checklist uses.
     pub verdict: String,
-    pub note: String,
-    /// `YYYY-MM-DDTHH:MM:SS`, UTC.
+    /// `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`, UTC.
     pub date: String,
-    pub when: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    /// A photo, relative path (optional).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub photo: String,
 }
 
-/// A clause as used in a file name (the same cleaning the runner does).
+/// The roles `by` may hold. The enforcer (`dist/autotest/evidence.py`) accepts all three as a human pass and records the sampling rule
+/// (a tenth of the passes of team members is looked at again by the owner).
+pub const BY_ROLES: [&str; 3] = ["owner", "admin", "person"];
+
+/// The first layout of this tab (before the join with the runner): `iyakki.human-evidence.1`, no machine in the file name. Still read.
+#[derive(Deserialize)]
+struct LegacyEvidence {
+    schema: String,
+    row: String,
+    clause: String,
+    machine: String,
+    image_commit: String,
+    #[serde(default)]
+    by: String,
+    #[serde(default)]
+    result: String,
+    #[serde(default)]
+    verdict: String,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    date: String,
+}
+
+impl LegacyEvidence {
+    fn convert(self) -> Option<Evidence> {
+        if self.schema != LEGACY_EVIDENCE_SCHEMA {
+            return None;
+        }
+        let verdict = if self.verdict.is_empty() { self.result } else { self.verdict };
+        Some(Evidence {
+            schema: EVIDENCE_SCHEMA,
+            row: self.row,
+            clause: clean_clause(&self.clause),
+            machine: clean_machine(&self.machine),
+            image_commit: commit_of(&self.image_commit)?,
+            by: if BY_ROLES.contains(&self.by.as_str()) { self.by } else { "person".into() },
+            verdict,
+            date: self.date,
+            note: self.note,
+            photo: String::new(),
+        })
+    }
+}
+
+impl Evidence {
+    /// Unix seconds of the date (a date alone is midnight); 0 when it does not read.
+    pub fn when(&self) -> i64 {
+        parse_iso(&self.date).unwrap_or(0)
+    }
+
+    /// Why this record is not a valid human evidence file (the runner's rules), or Ok.
+    pub fn check(&self) -> Result<(), String> {
+        if self.schema != EVIDENCE_SCHEMA {
+            return Err(format!("schema must be {EVIDENCE_SCHEMA}"));
+        }
+        if !row_ok(&self.row) {
+            return Err("the row is not a feature row id".into());
+        }
+        if !plain_id(&self.clause) {
+            return Err("the clause is not a plain id".into());
+        }
+        if !plain_id(&self.machine) {
+            return Err("the machine is not a plain machine id".into());
+        }
+        if !(7..=40).contains(&self.image_commit.len()) || !self.image_commit.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) {
+            return Err("the image commit is not known (this computer did not start from a release image), so an answer would prove nothing about an image".into());
+        }
+        if !BY_ROLES.contains(&self.by.as_str()) {
+            return Err(format!("`by` must be one of {}", BY_ROLES.join(", ")));
+        }
+        if !matches!(self.verdict.as_str(), "pass" | "fail" | "cannot-test") {
+            return Err("the verdict must be pass, fail or cannot-test".into());
+        }
+        if parse_iso(&self.date).is_none() {
+            return Err("the date must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS".into());
+        }
+        if self.note.chars().count() > MAX_TEXT {
+            return Err("the note is too long".into());
+        }
+        if !self.photo.is_empty() && !rel_ok(&self.photo) {
+            return Err("the photo must be a relative path of plain characters".into());
+        }
+        Ok(())
+    }
+}
+
+/// The commit of an image from what the machine knows: a plain hex commit as it is, or the `g<hex>` part of a `git describe` text.
+pub fn commit_of(s: &str) -> Option<String> {
+    let s = s.trim().to_ascii_lowercase();
+    let hex = |t: &str| (7..=40).contains(&t.len()) && t.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'));
+    if hex(&s) {
+        return Some(s);
+    }
+    s.rsplit('-').find_map(|p| p.strip_prefix('g').filter(|h| hex(h)).map(str::to_string))
+}
+
+/// The machine id answers are filed under, from the hardware text: the runner's kind (`lenovo`, `mac-mini-2018`, ...) when the text names
+/// one, so the runner's `machine-<name>` evidence and the person's answers meet. `None` when the text names no kind.
+pub fn machine_kind(hardware: &str) -> Option<&'static str> {
+    let h = hardware.to_ascii_lowercase();
+    let has = |w: &str| h.contains(w);
+    if has("qemu") {
+        Some("qemu")
+    } else if has("macmini7") || (has("mac mini") && has("2014")) {
+        Some("mac-mini-2014")
+    } else if has("macmini8") || (has("mac mini") && has("2018")) {
+        Some("mac-mini-2018")
+    } else if has("macbookpro") || has("macbook pro") {
+        Some("macbook-pro")
+    } else if has("lenovo") || has("thinkpad") {
+        Some("lenovo")
+    } else if h.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w == "hp") || has("hewlett") {
+        Some("hp")
+    } else {
+        None
+    }
+}
+
+/// The machine id answers are filed under: the runner's kind when the hardware text names one, else the computer's own name.
+pub fn own_machine(hardware: &str, hostname: &str) -> String {
+    machine_kind(hardware).map(str::to_string).unwrap_or_else(|| if hostname.trim().is_empty() { "this-computer".into() } else { clean_machine(hostname) })
+}
+
+/// The kinds a person may pick for this computer, in the order the list shows them (every runner kind except `any` and `qemu`).
+pub const PICK_KINDS: [&str; 7] = ["mac-mini-2014", "mac-mini-2018", "macbook-pro", "lenovo", "hp", "t7-ssd", "other"];
+/// Where the person's pick is kept, inside the person's home folder (through the core's file handles).
+pub const MACHINE_FILE: &str = "manual-tests/machine.json";
+/// What the tab and the chat tool say when answers are asked for before the person has picked.
+pub const PICK_FIRST: &str = "Pick which computer this is first (Manual tests, key k): the answers are filed under that name and the program never guesses it.";
+
+/// The words the list shows for a pickable kind.
+pub fn kind_label(kind: &str) -> &'static str {
+    match kind {
+        "mac-mini-2014" => "Mac mini (2014)",
+        "mac-mini-2018" => "Mac mini (2018)",
+        "macbook-pro" => "MacBook Pro",
+        "lenovo" => "Lenovo",
+        "hp" => "HP",
+        "t7-ssd" => "T7 SSD (the stick, whatever it runs in)",
+        "other" => "Other computer",
+        _ => "",
+    }
+}
+
+/// The kind the person picked once, or `None` when nothing was picked yet or the file is not a valid pick. Nothing is ever derived from the
+/// hardware text here.
+pub fn picked_kind(store: &dyn EvidenceStore) -> Option<String> {
+    let text = store.read(MACHINE_FILE).ok().flatten()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let k = v.get("kind")?.as_str()?;
+    PICK_KINDS.contains(&k).then(|| k.to_string())
+}
+
+/// Keep the person's pick. Only a listed kind is written; the store (the core's file handles) applies its own scope, audit and approval.
+pub fn pick_kind(store: &dyn EvidenceStore, kind: &str) -> Result<(), String> {
+    if !PICK_KINDS.contains(&kind) {
+        return Err(format!("`{kind}` is not one of the computers on the list: {}", PICK_KINDS.join(", ")));
+    }
+    store.write(MACHINE_FILE, &serde_json::json!({ "schema": 1, "kind": kind }).to_string())
+}
+
+/// The folders of a stick that DISKS opened (under `media/`) where another machine's exported answers may lie: at most four sticks.
+pub fn stick_dirs(store: &dyn EvidenceStore) -> Vec<String> {
+    let mut extra = Vec::new();
+    for f in store.folders("media").unwrap_or_default().into_iter().take(4) {
+        extra.push(format!("media/{f}"));
+        extra.push(format!("media/{f}/{EXPORT_DIR}"));
+    }
+    extra
+}
+
+/// A clause as used in a file name (the same cleaning the runner does): plain characters, at most 48, starting with a letter or digit.
 pub fn clean_clause(c: &str) -> String {
     let mut out = String::new();
     let mut gap = false;
@@ -341,6 +687,7 @@ pub fn clean_clause(c: &str) -> String {
             gap = true;
         }
     }
+    let out: String = out.trim_start_matches(['-', '_']).chars().take(48).collect();
     if out.is_empty() { "clause".into() } else { out }
 }
 
@@ -348,14 +695,16 @@ pub fn clean_machine(m: &str) -> String {
     clean_clause(m).to_lowercase()
 }
 
-pub fn file_name(row: &str, clause: &str) -> String {
-    format!("{row}.{}.json", clean_clause(clause))
+/// `<ROW>.<clause>.<machine>.json`, the runner's file name.
+pub fn file_name(row: &str, clause: &str, machine: &str) -> String {
+    format!("{row}.{}.{}.json", clean_clause(clause), clean_machine(machine))
 }
 
 /// Where the evidence of `machine` is kept when this machine is `own`: the machine's own answers are in `human/`, answers imported from
-/// another machine in `human/<machine>/` (one file per row and clause would otherwise be replaced by the other machine's).
+/// another machine in `human/<machine>/` (the runner's enforcer reads both).
 pub fn evidence_path(ev: &Evidence, own: &str) -> String {
-    if clean_machine(&ev.machine) == clean_machine(own) { format!("{HUMAN_DIR}/{}", file_name(&ev.row, &ev.clause)) } else { format!("{HUMAN_DIR}/{}/{}", clean_machine(&ev.machine), file_name(&ev.row, &ev.clause)) }
+    let name = file_name(&ev.row, &ev.clause, &ev.machine);
+    if clean_machine(&ev.machine) == clean_machine(own) { format!("{HUMAN_DIR}/{name}") } else { format!("{HUMAN_DIR}/{}/{name}", clean_machine(&ev.machine)) }
 }
 
 /// Unix seconds as `YYYY-MM-DDTHH:MM:SS` (UTC).
@@ -375,6 +724,37 @@ pub fn iso(t: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
 }
 
+/// The inverse of [`iso`]: `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS` to unix seconds (UTC); `None` when it is not a real date.
+pub fn parse_iso(t: &str) -> Option<i64> {
+    let b = t.as_bytes();
+    let num = |r: std::ops::Range<usize>| -> Option<i64> { t.get(r).filter(|x| x.bytes().all(|c| c.is_ascii_digit())).and_then(|x| x.parse().ok()) };
+    let full = match b.len() {
+        10 => false,
+        19 => true,
+        _ => return None,
+    };
+    if b[4] != b'-' || b[7] != b'-' || (full && (b[10] != b'T' || b[13] != b':' || b[16] != b':')) {
+        return None;
+    }
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (hh, mm, ss) = if full { (num(11..13)?, num(14..16)?, num(17..19)?) } else { (0, 0, 0) };
+    if !(1..=12).contains(&m) || d < 1 || hh > 23 || mm > 59 || ss > 59 {
+        return None;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let dim = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][(m - 1) as usize];
+    if d > dim {
+        return None;
+    }
+    let y2 = if m <= 2 { y - 1 } else { y };
+    let era = y2.div_euclid(400);
+    let yoe = y2.rem_euclid(400);
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146_097 + doe - 719_468) * 86_400 + hh * 3600 + mm * 60 + ss)
+}
+
 /// Who is answering and on what.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Who {
@@ -384,25 +764,23 @@ pub struct Who {
     pub image_commit: String,
 }
 
-pub fn make_evidence(sc: &Scenario, row: &str, clause: &str, v: Verdict, note: &str, who: &Who, now: i64) -> Option<Evidence> {
+/// The answer of `who` for one clause (`None` for a skip). The result is checked when it is written ([`record`]).
+pub fn make_evidence(_sc: &Scenario, row: &str, clause: &str, v: Verdict, note: &str, who: &Who, now: i64) -> Option<Evidence> {
     if v == Verdict::Skip {
         return None;
     }
     let note: String = note.chars().filter(|c| !c.is_control()).take(MAX_NOTE).collect();
     Some(Evidence {
-        schema: EVIDENCE_SCHEMA.into(),
+        schema: EVIDENCE_SCHEMA,
         row: row.into(),
-        clause: clause.into(),
-        scenario: sc.id.clone(),
-        machine: who.machine.clone(),
-        image_commit: who.image_commit.clone(),
-        who: who.who.clone(),
-        by: if who.admin { "owner".into() } else { "person".into() },
-        result: v.word().into(),
+        clause: clean_clause(clause),
+        machine: clean_machine(&who.machine),
+        image_commit: commit_of(&who.image_commit).unwrap_or_default(),
+        by: if who.admin { "admin".into() } else { "person".into() },
         verdict: v.word().into(),
-        note,
         date: iso(now),
-        when: now,
+        note,
+        photo: String::new(),
     })
 }
 
@@ -453,15 +831,22 @@ impl EvidenceStore for MemStore {
 
 /// Write one answer. Returns the path written.
 pub fn record(store: &dyn EvidenceStore, ev: &Evidence, own: &str) -> Result<String, String> {
+    ev.check()?;
     let path = evidence_path(ev, own);
     let text = serde_json::to_string_pretty(ev).map_err(|e| e.to_string())?;
     store.write(&path, &text)?;
     Ok(path)
 }
 
-fn parse_evidence(text: &str) -> Option<Evidence> {
-    let e: Evidence = serde_json::from_str(text).ok()?;
-    (e.schema == EVIDENCE_SCHEMA && !e.row.is_empty() && Verdict::parse(&e.result).is_some_and(|v| v != Verdict::Skip)).then_some(e)
+/// One answer from its text: the runner's schema (unknown fields refused) or the first layout of this tab; a file that is neither, or whose
+/// fields break the runner's rules, is not evidence.
+pub fn parse_evidence(text: &str) -> Option<Evidence> {
+    let e = match serde_json::from_str::<Evidence>(text) {
+        Ok(e) => e,
+        Err(_) => serde_json::from_str::<LegacyEvidence>(text).ok()?.convert()?,
+    };
+    e.check().ok()?;
+    Some(e)
 }
 
 /// Every answer kept here: this machine's (`human/`) and the ones imported from others (`human/<machine>/`). Files that do not read are
@@ -489,7 +874,7 @@ pub fn step_verdicts(sc: &Scenario, evidence: &[Evidence], own: &str) -> Vec<Opt
             let t = sc.targets(i);
             let found: Vec<Verdict> = t
                 .iter()
-                .filter_map(|(r, c)| evidence.iter().find(|e| e.row == *r && clean_clause(&e.clause) == clean_clause(c) && clean_machine(&e.machine) == clean_machine(own)).and_then(|e| Verdict::parse(&e.result)))
+                .filter_map(|(r, c)| evidence.iter().find(|e| e.row == *r && clean_clause(&e.clause) == clean_clause(c) && clean_machine(&e.machine) == clean_machine(own)).and_then(|e| Verdict::parse(&e.verdict)))
                 .collect();
             if found.is_empty() || found.len() < t.len() {
                 return None;
@@ -552,7 +937,7 @@ pub fn import(store: &dyn EvidenceStore, own: &str, extra_dirs: &[String]) -> Im
                 let old = have.iter().find(same);
                 // the files written during this import count too
                 match old {
-                    Some(o) if o.when >= e.when => rep.kept += 1,
+                    Some(o) if o.when() >= e.when() => rep.kept += 1,
                     Some(_) => {
                         if record(store, &e, own).is_ok() {
                             rep.updated += 1;
@@ -637,7 +1022,7 @@ mod tests {
         let p = ChkParser;
         for (text, word) in [
             ("title: x\n", "start with"),
-            ("scenario: A\ntitle: t\narea: a\nrows: F-X-1x\nstep: s\nexpect: e\n", "not a feature row"),
+            ("scenario: A\ntitle: t\narea: a\nrows: F-X-1xy\nstep: s\nexpect: e\n", "not a feature row"),
             ("scenario: A\ntitle: t\narea: a\nrows: F-X-01\nstep: s\n", "no expected"),
             ("scenario: A\ntitle: t\narea: a\nrows: F-X-01\n", "no step"),
             ("scenario: A\ntitle: t\narea: a\nstep: s\nexpect: e\n", "no feature row"),
@@ -706,10 +1091,12 @@ mod tests {
 
     #[test]
     fn file_names_are_the_runners_names() {
-        assert_eq!(file_name("F-SND-01", "tone"), "F-SND-01.tone.json");
-        assert_eq!(file_name("F-SND-01", "left right!"), "F-SND-01.left-right.json");
-        assert_eq!(file_name("F-X-01", "///"), "F-X-01.clause.json");
+        assert_eq!(file_name("F-SND-01", "tone", "lenovo"), "F-SND-01.tone.lenovo.json");
+        assert_eq!(file_name("F-SND-01", "left right!", "Mac Mini 2018"), "F-SND-01.left-right.mac-mini-2018.json");
+        assert_eq!(file_name("F-X-01", "///", "m"), "F-X-01.clause.m.json");
         assert_eq!(clean_machine("Mac Mini #2"), "mac-mini-2");
+        assert_eq!(clean_clause("_-a"), "a");
+        assert_eq!(clean_clause(&"x".repeat(80)).len(), 48);
     }
 
     #[test]
@@ -717,17 +1104,20 @@ mod tests {
         let s = sc();
         let st = MemStore::default();
         let e = make_evidence(&s, "F-SND-01", "tone", Verdict::Pass, "clear\nnotes\u{7}", &who(true, "iyakki-aaa"), 1_800_000_000).unwrap();
-        assert_eq!((e.by.as_str(), e.result.as_str(), e.verdict.as_str(), e.note.as_str(), e.date.as_str()), ("owner", "pass", "pass", "clearnotes", "2027-01-15T08:00:00"));
+        assert_eq!((e.by.as_str(), e.verdict.as_str(), e.note.as_str(), e.date.as_str(), e.schema), ("admin", "pass", "clearnotes", "2027-01-15T08:00:00", 1));
         assert_eq!(make_evidence(&s, "F-SND-01", "tone", Verdict::Skip, "", &who(true, "m"), 1), None);
         assert_eq!(make_evidence(&s, "F-SND-01", "tone", Verdict::Fail, "", &who(false, "m"), 1).unwrap().by, "person");
         let p = record(&st, &e, "iyakki-aaa").unwrap();
-        assert_eq!(p, "manual-tests/human/F-SND-01.tone.json");
+        assert_eq!(p, "manual-tests/human/F-SND-01.tone.iyakki-aaa.json");
         let back = load_evidence(&st);
         assert_eq!(back, vec![e.clone()]);
         let text = st.read(&p).unwrap().unwrap();
-        for key in ["\"row\"", "\"clause\"", "\"machine\"", "\"by\"", "\"result\"", "\"note\"", "\"date\"", "\"who\"", "\"image_commit\"", "\"verdict\""] {
-            assert!(text.contains(key), "{key}");
-        }
+        // exactly the runner's fields: nothing else is written, no name of a person
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["by", "clause", "date", "image_commit", "machine", "note", "row", "schema", "verdict"]);
+        assert!(!text.contains("ana"));
         // a long note is cut
         let long = make_evidence(&s, "F-SND-01", "tone", Verdict::Fail, &"x".repeat(5000), &who(true, "m"), 1).unwrap();
         assert_eq!(long.note.len(), MAX_NOTE);
@@ -771,7 +1161,7 @@ mod tests {
         let r = import(&b, "m2", &[]);
         assert_eq!((r.files, r.added, r.updated, r.kept), (1, 2, 0, 0), "{r:?}");
         // the other machine's answers sit in their own folder, mine is untouched
-        assert!(b.names().contains(&"manual-tests/human/m1/F-SND-01.tone.json".to_string()));
+        assert!(b.names().contains(&"manual-tests/human/m1/F-SND-01.tone.m1.json".to_string()));
         let mine = load_evidence(&b).into_iter().find(|e| e.machine == "m2").unwrap();
         assert_eq!(mine.note, "mine");
         // importing again changes nothing
@@ -783,7 +1173,7 @@ mod tests {
         let r3 = import(&b, "m2", &[]);
         assert_eq!(r3.updated, 1, "{r3:?}");
         let ev = load_evidence(&b);
-        assert_eq!(ev.iter().find(|e| e.machine == "m1" && e.clause == "stop").unwrap().result, "pass");
+        assert_eq!(ev.iter().find(|e| e.machine == "m1" && e.clause == "stop").unwrap().verdict, "pass");
         // junk is named, not merged
         b.put("manual-tests/import/junk.json", "{not json");
         b.put("manual-tests/import/other.json", "{\"schema\":\"x\"}");
@@ -820,5 +1210,213 @@ mod tests {
         assert_eq!(Verdict::parse("Cannot test"), Some(Verdict::CannotTest));
         assert_eq!(Verdict::parse("PASS"), Some(Verdict::Pass));
         assert_eq!(Verdict::parse("maybe"), None);
+    }
+
+    const RUNNER: &str = r#"{"schema":1,"row":"F-X-1","feature_sha":"0123456789abcdef","title":"the tone plays",
+      "clauses":[{"id":"ears-1","text":"two notes, left then right","machines":["lenovo","mac-mini-2018"],
+        "steps":[{"do":"open Sound","expect":"the card shows","runner_did":"booted the image"},{"do":"press Play","expect":"two notes","screenshot":"shots/tone.png"}]},
+        {"id":"stop","text":"stop is immediate","machines":["lenovo"],"steps":[{"do":"press Stop","expect":"silence"}]}]}"#;
+
+    fn runner() -> Scenario {
+        RunnerParser.parse("F-X-1.json", RUNNER).unwrap().remove(0)
+    }
+
+    #[test]
+    fn a_runner_checklist_becomes_one_scenario_answered_per_clause() {
+        let s = runner();
+        assert_eq!((s.id.as_str(), s.source, s.area.as_str(), s.feature_sha.as_str()), ("F-X-1", Source::Runner, RUNNER_AREA, "0123456789abcdef"));
+        assert_eq!(s.title, "F-X-1 the tone plays");
+        assert_eq!(s.rows, ["F-X-1"]);
+        assert_eq!(s.machines, ["lenovo", "mac mini"]);
+        assert_eq!(s.steps.len(), 3);
+        // only the last step of a clause answers it; the first is guidance
+        assert!(s.targets(0).is_empty());
+        assert_eq!(s.targets(1), vec![("F-X-1".to_string(), "ears-1".to_string())]);
+        assert_eq!(s.targets(2), vec![("F-X-1".to_string(), "stop".to_string())]);
+        assert_eq!((s.steps[0].runner_did.as_str(), s.steps[1].shot.as_str()), ("booted the image", "shots/tone.png"));
+        assert!(s.prereq[0].starts_with("Clause ears-1: two notes") && s.prereq.len() == 2);
+        assert!(s.applies_to("LENOVO ThinkPad") && !s.applies_to("HP Pavilion"));
+        // a clause for `any` makes the whole checklist apply everywhere
+        let any = RunnerParser.parse("x", &RUNNER.replace("[\"lenovo\"]", "[\"any\"]")).unwrap().remove(0);
+        assert!(any.machines.is_empty());
+    }
+
+    #[test]
+    fn a_bad_runner_checklist_is_refused_for_the_runners_reasons() {
+        for (from, to, word) in [
+            ("\"schema\":1", "\"schema\":2", "schema"),
+            ("F-X-1", "X-1", "row"),
+            ("0123456789abcdef", "xyz", "feature_sha"),
+            ("\"id\":\"stop\"", "\"id\":\"ears-1\"", "used twice"),
+            ("\"id\":\"stop\"", "\"id\":\"a b\"", "plain id"),
+            ("\"machines\":[\"lenovo\"]", "\"machines\":[\"toaster\"]", "not one of"),
+            ("\"machines\":[\"lenovo\"]", "\"machines\":[]", "machines"),
+            ("\"screenshot\":\"shots/tone.png\"", "\"screenshot\":\"../tone.png\"", "screenshot"),
+            ("\"expect\":\"silence\"", "\"expect\":\" \"", "expect"),
+            ("\"steps\":[{\"do\":\"press Stop\"", "\"steps\":[],\"x\":[{\"do\":\"press Stop\"", "steps"),
+            ("\"title\":\"the tone plays\"", "\"title\":\"\"", "title"),
+        ] {
+            let e = RunnerParser.parse("c.json", &RUNNER.replace(from, to)).unwrap_err();
+            assert!(e.contains(word) && e.starts_with("c.json:"), "{from} -> {e}");
+        }
+        assert!(RunnerParser.parse("c.json", "{not json").unwrap_err().contains("not JSON"));
+        assert!(RunnerParser.parse("c.json", "{\"schema\":1,\"row\":\"F-X-1\",\"feature_sha\":\"0123456789abcdef\",\"title\":\"t\",\"clauses\":[]}").unwrap_err().contains("clauses"));
+    }
+
+    #[test]
+    fn the_checklists_of_the_repository_parse() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist/autotest/checklists");
+        let files: Vec<(String, String)> = std::fs::read_dir(&dir).into_iter().flatten().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".json")).filter_map(|e| std::fs::read_to_string(e.path()).ok().map(|t| (e.file_name().to_string_lossy().into_owned(), t))).collect();
+        let (all, bad) = load_all(&RunnerParser, &files);
+        assert!(bad.is_empty(), "{bad:?}");
+        assert_eq!(all.len(), files.len());
+    }
+
+    #[test]
+    fn a_row_id_may_name_a_split_sub_row_with_one_lowercase_letter() {
+        for ok in ["F-SND-15", "F-SND-15a", "F-GEMVOICE-13b", "F-A11Y-02a", "F-X-1"] {
+            assert!(row_ok(ok), "{ok}");
+        }
+        for bad in ["F-SND-15A", "F-SND-15ab", "F-SND-a", "F-SND-", "F-snd-15", "F-SND-15a-1", "G-SND-15", "F-SND", "", "F-SND-1_5"] {
+            assert!(!row_ok(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn both_sources_are_listed_together_each_with_its_own_parser() {
+        let chk = vec![("a.chk".to_string(), SAMPLE.to_string())];
+        let json = vec![("F-X-1.json".to_string(), RUNNER.to_string()), ("bad.json".to_string(), "x".to_string())];
+        let (all, bad) = load_sources(&[(&ChkParser, &chk), (&RunnerParser, &json)]);
+        assert_eq!(all.iter().map(|s| (s.id.as_str(), s.source)).collect::<Vec<_>>(), [("F-X-1", Source::Runner), ("SND-01", Source::Chk)]);
+        assert_eq!(all[0].area, RUNNER_AREA);
+        assert_eq!(bad.len(), 1);
+        // the same id in both sources keeps the first
+        let clash = vec![("x.json".to_string(), RUNNER.to_string())];
+        let chk2 = vec![("a.chk".to_string(), "scenario: F-X-1\ntitle: t\narea: a\nrows: F-X-01\nstep: s\nexpect: e\n".to_string())];
+        let (all, bad) = load_sources(&[(&ChkParser, &chk2), (&RunnerParser, &clash)]);
+        assert_eq!((all.len(), all[0].source, bad.len()), (1, Source::Chk, 1));
+    }
+
+    #[test]
+    fn an_answer_on_a_runner_checklist_is_the_runners_file() {
+        let s = runner();
+        let st = MemStore::default();
+        let w = Who { who: "ana".into(), admin: false, machine: "lenovo".into(), image_commit: "v0.1.0-alpha.8-3-gabc1234f".into() };
+        let e = make_evidence(&s, "F-X-1", "ears-1", Verdict::Pass, "", &w, 1_800_000_000).unwrap();
+        assert_eq!((e.by.as_str(), e.image_commit.as_str(), e.machine.as_str()), ("person", "abc1234f", "lenovo"));
+        assert_eq!(record(&st, &e, "lenovo").unwrap(), "manual-tests/human/F-X-1.ears-1.lenovo.json");
+        assert!(!st.read("manual-tests/human/F-X-1.ears-1.lenovo.json").unwrap().unwrap().contains("note"));
+        assert_eq!(step_verdicts(&s, &load_evidence(&st), "lenovo"), vec![None, Some(Verdict::Pass), None]);
+        // a machine that cannot name its commit writes nothing
+        let w2 = Who { image_commit: "unknown".into(), ..w };
+        let e2 = make_evidence(&s, "F-X-1", "stop", Verdict::Pass, "", &w2, 1).unwrap();
+        assert!(record(&st, &e2, "lenovo").unwrap_err().contains("commit"));
+        assert_eq!(st.names().len(), 1);
+    }
+
+    #[test]
+    fn unknown_fields_and_bad_values_make_a_file_no_evidence() {
+        let ok = r#"{"schema":1,"row":"F-X-1","clause":"c","machine":"lenovo","image_commit":"abc1234","by":"owner","verdict":"pass","date":"2026-11-22"}"#;
+        assert!(parse_evidence(ok).is_some());
+        for (from, to) in [
+            ("\"by\":\"owner\"", "\"by\":\"owner\",\"who\":\"ana\""),
+            ("\"by\":\"owner\"", "\"by\":\"ana\""),
+            ("\"verdict\":\"pass\"", "\"verdict\":\"skip\""),
+            ("abc1234", "xyz"),
+            ("2026-11-22", "2026-02-30"),
+            ("\"clause\":\"c\"", "\"clause\":\"a b\""),
+            ("\"schema\":1", "\"schema\":2"),
+        ] {
+            assert!(parse_evidence(&ok.replace(from, to)).is_none(), "{to}");
+        }
+        for role in BY_ROLES {
+            assert!(parse_evidence(&ok.replace("owner", role)).is_some(), "{role}");
+        }
+        assert!(parse_evidence(&ok.replace("\"date\"", "\"photo\":\"p/x.jpg\",\"note\":\"n\",\"date\"")).is_some());
+        assert!(parse_evidence(&ok.replace("\"date\"", "\"photo\":\"/etc/x\",\"date\"")).is_none());
+    }
+
+    #[test]
+    fn the_first_layout_is_still_read_and_written_in_the_new_one() {
+        let old = r#"{"schema":"iyakki.human-evidence.1","row":"F-SND-01","clause":"tone","scenario":"SND-01","machine":"iyakki-aaa","image_commit":"v0.1.0-alpha.7-12-gabc1234","who":"ana","by":"owner","result":"pass","verdict":"pass","note":"clear","date":"2027-01-15T08:00:00","when":1800000000}"#;
+        let st = MemStore::default();
+        st.put("manual-tests/human/F-SND-01.tone.json", old);
+        let ev = load_evidence(&st);
+        assert_eq!(ev.len(), 1);
+        assert_eq!((ev[0].schema, ev[0].image_commit.as_str(), ev[0].by.as_str(), ev[0].verdict.as_str(), ev[0].when()), (1, "abc1234", "owner", "pass", 1_800_000_000));
+        // a bundle of the first layout imports into the new file names
+        st.put("manual-tests/import/b.json", &format!("{{\"schema\":\"{BUNDLE_SCHEMA}\",\"items\":[{}]}}", old.replace("iyakki-aaa", "other").replace("F-SND-01", "F-SND-02")));
+        let r = import(&st, "iyakki-aaa", &[]);
+        assert_eq!(r.added, 1, "{r:?}");
+        assert!(st.names().contains(&"manual-tests/human/other/F-SND-02.tone.other.json".to_string()));
+    }
+
+    #[test]
+    fn dates_round_trip_and_bad_dates_are_refused() {
+        for t in [0, 951_782_400, 1_800_000_000, -1, 4_102_444_799] {
+            assert_eq!(parse_iso(&iso(t)), Some(t));
+        }
+        assert_eq!(parse_iso("2027-01-15"), Some(1_799_971_200 + 0));
+        for bad in ["", "2026-13-01", "2026-00-10", "2026-02-29", "2026-1-1", "2026-11-22T25:00:00", "2026-11-22 10:00:00", "20261122", "2026-11-22T10:00"] {
+            assert_eq!(parse_iso(bad), None, "{bad}");
+        }
+        assert_eq!(parse_iso("2028-02-29").is_some(), true);
+    }
+
+    #[test]
+    fn commits_and_machine_kinds_come_from_what_the_machine_knows() {
+        assert_eq!(commit_of("ABC1234"), Some("abc1234".into()));
+        assert_eq!(commit_of("v0.1.0-alpha.8-12-gdeadbeef"), Some("deadbeef".into()));
+        assert_eq!(commit_of("v0.1.0-alpha.8"), None);
+        assert_eq!(commit_of(""), None);
+        assert_eq!(commit_of("abc"), None);
+        assert_eq!(machine_kind("Apple Macmini8,1"), Some("mac-mini-2018"));
+        assert_eq!(machine_kind("Apple Mac mini (Late 2014)"), Some("mac-mini-2014"));
+        assert_eq!(machine_kind("MacBookPro14,1"), Some("macbook-pro"));
+        assert_eq!(machine_kind("LENOVO 20XW"), Some("lenovo"));
+        assert_eq!(machine_kind("HP Pavilion Laptop 16"), Some("hp"));
+        assert_eq!(machine_kind("QEMU Standard PC"), Some("qemu"));
+        assert_eq!(machine_kind("chipset only"), None);
+        assert_eq!(own_machine("LENOVO 20XW", "iyakki-aaa"), "lenovo");
+        assert_eq!(own_machine("unknown box", "Iyakki AAA"), "iyakki-aaa");
+        assert_eq!(own_machine("", " "), "this-computer");
+    }
+
+    #[test]
+    fn sticks_are_looked_for_under_media() {
+        let st = MemStore::default();
+        for n in ["media/a/x.txt", "media/b/y.txt", "media/c/z.txt", "media/d/z.txt", "media/e/z.txt"] {
+            st.put(n, "");
+        }
+        let d = stick_dirs(&st);
+        assert_eq!(d.len(), 8);
+        assert_eq!(d[0], "media/a");
+        assert_eq!(d[1], "media/a/manual-tests/export");
+    }
+
+    #[test]
+    fn the_person_picks_the_machine_once_and_nothing_is_guessed() {
+        let st = MemStore::default();
+        assert_eq!(picked_kind(&st), None, "nothing picked: no kind, whatever the hardware says");
+        assert!(pick_kind(&st, "qemu").is_err() && pick_kind(&st, "any").is_err() && pick_kind(&st, "Lenovo").is_err(), "only the seven listed kinds");
+        assert_eq!(st.names(), Vec::<String>::new(), "a refused pick writes nothing");
+        for k in PICK_KINDS {
+            pick_kind(&st, k).unwrap();
+            assert_eq!(picked_kind(&st).as_deref(), Some(k));
+            assert!(!kind_label(k).is_empty());
+        }
+        assert!(PICK_KINDS.iter().all(|k| MACHINE_KINDS.contains(k)), "every pickable kind is a kind the runner's checklists know");
+        st.put(MACHINE_FILE, "not json");
+        assert_eq!(picked_kind(&st), None);
+        st.put(MACHINE_FILE, r#"{"schema":1,"kind":"toaster"}"#);
+        assert_eq!(picked_kind(&st), None, "a file edited by hand to an unknown kind is not a pick");
+    }
+
+    #[test]
+    fn the_pick_names_the_evidence_file() {
+        let st = MemStore::default();
+        pick_kind(&st, "mac-mini-2018").unwrap();
+        let who = Who { who: "ana".into(), admin: false, machine: picked_kind(&st).unwrap(), image_commit: String::new() };
+        assert_eq!(evidence_path(&make_evidence(&Scenario::default(), "F-SND-01", "tone", Verdict::Pass, "", &who, 1_800_000_000).unwrap(), &who.machine), "manual-tests/human/F-SND-01.tone.mac-mini-2018.json");
     }
 }

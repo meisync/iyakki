@@ -68,8 +68,7 @@ pub fn put_theme(data: &Path, user: Option<&str>, member_id: &str, member: &Valu
         Ok(_) => return Err(format!("a theme file bundle-{member_id}.theme from another bundle is already there")),
         Err(_) => {}
     }
-    std::fs::create_dir_all(p.parent().unwrap_or(data)).map_err(|e| e.to_string())?;
-    std::fs::write(&p, text).map_err(|e| e.to_string())
+    iyakki_schema::write_atomic(&p, text.as_bytes(), 0o644)
 }
 
 /// Take the theme member's file away, only when it is still what the bundle wrote.
@@ -193,8 +192,7 @@ pub fn put_data_member(data: &Path, kind: &str, user: Option<&str>, member_id: &
         Ok(_) => return Err(format!("a {kind} member {member_id} from another bundle is already there")),
         Err(_) => {}
     }
-    std::fs::create_dir_all(p.parent().unwrap_or(data)).map_err(|e| e.to_string())?;
-    std::fs::write(&p, text).map_err(|e| e.to_string())
+    iyakki_schema::write_atomic(&p, text.as_bytes(), 0o644)
 }
 
 /// Take the copy away, only when it is still what the bundle wrote.
@@ -270,8 +268,7 @@ pub fn choose_agent_preset(data: &Path, user: &str, name: Option<&str>) -> Resul
             if !bundled_agent_presets(data, user).iter().any(|p| p.name == n) {
                 return Err(format!("there is no assistant preset called `{n}` among the installed bundles"));
             }
-            std::fs::create_dir_all(file.parent().unwrap_or(data)).map_err(|e| e.to_string())?;
-            std::fs::write(&file, n).map_err(|e| e.to_string())
+            iyakki_schema::write_atomic(&file, n.as_bytes(), 0o600)
         }
     }
 }

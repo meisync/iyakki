@@ -10,6 +10,7 @@ use iyakki_agent_api::SharedFolderMgr;
 use iyakki_shared::sharedfolder as sf;
 
 use super::*;
+use crate::apps::settings::network_port::NetworkSettingsPort;
 
 /// What the page keeps between frames.
 #[derive(Default)]
@@ -153,21 +154,18 @@ pub(super) fn who(i: &ShareInfo) -> String {
 }
 
 impl SettingsApp {
-    pub(super) fn shares(cx: &AppCx) -> Arc<dyn SharedFolderMgr> {
-        let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-        let a2 = user.clone();
-        let admin = cx.session.role == iyakki_sec::policy::Role::Admin;
-        crate::agent().host_probe().shared_folders(cx.data_dir(), &user, admin, &cx.session.policy, Arc::new(move |e, d| audit.record(&a2, e, d)))
+    pub(super) fn shares(p: &dyn NetworkSettingsPort) -> Arc<dyn SharedFolderMgr> {
+        p.shared_folders()
     }
 
-    pub(super) fn shares_rows(cx: &AppCx) -> Vec<ShareInfo> {
-        let m = Self::shares(cx);
+    pub(super) fn shares_rows(p: &dyn NetworkSettingsPort) -> Vec<ShareInfo> {
+        let m = Self::shares(p);
         m.tick();
         m.list()
     }
 
-    pub(super) fn shares_len(cx: &AppCx) -> usize {
-        Self::shares_rows(cx).len()
+    pub(super) fn shares_len(p: &dyn NetworkSettingsPort) -> usize {
+        Self::shares_rows(p).len()
     }
 
     pub(super) fn shares_buttons(&self) -> Vec<Btn> {
@@ -180,15 +178,15 @@ impl SettingsApp {
         self.open_form(FormKind::Share(ShareForm::New), share_form(&d, false));
     }
 
-    pub(super) fn handle_shares(&mut self, k: &Key, cx: &AppCx) {
-        let rows = Self::shares_rows(cx);
+    pub(super) fn handle_shares(&mut self, k: &Key, p: &dyn NetworkSettingsPort) {
+        let rows = Self::shares_rows(p);
         let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
-        let m = Self::shares(cx);
+        let m = Self::shares(p);
         match k {
             Key::Up => self.move_sel(-1, rows.len()),
             Key::Down => self.move_sel(1, rows.len()),
             Key::Char('n') => {
-                let home = cx.core.file_scope().home_root(&cx.session.user, cx.data_dir());
+                let home = p.home_root();
                 self.shares_new_for(&home.to_string_lossy());
             }
             Key::Char('s') | Key::Enter => match rows.get(sel) {
@@ -201,7 +199,7 @@ impl SettingsApp {
                         self.ok(format!("{} is shared now.", i.cfg.name));
                         // other devices reach a share only if the firewall lets them in: ask, with the consequences in plain words, instead of leaving
                         // the person to find Settings -> Firewall (the change is kept at once: it only opens)
-                        let blocked = i.cfg.access != Access::Local && cx.session.policy.manage_settings && self.fw.writable && super::firewall_page::share_blocked_note(i.cfg.port).is_some();
+                        let blocked = i.cfg.access != Access::Local && p.is_admin() && self.fw.writable && super::firewall_page::share_blocked_note(i.cfg.port).is_some();
                         if blocked {
                             self.modal = Some(Modal::Confirm(
                                 ConfirmKind::ShareOpenFirewall,
@@ -242,10 +240,10 @@ impl SettingsApp {
                 }
                 None => self.fail("Choose a share first (Up/Down)."),
             },
-            Key::Char('r') => self.shares_package_drop(cx),
-            Key::Char('f') => self.fw_open_shares(cx),
-            Key::Char('m') => self.media_server_toggle(cx),
-            Key::Char(c @ ('p' | 'l' | 'g' | 'u' | ',' | '.' | 'i' | 'o')) => self.cast_key(*c, cx),
+            Key::Char('r') => self.shares_package_drop(p),
+            Key::Char('f') => self.fw_open_shares(p),
+            Key::Char('m') => self.media_server_toggle(p),
+            Key::Char(c @ ('p' | 'l' | 'g' | 'u' | ',' | '.' | 'i' | 'o')) => self.cast_key(*c, p),
             Key::Char('x') => {
                 let n = crate::agent().host_probe().shares_running_total();
                 if n == 0 {
@@ -260,14 +258,14 @@ impl SettingsApp {
 
     /// `m`: the media server (UPnP/DLNA) of the person's shared folders. Off at once; on asks first, because every player on the local
     /// network can then list and play the files without a password. The same switch is the chat tool `media_server_set`.
-    fn media_server_toggle(&mut self, cx: &AppCx) {
-        if cx.agent.upnp_serve_status_for(&cx.session.user).is_some() {
-            let was = cx.agent.upnp_serve_stop_user(&cx.session.user);
-            cx.audit.record(&cx.session.user, "settings.media_server", "off");
+    fn media_server_toggle(&mut self, p: &dyn NetworkSettingsPort) {
+        if p.agent().upnp_serve_status_for(p.acting_user()).is_some() {
+            let was = p.agent().upnp_serve_stop_user(p.acting_user());
+            p.audit("settings.media_server", "off");
             self.ok(if was { "The media server is off. Players can no longer see or play your files." } else { "The media server was already off." });
             return;
         }
-        let n = cx.agent.upnp_serve_share_folders(cx.data_dir(), &cx.session.user).len();
+        let n = p.agent().upnp_serve_share_folders(p.data_root(), p.acting_user()).len();
         if n == 0 {
             self.fail("There is no folder shared as Files to offer: make a share first (n). Websites and package drops are not offered.");
             return;
@@ -278,11 +276,11 @@ impl SettingsApp {
     /// The casting buttons (F-MEDIA-11). Finding players, playing, pause and resume, jumping 30 s, asking how far it is and stopping each make one
     /// call to the player on a thread of their own (the same calls as the chat tools `cast_*`); pressing the button is the person's approval, and
     /// every one is audited as `media.cast`. Playing opens a form that names the player and the item first.
-    fn cast_key(&mut self, c: char, cx: &AppCx) {
-        let agent = cx.agent.clone();
-        let (user, audit) = (cx.session.user.clone(), cx.audit.clone());
+    fn cast_key(&mut self, c: char, p: &dyn NetworkSettingsPort) {
+        let agent = p.agent().clone();
+        let user = p.acting_user().to_string();
         if c == 'p' {
-            audit.record(&user, "media.cast", "look for players");
+            p.audit("media.cast", "look for players");
             return self.start("Looking for players", move || JobOut::Cast(CastDone::Found(agent.helpers_b4().cast_find())));
         }
         if self.shares.cast.players.is_empty() {
@@ -307,7 +305,7 @@ impl SettingsApp {
             let f = Form::new("Play on a player").with_note("The player fetches the file from this computer's media server on the local network. Nothing is sent anywhere else.").choice("Player", &pl, self.shares.cast.player).choice("What to play", &refs, 0);
             return self.open_form(FormKind::Share(ShareForm::Cast(self.shares.cast.players.clone(), ids)), f);
         }
-        audit.record(&user, "media.cast", &format!("{c} {name}"));
+        p.audit("media.cast", &format!("{c} {name}"));
         let paused = self.shares.cast.paused;
         self.start("Talking to the player", move || {
             let b = agent.helpers_b4();
@@ -341,12 +339,11 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn media_server_start(&mut self, cx: &AppCx) {
-        let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-        let log: Arc<dyn Fn(&str, &str) + Send + Sync> = Arc::new(move |ev, d| audit.record(&user, ev, d));
-        match cx.agent.helpers_b4().upnp_start_for(cx.data_dir(), &cx.session.user, log) {
+    pub(super) fn media_server_start(&mut self, p: &dyn NetworkSettingsPort) {
+        let log = p.audit_sink();
+        match p.agent().helpers_b4().upnp_start_for(p.data_root(), p.acting_user(), log) {
             Ok(m) => {
-                cx.audit.record(&cx.session.user, "settings.media_server", "on");
+                p.audit("settings.media_server", "on");
                 self.ok(m);
             }
             Err(e) => self.fail(e),
@@ -354,8 +351,8 @@ impl SettingsApp {
     }
 
     /// The band at the top of the page: whether the media server is on, and who follows it for changes. Returns the height used.
-    fn render_media_band(&self, g: &mut Gfx, a: R, y: f32, s: f32, cx: &AppCx) -> f32 {
-        let on = cx.agent.upnp_serve_status_for(&cx.session.user);
+    fn render_media_band(&self, g: &mut Gfx, a: R, y: f32, s: f32, p: &dyn NetworkSettingsPort) -> f32 {
+        let on = p.agent().upnp_serve_status_for(p.acting_user());
         let mut h = 0.0;
         let (txt, col) = match on {
             Some((port, n)) => (format!("Media server: on (port {port}, {n} audio and video files). m switches it off."), OK),
@@ -366,7 +363,7 @@ impl SettingsApp {
             h += 18.0 * s;
         }
         if on.is_some() {
-            let (text, list) = cx.agent.helpers_b4().upnp_subscribers(&cx.session.user);
+            let (text, list) = p.agent().helpers_b4().upnp_subscribers(p.acting_user());
             for l in g.wrap(12.0 * s, &text, Face::Sans, a.w).iter().take(2) {
                 g.text(a.x, y + h, 12.0 * s, MUTED, l, Face::Sans);
                 h += 16.0 * s;
@@ -403,12 +400,12 @@ impl SettingsApp {
 
     /// "Receive a package": a ten-minute share of the local packages folder that takes only the audio and video add-on package, behind a password shown here once.
     /// For sending the file from another computer: the file lands where the add-on installer looks; nothing is installed until an administrator reads the review.
-    fn shares_package_drop(&mut self, cx: &AppCx) {
-        if !self.admin(cx) {
+    fn shares_package_drop(&mut self, p: &dyn NetworkSettingsPort) {
+        if !self.admin(p) {
             return;
         }
-        let m = Self::shares(cx);
-        let folder = cx.data_dir().join("local").join("packages");
+        let m = Self::shares(p);
+        let folder = p.data_root().join("local").join("packages");
         if let Err(e) = std::fs::create_dir_all(&folder) {
             return self.fail(format!("Could not make the packages folder: {e}"));
         }
@@ -424,8 +421,8 @@ impl SettingsApp {
         if let Err(e) = m.start(&id) {
             return self.fail(e);
         }
-        cx.audit.record(&cx.session.user, "share.package_drop", &id);
-        let info = Self::shares_rows(cx).into_iter().find(|i| i.cfg.id == id);
+        p.audit("share.package_drop", &id);
+        let info = Self::shares_rows(p).into_iter().find(|i| i.cfg.id == id);
         let (url, port) = info.map(|i| (i.urls.first().cloned().unwrap_or_default(), i.cfg.port)).unwrap_or_default();
         let how = format!("curl -T ffmpeg-libs-....tar.gz -u iyakki:{password} {}", url.trim_end_matches('/'));
         crate::ui::clipboard::copy(&how);
@@ -439,8 +436,8 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn shares_submit(&mut self, cx: &AppCx, kind: &ShareForm, form: &mut Form) -> Result<String, String> {
-        let m = Self::shares(cx);
+    pub(super) fn shares_submit(&mut self, p: &dyn NetworkSettingsPort, kind: &ShareForm, form: &mut Form) -> Result<String, String> {
+        let m = Self::shares(p);
         match kind {
             ShareForm::New => {
                 let d = draft_of_form(form)?;
@@ -459,8 +456,8 @@ impl SettingsApp {
                     return Err("Another operation is still running.".into());
                 }
                 self.shares.cast.player = form.choice_idx(0);
-                cx.audit.record(&cx.session.user, "media.cast", &format!("{item} to {name}"));
-                let (agent, user) = (cx.agent.clone(), cx.session.user.clone());
+                p.audit("media.cast", &format!("{item} to {name}"));
+                let (agent, user) = (p.agent().clone(), p.acting_user().to_string());
                 self.start("Sending to the player", move || JobOut::Cast(CastDone::Said(agent.helpers_b4().cast_play(&user, &name, &item))));
                 Ok("Sending it to the player\u{2026}".into())
             }
@@ -474,11 +471,11 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn render_shares(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+    pub(super) fn render_shares(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn NetworkSettingsPort) {
         if let Some(f) = self.shares.pending.take() {
             self.shares_new_for(&f);
         }
-        let rows = Self::shares_rows(cx);
+        let rows = Self::shares_rows(p);
         let mut y = a.y;
         let running = rows.iter().filter(|r| r.running).count();
         for (l, col) in [
@@ -491,7 +488,7 @@ impl SettingsApp {
             }
             y += 4.0 * s;
         }
-        y += self.render_media_band(g, a, y, s, cx);
+        y += self.render_media_band(g, a, y, s, p);
         y += self.render_cast_band(g, a, y, s);
         if running > 0 {
             g.text(a.x, y, 13.0 * s, rgb(255, 196, 94), &format!("{running} share(s) running now. 'Stop all sharing' (x) closes them at once."), Face::Bold);

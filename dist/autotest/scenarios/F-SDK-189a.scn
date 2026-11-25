@@ -1,0 +1,17 @@
+# autotest pilot, batch A (2026-11-21); split into sub-row F-SDK-189a on 2026-11-21: this scenario covers the whole visible clause, the API clauses are F-SDK-189b.
+row: F-SDK-189a
+targets: qemu
+provided-by: program  # every clause is given by the iyakki program (core, shell, Settings, SAMPLE); the rootfs of alpha.8 and alpha.10 differ in no file this scenario reads (docs/development/AUTOTEST.md)
+profile: ram
+feature-sha: 2c348d38bb844c0e
+doc: the person's Settings page for app events is served by the running core's AppEvents facet
+clause: 1 the person's Settings page for app events is served by the running core's AppEvents facet
+key s
+wait app=Settings
+skip-unless-button App events
+click-sidebar App events
+wait app=Settings page="App events"
+shot page
+expect-not-blank
+expect-text App events
+expect-page App events

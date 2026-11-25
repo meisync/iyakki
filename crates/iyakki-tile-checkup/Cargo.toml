@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-tile-checkup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The CHECK-UP tile (a guided hardware self-test). Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit` and
+# `iyakki-tile-api` only, never on the agent or the shared crate; the shell hands it the machine through `CheckupPort` (a fake in tests).
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-tile-api = { path = "../iyakki-tile-api" }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

@@ -4,13 +4,14 @@
 //! (`browser_media_sites`, `browser_media_site_forget`, which asks first).
 
 use super::*;
+use super::browser_port::BrowserSettingsPort;
 
 const MAX_ROWS: usize = 8;
 
 impl SettingsApp {
     /// One row about the audio and video add-on (H.264, AAC): what it is on this computer, and where to install it. Read only here.
-    pub(super) fn render_browser_addon(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, cx: &AppCx) -> f32 {
-        let (title, help) = iyakki_shared::avaddon::settings_text(&cx.agent.avaddon().detect(cx.data_dir()));
+    pub(super) fn render_browser_addon(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, p: &dyn BrowserSettingsPort) -> f32 {
+        let (title, help) = iyakki_shared::avaddon::settings_text(&p.agent().avaddon().detect(p.data_root()));
         let mut y = y0;
         y += controls::section_title(g, a.x, y, s, "Audio and video add-on");
         controls::info_row(g, R::new(a.x, y, a.w, 56.0 * s), s, &title, &help);
@@ -18,8 +19,8 @@ impl SettingsApp {
     }
 
     /// The list of remembered sites; nothing at all (no title, no height) when none is remembered.
-    pub(super) fn render_browser_sites(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, cx: &AppCx) -> f32 {
-        let perms = crate::apps::browser_media::load(cx);
+    pub(super) fn render_browser_sites(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, p: &dyn BrowserSettingsPort) -> f32 {
+        let perms = crate::apps::browser_media::load(p);
         let sites = perms.list();
         if sites.is_empty() || y0 + 90.0 * s > a.y + a.h {
             return 0.0;
@@ -44,11 +45,11 @@ impl SettingsApp {
     }
 
     /// `F`: the form to forget one site. True when the key was used.
-    pub(super) fn handle_browser_sites(&mut self, k: &Key, cx: &AppCx) -> bool {
+    pub(super) fn handle_browser_sites(&mut self, k: &Key, p: &dyn BrowserSettingsPort) -> bool {
         if !matches!(k, Key::Char('F')) {
             return false;
         }
-        let sites = crate::apps::browser_media::load(cx).list();
+        let sites = crate::apps::browser_media::load(p).list();
         let Some((first, _)) = sites.first() else {
             self.ok("No site is remembered: every request for the camera, the microphone or the screen asks.".to_string());
             return true;
@@ -58,16 +59,16 @@ impl SettingsApp {
         true
     }
 
-    pub(super) fn site_forget_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
+    pub(super) fn site_forget_submit(&mut self, p: &dyn BrowserSettingsPort, form: &Form) -> Result<String, String> {
         let host = form.value(0).trim().to_ascii_lowercase();
-        let mut m = crate::apps::browser_media::load(cx);
+        let mut m = crate::apps::browser_media::load(p);
         if !m.list().iter().any(|(h, _)| *h == host) {
             return Err(format!("{host} is not in the list."));
         }
         m.revoke(&host);
-        crate::apps::browser_media::save(cx, &m);
+        crate::apps::browser_media::save(p, &m);
         let what = format!("The browser will ask again before {host} uses the camera, the microphone or the screen.");
-        cx.audit.record(&cx.session.user, "settings.browser", &format!("{host} forgotten for camera, microphone and screen"));
+        p.audit("settings.browser", &format!("{host} forgotten for camera, microphone and screen"));
         Ok(what)
     }
 }

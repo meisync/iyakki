@@ -1,0 +1,22 @@
+{
+ "schema": 1,
+ "row": "F-A11Y-05",
+ "feature_sha": "1d46e6e35c9c0eb5",
+ "title": "the Accessibility page of Settings offers the switches (read only, not",
+ "clauses": [
+  {
+   "id": "a11y-look",
+   "text": "the Accessibility page of Settings offers the switches (read only, nothing is changed)",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Accessibility. Flip Reduce motion and Large pointer and look at the screen.",
+     "expect": "Each switch changes at once, the page stays readable and the values are still set after sign-out and in again.",
+     "runner_did": "Checked the page text first (when run through the runner)"
+    }
+   ]
+  }
+ ]
+}

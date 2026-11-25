@@ -1,0 +1,22 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha aa03d15d26889359; honest subset only: everything not checked is under not-covered.
+row: F-HW-05
+targets: qemu real
+profile: ram
+feature-sha: aa03d15d26889359
+doc: the This computer page of Settings names the computer and the computers this install has seen (read only)
+clause: 1 Settings > This computer is drawn and names the computers this install has seen
+human: computer-page | Open Settings, This computer. Read the label, the boot counts and the category switches, then press Reset this computer and answer No. Expect: The page reads clearly at this screen size and nothing is reset after No.
+not-covered: the six category switches (per computer or shared)
+not-covered: Copy settings from, Reset and Forget (each asks)
+not-covered: one inbox notice when a new computer is seen
+not-covered: first and last seen and the boots count
+not-covered: drawn at six sizes (one size here)
+key s
+wait app=Settings
+skip-unless-button This computer
+click-sidebar This computer
+wait app=Settings page="This computer"
+shot page
+expect-not-blank
+expect-text Computers this install has seen
+expect-page This computer

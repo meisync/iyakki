@@ -1,0 +1,10 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 880f611327292644; honest subset only: everything not checked is under not-covered.
+row: F-DOCTOR-03
+targets: qemu
+profile: ram
+feature-sha: 880f611327292644
+doc: iyakki dev doctor answers over the developer channel with the running system's report
+clause: 1 `iyakki dev doctor` over developer mode's TLS channel answers with the report of the running system and its --detail form is not shorter
+clause: 2 the offline `iyakki doctor` says it cannot see the running system's part
+not-covered: each named area (dev cluster, vault, VPN, failed services) appears with real findings (a scratch guest has none of them)
+session-check: dev_doctor

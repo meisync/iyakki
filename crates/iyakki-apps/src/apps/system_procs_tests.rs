@@ -4,6 +4,7 @@ use super::*;
 use crate::apps::tests::{cx_with_admin_store, temp_dir};
 use iyakki_dash::cluster::Kubectl;
 use iyakki_agent::sysprocs::PodTable;
+use iyakki_shared::sysprocs;
 use std::sync::Arc;
 
 const UID: &str = "7c1e2f3a-aaaa-4bbb-8ccc-0123456789ab";

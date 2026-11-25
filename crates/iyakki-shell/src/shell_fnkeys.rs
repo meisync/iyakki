@@ -265,6 +265,8 @@ impl Shell {
             self.sign_out();
         }
         mark_stale!(self);
+        // the microphone, the camera, screen capture, the wake listener and every sound stop before the machine sleeps (D-SESSION-END, KI-1022)
+        self.end_session(user, iyakki_shared::sessionend::Why::Suspend, true);
         self.env.audit.record(if user.is_empty() { "login screen" } else { user }, "power.sleep", detail);
         self.env.host.sleep();
     }

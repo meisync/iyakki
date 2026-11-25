@@ -1,0 +1,23 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha fd837b602679a946; honest subset only: everything not checked is under not-covered.
+row: F-CLOUD-20
+targets: qemu real
+profile: ram
+feature-sha: fd837b602679a946
+doc: the Cloud access page of Settings is drawn for an administrator (read only; skipped when the page is not offered)
+clause: 1 Settings > Cloud access is drawn for an administrator with the Tenant members and Namespaces sections
+human: cloud-look | Open Settings, Cloud access as an administrator, add a test person, change the role and remove the person. Expect: Each change asks first, shows the result and the page says the keys are to be rotated.
+not-covered: every change goes through the roles model and is shown, saved, audited and put in the inbox
+not-covered: refusals shown
+not-covered: the key-rotation hint after a removal
+not-covered: a forced owner change
+not-covered: the page only for administrators (the non-administrator view is not driven)
+not-covered: the Tenant members list (it is drawn only when the scratch guest is in a cloud tenant, which it is not)
+key s
+wait app=Settings
+skip-unless-button Cloud access
+click-sidebar Cloud access
+wait app=Settings page="Cloud access"
+shot page
+expect-not-blank
+expect-text Namespaces
+expect-page Cloud access

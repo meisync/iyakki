@@ -1,0 +1,93 @@
+{
+ "schema": 1,
+ "row": "F-GEMVOICE-13b",
+ "feature_sha": "a189a166d7bd1f56",
+ "title": "Gemini voice settings: consent card, choices and Stop (manual until automated)",
+ "clauses": [
+  {
+   "id": "card-no-first",
+   "text": "The consent card puts No first, so Enter alone never agrees; only a person's choice of Yes on the page agrees.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Open the consent card (press C) and press Enter without moving the choice.",
+     "expect": "No is chosen and nothing is agreed. Only choosing Yes (allow sending my microphone to Google while a session is open) and confirming it agrees."
+    }
+   ]
+  },
+  {
+   "id": "admin-saved",
+   "text": "It is off by default, and the switch and choices are saved and only administrators change them.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "As an administrator, turn the switch on and off and change one choice. Leave the page and come back.",
+     "expect": "The changes are kept. A person who is not an administrator is refused in words when trying to change them."
+    }
+   ]
+  },
+  {
+   "id": "choices",
+   "text": "The page has who speaks (local or gemini), session length, quiet time, daily cap, spoken-reply cap, the start key's name, the wake hand-off, and a status row with the delay log and the limit meter.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Walk down every row on the page and change one value in each choice, with the keys the page shows.",
+     "expect": "Each row shows its current value and each change is kept. The start key's name steps through names. The status row shows the delay log and the limit meter."
+    }
+   ]
+  },
+  {
+   "id": "keys-clicks",
+   "text": "Keyboard and click do the same thing on every row.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Change one choice with the keyboard, then one with the mouse.",
+     "expect": "Both change the value in the same way."
+    }
+   ]
+  },
+  {
+   "id": "stop-everyone",
+   "text": "Stop now works for everyone, not only administrators.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Sign in as a person who is not an administrator and press x (Stop now).",
+     "expect": "Stop now works: it closes the microphone and ends any open session."
+    }
+   ]
+  }
+ ]
+}

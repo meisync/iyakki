@@ -1,0 +1,25 @@
+{
+ "schema": 1,
+ "row": "F-TCFG-10",
+ "feature_sha": "e399b0dbcadc957b",
+ "title": "approvals routed to the team's approvers",
+ "clauses": [
+  {
+   "id": "inbox",
+   "text": "the approvals inbox shows only the requests this person may decide, and Approve or Deny is the person's own click",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Sign in as an approver of a team, open the tenant settings page, then open the approvals inbox.",
+     "expect": "Only the pending requests for this person are listed, each with Approve and Deny."
+    },
+    {
+     "do": "Sign in as the person who made a request and open the same inbox.",
+     "expect": "The person's own request is not offered for approval."
+    }
+   ]
+  }
+ ]
+}

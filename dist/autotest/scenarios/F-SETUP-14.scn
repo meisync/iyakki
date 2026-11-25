@@ -1,0 +1,21 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha faf011c095c74ad6; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-SETUP-14
+targets: qemu
+profile: ram
+feature-sha: faf011c095c74ad6
+doc: Store, Setup lists ClickHouse (analytics database) (read only, nothing is installed)
+clause: 1 Store, Setup lists the item ClickHouse (analytics database) in the Data group
+not-covered: the pod, the licence line and the install on a cluster
+not-covered: the Quick install twin
+skip-unless-button group Devices & System
+click group Devices & System
+skip-unless-button STORE
+click STORE
+wait text="Setup"
+skip-unless-button Setup
+click Setup
+wait text="This machine"
+scroll down
+shot page
+expect-not-blank
+expect-text ClickHouse

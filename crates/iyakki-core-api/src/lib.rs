@@ -108,6 +108,8 @@ pub mod netscan;
 pub mod router;
 #[cfg(feature = "native")]
 pub mod fleet;
+#[cfg(feature = "native")]
+pub mod portforward;
 pub mod identity;
 pub mod media;
 pub mod sdkbridge;

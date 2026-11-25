@@ -325,7 +325,75 @@ fn apps_do_not_name_the_raw_os_crate_and_the_shell_hands_out_only_the_guarded_on
 // ---- migrated tiles stay clean (procedure section 10) ----------------------------------------------------------------------------
 
 const MIGRATED: &str = include_str!("data/migrated_tiles.list");
+/// Handles of the shell context that a migrated tile may not name. `Services` is a type name, so it is matched as a whole word that is not a
+/// string literal and not a variant of a tile's own enum (see [`names_the_services_type`]); the others are specific enough as text.
 const FORBIDDEN: [&str; 9] = ["Services", ".services", "cx.host", "cx.web", "cx.chat", "cx.store", "cx.session", "cx.audit", "iyakki_agent::services"];
+
+/// The line with the text of its string and character literals blanked out, so a tab label such as "Services" is not read as the type.
+fn without_literals(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let (mut in_str, mut esc) = (false, false);
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == '\\' {
+                esc = true;
+            } else if c == '"' {
+                in_str = false;
+                out.push('"');
+            }
+            continue;
+        }
+        if c == '\'' && chars.peek() == Some(&'"') {
+            // the character literal '"' is not the start of a string
+            chars.next();
+            chars.next();
+            out.push_str("' '");
+        } else if c == '"' {
+            in_str = true;
+            out.push('"');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `Services` the shell's handle type: the whole word, outside literals, standing where a type or a path to it stands (after `:`, `<`, `&`,
+/// `->`, `dyn`, `impl`, `as`, `use`, or followed by `::`, or at the end of a path whose head is a module such as `iyakki_agent::Services`). A
+/// variant of a tile's own enum (`enum Tab { Services }`, `Tab::Services`) is not the handle.
+fn names_the_services_type(line: &str) -> bool {
+    let code = without_literals(line);
+    let b = code.as_bytes();
+    let mut from = 0;
+    while let Some(i) = code[from..].find("Services") {
+        let at = from + i;
+        let end = at + "Services".len();
+        from = end;
+        let word_before = at > 0 && (b[at - 1].is_ascii_alphanumeric() || b[at - 1] == b'_');
+        let word_after = end < b.len() && (b[end].is_ascii_alphanumeric() || b[end] == b'_');
+        if word_before || word_after {
+            continue;
+        }
+        let before = code[..at].trim_end();
+        if let Some(path) = before.strip_suffix("::") {
+            // `Head::Services`: the handle only when the head is a module (lower case), not a type of the tile's own
+            let head: String = path.chars().rev().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect::<Vec<_>>().into_iter().rev().collect();
+            if head.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
+                return true;
+            }
+            continue;
+        }
+        let word = before.rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).next().unwrap_or("");
+        let type_position = before.ends_with(':') || before.ends_with('<') || before.ends_with('&') || before.ends_with("->") || matches!(word, "dyn" | "impl" | "as" | "use" | "mut");
+        if type_position || code[end..].starts_with("::") {
+            return true;
+        }
+    }
+    false
+}
 
 fn migrated() -> Vec<(String, usize)> {
     MIGRATED
@@ -349,7 +417,8 @@ fn tile_context_use(text: &str) -> (Vec<String>, usize) {
             continue;
         }
         for f in FORBIDDEN {
-            if l.contains(f) {
+            let hit = if f == "Services" { names_the_services_type(l) } else { l.contains(f) };
+            if hit {
                 bad.push(format!("line {}: `{f}` in `{}`", i + 1, l.trim().chars().take(80).collect::<String>()));
             }
         }
@@ -378,4 +447,23 @@ fn the_migrated_tile_checker_sees_what_it_is_for() {
     assert!(bad[0].contains("cx.services") || bad[0].contains(".services"));
     assert_eq!(tile_context_use("fn a(s: Arc<Services>) {}").0.len(), 1);
     assert_eq!(tile_context_use("fn a(p: &dyn RadioPort) { p.audit(\"x\", \"y\"); }").0.len(), 0);
+}
+
+#[test]
+fn the_word_services_is_the_type_only_as_a_whole_word_outside_literals_and_own_enum_paths() {
+    // the shell's handle: forbidden in every spelling a tile could name it
+    for bad in ["fn a(s: Arc<Services>) {}", "let s: &Services = x;", "use iyakki_agent::Services;", "fn a(s: Services) {}", "x.push(Services::new());"] {
+        assert!(names_the_services_type(bad), "{bad}");
+    }
+    // a tab, a label, a variant of the tile's own enum and longer names are not the handle (MESH, NET SCAN)
+    for fine in ["enum Tab { Services, Nodes }", "(Tab::Services, \"Services\"),", "let t = Tab::Services;", "let l = \"the Services tab\";", "struct MyServices;", "fn a(s: ServicesList) {}", "let n = Section::Services;"] {
+        assert!(!names_the_services_type(fine), "{fine}");
+    }
+    // a quote character literal does not hide the type that follows it
+    assert!(names_the_services_type("let c = '\"'; let s: Services = x;"));
+    // an escaped quote does not end the literal early
+    assert!(!names_the_services_type("let l = \"say \\\"Services\\\" now\";"));
+    // the checker as a whole: a label and a variant pass, the handle is still found
+    assert_eq!(tile_context_use("const TABS: [(Tab, &str); 1] = [(Tab::Services, \"Services\")];").0.len(), 0);
+    assert_eq!(tile_context_use("fn a(s: Arc<Services>) { let _ = Tab::Services; }").0.len(), 1);
 }

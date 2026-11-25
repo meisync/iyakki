@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-28",
+  "feature_sha": "615a00479fd528fa",
+  "title": "the assistant does file work itself",
+  "clauses": [
+    {
+      "id": "no-ask-to-edit",
+      "text": "The assistant edits files itself and does not ask you to",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Ask the assistant to fix a file in the workspace (for example a Dockerfile) without giving steps.",
+          "expect": "It edits the file itself and does not tell you to open, edit or run anything."
+        }
+      ]
+    }
+  ]
+}

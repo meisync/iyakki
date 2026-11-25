@@ -1,0 +1,41 @@
+{
+ "schema": 1,
+ "row": "F-BATT-02",
+ "feature_sha": "216ed784e4f72842",
+ "title": "battery indicator in the top bar",
+ "clauses": [
+  {
+   "id": "indicator",
+   "text": "the battery icon sits left of the clock, its fill is green, amber under 20 percent and red under 10 percent, a white bolt shows while charging, and a click or F4 opens the battery popup",
+   "machines": [
+    "lenovo",
+    "hp",
+    "macbook-pro"
+   ],
+   "steps": [
+    {
+     "do": "Look at the top bar left of the clock on the laptop, then click the battery icon or press F4.",
+     "expect": "The icon is drawn with its fill for the charge, a bolt while charging, and the popup shows the status, time, health, cycles, adapter and Battery settings."
+    },
+    {
+     "do": "Press Esc, then click outside the popup.",
+     "expect": "The popup closes both ways."
+    }
+   ]
+  },
+  {
+   "id": "no-battery",
+   "text": "a desktop, a virtual machine or a Mac mini shows no battery icon",
+   "machines": [
+    "mac-mini-2018",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "On the Mac mini, look at the top bar left of the clock.",
+     "expect": "No battery icon is shown."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-GEMVOICE-09",
+  "feature_sha": "ba39d2ebdea5109d",
+  "title": "wake phrase hands over to Gemini (experimental)",
+  "clauses": [
+    {
+      "id": "handoff-speak",
+      "text": "Saying My IYAKKI with the hand-off on opens a Gemini session with a chime",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "With the wake phrase on and the Gemini wake hand-off turned on, say My IYAKKI.",
+          "expect": "A chime plays and a session opens."
+        }
+      ]
+    }
+  ]
+}

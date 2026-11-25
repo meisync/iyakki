@@ -1,0 +1,24 @@
+{
+ "schema": 1,
+ "row": "F-BELL-04",
+ "feature_sha": "22508f900106c585",
+ "title": "the first NET SCAN is the baseline; later scans report only strangers ",
+ "clauses": [
+  {
+   "id": "net-scan",
+   "text": "the first NET SCAN is the baseline; later scans report only strangers as one grouped row and one toast",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018",
+    "macbook-pro",
+    "hp"
+   ],
+   "steps": [
+    {
+     "do": "Run NET SCAN on a fresh install, then plug in a new device and scan again.",
+     "expect": "The first scan raises no new-device notes; the second raises one grouped row and one toast for the stranger."
+    }
+   ]
+  }
+ ]
+}

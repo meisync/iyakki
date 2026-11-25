@@ -68,12 +68,12 @@ impl Fetch for NoFetch {
 
 /// Install the catalog's version of `name` for everyone, as the tile does after the review (so the store remembers where it came from).
 fn install_cat(a: &mut StoreApp, cx: &AppCx, name: &str) {
-    a.reload(cx);
+    a.reload(&CxPort(cx));
     let item = a.all_items.iter().find(|i| i.entry.name == name).cloned().unwrap_or_else(|| panic!("{name} is in the catalog"));
     let actor = Actor::from_policy(&cx.session.user, &cx.session.policy);
     let r = a.store.review_item(&actor, &item, &a.loaded, &NoFetch, iyakki_shared::skills::Scope::Shared, &[]).unwrap();
     a.store.install(&actor, &r, Confirm::all()).unwrap_or_else(|e| panic!("{e}: {}", r.summary()));
-    a.reload(cx);
+    a.reload(&CxPort(cx));
 }
 
 fn world(tag: &str) -> (AppCx, SigningKey, std::path::PathBuf) {
@@ -119,7 +119,7 @@ fn the_installed_page_offers_updates_and_update_all_reviews_skips_what_needs_a_d
     install_cat(&mut a, &cx, "weekly-report");
     // the stick now has newer versions; the tool wants one permission more
     publish(&d, 2, &k, &[tool("shout", "1.1.0", &["net:example.com", "write:/tmp"], &k), skill("weekly-report", "1.1.0", &k)]);
-    a.reload(&cx);
+    a.reload(&CxPort(&cx));
     a.switch(Section::Installed);
     assert_eq!(a.lives.iter().filter(|l| l.has_update()).count(), 2);
     for (w, h) in SIZES {
@@ -175,7 +175,7 @@ fn updating_one_item_shows_the_new_permissions_applies_only_after_the_yes_and_ca
     add_folder(&mut a, &cx, &d);
     install_cat(&mut a, &cx, "shout");
     publish(&d, 2, &k, &[tool("shout", "1.1.0", &["net:example.com", "write:/tmp"], &k)]);
-    a.reload(&cx);
+    a.reload(&CxPort(&cx));
     a.switch(Section::Installed);
     select(&mut a, "shout");
     key(&mut a, &cx, Key::Char('u'));
@@ -274,7 +274,7 @@ fn removing_shows_what_goes_and_what_stays_and_deleting_data_needs_the_name_type
     // the default keeps the data
     install(&cx, &skill("weekly-report", "1.0.0", &k));
     std::fs::create_dir_all(&data).unwrap();
-    a.reload(&cx);
+    a.reload(&CxPort(&cx));
     select(&mut a, "weekly-report");
     key(&mut a, &cx, Key::Char('r'));
     key(&mut a, &cx, Key::Char('y'));
@@ -282,7 +282,7 @@ fn removing_shows_what_goes_and_what_stays_and_deleting_data_needs_the_name_type
     assert!(data.exists());
     // Esc cancels
     install(&cx, &skill("weekly-report", "1.0.0", &k));
-    a.reload(&cx);
+    a.reload(&CxPort(&cx));
     select(&mut a, "weekly-report");
     key(&mut a, &cx, Key::Char('r'));
     key(&mut a, &cx, Key::Esc);
@@ -478,7 +478,7 @@ fn a_title_of_your_own_never_hides_what_the_thing_is_in_the_page_the_list_or_the
     assert!(a.row_sub(&e).contains("“shout”"), "the real name is the subtitle: {}", a.row_sub(&e));
     // the update review is about the package, not the title
     publish(&d, 2, &k, &[tool("shout", "1.1.0", &["net:example.com"], &k)]);
-    a.reload(&cx);
+    a.reload(&CxPort(&cx));
     key(&mut a, &cx, Key::Char('u'));
     wait_job(&mut a, &cx);
     let Mode::Review(rv) = &a.mode else { panic!("{:?}", a.status_text()) };

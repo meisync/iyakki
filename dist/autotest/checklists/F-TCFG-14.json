@@ -1,0 +1,25 @@
+{
+ "schema": 1,
+ "row": "F-TCFG-14",
+ "feature_sha": "b977b7aa0899611d",
+ "title": "local model host for a team",
+ "clauses": [
+  {
+   "id": "local-host",
+   "text": "a team's local model host (for example Ollama) answers one chat message through the team's entry",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "On a machine that runs the local model host, add its entry for the team with its address, then press the health or test button.",
+     "expect": "The entry shows its health state. Send one chat message with that model."
+    },
+    {
+     "do": "Send messages from two people at once when the limit is one per person.",
+     "expect": "The second message waits in the queue, and the reply comes from the host."
+    }
+   ]
+  }
+ ]
+}

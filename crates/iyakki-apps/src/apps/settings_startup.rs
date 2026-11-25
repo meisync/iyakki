@@ -3,7 +3,8 @@
 //! Administrators get Retry (cluster, models) and Open (the service's own page) for the chosen row; the page is for administrators.
 
 use super::*;
-use iyakki_shared::startup::{self, Row, StartupState};
+use super::system_port::StartupPort;
+use iyakki_shared::startup::{Row, StartupState};
 
 pub(super) const ROW_H: f32 = 44.0;
 
@@ -35,12 +36,8 @@ impl SettingsApp {
         vec![("Retry", ACCENT, 'e'), ("Open its page", TEXT, 'o'), ("Look again", TEXT, 'r')]
     }
 
-    fn startup_rows() -> Vec<Row> {
-        startup::global().snapshot()
-    }
-
-    pub(super) fn handle_startup(&mut self, k: &Key, cx: &AppCx) {
-        let rows = Self::startup_rows();
+    pub(super) fn handle_startup(&mut self, k: &Key, p: &dyn StartupPort) {
+        let rows = p.startup_rows();
         let len = rows.len();
         match k {
             Key::Up => self.move_sel(-1, len),
@@ -48,12 +45,12 @@ impl SettingsApp {
             Key::Home => self.move_sel(-(len as i32), len),
             Key::End => self.move_sel(len as i32, len),
             Key::Char('r') => {
-                cx.b3().startup_poll(startup::global(), iyakki_fw::service::alert());
+                p.startup_poll();
                 self.ok("Looked again.");
             }
             Key::Char('e') | Key::Char('o') => {
                 let Some(row) = rows.get(self.sel()) else { return };
-                if !cx.session.policy.manage_settings {
+                if !p.is_admin() {
                     self.fail("Only an administrator can do that.");
                     return;
                 }
@@ -62,15 +59,14 @@ impl SettingsApp {
                         self.fail(format!("{} is not waiting for a retry.", row.name));
                         return;
                     }
-                    cx.audit.record(&cx.session.user, "startup.retry", row.id);
-                    let (svc, id, user) = (cx.services.clone(), row.id, cx.session.user.clone());
-                    std::thread::spawn(move || {
-                        let _ = svc.b3().startup_retry(id, &user);
-                    });
+                    p.audit("startup.retry", row.id);
+                    p.startup_retry(row.id);
                     self.ok(format!("Starting {} again.", row.name));
                 } else {
                     match row.goes.item() {
-                        Some(item) => self.open_item(item, cx),
+                        Some(item) => {
+                            self.open_tab_item(item);
+                        }
                         None => self.fail(format!("{} has no page of its own.", row.name)),
                     }
                 }
@@ -79,10 +75,10 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn render_startup(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let rows = Self::startup_rows();
-        let admin = cx.session.policy.manage_settings;
-        let sum = startup::global().summary();
+    pub(super) fn render_startup(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn StartupPort) {
+        let rows = p.startup_rows();
+        let admin = p.is_admin();
+        let sum = p.startup_summary();
         let head = if sum.all_ready() { format!("All services are ready ({} running).", sum.ready) } else { format!("{} of {} services are not ready yet.", sum.rows.len(), sum.tracked) };
         // the head line wraps in a narrow window instead of running past the edge
         let head_lines = g.wrap(15.0 * s, &head, Face::Bold, a.w);

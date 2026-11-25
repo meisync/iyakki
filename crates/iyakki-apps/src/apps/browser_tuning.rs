@@ -4,7 +4,7 @@
 //! The file holds other words too (`cpu`, `lp:4`, `fps:20`, ...): only the `vaapi` word is read and written here, the others are kept as they
 //! are. Applies the next time the engine starts.
 
-use super::AppCx;
+use super::chat_port::UserData;
 
 /// The word that turns it on.
 pub const WORD: &str = "vaapi";
@@ -27,17 +27,17 @@ pub fn with_word(text: &str, on: bool) -> String {
     }
 }
 
-fn path(cx: &AppCx) -> std::path::PathBuf {
-    cx.data_dir().join("web-profile").join("web-tuning")
+fn path(cx: &dyn UserData) -> std::path::PathBuf {
+    cx.data_root().join("web-profile").join("web-tuning")
 }
 
-pub fn load(cx: &AppCx) -> bool {
+pub fn load(cx: &dyn UserData) -> bool {
     std::fs::read_to_string(path(cx)).map(|t| is_on(&t)).unwrap_or(false)
 }
 
 /// Switch it; only an administrator may (it is a device setting for everybody's engine). Audited.
-pub fn set(cx: &AppCx, on: bool) -> Result<(), String> {
-    if !cx.session.policy.manage_settings {
+pub fn set(cx: &dyn UserData, on: bool) -> Result<(), String> {
+    if !cx.acting_policy().manage_settings {
         return Err("An administrator changes hardware video decoding: it is a setting of this computer.".into());
     }
     let p = path(cx);
@@ -55,7 +55,7 @@ pub fn set(cx: &AppCx, on: bool) -> Result<(), String> {
     } else {
         std::fs::write(&p, new).map_err(|e| e.to_string())?;
     }
-    cx.audit.record(&cx.session.user, "settings.browser", &format!("Hardware video decoding: {}.", if on { "on" } else { "off" }));
+    cx.record_audit("settings.browser", &format!("Hardware video decoding: {}.", if on { "on" } else { "off" }));
     Ok(())
 }
 

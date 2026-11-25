@@ -25,6 +25,24 @@
    "manual": "none",
    "test": 50
   },
+  "F-A11Y-02a": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "none",
+   "test": 0
+  },
+  "F-A11Y-02b": {
+   "levels": {
+    "unit": {
+     "tests": 22
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
   "F-A11Y-03": {
    "levels": {
     "unit": {
@@ -334,7 +352,7 @@
   "F-AIHW-03": {
    "levels": {
     "unit": {
-     "tests": 8
+     "tests": 9
     }
    },
    "manual": "passed 2026-11-11 macmini",
@@ -415,7 +433,7 @@
   "F-APPS-05": {
    "levels": {
     "unit": {
-     "tests": 8
+     "tests": 10
     }
    },
    "manual": "none",
@@ -838,7 +856,7 @@
   "F-ARCH-07": {
    "levels": {
     "unit": {
-     "tests": 43
+     "tests": 58
     }
    },
    "manual": "none",
@@ -901,7 +919,7 @@
   "F-ASSIST-06": {
    "levels": {
     "unit": {
-     "tests": 9
+     "tests": 15
     }
    },
    "manual": "none",
@@ -1177,7 +1195,43 @@
    "manual": "needed",
    "test": 50
   },
+  "F-ASSIST-46a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-ASSIST-46b": {
+   "levels": {
+    "unit": {
+     "tests": 4
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
   "F-ASSIST-47": {
+   "levels": {
+    "unit": {
+     "tests": 5
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-ASSIST-47a": {
+   "levels": {
+    "unit": {
+     "tests": 2
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-ASSIST-47b": {
    "levels": {
     "unit": {
      "tests": 5
@@ -2491,6 +2545,24 @@
    "manual": "none",
    "test": 50
   },
+  "F-BROW-79a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-BROW-79b": {
+   "levels": {
+    "unit": {
+     "tests": 28
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
   "F-BROW-80": {
    "levels": {
     "unit": {
@@ -2600,6 +2672,24 @@
    "test": 50
   },
   "F-BROW-92": {
+   "levels": {
+    "unit": {
+     "tests": 8
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-BROW-92a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-BROW-92b": {
    "levels": {
     "unit": {
      "tests": 8
@@ -2888,6 +2978,24 @@
    "test": 30
   },
   "F-BROX-25": {
+   "levels": {
+    "unit": {
+     "tests": 11
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-BROX-25a": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 0
+  },
+  "F-BROX-25b": {
    "levels": {
     "unit": {
      "tests": 11
@@ -3250,7 +3358,7 @@
   "F-CHAT-18": {
    "levels": {
     "unit": {
-     "tests": 12
+     "tests": 13
     }
    },
    "manual": "none",
@@ -3322,7 +3430,7 @@
   "F-CHECKUP-02": {
    "levels": {
     "unit": {
-     "tests": 31
+     "tests": 53
     }
    },
    "manual": "none",
@@ -4228,6 +4336,24 @@
    "manual": "none",
    "test": 50
   },
+  "F-CORE-20a": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "none",
+   "test": 70
+  },
+  "F-CORE-20b": {
+   "levels": {
+    "unit": {
+     "tests": 6
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
   "F-CORE-21": {
    "levels": {
     "unit": {
@@ -4301,6 +4427,24 @@
    "test": 50
   },
   "F-CORE-29": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-CORE-29a": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "none",
+   "test": 70
+  },
+  "F-CORE-29b": {
    "levels": {
     "unit": {
      "tests": 1
@@ -4384,7 +4528,7 @@
   "F-DASH-05": {
    "levels": {
     "unit": {
-     "tests": 15
+     "tests": 17
     }
    },
    "manual": "needed",
@@ -4393,7 +4537,7 @@
   "F-DASH-06": {
    "levels": {
     "unit": {
-     "tests": 29
+     "tests": 33
     }
    },
    "manual": "needed",
@@ -4411,7 +4555,7 @@
   "F-DASH-08": {
    "levels": {
     "unit": {
-     "tests": 10
+     "tests": 17
     }
    },
    "manual": "none",
@@ -4706,6 +4850,24 @@
    "test": 50
   },
   "F-DEV-11": {
+   "levels": {
+    "unit": {
+     "tests": 8
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-DEV-11a": {
+   "levels": {
+    "unit": {
+     "tests": 2
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-DEV-11b": {
    "levels": {
     "unit": {
      "tests": 8
@@ -5122,7 +5284,7 @@
   "F-DISKS-03": {
    "levels": {
     "unit": {
-     "tests": 3
+     "tests": 5
     }
    },
    "manual": "none",
@@ -5299,6 +5461,24 @@
    "manual": "needed",
    "test": 50
   },
+  "F-DISP-14a": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 0
+  },
+  "F-DISP-14b": {
+   "levels": {
+    "unit": {
+     "tests": 5
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
   "F-DISP-15": {
    "levels": {
     "unit": {
@@ -5320,7 +5500,7 @@
   "F-DOCTOR-02": {
    "levels": {
     "unit": {
-     "tests": 19
+     "tests": 27
     }
    },
    "manual": "none",
@@ -5334,6 +5514,42 @@
    },
    "manual": "none",
    "test": 70
+  },
+  "F-DOCTOR-04": {
+   "levels": {
+    "unit": {
+     "tests": 41
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-DOCTOR-05": {
+   "levels": {
+    "unit": {
+     "tests": 8
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-DOCTOR-06": {
+   "levels": {
+    "unit": {
+     "tests": 2
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-DOCTOR-07": {
+   "levels": {
+    "unit": {
+     "tests": 9
+    }
+   },
+   "manual": "none",
+   "test": 50
   },
   "F-DOMAIN-01": {
    "levels": {
@@ -6118,6 +6334,24 @@
    "manual": "needed",
    "test": 50
   },
+  "F-FILE-06a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-FILE-06b": {
+   "levels": {
+    "unit": {
+     "tests": 5
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
   "F-FILE-07": {
    "levels": {
     "unit": {
@@ -6271,6 +6505,24 @@
    "manual": "needed",
    "test": 50
   },
+  "F-FLEET-09a": {
+   "levels": {
+    "unit": {
+     "tests": 2
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-FLEET-09b": {
+   "levels": {
+    "unit": {
+     "tests": 9
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
   "F-FLEET-10": {
    "levels": {
     "unit": {
@@ -6316,7 +6568,43 @@
    "manual": "needed",
    "test": 50
   },
+  "F-FLEET-14a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-FLEET-14b": {
+   "levels": {
+    "unit": {
+     "tests": 3
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
   "F-FLEET-15": {
+   "levels": {
+    "unit": {
+     "tests": 2
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-FLEET-15a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-FLEET-15b": {
    "levels": {
     "unit": {
      "tests": 2
@@ -6937,6 +7225,24 @@
    "manual": "needed",
    "test": 50
   },
+  "F-GEMVOICE-13a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-GEMVOICE-13b": {
+   "levels": {
+    "unit": {
+     "tests": 3
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
   "F-GEMVOICE-14": {
    "levels": {
     "unit": {
@@ -7333,6 +7639,24 @@
    "manual": "none",
    "test": 50
   },
+  "F-HOTSPOT-12a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-HOTSPOT-12b": {
+   "levels": {
+    "unit": {
+     "tests": 10
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
   "F-HOTSPOT-13": {
    "levels": {
     "unit": {
@@ -7696,7 +8020,7 @@
   "F-INBOX-01": {
    "levels": {
     "unit": {
-     "tests": 9
+     "tests": 11
     }
    },
    "manual": "none",
@@ -7705,7 +8029,7 @@
   "F-INBOX-02": {
    "levels": {
     "unit": {
-     "tests": 5
+     "tests": 6
     }
    },
    "manual": "none",
@@ -7714,7 +8038,7 @@
   "F-INBOX-03": {
    "levels": {
     "unit": {
-     "tests": 3
+     "tests": 5
     }
    },
    "manual": "none",
@@ -8083,7 +8407,7 @@
   "F-JOBS-05": {
    "levels": {
     "unit": {
-     "tests": 10
+     "tests": 14
     }
    },
    "manual": "needed",
@@ -8317,7 +8641,7 @@
   "F-K8S-21": {
    "levels": {
     "unit": {
-     "tests": 16
+     "tests": 20
     }
    },
    "manual": "none",
@@ -8362,7 +8686,7 @@
   "F-K8S-26": {
    "levels": {
     "unit": {
-     "tests": 15
+     "tests": 26
     }
    },
    "manual": "none",
@@ -8611,10 +8935,46 @@
    "manual": "needed",
    "test": 50
   },
+  "F-KV260-01": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-KV260-02": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-KV260-03": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-KV260-04": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 0
+  },
   "F-LAB-01": {
    "levels": {
     "unit": {
-     "tests": 5
+     "tests": 7
     }
    },
    "manual": "none",
@@ -8623,7 +8983,7 @@
   "F-LAB-02": {
    "levels": {
     "unit": {
-     "tests": 4
+     "tests": 6
     }
    },
    "manual": "none",
@@ -8632,7 +8992,7 @@
   "F-LAB-03": {
    "levels": {
     "unit": {
-     "tests": 6
+     "tests": 7
     }
    },
    "manual": "none",
@@ -8701,6 +9061,24 @@
    "manual": "needed",
    "test": 50
   },
+  "F-LAUNCH-06a": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 0
+  },
+  "F-LAUNCH-06b": {
+   "levels": {
+    "unit": {
+     "tests": 3
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
   "F-LAUNCH-07": {
    "levels": {
     "unit": {
@@ -8755,7 +9133,43 @@
    "manual": "needed",
    "test": 50
   },
+  "F-LAUNCH-12a": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 0
+  },
+  "F-LAUNCH-12b": {
+   "levels": {
+    "unit": {
+     "tests": 2
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
   "F-LAUNCH-13": {
+   "levels": {
+    "unit": {
+     "tests": 3
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-LAUNCH-13a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-LAUNCH-13b": {
    "levels": {
     "unit": {
      "tests": 3
@@ -8819,6 +9233,24 @@
    "test": 50
   },
   "F-LAUNCH-20": {
+   "levels": {
+    "unit": {
+     "tests": 3
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-LAUNCH-20a": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 0
+  },
+  "F-LAUNCH-20b": {
    "levels": {
     "unit": {
      "tests": 3
@@ -8966,6 +9398,195 @@
    "levels": {
     "unit": {
      "tests": 2
+    }
+   },
+   "manual": "none",
+   "test": 70
+  },
+  "F-LIFE-01": {
+   "levels": {
+    "unit": {
+     "tests": 2
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-02": {
+   "levels": {
+    "unit": {
+     "tests": 2
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-03": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-04": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-05": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-06": {
+   "levels": {
+    "unit": {
+     "tests": 2
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-07": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-08": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-09": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-10": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-11": {
+   "levels": {
+    "unit": {
+     "tests": 5
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-12": {
+   "levels": {
+    "unit": {
+     "tests": 3
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-13": {
+   "levels": {
+    "unit": {
+     "tests": 3
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-LIFE-14": {
+   "levels": {
+    "unit": {
+     "tests": 3
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-15": {
+   "levels": {
+    "unit": {
+     "tests": 5
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-16": {
+   "levels": {
+    "unit": {
+     "tests": 4
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-17": {
+   "levels": {
+    "unit": {
+     "tests": 5
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-18": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 0
+  },
+  "F-LIFE-19": {
+   "levels": {
+    "unit": {
+     "tests": 7
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-20": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-LIFE-21": {
+   "levels": {
+    "unit": {
+     "tests": 1
     }
    },
    "manual": "none",
@@ -9190,7 +9811,7 @@
   "F-LINWIN-06": {
    "levels": {
     "unit": {
-     "tests": 13
+     "tests": 20
     }
    },
    "manual": "none",
@@ -9199,7 +9820,7 @@
   "F-LINWIN-07": {
    "levels": {
     "unit": {
-     "tests": 4
+     "tests": 5
     }
    },
    "manual": "none",
@@ -9208,7 +9829,7 @@
   "F-LINWIN-08": {
    "levels": {
     "unit": {
-     "tests": 3
+     "tests": 5
     }
    },
    "manual": "none",
@@ -9514,7 +10135,7 @@
   "F-MESH-02": {
    "levels": {
     "unit": {
-     "tests": 11
+     "tests": 26
     }
    },
    "manual": "none",
@@ -9755,6 +10376,24 @@
    "test": 100
   },
   "F-NET-07": {
+   "levels": {
+    "unit": {
+     "tests": 28
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-NET-07a": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "none",
+   "test": 0
+  },
+  "F-NET-07b": {
    "levels": {
     "unit": {
      "tests": 28
@@ -10447,6 +11086,15 @@
    "manual": "needed",
    "test": 50
   },
+  "F-QA-17": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
   "F-RADIO-01": {
    "levels": {
     "unit": {
@@ -10639,7 +11287,7 @@
   "F-RAG-05": {
    "levels": {
     "unit": {
-     "tests": 4
+     "tests": 9
     }
    },
    "manual": "none",
@@ -10657,7 +11305,7 @@
   "F-RAG-07": {
    "levels": {
     "unit": {
-     "tests": 1
+     "tests": 3
     }
    },
    "manual": "none",
@@ -10702,7 +11350,7 @@
   "F-RAG-12": {
    "levels": {
     "unit": {
-     "tests": 3
+     "tests": 6
     }
    },
    "manual": "none",
@@ -11014,6 +11662,78 @@
    "manual": "none",
    "test": 50
   },
+  "F-RPI-01": {
+   "levels": {
+    "unit": {
+     "tests": 10
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-RPI-02": {
+   "levels": {
+    "unit": {
+     "tests": 2
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-RPI-03": {
+   "levels": {
+    "unit": {
+     "tests": 8
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-RPI-04": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 30
+  },
+  "F-RPI-05": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-RPI-06": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 0
+  },
+  "F-RPI-07": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 0
+  },
+  "F-RPI-08": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 0
+  },
   "F-SAMPLE-01": {
    "levels": {
     "unit": {
@@ -11080,7 +11800,7 @@
   "F-SCAN-02": {
    "levels": {
     "unit": {
-     "tests": 12
+     "tests": 20
     }
    },
    "manual": "none",
@@ -11635,6 +12355,24 @@
    "manual": "none",
    "test": 50
   },
+  "F-SDK-189a": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "none",
+   "test": 70
+  },
+  "F-SDK-189b": {
+   "levels": {
+    "unit": {
+     "tests": 4
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
   "F-SDK-19": {
    "levels": {
     "unit": {
@@ -11657,6 +12395,24 @@
    "levels": {
     "unit": {
      "tests": 6
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-SDK-191a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "none",
+   "test": 70
+  },
+  "F-SDK-191b": {
+   "levels": {
+    "unit": {
+     "tests": 5
     }
    },
    "manual": "none",
@@ -11869,10 +12625,46 @@
    "manual": "none",
    "test": 50
   },
+  "F-SDK-212a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "none",
+   "test": 70
+  },
+  "F-SDK-212b": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
   "F-SDK-213": {
    "levels": {
     "unit": {
      "tests": 6
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-SDK-213a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "none",
+   "test": 70
+  },
+  "F-SDK-213b": {
+   "levels": {
+    "unit": {
+     "tests": 5
     }
    },
    "manual": "none",
@@ -11887,7 +12679,43 @@
    "manual": "none",
    "test": 50
   },
+  "F-SDK-214a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "none",
+   "test": 70
+  },
+  "F-SDK-214b": {
+   "levels": {
+    "unit": {
+     "tests": 3
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
   "F-SDK-215": {
+   "levels": {
+    "unit": {
+     "tests": 4
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-SDK-215a": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 0
+  },
+  "F-SDK-215b": {
    "levels": {
     "unit": {
      "tests": 4
@@ -12034,7 +12862,7 @@
   "F-SDK-34": {
    "levels": {
     "unit": {
-     "tests": 18
+     "tests": 33
     }
    },
    "manual": "none",
@@ -12202,6 +13030,15 @@
    "manual": "none",
    "test": 70
   },
+  "F-SESS-01": {
+   "levels": {
+    "unit": {
+     "tests": 21
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
   "F-SET-01": {
    "levels": {
     "unit": {
@@ -12268,7 +13105,7 @@
   "F-SETUP-01": {
    "levels": {
     "unit": {
-     "tests": 11
+     "tests": 12
     }
    },
    "manual": "needed",
@@ -12295,7 +13132,7 @@
   "F-SETUP-04": {
    "levels": {
     "unit": {
-     "tests": 3
+     "tests": 4
     }
    },
    "manual": "none",
@@ -13219,7 +14056,43 @@
    "manual": "needed",
    "test": 50
   },
+  "F-SKIN-06a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-SKIN-06b": {
+   "levels": {
+    "unit": {
+     "tests": 2
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
   "F-SKIN-07": {
+   "levels": {
+    "unit": {
+     "tests": 4
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-SKIN-07a": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "none",
+   "test": 70
+  },
+  "F-SKIN-07b": {
    "levels": {
     "unit": {
      "tests": 4
@@ -13318,6 +14191,24 @@
    "manual": "none",
    "test": 50
   },
+  "F-SND-10a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-SND-10b": {
+   "levels": {
+    "unit": {
+     "tests": 10
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
   "F-SND-11": {
    "levels": {
     "unit": {
@@ -13355,6 +14246,24 @@
    "test": 50
   },
   "F-SND-15": {
+   "levels": {
+    "unit": {
+     "tests": 7
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-SND-15a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-SND-15b": {
    "levels": {
     "unit": {
      "tests": 7
@@ -13438,7 +14347,7 @@
   "F-SPLIT-03": {
    "levels": {
     "unit": {
-     "tests": 179
+     "tests": 186
     }
    },
    "manual": "needed",
@@ -13484,6 +14393,15 @@
    "levels": {
     "unit": {
      "tests": 6
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-SPLIT-09": {
+   "levels": {
+    "unit": {
+     "tests": 12
     }
    },
    "manual": "needed",
@@ -13618,7 +14536,7 @@
   "F-STUDY-01": {
    "levels": {
     "unit": {
-     "tests": 13
+     "tests": 15
     }
    },
    "manual": "none",
@@ -13627,7 +14545,7 @@
   "F-STUDY-02": {
    "levels": {
     "unit": {
-     "tests": 8
+     "tests": 9
     }
    },
    "manual": "none",
@@ -13645,7 +14563,7 @@
   "F-STUDY-04": {
    "levels": {
     "unit": {
-     "tests": 13
+     "tests": 18
     }
    },
    "manual": "none",
@@ -13654,7 +14572,7 @@
   "F-STUDY-05": {
    "levels": {
     "unit": {
-     "tests": 10
+     "tests": 13
     }
    },
    "manual": "none",
@@ -13663,7 +14581,7 @@
   "F-STUDY-06": {
    "levels": {
     "unit": {
-     "tests": 5
+     "tests": 10
     }
    },
    "manual": "none",
@@ -13681,7 +14599,7 @@
   "F-STUDY-08": {
    "levels": {
     "unit": {
-     "tests": 6
+     "tests": 8
     }
    },
    "manual": "needed",
@@ -13690,7 +14608,7 @@
   "F-SYS-01": {
    "levels": {
     "unit": {
-     "tests": 23
+     "tests": 29
     }
    },
    "manual": "none",
@@ -13699,7 +14617,7 @@
   "F-SYS-02": {
    "levels": {
     "unit": {
-     "tests": 1
+     "tests": 2
     }
    },
    "manual": "none",
@@ -13780,7 +14698,7 @@
   "F-TALES-01": {
    "levels": {
     "unit": {
-     "tests": 8
+     "tests": 17
     }
    },
    "manual": "none",
@@ -14434,6 +15352,42 @@
    "manual": "none",
    "test": 70
   },
+  "F-UPD-27": {
+   "levels": {
+    "unit": {
+     "tests": 12
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-UPD-28": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-UPD-29": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "needed",
+   "test": 50
+  },
+  "F-UPD-30": {
+   "levels": {
+    "unit": {
+     "tests": 0
+    }
+   },
+   "manual": "needed",
+   "test": 0
+  },
   "F-UPG-01": {
    "levels": {
     "unit": {
@@ -14680,7 +15634,7 @@
   "F-VOICE-03": {
    "levels": {
     "unit": {
-     "tests": 5
+     "tests": 6
     }
    },
    "manual": "none",
@@ -14806,7 +15760,7 @@
   "F-VOICE-17": {
    "levels": {
     "unit": {
-     "tests": 22
+     "tests": 23
     }
    },
    "manual": "needed",
@@ -14815,7 +15769,7 @@
   "F-VOICE-18": {
    "levels": {
     "unit": {
-     "tests": 13
+     "tests": 14
     }
    },
    "manual": "none",
@@ -14887,7 +15841,7 @@
   "F-VOICE-26": {
    "levels": {
     "unit": {
-     "tests": 6
+     "tests": 7
     }
    },
    "manual": "none",
@@ -14905,7 +15859,7 @@
   "F-VOICE-28": {
    "levels": {
     "unit": {
-     "tests": 18
+     "tests": 19
     }
    },
    "manual": "none",
@@ -14941,7 +15895,7 @@
   "F-VOICE-32": {
    "levels": {
     "unit": {
-     "tests": 1
+     "tests": 2
     }
    },
    "manual": "none",
@@ -14968,7 +15922,7 @@
   "F-VOICE-35": {
    "levels": {
     "unit": {
-     "tests": 26
+     "tests": 27
     }
    },
    "manual": "needed",
@@ -15067,7 +16021,7 @@
   "F-VOICE-46": {
    "levels": {
     "unit": {
-     "tests": 7
+     "tests": 8
     }
    },
    "manual": "needed",
@@ -15191,6 +16145,24 @@
    "test": 70
   },
   "F-VPN-12": {
+   "levels": {
+    "unit": {
+     "tests": 7
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-VPN-12a": {
+   "levels": {
+    "unit": {
+     "tests": 2
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-VPN-12b": {
    "levels": {
     "unit": {
      "tests": 7
@@ -15515,6 +16487,24 @@
    "test": 50
   },
   "F-WEB-15": {
+   "levels": {
+    "unit": {
+     "tests": 5
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-WEB-15a": {
+   "levels": {
+    "unit": {
+     "tests": 1
+    }
+   },
+   "manual": "none",
+   "test": 50
+  },
+  "F-WEB-15b": {
    "levels": {
     "unit": {
      "tests": 5

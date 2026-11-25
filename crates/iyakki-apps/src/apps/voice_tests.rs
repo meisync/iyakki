@@ -504,17 +504,18 @@ fn the_language_of_the_text_is_noticed_and_a_voice_that_cannot_read_it_is_flagge
     let b = bench("voice-lang");
     let mut a = b.app();
     a.handle(&Event::Paste("வணக்கம், இது ஒரு சோதனை வாக்கியம்.".into()), &b.cx);
-    let notes = a.read_notes(&b.cx);
+    let notes = a.read_notes(&CxPort(&b.cx));
     assert!(notes.iter().any(|(t, _)| t.contains("looks like Tamil") && t.contains("Kokoro reads English only")), "{notes:?}");
     let place = notes.iter().map(|n| n.0.as_str()).find(|t| t.starts_with("Text is sent to")).unwrap();
     assert!(place.contains("lemonade-local") && place.contains("(this computer)"), "{place}");
     a.text.take();
     a.handle(&Event::Paste("This is plain English text for the hint.".into()), &b.cx);
-    assert!(a.read_notes(&b.cx).iter().any(|(t, _)| t == "Looks like English."));
+    assert!(a.read_notes(&CxPort(&b.cx)).iter().any(|(t, _)| t == "Looks like English."));
 }
 
 #[test]
 fn paste_open_file_and_clear_work_and_files_are_checked_against_the_account() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     let b = bench("voice-file");
     let mut a = b.app();
     crate::ui::clipboard::copy("from the clipboard");
@@ -626,7 +627,7 @@ fn keep_listening_starts_the_next_dictation_after_a_pause_but_never_after_stop()
     click(&mut a, &b.cx, T_REC);
     assert!(a.is_recording());
     a.ended_on_pause = true;
-    a.stop_record(&b.cx, true);
+    a.stop_record(&CxPort(&b.cx), true);
     wait(&mut a, &b.cx, |a| !a.transcribing);
     assert!(!a.is_recording(), "off: it does not listen again");
     // the checkbox turns it on and the Voice settings keep it
@@ -637,7 +638,7 @@ fn keep_listening_starts_the_next_dictation_after_a_pause_but_never_after_stop()
     // on: after a pause-ended dictation and its text, it listens again by itself
     click(&mut a, &b.cx, T_REC);
     a.ended_on_pause = true;
-    a.stop_record(&b.cx, true);
+    a.stop_record(&CxPort(&b.cx), true);
     wait(&mut a, &b.cx, |a| !a.transcribing);
     assert!(a.is_recording(), "on: it listens again after the pause");
     assert_eq!(b.recs.started.lock().unwrap().len(), 3);
@@ -778,7 +779,7 @@ fn a_remote_speech_to_text_server_asks_before_the_microphone_starts() {
     click(&mut a, &cx, T_YES);
     assert_eq!(cx.voice_settings().remote_ok, vec!["http://lemon.lan:13305".to_string()]);
     assert!(a.is_recording(), "yes starts the recording that was asked for");
-    a.stop_record(&cx, false);
+    a.stop_record(&CxPort(&cx), false);
 }
 
 #[test]
@@ -864,7 +865,7 @@ fn the_chosen_microphone_is_the_one_recorded() {
     assert_eq!(a.mic_i, 2);
     click(&mut a, &b.cx, T_REC);
     assert!(r.started.lock().unwrap()[0].0.contains("-D plughw:1,0"), "{:?}", r.started.lock().unwrap());
-    a.stop_record(&b.cx, false);
+    a.stop_record(&CxPort(&b.cx), false);
 }
 
 // ------------------------------------------------------------------------------------------------ keys
@@ -1062,7 +1063,7 @@ fn the_microphone_choice_is_saved_for_the_browser_and_comes_back_when_the_tile_o
     // a new tile starts on the saved microphone, and automatic (nothing chosen) records the first one, not the playback-only default
     let mut again = b.app_with_recs(recs(two, "x"));
     click(&mut again, &b.cx, T_TAB_DICT);
-    again.look(&b.cx);
+    again.look(&CxPort(&b.cx));
     assert_eq!(again.mic_i, 2);
     b.cx.services.set_voice_mic("").unwrap();
     let r2 = recs(vec![Mic { id: "plughw:0,1".into(), label: "Digital Mic".into(), usb: false }], "x");
@@ -1070,7 +1071,7 @@ fn the_microphone_choice_is_saved_for_the_browser_and_comes_back_when_the_tile_o
     click(&mut auto, &b.cx, T_TAB_DICT);
     click(&mut auto, &b.cx, T_REC);
     assert!(r2.started.lock().unwrap()[0].0.contains("-D plughw:0,1"), "{:?}", r2.started.lock().unwrap());
-    auto.stop_record(&b.cx, false);
+    auto.stop_record(&CxPort(&b.cx), false);
 }
 
 #[path = "voice_rec_tests.rs"]
@@ -1120,7 +1121,7 @@ fn kept(raw: &str, reason: Reason, why: &str) -> Fixed {
 /// Stop the recording as a pause would, and wait until the speech engine's text is in.
 fn pause_stop(a: &mut VoiceApp, cx: &AppCx) {
     a.ended_on_pause = true;
-    a.stop_record(cx, true);
+    a.stop_record(&CxPort(&cx), true);
     wait(a, cx, |a| !a.transcribing);
 }
 
@@ -1181,7 +1182,7 @@ fn the_raw_words_land_at_once_keep_listening_does_not_wait_and_each_correction_f
     let lines = b.cx.audit.recent(50);
     assert!(lines.iter().any(|l| l.contains("voice.fixwording") && l.contains("changed")));
     assert!(lines.iter().all(|l| !l.contains("Lemonade, and welcome") && !l.contains("howdy")), "no text in the audit");
-    a.stop_record(&b.cx, false);
+    a.stop_record(&CxPort(&b.cx), false);
 }
 
 #[test]
@@ -1190,27 +1191,27 @@ fn only_the_last_five_corrected_chunks_are_remembered_and_a_moved_chunk_is_found
     let mut a = b.app();
     key(&mut a, &b.cx, Key::F(3));
     // the person types in front of a pending chunk: it is found again by its one exact text
-    a.add_chunk(&b.cx, "hello there".into(), false);
+    a.add_chunk(&CxPort(&b.cx), "hello there".into(), false);
     a.fixes.push(fix::Chunk { serial: 1, start: 0, raw: "hello there".into(), text: String::new(), showing_raw: false, pending: true, changed: false });
     let t = a.transcript.text.clone();
     a.transcript.set(&format!("NOTE: {t}"));
-    a.apply_fix(&b.cx, 1, answer("hello there", "Hello there."));
+    a.apply_fix(&CxPort(&b.cx), 1, answer("hello there", "Hello there."));
     assert_eq!(a.transcript.text, "NOTE: Hello there.");
     assert!(a.last_fix().is_some());
     // a text that appears twice cannot be told apart: the correction is dropped
     let mut a = b.app();
     a.transcript.set("same words\nsame words");
     a.fixes.push(fix::Chunk { serial: 1, start: 3, raw: "same words".into(), text: String::new(), showing_raw: false, pending: true, changed: false });
-    a.apply_fix(&b.cx, 1, answer("same words", "Same words."));
+    a.apply_fix(&CxPort(&b.cx), 1, answer("same words", "Same words."));
     assert_eq!(a.transcript.text, "same words\nsame words");
     let mut many = b.app();
     for i in 0..9u64 {
         many.fixes.push(fix::Chunk { serial: i, start: 0, raw: format!("w{i}"), text: String::new(), showing_raw: false, pending: false, changed: false });
     }
     many.fix_serial = 9;
-    many.add_chunk(&b.cx, "tail".into(), false);
+    many.add_chunk(&CxPort(&b.cx), "tail".into(), false);
     many.fixes.push(fix::Chunk { serial: 10, start: 0, raw: "tail".into(), text: String::new(), showing_raw: false, pending: true, changed: false });
-    many.apply_fix(&b.cx, 10, answer("tail", "tail"));
+    many.apply_fix(&CxPort(&b.cx), 10, answer("tail", "tail"));
     assert_eq!(many.fixes.len(), fix::KEEP, "{:?}", many.fixes.iter().map(|c| c.serial).collect::<Vec<_>>());
 }
 
@@ -1219,26 +1220,26 @@ fn the_reason_the_words_were_kept_stays_until_the_next_answer_or_clear_and_the_a
     let b = bench("voice-fix-note");
     let mut a = b.app();
     key(&mut a, &b.cx, Key::F(3));
-    a.add_chunk(&b.cx, "hello world".into(), false);
+    a.add_chunk(&CxPort(&b.cx), "hello world".into(), false);
     a.fixes.push(fix::Chunk { serial: 1, start: 0, raw: "hello world".into(), text: String::new(), showing_raw: false, pending: true, changed: false });
     let why = "kept your words as heard: the assistant did not answer within 20 seconds";
-    a.apply_fix(&b.cx, 1, kept("hello world", Reason::Timeout, why));
+    a.apply_fix(&CxPort(&b.cx), 1, kept("hello world", Reason::Timeout, why));
     assert_eq!(a.fix_note.as_deref(), Some("kept your words as heard: the assistant did not answer within 20 seconds"));
     let g = draw(&mut a, &b.cx, 1280, 720);
     assert!(g.hits.iter().any(|h| h.label.contains("did not answer within 20 seconds")), "the reason is on the screen");
     // the next chunk's generic line does not wipe it
-    a.add_chunk(&b.cx, "second part".into(), false);
+    a.add_chunk(&CxPort(&b.cx), "second part".into(), false);
     assert!(status(&a).starts_with("Transcript ready"));
     assert!(a.fix_note.is_some());
     let g = draw(&mut a, &b.cx, 1280, 720);
     assert!(g.hits.iter().any(|h| h.label.contains("did not answer within 20 seconds")));
     // the next answer replaces it
     a.fixes.push(fix::Chunk { serial: 2, start: 12, raw: "second part".into(), text: String::new(), showing_raw: false, pending: true, changed: false });
-    a.apply_fix(&b.cx, 2, answer("second part", "Second part."));
+    a.apply_fix(&CxPort(&b.cx), 2, answer("second part", "Second part."));
     assert!(a.fix_note.is_none());
     // and Clear
     a.fixes.push(fix::Chunk { serial: 3, start: 0, raw: "x".into(), text: String::new(), showing_raw: false, pending: true, changed: false });
-    a.apply_fix(&b.cx, 3, kept("x", Reason::NoModel, "kept your words as heard: no chat model is set up"));
+    a.apply_fix(&CxPort(&b.cx), 3, kept("x", Reason::NoModel, "kept your words as heard: no chat model is set up"));
     assert!(a.fix_note.is_some());
     click(&mut a, &b.cx, T_T_CLEAR);
     assert!(a.fix_note.is_none());
@@ -1265,13 +1266,13 @@ fn with_keep_listening_empty_results_listen_again_quietly_and_five_in_a_row_stop
     }
     // a real transcript starts the count again
     a.rig.recorders = b.recs.clone();
-    a.stop_record(&b.cx, false);
+    a.stop_record(&CxPort(&b.cx), false);
     click(&mut a, &b.cx, T_REC);
     pause_stop(&mut a, &b.cx);
     assert_eq!(a.transcript.text, "hello lemonade");
     assert_eq!(a.empty_streak, 0);
     a.rig.recorders = silent.clone();
-    a.stop_record(&b.cx, false);
+    a.stop_record(&CxPort(&b.cx), false);
     click(&mut a, &b.cx, T_REC);
     for _ in 1..=4 {
         pause_stop(&mut a, &b.cx);
@@ -1303,7 +1304,7 @@ fn the_open_a_text_file_box_has_browse_inside_the_window_and_the_picker_fills_it
     for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
         let mut g = Gfx::new(w, h);
         let s = (w as f32 / 1280.0).min(h as f32 / 720.0).clamp(0.6, 3.0);
-        a.draw(&mut g, R::new(0.0, 72.0 * s, w as f32, h as f32 - 72.0 * s), s, &cx, 0);
+        a.draw(&mut g, R::new(0.0, 72.0 * s, w as f32, h as f32 - 72.0 * s), s, &CxPort(&cx), 0);
         let br: Vec<_> = g.hits.iter().filter(|x| x.ev == Event::Tab(T_BROWSE)).collect();
         assert_eq!(br.len(), 1, "{w}x{h}: one Browse button");
         assert!(br[0].rect.x >= 0.0 && br[0].rect.x + br[0].rect.w <= w as f32 + 0.5, "{w}x{h}: inside the width");
@@ -1311,7 +1312,7 @@ fn the_open_a_text_file_box_has_browse_inside_the_window_and_the_picker_fills_it
     click(&mut a, &cx, T_BROWSE);
     assert!(a.path_pick.is_open());
     let mut g = Gfx::new(1280, 720);
-    a.draw(&mut g, R::new(0.0, 72.0, 1280.0, 648.0), 1.0, &cx, 0);
+    a.draw(&mut g, R::new(0.0, 72.0, 1280.0, 648.0), 1.0, &CxPort(&cx), 0);
     assert!(!g.hits.is_empty());
     a.handle(&Event::Key(Key::Esc), &cx);
     assert!(!a.path_pick.is_open() && a.focus == Focus::Path, "Esc closes the picker only");

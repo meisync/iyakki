@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-pub const ASK_NOTE: &str = "The camera is private: the assistant asks every time; Allow for 5 minutes is the longest it may keep using it.";
+pub use iyakki_chat_model::cardtext::{takes_pictures, ASK_NOTE};
 
 /// A country's passport or visa photo rules, as the backend's table has them.
 #[derive(Clone, Debug, PartialEq)]
@@ -143,6 +143,23 @@ impl CameraHub {
         self.grants.lock().unwrap_or_else(|e| e.into_inner()).remove(user);
     }
 
+    /// The camera part of ending a session or locking the screen (D-SESSION-END): the person's grant goes and a video the assistant records
+    /// for them is stopped. Returns whether something ended.
+    pub fn end_capture(&self, user: &str) -> bool {
+        let had_grant = self.granted(user);
+        self.revoke(user);
+        let mine = self.busy.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|(u, _)| u == user);
+        let mut stopped = false;
+        if mine {
+            if let Some(b) = self.backend() {
+                if b.recording().is_some() {
+                    stopped = b.record_stop().is_ok();
+                }
+            }
+        }
+        had_grant || stopped
+    }
+
     /// Mark the camera as in use by `user` for `what` until the guard is dropped (the shell shows the red sign meanwhile).
     pub fn begin(&self, user: &str, what: &str) -> Busy<'_> {
         *self.busy.lock().unwrap_or_else(|e| e.into_inner()) = Some((user.to_string(), what.to_string()));
@@ -171,10 +188,6 @@ pub fn is_camera_tool(name: &str) -> bool {
     matches!(name, "camera_list" | "camera_photo" | "camera_record_start" | "camera_record_stop" | "camera_passport" | "camera_recent")
 }
 
-/// The tools that take pictures: asked every time unless a 5-minute grant is running.
-pub fn takes_pictures(name: &str) -> bool {
-    matches!(name, "camera_photo" | "camera_record_start" | "camera_passport")
-}
 
 
 

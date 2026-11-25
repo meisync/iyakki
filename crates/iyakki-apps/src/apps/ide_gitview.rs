@@ -24,7 +24,7 @@ use super::git_tile::{GitApp, Load, Rig, Slot, ACCENT};
 use super::git_tile_repo_ui::draw_text;
 use super::git_tile_ui::{btn, btn_w, fit_list, para, sbar, Cursor};
 use super::k8s_tile::{Line, ListState, TextView};
-use super::{AppCx, Flow};
+use super::AppCx;
 use crate::fx::{self, with_alpha, AMBER, CYAN};
 use crate::gfx::{rgb, Face, Gfx};
 use crate::ui::{Event, Key, DIM, ERR, MUTED, OK, R, TEXT};
@@ -193,7 +193,7 @@ impl GitTabView {
         let mut changed = false;
         let now = self.now_ms();
         if self.sub == Sub::Connections || self.app.visible() {
-            let _ = self.app.handle_event(&Event::Tick, cx);
+            let _ = self.app.handle_event(&Event::Tick, &super::git_port::CxPort(cx));
         }
         if self.work.poll(now).is_some() {
             changed = true;
@@ -369,7 +369,7 @@ impl GitTabView {
             Event::Key(k) => self.key(k, cx),
             Event::Scroll(d) => {
                 if self.sub == Sub::Connections {
-                    let _ = self.app.handle_event(ev, cx);
+                    let _ = self.app.handle_event(ev, &super::git_port::CxPort(cx));
                 } else {
                     self.wheel(*d);
                 }
@@ -381,7 +381,7 @@ impl GitTabView {
             }
             _ => {
                 if self.sub == Sub::Connections {
-                    let _ = self.app.handle_event(ev, cx);
+                    let _ = self.app.handle_event(ev, &super::git_port::CxPort(cx));
                     true
                 } else {
                     false
@@ -430,7 +430,7 @@ impl GitTabView {
 
     fn key(&mut self, k: &Key, cx: &AppCx) -> bool {
         if self.sub == Sub::Connections {
-            let back = matches!(self.app.handle_event(&Event::Key(k.clone()), cx), Flow::Back);
+            let back = matches!(self.app.handle_event(&Event::Key(k.clone()), &super::git_port::CxPort(cx)), super::git_tile::TileFlow::Back);
             if back {
                 if matches!(k, Key::Esc) && self.root.join(".git").exists() {
                     self.set_sub(Sub::Project);
@@ -516,7 +516,7 @@ impl GitTabView {
         match self.sub {
             Sub::Connections => {
                 self.rects = [R::default(); 3];
-                self.app.draw(g, body, s, cx, tick);
+                self.app.draw(g, body, s, &super::git_port::CxPort(cx), tick);
             }
             Sub::Project => self.draw_project(g, body, s, focused),
         }

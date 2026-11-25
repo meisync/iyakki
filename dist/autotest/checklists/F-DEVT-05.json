@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-DEVT-05",
+ "feature_sha": "28460d917a37d7e4",
+ "title": "the DEV TOOLS QR tool draws codes that a phone camera reads",
+ "clauses": [
+  {
+   "id": "qr-phone",
+   "text": "the DEV TOOLS QR tool draws codes that a phone camera reads",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Open DEV TOOLS, QR code. Make a text code, a Wi-Fi code and a URL code and point a phone camera at each.",
+     "expect": "The phone reads each code back to the text typed and the code has a quiet zone and black on white."
+    }
+   ]
+  }
+ ]
+}

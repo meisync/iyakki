@@ -2,33 +2,118 @@
 //! you willing to let it act for you there (approve all / one by one / deny), may it do this one thing, can you do something
 //! only you can (a code, a captcha) and press Continue. The questions are held by `iyakki_shared::browserconsent`; the INBOX
 //! (Approvals page) and the open chat both show them with this dialog, so an answer in either place ends the wait.
+//!
+//! The drawing and the key map are the tile crate's (`iyakki_tile_inbox::consent`, on the plain mirrors of `iyakki-tile-api`); this file
+//! converts between the agent's request and the mirror, and gives the answer to the waiting tool (the only part that needs the shell).
 
-use iyakki_shared::browserconsent::{Answer, ConsentKind, ConsentRequest};
+use iyakki_shared::browserconsent::{Answer, ConsentChoice, ConsentKind, ConsentRequest};
+use iyakki_tile_api::inbox as api;
 
 use super::AppCx;
-use crate::gfx::{rgb, Face, Gfx};
-use crate::ui::{Event, Key, R, DIM, ERR, MUTED, TEXT};
+use crate::gfx::Gfx;
+use crate::ui::{Key, R};
 
-const AMBER: [u8; 4] = rgb(255, 170, 70);
+pub fn kind_to_api(k: ConsentKind) -> api::ConsentKind {
+    match k {
+        ConsentKind::Look => api::ConsentKind::Look,
+        ConsentKind::Interact => api::ConsentKind::Interact,
+        ConsentKind::Step => api::ConsentKind::Step,
+        ConsentKind::Handover => api::ConsentKind::Handover,
+        ConsentKind::Permission => api::ConsentKind::Permission,
+    }
+}
+
+pub fn kind_from_api(k: api::ConsentKind) -> ConsentKind {
+    match k {
+        api::ConsentKind::Look => ConsentKind::Look,
+        api::ConsentKind::Interact => ConsentKind::Interact,
+        api::ConsentKind::Step => ConsentKind::Step,
+        api::ConsentKind::Handover => ConsentKind::Handover,
+        api::ConsentKind::Permission => ConsentKind::Permission,
+    }
+}
+
+pub fn answer_to_api(a: Answer) -> api::Answer {
+    match a {
+        Answer::Allow => api::Answer::Allow,
+        Answer::AllowSession => api::Answer::AllowSession,
+        Answer::Deny => api::Answer::Deny,
+        Answer::ApproveAll => api::Answer::ApproveAll,
+        Answer::OneByOne => api::Answer::OneByOne,
+        Answer::Continue => api::Answer::Continue,
+        Answer::AllowOnce => api::Answer::AllowOnce,
+        Answer::AlwaysAllow => api::Answer::AlwaysAllow,
+        Answer::NotNow => api::Answer::NotNow,
+        Answer::Block => api::Answer::Block,
+    }
+}
+
+pub fn answer_from_api(a: api::Answer) -> Answer {
+    match a {
+        api::Answer::Allow => Answer::Allow,
+        api::Answer::AllowSession => Answer::AllowSession,
+        api::Answer::Deny => Answer::Deny,
+        api::Answer::ApproveAll => Answer::ApproveAll,
+        api::Answer::OneByOne => Answer::OneByOne,
+        api::Answer::Continue => Answer::Continue,
+        api::Answer::AllowOnce => Answer::AllowOnce,
+        api::Answer::AlwaysAllow => Answer::AlwaysAllow,
+        api::Answer::NotNow => Answer::NotNow,
+        api::Answer::Block => Answer::Block,
+    }
+}
+
+pub fn request_to_api(r: &ConsentRequest) -> api::ConsentRequest {
+    api::ConsentRequest {
+        id: r.id.clone(),
+        user: r.user.clone(),
+        kind: kind_to_api(r.kind),
+        domain: r.domain.clone(),
+        title: r.title.clone(),
+        text: r.text.clone(),
+        detail: r.detail.clone(),
+        choices: r.choices.iter().map(|c| api::ConsentChoice { answer: answer_to_api(c.answer), label: c.label.clone() }).collect(),
+        since: r.since,
+        payload: r.payload.clone(),
+        quiet: r.quiet,
+    }
+}
+
+pub fn request_from_api(r: &api::ConsentRequest) -> ConsentRequest {
+    ConsentRequest {
+        id: r.id.clone(),
+        user: r.user.clone(),
+        kind: kind_from_api(r.kind),
+        domain: r.domain.clone(),
+        title: r.title.clone(),
+        text: r.text.clone(),
+        detail: r.detail.clone(),
+        choices: r.choices.iter().map(|c| ConsentChoice { answer: answer_from_api(c.answer), label: c.label.clone() }).collect(),
+        since: r.since,
+        payload: r.payload.clone(),
+        quiet: r.quiet,
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ConsentDialog {
     pub req: ConsentRequest,
+    tile: iyakki_tile_inbox::ConsentDialog,
 }
 
 impl ConsentDialog {
     pub fn new(req: ConsentRequest) -> ConsentDialog {
-        ConsentDialog { req }
+        let tile = iyakki_tile_inbox::ConsentDialog::new(request_to_api(&req));
+        ConsentDialog { req, tile }
     }
 
     /// The answer a key stands for: 1, 2, 3 choose by position; Esc is the "no" (Deny or Cancel) of the question.
     pub fn answer_of(&self, k: &Key) -> Option<Answer> {
-        match k {
-            Key::Char(c @ '1'..='4') => self.req.choices.get(*c as usize - '1' as usize).map(|c| c.answer),
-            Key::Esc if self.req.kind == ConsentKind::Permission => Some(Answer::NotNow),
-            Key::Esc => self.req.choices.iter().find(|c| c.answer == Answer::Deny).map(|c| c.answer),
-            _ => None,
-        }
+        self.tile.answer_of(k).map(answer_from_api)
+    }
+
+    pub fn render(&self, g: &mut Gfx, area: R, s: f32) {
+        self.tile.render(g, area, s)
     }
 
     /// Give the answer to the waiting tool; audited by what it allows, never by the page's content.
@@ -64,88 +149,6 @@ impl ConsentDialog {
             cx.audit.record(&cx.session.user, "browser.agent.answer", &format!("{} {}", self.req.domain, what));
         }
         r
-    }
-
-    pub fn render(&self, g: &mut Gfx, area: R, s: f32) {
-        let accent = match self.req.kind {
-            ConsentKind::Look => rgb(110, 190, 255),
-            ConsentKind::Interact | ConsentKind::Step => AMBER,
-            ConsentKind::Handover => rgb(167, 116, 255),
-            ConsentKind::Permission => rgb(255, 120, 200),
-        };
-        if self.req.kind == ConsentKind::Permission {
-            return self.render_permission(g, area, s, accent);
-        }
-        let p = crate::fx::modal(g, area, s, 640.0 * s, 330.0 * s, accent, false);
-        let y = crate::fx::modal_title(g, p, s, &self.req.title, accent);
-        let mut y = y + 6.0 * s;
-        let text = if self.req.kind == ConsentKind::Look { "The assistant wants to read and take pictures of the pages you have open on this site, and to scroll them. It will not click or type." } else { self.req.text.as_str() };
-        for line in text.lines() {
-            for l in g.wrap(15.0 * s, line, Face::Sans, p.w - 52.0 * s) {
-                g.text(p.x + 26.0 * s, y, 15.0 * s, TEXT, &l, Face::Sans);
-                y += 21.0 * s;
-            }
-        }
-        if !self.req.detail.is_empty() && self.req.kind != ConsentKind::Step {
-            y += 4.0 * s;
-            for l in g.wrap(13.5 * s, &self.req.detail, Face::Mono, p.w - 52.0 * s).into_iter().take(3) {
-                g.text(p.x + 26.0 * s, y, 13.5 * s, MUTED, &l, Face::Mono);
-                y += 19.0 * s;
-            }
-        }
-        // the choices, one button each, numbered
-        let mut by = p.y + p.h - 28.0 * s - 40.0 * s * self.req.choices.len() as f32;
-        by = by.max(y + 6.0 * s);
-        for (i, c) in self.req.choices.iter().enumerate() {
-            let deny = c.answer == Answer::Deny;
-            let label = format!("{}  {}", i + 1, c.label);
-            let w = (g.text_width(14.5 * s, &label, Face::Bold) + 40.0 * s).min(p.w - 52.0 * s);
-            g.button(p.x + 26.0 * s, by + i as f32 * 40.0 * s, 14.5 * s, &label, if deny { ERR } else { accent }, Event::Key(Key::Char((b'1' + i as u8) as char)));
-            let _ = w;
-        }
-        g.text(p.x + 26.0 * s, p.y + p.h - 22.0 * s, 12.5 * s, DIM, "Press 1, 2 or 3, or Esc to say no.", Face::Sans);
-    }
-}
-
-impl ConsentDialog {
-    /// A flow's permission request: the exact text of the permission, the flow and step, the model, and four answers.
-    fn render_permission(&self, g: &mut Gfx, area: R, s: f32, accent: [u8; 4]) {
-        let p = crate::fx::modal(g, area, s, 760.0 * s, 580.0 * s, accent, false);
-        let y = crate::fx::modal_title(g, p, s, &self.req.title, accent);
-        let mut y = y + 4.0 * s;
-        let buttons_h = 2.0 * 42.0 * s + 40.0 * s;
-        let limit = p.y + p.h - buttons_h;
-        'text: for line in self.req.text.lines() {
-            for l in g.wrap(14.0 * s, line, Face::Sans, p.w - 52.0 * s) {
-                if y + 19.0 * s > limit {
-                    g.text(p.x + 26.0 * s, y, 14.0 * s, MUTED, "…", Face::Sans);
-                    break 'text;
-                }
-                g.text(p.x + 26.0 * s, y, 14.0 * s, TEXT, &l, Face::Sans);
-                y += 19.0 * s;
-            }
-            y += 4.0 * s;
-        }
-        let colw = (p.w - 52.0 * s - 12.0 * s) / 2.0;
-        let by = p.y + p.h - buttons_h + 8.0 * s;
-        for (i, c) in self.req.choices.iter().enumerate() {
-            let (col, row) = (i % 2, i / 2);
-            let block = c.answer == Answer::Block;
-            let label = format!("{}  {}", i + 1, g.fit(14.0 * s, &c.label, Face::Bold, colw - 60.0 * s));
-            g.button(p.x + 26.0 * s + col as f32 * (colw + 12.0 * s), by + row as f32 * 42.0 * s, 14.0 * s, &label, if block { ERR } else { accent }, Event::Key(Key::Char((b'1' + i as u8) as char)));
-        }
-        g.text(p.x + 26.0 * s, p.y + p.h - 28.0 * s, 12.0 * s, DIM, "Press 1 to 4. Esc is Not now. Only you can answer this, on this device.", Face::Sans);
-    }
-}
-
-/// The row text for the Approvals list.
-pub fn row_summary(r: &ConsentRequest) -> String {
-    match r.kind {
-        ConsentKind::Look => format!("The assistant wants to read pages on {} in your browser. It will not click or type.", r.domain),
-        ConsentKind::Interact => r.text.clone(),
-        ConsentKind::Step => r.text.clone(),
-        ConsentKind::Handover => r.text.clone(),
-        ConsentKind::Permission => format!("{}. Open it to read what it allows and to answer.", r.title),
     }
 }
 
@@ -194,5 +197,17 @@ mod tests {
         d.answer(&cx, Answer::OneByOne).unwrap();
         assert_eq!(cx.browser_consent().wait(&id, std::time::Duration::from_millis(10)), Some(Answer::OneByOne));
         assert!(d.answer(&cx, Answer::Deny).is_err(), "only once");
+    }
+
+    #[test]
+    fn the_mirrors_of_the_tile_api_round_trip_every_kind_answer_and_request() {
+        for k in [ConsentKind::Look, ConsentKind::Interact, ConsentKind::Step, ConsentKind::Handover, ConsentKind::Permission] {
+            assert_eq!(kind_from_api(kind_to_api(k)), k);
+        }
+        for a in [Answer::Allow, Answer::AllowSession, Answer::Deny, Answer::ApproveAll, Answer::OneByOne, Answer::Continue, Answer::AllowOnce, Answer::AlwaysAllow, Answer::NotNow, Answer::Block] {
+            assert_eq!(answer_from_api(answer_to_api(a)), a);
+        }
+        let r = ConsentRequest { id: "i".into(), user: "u".into(), kind: ConsentKind::Permission, domain: "d".into(), title: "t".into(), text: "x".into(), detail: "y".into(), choices: vec![ConsentChoice { answer: Answer::Block, label: "Block".into() }], since: 7, payload: "p".into(), quiet: true };
+        assert_eq!(request_from_api(&request_to_api(&r)), r);
     }
 }

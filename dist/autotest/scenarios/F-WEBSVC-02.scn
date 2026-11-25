@@ -1,0 +1,10 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 4dcaded1825a32fd; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-WEBSVC-02
+targets: browser
+feature-sha: 4dcaded1825a32fd
+doc: Web sign-in page: a wrong password stays on the form and the token lives in session storage only (browser harness)
+clause: 1 the sign-in page of the web service refuses a wrong password with one plain sentence and stays on the form, signs in with the Enter key and keeps the token in the tab's session storage only (no cookie, no local storage)
+not-covered: the 256-bit token kept only as a SHA-256 hash and the idle and absolute life
+not-covered: the approvals route, the 403 and 409 answers and the five-minute refusal
+not-covered: the allow-list of tools per profile
+suite: run_pages.py --only pages

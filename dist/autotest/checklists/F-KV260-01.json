@@ -1,0 +1,65 @@
+{
+ "schema": 1,
+ "row": "F-KV260-01",
+ "feature_sha": "267f655b21787b74",
+ "title": "KV260 first boot from the SD card",
+ "clauses": [
+  {
+   "id": "serial",
+   "text": "the board's U-Boot finds extlinux/extlinux.conf on the card, the menu and the Linux boot text appear on the serial console (PS UART1, 115200 8N1)",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Write the card with kv260-write-sd.sh, insert it, connect the micro-USB cable and open the serial ports at 115200 8N1 (the second of the four is usually the console), then power on.",
+     "expect": "U-Boot scans mmc 1, finds /extlinux/extlinux.conf, the IYAKKI menu shows, the kernel starts and the IYAKKI start lines appear on the serial port.",
+     "runner_did": "Booted the same kernel and userspace in QEMU's virt machine (the ZynqMP machine model does not start on this QEMU); not the board's firmware"
+    }
+   ]
+  },
+  {
+   "id": "ethernet",
+   "text": "Ethernet comes up and gets an address",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Connect the Ethernet cable before power-on and read the network line in the boot text or run iyakki hwreport.",
+     "expect": "eth0 has a link and an address from the router."
+    }
+   ]
+  },
+  {
+   "id": "displayport",
+   "text": "the shell is shown on the DisplayPort monitor",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Connect a DisplayPort monitor before power-on. If the screen stays black, try the menu entries 'device tree from the SD card' (rev B, then rev A) from the serial console.",
+     "expect": "The IYAKKI shell start screen appears on the monitor."
+    },
+    {
+     "do": "Plug a USB keyboard into one of the board's USB ports and press a key in the shell.",
+     "expect": "The shell reacts."
+    }
+   ]
+  },
+  {
+   "id": "shutdown",
+   "text": "shutdown and a second boot work",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Power off from the shell, power on again.",
+     "expect": "The second boot reaches the same screen."
+    }
+   ]
+  }
+ ]
+}

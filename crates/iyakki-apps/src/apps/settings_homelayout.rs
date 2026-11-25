@@ -7,6 +7,7 @@
 //! have a layout file of their own are not touched.
 
 use super::*;
+use super::super::settings_device_port::HomeLayoutPort;
 use iyakki_shared::layout::{app_key, Layout, BUILTIN};
 
 /// One line of the page.
@@ -19,24 +20,24 @@ pub(super) enum HlRow {
 }
 
 impl SettingsApp {
-    fn hl_layout(cx: &AppCx) -> Layout {
-        Layout::load(cx.data_dir(), &cx.session.user)
+    fn hl_layout(p: &dyn HomeLayoutPort) -> Layout {
+        Layout::load(&p.data_dir(), &p.user())
     }
 
-    fn hl_save(cx: &AppCx, l: &Layout) {
-        l.save(cx.data_dir(), &cx.session.user);
+    fn hl_save(p: &dyn HomeLayoutPort, l: &Layout) {
+        l.save(&p.data_dir(), &p.user());
     }
 
     /// The groups, then the tiles this person sees.
-    pub(super) fn hl_rows(cx: &AppCx) -> Vec<HlRow> {
-        let l = Self::hl_layout(cx);
+    pub(super) fn hl_rows(p: &dyn HomeLayoutPort) -> Vec<HlRow> {
+        let l = Self::hl_layout(p);
         let mut rows: Vec<HlRow> = BUILTIN.iter().map(|(id, name)| HlRow::Group { id: id.to_string(), name: name.to_string(), moved: l.count_in(id), builtin: true }).collect();
         rows.extend(l.groups.iter().map(|g| HlRow::Group { id: g.id.clone(), name: g.label.clone(), moved: l.count_in(&g.id), builtin: false }));
-        for (key, label, own) in crate::apps::layout_tiles(cx.session.policy.manage_users, &iyakki_cloudmode::CloudMode::desktop()) {
+        for (key, label, own) in crate::apps::layout_tiles(p.can_manage_users(), &iyakki_cloudmode::CloudMode::desktop()) {
             let now = l.group_of(&key, own);
             rows.push(HlRow::Tile { moved: l.placed.contains_key(&key), group: l.label_of(&now).unwrap_or_default(), title: label.to_string(), key });
         }
-        for e in cx.storeapi().tiles(&cx.session.policy, &cx.session.user) {
+        for e in p.store_tiles() {
             let key = app_key(&e.name);
             let own = l.app_default(&e.name, &e.group).0;
             let now = l.group_of(&key, &own);
@@ -45,19 +46,19 @@ impl SettingsApp {
         rows
     }
 
-    pub(super) fn hl_len(cx: &AppCx) -> usize {
-        Self::hl_rows(cx).len()
+    pub(super) fn hl_len(p: &dyn HomeLayoutPort) -> usize {
+        Self::hl_rows(p).len()
     }
 
-    fn hl_default_of(cx: &AppCx, l: &Layout, key: &str) -> String {
-        if let Some((_, _, own)) = crate::apps::layout_tiles(cx.session.policy.manage_users, &iyakki_cloudmode::CloudMode::desktop()).into_iter().find(|t| t.0 == key) {
+    fn hl_default_of(p: &dyn HomeLayoutPort, l: &Layout, key: &str) -> String {
+        if let Some((_, _, own)) = crate::apps::layout_tiles(p.can_manage_users(), &iyakki_cloudmode::CloudMode::desktop()).into_iter().find(|t| t.0 == key) {
             return own.to_string();
         }
-        cx.storeapi().tiles(&cx.session.policy, &cx.session.user).into_iter().find(|e| app_key(&e.name) == key).map(|e| l.app_default(&e.name, &e.group).0).unwrap_or_else(|| "work".into())
+        p.store_tiles().into_iter().find(|e| app_key(&e.name) == key).map(|e| l.app_default(&e.name, &e.group).0).unwrap_or_else(|| "work".into())
     }
 
-    pub(super) fn handle_homelayout(&mut self, k: &Key, cx: &AppCx) {
-        let rows = Self::hl_rows(cx);
+    pub(super) fn handle_homelayout(&mut self, k: &Key, p: &dyn HomeLayoutPort) {
+        let rows = Self::hl_rows(p);
         let cur = rows.get(self.sel()).cloned();
         match (k, cur) {
             (Key::Up, _) => self.move_sel(-1, rows.len()),
@@ -82,9 +83,9 @@ impl SettingsApp {
                 if builtin {
                     self.fail("The built-in groups stay in their places; your own groups can be put in order.");
                 } else {
-                    let mut l = Self::hl_layout(cx);
+                    let mut l = Self::hl_layout(p);
                     if l.shift_group(&id, *c == '[') {
-                        Self::hl_save(cx, &l);
+                        Self::hl_save(p, &l);
                         // the cursor follows the group
                         self.move_sel(if *c == '[' { -1 } else { 1 }, rows.len());
                         self.ok("Group moved.");
@@ -92,29 +93,29 @@ impl SettingsApp {
                 }
             }
             (Key::Char('m') | Key::Enter, Some(HlRow::Tile { key, title, .. })) => {
-                let l = Self::hl_layout(cx);
-                let now = l.group_of(&key, &Self::hl_default_of(cx, &l, &key));
+                let l = Self::hl_layout(p);
+                let now = l.group_of(&key, &Self::hl_default_of(p, &l, &key));
                 let mut items: Vec<String> = BUILTIN.iter().map(|(_, n)| n.to_string()).chain(l.groups.iter().map(|g| g.label.clone())).collect();
                 items.retain(|n| l.find(n).is_some_and(|id| id != now));
                 self.modal = Some(Modal::Pick(PickKind::HomeMove(key), Picker::new(&format!("Move {title} to"), items)));
             }
             (Key::Char('p'), Some(HlRow::Tile { key, title, .. })) => {
-                let mut l = Self::hl_layout(cx);
+                let mut l = Self::hl_layout(p);
                 l.reset_tile(&key);
-                Self::hl_save(cx, &l);
+                Self::hl_save(p, &l);
                 self.ok(format!("{title} is back in its own group."));
             }
             (Key::Char('d'), _) => {
-                if !cx.session.policy.manage_settings {
+                if !p.is_admin() {
                     self.fail("Only an administrator sets the default layout for new accounts.");
                 } else {
                     self.modal = Some(Modal::Confirm(ConfirmKind::HomeDefaultSet, "Use this layout as the default for new accounts? Accounts that already have a layout keep theirs.".into()));
                 }
             }
             (Key::Char('c'), _) => {
-                if !cx.session.policy.manage_settings {
+                if !p.is_admin() {
                     self.fail("Only an administrator clears the default layout for new accounts.");
-                } else if !Layout::has_default(cx.data_dir()) {
+                } else if !Layout::has_default(&p.data_dir()) {
                     self.fail("No default layout is set for new accounts.");
                 } else {
                     self.modal = Some(Modal::Confirm(ConfirmKind::HomeDefaultClear, "Clear the default layout? New accounts start with the plain layout again.".into()));
@@ -125,68 +126,68 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn hl_submit(&mut self, cx: &AppCx, editing: &Option<String>, form: &Form) -> Result<String, String> {
-        let mut l = Self::hl_layout(cx);
+    pub(super) fn hl_submit(&mut self, p: &dyn HomeLayoutPort, editing: &Option<String>, form: &Form) -> Result<String, String> {
+        let mut l = Self::hl_layout(p);
         let name = form.value(0);
         let r = match editing {
             Some(id) => l.rename_group(id, &name).map(|_| format!("Renamed to {}.", name.trim())),
             None => l.create_group(&name).map(|_| format!("Made the group {}.", name.trim())),
         };
         if r.is_ok() {
-            Self::hl_save(cx, &l);
-            cx.audit.record(&cx.session.user, "layout.group", &name);
+            Self::hl_save(p, &l);
+            p.audit("layout.group", &name);
         }
         r
     }
 
-    pub(super) fn hl_pick(&mut self, cx: &AppCx, key: &str, item: &str) {
-        let mut l = Self::hl_layout(cx);
+    pub(super) fn hl_pick(&mut self, p: &dyn HomeLayoutPort, key: &str, item: &str) {
+        let mut l = Self::hl_layout(p);
         let Some(gid) = l.find(item) else { return };
-        let own = Self::hl_default_of(cx, &l, key);
+        let own = Self::hl_default_of(p, &l, key);
         match l.place(key, &gid, &own) {
             Ok(()) => {
-                Self::hl_save(cx, &l);
+                Self::hl_save(p, &l);
                 self.ok(format!("Moved to {item}."));
             }
             Err(e) => self.fail(e),
         }
     }
 
-    pub(super) fn hl_confirm(&mut self, cx: &AppCx, kind: &ConfirmKind) {
-        let mut l = Self::hl_layout(cx);
+    pub(super) fn hl_confirm(&mut self, p: &dyn HomeLayoutPort, kind: &ConfirmKind) {
+        let mut l = Self::hl_layout(p);
         match kind {
             ConfirmKind::HomeDelete(id) => match l.delete_group(id) {
                 Ok(n) => {
-                    Self::hl_save(cx, &l);
-                    cx.audit.record(&cx.session.user, "layout.group.delete", id);
+                    Self::hl_save(p, &l);
+                    p.audit("layout.group.delete", id);
                     self.ok(format!("Group deleted. {n} tile{} went back to {}own group.", if n == 1 { "" } else { "s" }, if n == 1 { "its " } else { "their " }));
                 }
                 Err(e) => self.fail(e),
             },
             ConfirmKind::HomeReset => {
                 l.reset();
-                Self::hl_save(cx, &l);
+                Self::hl_save(p, &l);
                 self.ok("Every tile is back in its own group.");
             }
-            ConfirmKind::HomeDefaultSet if cx.session.policy.manage_settings => {
-                if l.save_default(cx.data_dir()) {
-                    cx.audit.record(&cx.session.user, "layout.default.set", "");
+            ConfirmKind::HomeDefaultSet if p.is_admin() => {
+                if l.save_default(&p.data_dir()) {
+                    p.audit("layout.default.set", "");
                     self.ok("This layout is now the default for new accounts.");
                 } else {
                     self.fail("The default layout could not be saved.");
                 }
             }
-            ConfirmKind::HomeDefaultClear if cx.session.policy.manage_settings => {
-                Layout::clear_default(cx.data_dir());
-                cx.audit.record(&cx.session.user, "layout.default.clear", "");
+            ConfirmKind::HomeDefaultClear if p.is_admin() => {
+                Layout::clear_default(&p.data_dir());
+                p.audit("layout.default.clear", "");
                 self.ok("New accounts start with the plain layout again.");
             }
             _ => {}
         }
     }
 
-    pub(super) fn render_homelayout(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let rows = Self::hl_rows(cx);
+    pub(super) fn render_homelayout(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn HomeLayoutPort) {
+        let rows = Self::hl_rows(p);
         let sel = self.sel().min(rows.len().saturating_sub(1));
         let row_h = 30.0 * s;
         let head_h = 26.0 * s;

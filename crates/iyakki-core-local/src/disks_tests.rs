@@ -811,6 +811,50 @@ fn drives_open_in_the_signed_in_persons_home_and_a_user_closes_only_their_own() 
 }
 
 #[test]
+fn a_drive_pulled_out_while_files_are_open_is_let_go_the_person_is_told_and_the_stale_folders_are_removed() {
+    let f = machine();
+    let d = f.disks();
+    let log = logger();
+    let mut sam = who(Role::User);
+    sam.home = "/home/sam".into();
+    assert!(d.after_unplug(&sam, &sink(&log)).is_none(), "nothing mounted, nothing left");
+    d.mount(&sam, "sda1", &MountOpts::default(), &sink(&log)).unwrap();
+    f.add_process(9, "vlc", "/home/sam/media/STICK", &["/home/sam/media/STICK/song.mp3"]);
+    f.make_busy("/home/sam/media/STICK");
+    // the drive is still there: nothing is touched
+    assert!(d.after_unplug(&sam, &sink(&log)).is_none());
+    assert_eq!(d.mounted_in("/home/sam").len(), 1);
+    // the person pulls it out; the kernel keeps the mount, the program still has the file open
+    f.remove_disk("sda");
+    f.st.lock().unwrap().dirs.insert("/home/sam/media/OLD".into());
+    let msg = d.after_unplug(&sam, &sink(&log)).expect("a sentence");
+    assert!(msg.contains("The drive STICK was removed") && msg.contains("vlc (process 9)") && msg.contains("not saved to it is lost"), "{msg}");
+    assert!(d.mounted_in("/home/sam").is_empty(), "the mount is let go");
+    let calls = f.calls();
+    assert!(calls.contains(&"umount-detach /home/sam/media/STICK".to_string()), "{calls:?}");
+    assert!(calls.contains(&"rmdir /home/sam/media/STICK".to_string()) && calls.contains(&"rmdir /home/sam/media/OLD".to_string()), "the stale folders are removed: {calls:?}");
+    let a = actions(&log);
+    assert!(a.contains(&"disks.unplugged".to_string()) && a.contains(&"disks.media_folder_removed".to_string()), "{a:?}");
+    // said once
+    assert!(d.after_unplug(&sam, &sink(&log)).is_none());
+}
+
+#[test]
+fn a_drive_pulled_out_that_nothing_used_is_closed_quietly_with_one_short_sentence_and_other_peoples_folders_are_left() {
+    let f = machine();
+    let d = f.disks();
+    let log = logger();
+    let mut sam = who(Role::User);
+    sam.home = "/home/sam".into();
+    d.mount(&sam, "sda1", &MountOpts::default(), &sink(&log)).unwrap();
+    f.remove_disk("sda");
+    f.st.lock().unwrap().dirs.insert("/home/amy/media/KEEP".into());
+    let msg = d.after_unplug(&sam, &sink(&log)).unwrap();
+    assert_eq!(msg, "The drive STICK was removed. It was not in use, and its folder is closed.");
+    assert!(!f.calls().iter().any(|c| c.contains("/home/amy")), "another person's folder is not touched: {:?}", f.calls());
+}
+
+#[test]
 fn sign_out_closes_nothing_by_itself_and_says_a_drive_is_still_open_unless_the_switch_is_on() {
     let tmp = std::env::temp_dir().join(format!("disks-signout-{}", std::process::id()));
     let home = tmp.join("home/sam");

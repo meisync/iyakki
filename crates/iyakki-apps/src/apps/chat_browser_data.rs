@@ -4,12 +4,16 @@
 //! fields are kept, never what they hold, and nothing here can set one (the person types them in the address bar with `profile set`).
 
 use iyakki_shared::settingstools::{Entry};
+use crate::apps::chat_port::ChatPort;
+#[cfg(test)]
+use crate::apps::chat_port::CxChat;
 use iyakki_shared::settingstools::{arg_str, no_args};
 use super::chat_settings::Env;
 use serde_json::json;
 
 use super::browser_data as bd;
 use super::browser_forms as bf;
+#[cfg(test)]
 use super::AppCx;
 
 pub const TOOLS: [&str; 28] = ["browser_install_site", "site_apps_list", "site_app_open", "site_app_remove", "browser_data_export", "browser_data_import", "browser_data_to_tenant", "browser_data_from_tenant", "browser_protection_choices", "browser_protection_choices_set", "browser_bookmarks", "browser_bookmark_folder", "browser_history_search", "browser_zoom_status", "browser_zoom_set", "browser_profile_status", "browser_profile_clear", "browser_thumbnails_status", "browser_thumbnails_set", "browser_downloads_list", "browser_download_open", "browser_reports_list", "browser_reports_clear", "browser_media_sites", "browser_media_site_forget", "browser_av_addon_status", "browser_media_policy_status", "browser_media_policy_set"];
@@ -20,12 +24,12 @@ fn site_ok(s: &str) -> bool {
     !s.is_empty() && s.len() <= 100 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
 }
 
-pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
+pub fn entries(cx: &dyn ChatPort, env: &Env) -> Vec<Entry> {
     let mut v = Vec::new();
     {
-        let c = cx.clone();
+        let c = cx.shared();
         v.push(Entry::read("Browser", "site_apps_list", "List the sites installed as app tiles: name, start address, the origins each may load, what it holds, and a note when the site needs the audio and video add-on or a content decryption module that this computer does not have.", no_args(), move |_| {
-            let st = super::site_apps::load(&c);
+            let st = super::site_apps::load(&*c);
             if st.apps.is_empty() {
                 return Ok("No site is installed as an app.".into());
             }
@@ -39,7 +43,7 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
                     line.push_str(&format!("; NOTE: {t}"));
                 }
                 // the size of its own cookies and storage (F-BROW-100): a note once it passes the cap, never a deletion
-                let size = super::site_apps::profile_size(&super::site_apps::profile_dir(c.data_dir(), &super::browser_config::who(&c), &a.id));
+                let size = super::site_apps::profile_size(&super::site_apps::profile_dir(c.data_dir(), &super::browser_config::who(&*c), &a.id));
                 if let Some(t) = super::site_apps::size_note(size) {
                     line.push_str(&format!("; NOTE: {t}"));
                 }
@@ -48,15 +52,15 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let (c, e1) = (cx.clone(), env.clone());
+        let (c, e1) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"url": {"type": "string", "description": "The https address of the page to install."}, "name": {"type": "string", "description": "The tile name; leave out to use the page's own."}, "title": {"type": "string", "description": "The page title."}, "manifest": {"type": "string", "description": "The text of the page's web app manifest, if known."}, "favicon": {"type": "string", "description": "The page's icon address, if known."}, "extra_origins": {"type": "array", "items": {"type": "string"}, "description": "More https origins the tile may load (a sign-in host, for example)."}}, "required": ["url"]});
         v.push(Entry::change("Browser", "browser_install_site", "Install a site as an app tile with its own window and its own cookies and storage; other hosts open in the Browser tile. The person approves a card first.", schema, |a| format!("Install {} as an app tile", a["url"].as_str().unwrap_or("a site")), move |a| {
             let page = super::site_apps::PageInfo { url: arg_str(a, "url")?, title: a["title"].as_str().unwrap_or("").to_string(), manifest: a["manifest"].as_str().map(str::to_string), manifest_url: None, favicon: a["favicon"].as_str().map(str::to_string) };
             let extra: Vec<String> = a["extra_origins"].as_array().map(|l| l.iter().filter_map(|x| x.as_str().map(str::to_string)).take(8).collect()).unwrap_or_default();
             let app = super::site_apps::from_page(&page, a["name"].as_str(), &extra)?;
-            let mut st = super::site_apps::load(&c);
+            let mut st = super::site_apps::load(&*c);
             st.add(app.clone())?;
-            super::site_apps::save(&c, &st);
+            super::site_apps::save(&*c, &st);
             e1.audit("browser.siteapp", &app.audit("installed"));
             let mut msg = format!("{} is now an app tile ({}).", app.name, app.origins.join(", "));
             if let Some(t) = super::site_apps::codec_card(&app, &crate::agent().avaddon().detect(c.data_dir())) {
@@ -71,41 +75,41 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let (c, e1) = (cx.clone(), env.clone());
+        let (c, e1) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"name": {"type": "string", "description": "The site app's name from site_apps_list."}}, "required": ["name"]});
         v.push(Entry::change("Browser", "site_app_open", "Open a site app in a tab of its own in the Browser, with the site's own profile and only its origins (the screen the person is on is kept aside so Back returns). The person approves a card first that names the site and what the tile may hold.", schema, |a| format!("Open the site app {}", a["name"].as_str().unwrap_or("")), move |a| {
-            let st = super::site_apps::load(&c);
+            let st = super::site_apps::load(&*c);
             let app = st.find(&arg_str(a, "name")?).cloned().ok_or("no site app has that name; call site_apps_list")?;
-            super::download_open::queue_chat(&c.session.user, "browser", &format!("site:{}", app.id));
+            super::download_open::queue_chat(&c.user(), "browser", &format!("site:{}", app.id));
             e1.audit("browser.siteapp", &app.audit("open requested"));
             Ok(format!("Opening {} in the Browser.", app.name))
         }));
     }
     {
-        let (c, e1) = (cx.clone(), env.clone());
+        let (c, e1) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"name": {"type": "string", "description": "The site app's name from site_apps_list."}}, "required": ["name"]});
         v.push(Entry::change("Browser", "site_app_remove", "Remove a site app and delete its own cookies, storage and sign-ins. The person approves a card first.", schema, |a| format!("Remove the site app {} and forget its sign-ins", a["name"].as_str().unwrap_or("")), move |a| {
-            let mut st = super::site_apps::load(&c);
+            let mut st = super::site_apps::load(&*c);
             let app = st.find(&arg_str(a, "name")?).cloned().ok_or("no site app has that name; call site_apps_list")?;
-            let gone = st.remove(c.data_dir(), &super::browser_config::who(&c), &app.id)?;
-            super::site_apps::save(&c, &st);
+            let gone = st.remove(c.data_dir(), &super::browser_config::who(&*c), &app.id)?;
+            super::site_apps::save(&*c, &st);
             e1.audit("browser.siteapp", &app.audit("removed"));
             Ok(format!("{} is removed{}.", app.name, if gone { " and its sign-ins are deleted" } else { "" }))
         }));
     }
     {
-        let c = cx.clone();
+        let c = cx.shared();
         v.push(Entry::read("Browser", "browser_media_policy_status", "Say how tall a video the browser's web engine is asked for (Automatic or a number of pixels) and whether it may use the audio and video add-on's decoders.", no_args(), move |_| {
-            let b = super::browser_config::load(&c);
-            let held = c.agent.av_build().codecs_policy(&c.session.user) == Some(false);
+            let b = super::browser_config::load(&*c);
+            let held = c.agent().av_build().codecs_policy(&c.user()) == Some(false);
             Ok(format!("Video quality: {}. Add-on decoders: {}{}.", super::browser_config::cap_words(b.video_max_height), if b.codecs && !held { "allowed" } else { "off" }, if held { " (the tenant's administrator has turned them off)" } else { "" }))
         }));
     }
     {
-        let (c, e) = (cx.clone(), env.clone());
+        let (c, e) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"max_height": {"type": "integer", "description": "The tallest video in pixels: 0 (Automatic), 1080, 720, 480 or 360"}, "codecs": {"type": "boolean", "description": "Allow the audio and video add-on's decoders"}}});
         v.push(Entry::change("Browser", "browser_media_policy_set", "Change the tallest video the web engine is asked for (max_height: 0, 1080, 720, 480 or 360) and/or whether it may use the audio and video add-on's decoders (codecs). Applies to the next page. The person approves a card first.", schema, |a| format!("Browser video: {}{}", a["max_height"].as_u64().map(|h| format!("tallest {}", if h == 0 { "automatic".to_string() } else { h.to_string() })).unwrap_or_default(), a["codecs"].as_bool().map(|b| format!(" decoders {}", if b { "on" } else { "off" })).unwrap_or_default()), move |a| {
-            let mut b = super::browser_config::load(&c);
+            let mut b = super::browser_config::load(&*c);
             if let Some(h) = a["max_height"].as_u64() {
                 let h = u32::try_from(h).unwrap_or(u32::MAX);
                 if !super::browser_config::VIDEO_CAPS.contains(&h) {
@@ -119,23 +123,23 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
             if a["max_height"].is_null() && a["codecs"].is_null() {
                 return Err("say max_height, codecs or both".into());
             }
-            super::browser_config::save(&c, &b);
+            super::browser_config::save(&*c, &b);
             e.audit("settings.browser", &format!("Video quality: {}; add-on decoders {}.", super::browser_config::cap_words(b.video_max_height), if b.codecs { "allowed" } else { "off" }));
             Ok(format!("Video quality: {}. Add-on decoders: {}. It applies to the next page.", super::browser_config::cap_words(b.video_max_height), if b.codecs { "allowed" } else { "off" }))
         }));
     }
     {
-        let c = cx.clone();
+        let c = cx.shared();
         v.push(Entry::read("Browser", "browser_hw_decode_status", "Say whether the web engine decodes video on the graphics chip (VA-API) on this computer: on or off. It is a setting of this computer that an administrator changes.", no_args(), move |_| {
-            Ok(format!("Hardware video decoding: {}. It applies the next time the web engine starts, and the engine falls back to the processor by itself when the chip or its driver is missing.", super::browser_tuning::words(super::browser_tuning::load(&c))))
+            Ok(format!("Hardware video decoding: {}. It applies the next time the web engine starts, and the engine falls back to the processor by itself when the chip or its driver is missing.", super::browser_tuning::words(super::browser_tuning::load(&*c))))
         }));
     }
     {
-        let c = cx.clone();
+        let c = cx.shared();
         let schema = json!({"type": "object", "properties": {"on": {"type": "boolean", "description": "true to decode video on the graphics chip, false for the processor"}}, "required": ["on"]});
         v.push(Entry::change("Browser", "browser_hw_decode_set", "Turn hardware video decoding (VA-API) of the web engine on or off for this computer. Only an administrator may. It applies the next time the web engine starts. The person approves a card first.", schema, |a| format!("Hardware video decoding {}", if a["on"].as_bool() == Some(true) { "on" } else { "off" }), move |a| {
             let on = a["on"].as_bool().ok_or("say on: true or false")?;
-            super::browser_tuning::set(&c, on)?;
+            super::browser_tuning::set(&*c, on)?;
             Ok(format!("Hardware video decoding: {}. It applies the next time the web engine starts.", super::browser_tuning::words(on)))
         }));
     }
@@ -147,36 +151,36 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let c = cx.clone();
+        let c = cx.shared();
         v.push(Entry::read("Browser", "browser_media_sites", "List the sites the person allowed or blocked for the camera, the microphone or the screen share (site and what was decided).", no_args(), move |_| {
-            let m = super::browser_media::load(&c);
+            let m = super::browser_media::load(&*c);
             let l = m.list();
             Ok(if l.is_empty() { "No site is remembered: every request asks.".to_string() } else { l.iter().map(|(h, w)| { let n = m.device_note(h); if n.is_empty() { format!("{h}: {w}") } else { format!("{h}: {w} ({n})") } }).collect::<Vec<_>>().join("\n") })
         }));
     }
     {
-        let (c, e1) = (cx.clone(), env.clone());
+        let (c, e1) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"site": {"type": "string", "description": "A site from browser_media_sites, for example meet.example.org."}}, "required": ["site"]});
         v.push(Entry::change("Browser", "browser_media_site_forget", "Make the browser ask again about camera, microphone and screen for one remembered site (it forgets the allow or block and the device chosen for it). The person approves a card first.", schema, |a| format!("Forget what the browser remembers about {} for camera and microphone", a["site"].as_str().unwrap_or("a site")), move |a| {
             let site = arg_str(a, "site")?.to_ascii_lowercase();
             if !site_ok(&site) {
                 return Err("that is not a site name".into());
             }
-            let mut m = super::browser_media::load(&c);
+            let mut m = super::browser_media::load(&*c);
             if !m.list().iter().any(|(h, _)| *h == site) {
                 return Err(format!("{site} is not remembered; call browser_media_sites"));
             }
             m.revoke(&site);
-            super::browser_media::save(&c, &m);
+            super::browser_media::save(&*c, &m);
             e1.audit("settings.browser.media", &format!("{site} forgotten for camera, microphone and screen"));
             Ok(format!("The browser will ask again before {site} uses the camera, the microphone or the screen."))
         }));
     }
     {
-        let c = cx.clone();
+        let c = cx.shared();
         let schema = json!({"type": "object", "properties": {"folder": {"type": "string", "description": "A folder name; leave out to list the folders."}}});
         v.push(Entry::read("Browser", "browser_bookmarks", "List the browser's bookmark folders with counts, or the bookmarks (title, site) of one folder (\"-\" is the top level).", schema, move |a| {
-            let d = bd::load(&c);
+            let d = bd::load(&*c);
             if let Some(f) = a.get("folder").and_then(|f| f.as_str()) {
                 let f = if f.trim() == "-" { String::new() } else { bd::Data::clean_folder(f) };
                 let items: Vec<String> = d.bookmarks.iter().filter(|b| b.folder == f).take(100).map(|b| format!("{} ({})", b.title, bd::host_of(&b.url))).collect();
@@ -189,13 +193,13 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let c = cx.clone();
+        let c = cx.shared();
         let e1 = env.clone();
         let schema = json!({"type": "object", "properties": {"action": {"type": "string", "enum": ["new", "move", "rename", "delete"]}, "name": {"type": "string", "description": "The folder (for move: the folder to put the bookmark in, \"-\" for none)."}, "to": {"type": "string", "description": "rename: the new name."}, "site": {"type": "string", "description": "move: the site (host) of the bookmark."}}, "required": ["action", "name"]});
         v.push(
             Entry::change("Browser", "browser_bookmark_folder", "Make, rename or delete a bookmark folder, or move the bookmark of a site into one (deleting keeps the bookmarks). The person approves a card first.", schema, |a| format!("Bookmarks: {} {}", a["action"].as_str().unwrap_or("change"), a["name"].as_str().unwrap_or("a folder")), move |a| {
                 let (action, name) = (arg_str(a, "action")?, arg_str(a, "name")?);
-                let mut d = bd::load(&c);
+                let mut d = bd::load(&*c);
                 let msg = match action.as_str() {
                     "new" => format!("Folder {} made.", d.new_folder(&name)?),
                     "rename" => format!("Renamed ({} bookmarks).", d.rename_folder(&name, &arg_str(a, "to")?)?),
@@ -213,7 +217,7 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
                     }
                     _ => return Err("action is new, move, rename or delete".into()),
                 };
-                bd::save(&c, &d);
+                bd::save(&*c, &d);
                 e1.audit("settings.browser", &format!("Bookmark folders: {action}"));
                 Ok(msg)
             })
@@ -221,12 +225,12 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         );
     }
     {
-        let c = cx.clone();
+        let c = cx.shared();
         let schema = json!({"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "description": "At most 20."}}, "required": ["query"]});
         v.push(Entry::read("Browser", "browser_history_search", "Find pages the person visited: every word must be in the title or address. Returns title, site and when; never full addresses.", schema, move |a| {
             let q = arg_str(a, "query")?;
             let n = a.get("limit").and_then(|l| l.as_u64()).unwrap_or(10).clamp(1, 20) as usize;
-            let d = bd::load(&c);
+            let d = bd::load(&*c);
             let found = d.search_history(&q, n);
             if found.is_empty() {
                 return Ok("Nothing in the history matches.".into());
@@ -235,9 +239,9 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let c = cx.clone();
+        let c = cx.shared();
         v.push(Entry::read("Browser", "browser_zoom_status", "List the sites whose zoom is not 100% and whether the zoom changes only the text.", no_args(), move |_| {
-            let d = bd::load(&c);
+            let d = bd::load(&*c);
             if d.zoom.is_empty() && d.text_zoom.is_empty() {
                 return Ok("Every site is at 100%.".into());
             }
@@ -245,20 +249,20 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let (c, e1) = (cx.clone(), env.clone());
+        let (c, e1) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"site": {"type": "string", "description": "The host name, e.g. example.org."}, "percent": {"type": "integer", "description": "50 to 300; 100 resets."}, "text_only": {"type": "boolean", "description": "Make only the letters bigger."}}, "required": ["site", "percent"]});
         v.push(
             Entry::change("Browser", "browser_zoom_set", "Set the zoom of one site (50 to 300 percent, 100 resets), optionally for the text only. The person approves a card first.", schema, |a| format!("Zoom {} to {}%", a["site"].as_str().unwrap_or("a site"), a["percent"]), move |a| {
                 let site = arg_str(a, "site")?.to_ascii_lowercase();
                 let pct = a.get("percent").and_then(|p| p.as_i64()).ok_or("percent is a number from 50 to 300")?;
-                let mut d = bd::load(&c);
+                let mut d = bd::load(&*c);
                 d.set_zoom(&site, pct as f32 / 100.0);
                 if let Some(t) = a.get("text_only").and_then(|t| t.as_bool()) {
                     if t != d.is_text_zoom(&site) {
                         d.toggle_text_zoom(&site);
                     }
                 }
-                bd::save(&c, &d);
+                bd::save(&*c, &d);
                 e1.audit("settings.browser", &format!("Zoom {site} {pct}%"));
                 Ok(format!("{site} is at {pct}%{}.", if d.is_text_zoom(&site) { " (text only)" } else { "" }))
             })
@@ -273,7 +277,7 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         );
     }
     {
-        let (data, user, agent) = (cx.data_dir().to_path_buf(), env.user.clone(), cx.agent.clone());
+        let (data, user, agent) = (cx.data_dir().to_path_buf(), env.user.clone(), cx.agent());
         v.push(Entry::read("Browser", "browser_protection_choices", "Say what the person chose for their protected browser data: the timed checkpoint, sealing when the screen locks, what is left out at sign-out and the sites never kept. Also says whether protection is on.", no_args(), move |_| {
             let st = agent.profile_store().status(&data, &user);
             Ok(format!("Protection: {}\n{}", st.text(), iyakki_shared::profilepolicy::Policy::load(&data, &user).summary()))
@@ -281,58 +285,58 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
     }
     {
         // moving the sealed file to another machine (F-VAULT-11): the file stays sealed; the key stays in the person's own vault
-        let (c, e1) = (cx.clone(), env.clone());
+        let (c, e1) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"path": {"type": "string", "description": "A new file to write (in a folder this account may write), for example on a USB stick."}}, "required": ["path"]});
         v.push(Entry::change("Browser", "browser_data_export", "Copy the protected browser data, still sealed, to a new file (for example on a USB stick) so it can be taken to another computer. The cookies stay unreadable without the browser key in the person's vault; the key is not copied. Only while the data is sealed (signed out of the browser, not open). The person approves a card first.", schema, |a| format!("Copy the sealed browser data to {}", a["path"].as_str().unwrap_or("?")), move |a| {
             let p = arg_str(a, "path")?;
             let path = std::path::Path::new(&p);
-            if !path.is_absolute() || p.contains("..") || !c.session.policy.allows_write(&c.session.user, &p) {
+            if !path.is_absolute() || p.contains("..") || !c.policy().allows_write(&c.user(), &p) {
                 return Err("that is not a place this account may write (give a full path in your own folders)".into());
             }
-            let n = c.agent.profile_store().export_sealed(c.data_dir(), &c.session.user, path, iyakki_schema::now_secs())?;
+            let n = c.agent().profile_store().export_sealed(c.data_dir(), &c.user(), path, iyakki_schema::now_secs())?;
             e1.audit("settings.browser.data.export", &format!("{n} bytes"));
             Ok(format!("The sealed browser data ({n} bytes) is in {p}. It opens only with the browser key in your own vault (it is not in the file)."))
         }));
     }
     {
-        let (c, e1) = (cx.clone(), env.clone());
+        let (c, e1) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"path": {"type": "string", "description": "A sealed browser data file made by browser_data_export."}}, "required": ["path"]});
         v.push(Entry::change("Browser", "browser_data_import", "Take in a sealed browser data file made on another computer as this account's protected browser data. It is checked with this account's own browser key first; the data that was here becomes the backup copy. Refused while the browser data is open. The person approves a card first.", schema, |a| format!("Take in sealed browser data from {}", a["path"].as_str().unwrap_or("?")), move |a| {
             let p = arg_str(a, "path")?;
             let path = std::path::Path::new(&p);
-            if !path.is_absolute() || p.contains("..") || !c.session.policy.allows_read(&c.session.user, &p) {
+            if !path.is_absolute() || p.contains("..") || !c.policy().allows_read(&c.user(), &p) {
                 return Err("that is not a file this account may read (give a full path in your own folders)".into());
             }
-            let key = c.vault().user_get(&c.session.user, iyakki_shared::profilestore::VAULT_SECRET).ok().ok_or("this account's vault has no browser key, so the file cannot be opened here (the key is not moved by the file)")?;
-            c.agent.profile_store().import_sealed(c.data_dir(), &c.session.user, path, &key, iyakki_schema::now_secs())?;
+            let key = c.vault().user_get(&c.user(), iyakki_shared::profilestore::VAULT_SECRET).ok().ok_or("this account's vault has no browser key, so the file cannot be opened here (the key is not moved by the file)")?;
+            c.agent().profile_store().import_sealed(c.data_dir(), &c.user(), path, &key, iyakki_schema::now_secs())?;
             e1.audit("settings.browser.data.import", "sealed file taken in");
             Ok("The sealed browser data was checked with your browser key and taken in; it opens at your next sign-in. The data that was here is kept as the backup copy.".into())
         }));
     }
     {
         // moving the sealed file to a signed-in cloud tenant and back (F-VAULT-11): the tenant holds bytes it cannot read
-        let (c, e1) = (cx.clone(), env.clone());
+        let (c, e1) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"tenant": {"type": "string", "description": "The name of a cloud tenant you are signed in to (see the cloud strip)."}}, "required": ["tenant"]});
         v.push(Entry::change("Browser", "browser_data_to_tenant", "Send the protected browser data, still sealed, to a cloud tenant you are signed in to, so the browser there can use your sign-ins. The tenant cannot read it: the key stays in your own vault and is not sent. Only while the data is sealed here (signed out of the browser). The person approves a card first.", schema, |a| format!("Send the sealed browser data to the tenant {}", a["tenant"].as_str().unwrap_or("?")), move |a| {
             let t = arg_str(a, "tenant")?;
-            let n = c.agent.profile_store().send_to_tenant(c.data_dir(), &c.session.user, &t, iyakki_schema::now_secs())?;
+            let n = c.agent().profile_store().send_to_tenant(c.data_dir(), &c.user(), &t, iyakki_schema::now_secs())?;
             e1.audit("settings.browser.data.to_tenant", &format!("{t}: {n} bytes"));
             Ok(format!("The sealed browser data ({n} bytes) is on the tenant {t}. It opens only with the browser key in your own vault."))
         }));
     }
     {
-        let (c, e1) = (cx.clone(), env.clone());
+        let (c, e1) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"tenant": {"type": "string", "description": "The name of a cloud tenant you are signed in to."}}, "required": ["tenant"]});
         v.push(Entry::change("Browser", "browser_data_from_tenant", "Bring back the sealed browser data a cloud tenant holds for this account as the protected browser data here. It is checked with this account's own browser key first; the data that was here becomes the backup copy. Refused while the browser data is open. The person approves a card first.", schema, |a| format!("Take in the sealed browser data from the tenant {}", a["tenant"].as_str().unwrap_or("?")), move |a| {
             let t = arg_str(a, "tenant")?;
-            let key = c.vault().user_get(&c.session.user, iyakki_shared::profilestore::VAULT_SECRET).ok().ok_or("this account's vault has no browser key, so the data cannot be opened here (the key is not moved by the data)")?;
-            c.agent.profile_store().fetch_from_tenant(c.data_dir(), &c.session.user, &t, &key, iyakki_schema::now_secs())?;
+            let key = c.vault().user_get(&c.user(), iyakki_shared::profilestore::VAULT_SECRET).ok().ok_or("this account's vault has no browser key, so the data cannot be opened here (the key is not moved by the data)")?;
+            c.agent().profile_store().fetch_from_tenant(c.data_dir(), &c.user(), &t, &key, iyakki_schema::now_secs())?;
             e1.audit("settings.browser.data.from_tenant", &t);
             Ok("The sealed browser data was checked with your browser key and taken in; it opens at your next sign-in. The data that was here is kept as the backup copy.".into())
         }));
     }
     {
-        let (data, user, e1, agent) = (cx.data_dir().to_path_buf(), env.user.clone(), env.clone(), cx.agent.clone());
+        let (data, user, e1, agent) = (cx.data_dir().to_path_buf(), env.user.clone(), env.clone(), cx.agent());
         let sites = json!({"type": "array", "items": {"type": "string"}, "description": "Site names such as example.com; a site covers its sub-domains. The whole list is replaced."});
         let schema = json!({"type": "object", "properties": {
             "checkpoint_minutes": {"type": "integer", "description": "Minutes between write-backs while the browser data is open and changes; 0 switches it off."},
@@ -385,9 +389,9 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let c = cx.clone();
+        let c = cx.shared();
         v.push(Entry::read("Browser", "browser_profile_status", "Say which saved name and address fields are kept in the vault (field names only, never their values).", no_args(), move |_| {
-            let p = bf::load(&c)?;
+            let p = bf::load(&*c)?;
             if p.is_empty() {
                 return Ok("Nothing is kept.".into());
             }
@@ -395,28 +399,28 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let (c, e1) = (cx.clone(), env.clone());
+        let (c, e1) = (cx.shared(), env.clone());
         v.push(Entry::change("Browser", "browser_profile_clear", "Remove the saved name and address from the vault. The person approves a card first.", no_args(), |_| "Remove the saved name and address".to_string(), move |_| {
-            bf::save(&c, &bf::Profile::default())?;
+            bf::save(&*c, &bf::Profile::default())?;
             e1.audit("settings.browser", "Saved name and address removed");
             Ok("The saved name and address were removed from the vault.".into())
         }));
     }
     {
-        let c = cx.clone();
+        let c = cx.shared();
         v.push(Entry::read("Browser", "browser_thumbnails_status", "Say whether small pictures of often-visited pages are kept for the browser's start page, and how many.", no_args(), move |_| {
-            let d = bd::load(&c);
-            let n = super::browser_thumbs::Thumbs::new(&thumbs_dir(&c)).count();
+            let d = bd::load(&*c);
+            let n = super::browser_thumbs::Thumbs::new(&thumbs_dir(&*c)).count();
             Ok(format!("Pictures of often-visited pages are {}; {n} kept.", if d.thumbs_off { "off" } else { "on" }))
         }));
     }
     {
-        let (c, e1) = (cx.clone(), env.clone());
+        let (c, e1) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"mode": {"type": "string", "enum": ["on", "off", "clear"]}}, "required": ["mode"]});
         v.push(Entry::change("Browser", "browser_thumbnails_set", "Switch the small pictures of often-visited pages on or off (off deletes them), or delete them. The person approves a card first.", schema, |a| format!("Browser pictures: {}", a["mode"].as_str().unwrap_or("change")), move |a| {
             let mode = arg_str(a, "mode")?;
-            let mut d = bd::load(&c);
-            let t = super::browser_thumbs::Thumbs::new(&thumbs_dir(&c));
+            let mut d = bd::load(&*c);
+            let t = super::browser_thumbs::Thumbs::new(&thumbs_dir(&*c));
             match mode.as_str() {
                 "on" => d.thumbs_off = false,
                 "off" => {
@@ -426,26 +430,26 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
                 "clear" => t.clear(),
                 _ => return Err("mode is on, off or clear".into()),
             }
-            bd::save(&c, &d);
+            bd::save(&*c, &d);
             e1.audit("settings.browser", &format!("Page pictures: {mode}"));
             Ok(format!("Pictures of often-visited pages: {mode}."))
         }));
     }
     {
-        let c = cx.clone();
+        let c = cx.shared();
         v.push(Entry::read("Browser", "browser_downloads_list", "List the files the browser saved to Downloads (newest first) with their size and the tile that opens each: text and code in EDIT, tables in DATA, music and video in MEDIA.", no_args(), move |_| {
-            let l = super::download_open::describe(&c);
+            let l = super::download_open::describe(&*c);
             Ok(if l.is_empty() { "No saved downloads.".into() } else { l.join("\n") })
         }));
     }
     {
-        let (c, e1) = (cx.clone(), env.clone());
+        let (c, e1) = (cx.shared(), env.clone());
         let schema = json!({"type": "object", "properties": {"name": {"type": "string", "description": "The file name as listed (no folder)."}}, "required": ["name"]});
         v.push(
             Entry::change("Browser", "browser_download_open", "Open a saved download in the tile that suits it (EDIT, DATA or MEDIA); the screen the person is on is kept aside. The person approves a card first.", schema, |a| format!("Open the download {}", a["name"].as_str().unwrap_or("")), move |a| {
                 let name = arg_str(a, "name")?;
-                let (tile, path) = super::download_open::resolve(&c, &name)?;
-                super::download_open::queue_chat(&c.session.user, tile, &path);
+                let (tile, path) = super::download_open::resolve(&*c, &name)?;
+                super::download_open::queue_chat(&c.user(), tile, &path);
                 e1.audit("browser.download.open", tile);
                 Ok(format!("Opening {name} in {}.", tile.to_ascii_uppercase()))
             })
@@ -456,9 +460,9 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         );
     }
     {
-        let c = cx.clone();
+        let c = cx.shared();
         v.push(Entry::read("Browser", "browser_reports_list", "List the site reports the person saved with the Report site button (or the ! key) in the developer tools: time, site, status, engine and the number of notes. Reports stay on this computer.", no_args(), move |_| {
-            let path = super::browser_report::file_for(c.data_dir(), &c.session.user);
+            let path = super::browser_report::file_for(c.data_dir(), &c.user());
             let text = std::fs::read_to_string(path).unwrap_or_default();
             let rows: Vec<String> = text
                 .lines()
@@ -469,9 +473,9 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let (c, e1) = (cx.clone(), env.clone());
+        let (c, e1) = (cx.shared(), env.clone());
         v.push(Entry::change("Browser", "browser_reports_clear", "Delete the person's saved site reports. The person approves a card first.", no_args(), |_| "Delete the saved site reports".to_string(), move |_| {
-            let path = super::browser_report::file_for(c.data_dir(), &c.session.user);
+            let path = super::browser_report::file_for(c.data_dir(), &c.user());
             let had = path.is_file();
             if had {
                 std::fs::remove_file(&path).map_err(|e| format!("could not delete the reports: {e}"))?;
@@ -484,7 +488,7 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
 }
 
 /// Where this person's pictures are (the browser tile uses the same folder).
-fn thumbs_dir(cx: &AppCx) -> std::path::PathBuf {
+fn thumbs_dir(cx: &dyn ChatPort) -> std::path::PathBuf {
     cx.data_dir().join(format!("browser-thumbs-{}", super::browser_config::who(cx)))
 }
 
@@ -517,7 +521,7 @@ mod tests {
         let a2 = audits.clone();
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
         let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
-        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&CxChat(&cx), &env));
         (cx, t, audits)
     }
 
@@ -568,7 +572,7 @@ mod tests {
         t.call("browser_profile_clear", &json!({})).unwrap();
         assert!(bf::load(&cx).unwrap().is_empty());
         // page pictures
-        let th = super::super::browser_thumbs::Thumbs::new(&thumbs_dir(&cx));
+        let th = super::super::browser_thumbs::Thumbs::new(&thumbs_dir(&CxChat(&cx)));
         th.save("a.org", &tiny_skia::Pixmap::new(super::super::browser_thumbs::W, super::super::browser_thumbs::H).unwrap()).unwrap();
         assert_eq!(t.call("browser_thumbnails_status", &json!({})).unwrap(), "Pictures of often-visited pages are on; 1 kept.");
         t.call("browser_thumbnails_set", &json!({"mode": "off"})).unwrap();

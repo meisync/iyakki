@@ -131,13 +131,48 @@ fn losing_the_uplink_tears_everything_down() {
     os.advance_secs(3);
     let st = m.tick(&mut os, &start_req(1));
     assert_eq!(st.state, State::Failed);
-    assert_eq!(st.note, "Sharing stopped: eth0 lost its route to the internet.");
+    assert_eq!(st.note, "Sharing stopped: eth0 lost its route to the internet. It starts again by itself when the uplink returns.");
     pristine(&os);
-    // it does not come back by itself when the route returns; the person starts it again
+    // the route returns: sharing starts again by itself (F-LIFE-17), the same request, no person needed
     os.st().ifs[0].default_route = true;
     os.advance_secs(3);
+    assert_eq!(m.tick(&mut os, &start_req(1)).state, State::Failed, "it looks again only every ten seconds");
+    os.advance_secs(10);
+    let st = m.tick(&mut os, &start_req(1));
+    assert_eq!(st.state, State::On, "{}", st.note);
+    assert!(os.st().audit.iter().any(|l| l.contains("started again, the uplink is back")));
+}
+
+#[test]
+fn a_sharing_that_waits_for_its_uplink_does_not_start_while_the_route_is_missing_and_never_after_switch_off_or_a_changed_request() {
+    let mut os = FakeOs::new(machine());
+    let mut m = Manager::new();
+    m.tick(&mut os, &start_req(1));
+    os.st().ifs[0].default_route = false;
+    os.advance_secs(3);
     assert_eq!(m.tick(&mut os, &start_req(1)).state, State::Failed);
-    assert_eq!(m.tick(&mut os, &start_req(2)).state, State::On);
+    // many looks, no route: still waiting, nothing set up
+    for _ in 0..5 {
+        os.advance_secs(11);
+        assert_eq!(m.tick(&mut os, &start_req(1)).state, State::Failed);
+    }
+    pristine(&os);
+    // switched off while waiting: the wait ends, and the route coming back changes nothing
+    assert_eq!(m.tick(&mut os, &stop_req(2)).state, State::Off);
+    os.st().ifs[0].default_route = true;
+    os.advance_secs(30);
+    assert_eq!(m.tick(&mut os, &stop_req(2)).state, State::Off);
+    pristine(&os);
+    // a session that failed for another reason (the shared device went away) does not come back by itself
+    let mut os = FakeOs::new(machine());
+    let mut m = Manager::new();
+    m.tick(&mut os, &start_req(1));
+    os.st().ifs[1].up = false;
+    os.advance_secs(3);
+    assert_eq!(m.tick(&mut os, &start_req(1)).state, State::Failed);
+    os.st().ifs[1].up = true;
+    os.advance_secs(30);
+    assert_eq!(m.tick(&mut os, &start_req(1)).state, State::Failed, "only a lost uplink is waited for");
 }
 
 #[test]

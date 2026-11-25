@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-AI-17",
+ "feature_sha": "5347678f01ec3b29",
+ "title": "a background job shows real progress only and a quiet job is a still a",
+ "clauses": [
+  {
+   "id": "job-spinner",
+   "text": "a background job shows real progress only and a quiet job is a still amber spinner",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Start a long Quick install in the Jobs strip and watch it, then start one that prints nothing.",
+     "expect": "A percentage only when the output gives one; the silent job shows a still amber spinner with how long it has been quiet."
+    }
+   ]
+  }
+ ]
+}

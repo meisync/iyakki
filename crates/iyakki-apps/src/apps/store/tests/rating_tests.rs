@@ -141,7 +141,7 @@ fn the_rating_stays_when_the_package_updates_and_in_the_next_session_and_belongs
     key(&mut a, &cx, Key::Enter);
     key(&mut a, &cx, Key::Esc);
     publish(&d, 2, &k, &[tool("shout", "1.1.0", &["net:example.com"], &k)]);
-    a.reload(&cx);
+    a.reload(&CxPort(&cx));
     select(&mut a, "shout");
     key(&mut a, &cx, Key::Char('u'));
     wait_job(&mut a, &cx);
@@ -191,4 +191,34 @@ fn discover_pages_have_the_row_too_and_the_keys_do_nothing_elsewhere() {
     key(&mut a, &cx, Key::Enter);
     assert!(matches!(a.mode, Mode::Detail) && a.detail.is_some(), "the page stays open after the dialog");
     assert_eq!(rating_of(&cx, &a, "shout").unwrap().comment, "Looks useful");
+}
+
+/// The rating actions reach the audit log through the port, not through the shell context: a fake port records the lines.
+#[test]
+fn the_rating_actions_are_audited_through_the_port() {
+    let (_cx, mut a, _k, _d) = open_installed("rate-fake");
+    let f = crate::apps::store::setup::fake_tests::Fake::new("rate-fake-port", true);
+    assert!(a.rating_event(&Event::Key(Key::Char('4')), &f));
+    assert_eq!(f.audited("store.rate"), vec!["shout".to_string()]);
+    a.save_comment("tool:shout", "Nice and quick", &f);
+    assert_eq!(f.audited("store.rate-comment"), vec!["shout".to_string()]);
+    assert!(a.rating_event(&Event::Key(Key::Char('f')), &f));
+    assert_eq!(f.audited("store.rate-forget"), vec!["shout".to_string()]);
+}
+
+/// Ratings and folders are kept per account: the person the port names decides whose file is read.
+#[test]
+fn what_is_read_again_follows_the_person_the_port_names() {
+    let (cx, mut a, _k, _d) = open_installed("rate-person");
+    let f = crate::apps::store::setup::fake_tests::Fake::new("rate-person-port", true);
+    assert!(a.rating_event(&Event::Key(Key::Char('3')), &cx_port(&cx)));
+    assert_eq!(rating_of(&cx, &a, "shout").unwrap().stars, 3);
+    a.reload_org(&f);
+    assert!(a.rate.get("tool:shout").is_none(), "tester has rated nothing");
+    a.reload_org(&cx_port(&cx));
+    assert_eq!(a.rate.get("tool:shout").unwrap().stars, 3);
+}
+
+fn cx_port(cx: &AppCx) -> crate::apps::store_port::CxPort<'_> {
+    crate::apps::store_port::CxPort(cx)
 }

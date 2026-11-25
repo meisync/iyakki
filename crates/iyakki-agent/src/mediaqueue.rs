@@ -29,6 +29,10 @@ pub const MAX_ACTIVE: usize = 2;
 pub const MAX_UNFINISHED: usize = 60;
 /// How many entries the list keeps (the oldest finished ones go first).
 pub const MAX_ENTRIES: usize = 200;
+/// How many times one download starts again by itself after the network returned (then it waits for the person).
+pub const MAX_AUTO_RESUMES: u8 = 5;
+/// The words that go with a download that waits for the network.
+pub const WAITS_FOR_NETWORK: &str = "It starts again by itself when the network returns.";
 
 
 
@@ -52,6 +56,12 @@ struct Saved {
     note: String,
     added: i64,
     finished: i64,
+    /// Failed on the network (or was interrupted by a restart): starts again by itself when the network returns (F-LIFE-15).
+    #[serde(default)]
+    net_wait: bool,
+    /// How many times it started again by itself (at most [`MAX_AUTO_RESUMES`]).
+    #[serde(default)]
+    resumes: u8,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -113,6 +123,8 @@ impl DownloadQueue {
             if !s.status.finished() {
                 s.status = Status::Failed;
                 s.error = INTERRUPTED.into();
+                s.net_wait = true;
+                s.note = WAITS_FOR_NETWORK.into();
                 changed = true;
             }
             st.next_id = st.next_id.max(s.id + 1);
@@ -122,7 +134,23 @@ impl DownloadQueue {
         if changed {
             q.save();
         }
+        // a download that waits for the network starts again when the machine's way out returns (the hook goes when the queue is gone)
+        let weak = Arc::downgrade(&q.inner);
+        crate::routeevents::global().on_return(&format!("media-downloads:{}", q.inner.path.display()), Arc::new(move || match weak.upgrade() {
+            Some(inner) => {
+                resume_waiting(&inner);
+                true
+            }
+            None => false,
+        }));
         q
+    }
+
+    /// The network returned: every download that failed on the network (or was interrupted by a restart) goes back in the line, up to
+    /// [`MAX_AUTO_RESUMES`] times each; the partly downloaded file is continued where it stopped. Returns how many. Called by the machine's
+    /// route watcher; a test calls it directly.
+    pub fn resume_after_network(&self) -> usize {
+        resume_waiting(&self.inner)
     }
 
     /// A different limit of simultaneous downloads (tests; 1 to 8).
@@ -181,6 +209,8 @@ impl DownloadQueue {
                     note: String::new(),
                     added: crate::clock::now_unix(),
                     finished: 0,
+                    net_wait: false,
+                    resumes: 0,
                 },
                 live: None,
                 started: None,
@@ -231,6 +261,7 @@ impl DownloadQueue {
             e.s.error.clear();
             e.s.note.clear();
             e.s.finished = 0;
+            e.s.net_wait = false;
             e.cancelling = false;
             // it goes to the end of the line
             let pos = st.items.iter().position(|e| e.s.id == id).unwrap_or(0);
@@ -310,7 +341,12 @@ impl DownloadQueue {
                 Status::Downloading => out.push_str(&format!(" ({} KB{})", x.bytes / 1024, if x.total > 0 { format!(" of {} KB", x.total / 1024) } else { String::new() })),
                 Status::Succeeded if !x.name.is_empty() => out.push_str(&format!(" -> {} in {} ({} KB)", x.name, x.folder.rsplit('/').next().unwrap_or(""), x.size / 1024)),
                 Status::Succeeded => out.push_str(&format!(" ({})", x.note)),
-                Status::Failed | Status::Cancelled => out.push_str(&format!(" — {}", x.error)),
+                Status::Failed | Status::Cancelled => {
+                    out.push_str(&format!(" — {}", x.error));
+                    if !x.note.is_empty() && x.status == Status::Failed {
+                        out.push_str(&format!(" {}", x.note));
+                    }
+                }
                 Status::Queued => {}
             }
             out.push('\n');
@@ -375,6 +411,29 @@ fn save(inner: &Inner) {
 }
 
 /// Start waiting downloads while fewer than the limit run.
+fn resume_waiting(inner: &Arc<Inner>) -> usize {
+    let n = {
+        let mut st = inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut n = 0;
+        for e in st.items.iter_mut().filter(|e| e.s.status == Status::Failed && e.s.net_wait && e.s.resumes < MAX_AUTO_RESUMES) {
+            e.s.status = Status::Queued;
+            e.s.error.clear();
+            e.s.note.clear();
+            e.s.finished = 0;
+            e.s.net_wait = false;
+            e.s.resumes += 1;
+            e.cancelling = false;
+            n += 1;
+        }
+        n
+    };
+    if n > 0 {
+        save(inner);
+        pump(inner);
+    }
+    n
+}
+
 fn pump(inner: &Arc<Inner>) {
     let Some(ctx) = inner.ctx.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
     loop {
@@ -443,6 +502,11 @@ fn work(inner: &Arc<Inner>, ctx: &Context, id: u64, progress: &Arc<Progress>) {
             Err(msg) => {
                 e.s.status = Status::Failed;
                 e.s.error = plain_failure(&msg);
+                // a failure of the network itself is waited out: it starts again when the network returns
+                if e.s.error.starts_with("Network error:") && e.s.resumes < MAX_AUTO_RESUMES {
+                    e.s.net_wait = true;
+                    e.s.note = WAITS_FOR_NETWORK.into();
+                }
             }
         }
         let status = e.s.status;
@@ -799,5 +863,74 @@ mod tests {
         assert!(ranges.len() == 2 && ranges[1].starts_with("bytes="), "{ranges:?}");
         let leftovers: Vec<String> = std::fs::read_dir(w.home.join("Music")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(leftovers, vec!["long.mp3".to_string()]);
+    }
+
+    #[test]
+    fn a_download_that_failed_on_the_network_continues_by_itself_when_the_network_returns() {
+        let w = world("net-return");
+        let body = [mediadl::tests::tiny_mp3(), (0..120_000u32).map(|i| (i % 241) as u8).collect::<Vec<u8>>()].concat();
+        let (base, seen) = mediadl::tests::serve_ranged(body.clone(), 50_000, mediadl::tests::RangeMode::Honour);
+        let id = w.q.enqueue(w.ctx.clone(), req(format!("{base}/long.mp3"))).unwrap();
+        wait_until(&w.q, "first try ends", |q| q.view(id).unwrap().status.finished());
+        let v = w.q.view(id).unwrap();
+        assert_eq!(v.status, Status::Failed, "{}", v.error);
+        assert_eq!(v.note, WAITS_FOR_NETWORK, "the person is told it waits");
+        assert!(w.q.describe().contains("starts again by itself when the network returns"), "{}", w.q.describe());
+        // a failure of another kind is not waited out: a folder outside the write scope stays failed
+        assert_eq!(w.q.resume_after_network(), 1, "one download was waiting");
+        wait_until(&w.q, "continued", |q| q.view(id).unwrap().status.finished());
+        let v = w.q.view(id).unwrap();
+        assert_eq!(v.status, Status::Succeeded, "{}", v.error);
+        assert_eq!(std::fs::read(w.home.join("Music/long.mp3")).unwrap(), body, "the whole file, continued from where it stopped");
+        let ranges = seen.lock().unwrap().clone();
+        assert!(ranges.len() == 2 && ranges[1].starts_with("bytes="), "{ranges:?}");
+        assert_eq!(w.q.resume_after_network(), 0, "nothing is waiting any more");
+    }
+
+    #[test]
+    fn a_download_interrupted_by_a_restart_waits_for_the_network_and_other_failures_and_cancelled_ones_do_not() {
+        let w = world("net-restart");
+        let (a, b, c) = {
+            let mut st = w.q.st();
+            let mk = |id: u64, status: Status, error: &str| Entry {
+                s: Saved { id, url: format!("http://127.0.0.1:1/{id}.mp3"), status, categories: vec![], tags: vec![], rating: 0, folder: None, kind: None, dest: String::new(), file: String::new(), size: 0, error: error.into(), note: String::new(), added: 0, finished: 0, net_wait: false, resumes: 0 },
+                live: None,
+                started: None,
+                cancelling: false,
+            };
+            st.items.push(mk(1, Status::Downloading, ""));
+            st.items.push(mk(2, Status::Failed, "Outside the write scope: x."));
+            st.items.push(mk(3, Status::Cancelled, "Cancelled."));
+            (1, 2, 3)
+        };
+        w.q.save();
+        let q2 = DownloadQueue::open(w.svc.dir(), "alice");
+        let v = |id| q2.view(id).unwrap();
+        assert_eq!((v(a).status, v(a).error.as_str(), v(a).note.as_str()), (Status::Failed, INTERRUPTED, WAITS_FOR_NETWORK));
+        assert_eq!((v(b).status, v(b).note.as_str()), (Status::Failed, ""));
+        assert_eq!(v(c).status, Status::Cancelled);
+        // no person to download for yet: nothing starts, and the entry keeps waiting
+        assert_eq!(q2.resume_after_network(), 1);
+        assert_eq!(q2.view(a).unwrap().status, Status::Queued, "back in the line");
+        assert_eq!(q2.view(b).unwrap().status, Status::Failed);
+        assert_eq!(q2.view(c).unwrap().status, Status::Cancelled);
+    }
+
+    #[test]
+    fn a_download_that_keeps_failing_is_started_again_only_a_few_times_and_then_waits_for_the_person() {
+        let w = world("net-limit");
+        {
+            let mut st = w.q.st();
+            st.items.push(Entry {
+                s: Saved { id: 1, url: "http://127.0.0.1:1/x.mp3".into(), status: Status::Failed, categories: vec![], tags: vec![], rating: 0, folder: None, kind: None, dest: String::new(), file: String::new(), size: 0, error: "Network error: x.".into(), note: WAITS_FOR_NETWORK.into(), added: 0, finished: 0, net_wait: true, resumes: MAX_AUTO_RESUMES },
+                live: None,
+                started: None,
+                cancelling: false,
+            });
+        }
+        assert_eq!(w.q.resume_after_network(), 0, "the limit is reached");
+        assert_eq!(w.q.view(1).unwrap().status, Status::Failed);
+        // a person's retry still works and gives it a fresh start
+        w.q.retry(1).unwrap();
     }
 }

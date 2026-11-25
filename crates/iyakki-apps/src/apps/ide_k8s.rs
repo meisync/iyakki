@@ -175,16 +175,7 @@ pub fn banner(snap: &Snapshot) -> Option<(String, String)> {
     banner_for(&snap.cluster)
 }
 
-/// The same plain-English text for a cluster state (shared with the K8S tile).
-pub fn banner_for(cluster: &Cluster) -> Option<(String, String)> {
-    match cluster {
-        Cluster::Ok => None,
-        Cluster::KubectlMissing => Some(("kubectl was not found".into(), "Install kubectl (or the k3s bundle: CLI → CLIs → k3s), then press r. Cluster profiles live in Settings → Dev cluster; the plan is in docs/K3S-DEV.md.".into())),
-        Cluster::Unreachable(m) => Some(("The cluster is not reachable".into(), format!("{m}. Check that the cluster is running (k3s status), that the VPN or SSH tunnel is up, and that the kubeconfig points at it (the profile in .iyakki/project.json or $KUBECONFIG). Settings → Dev cluster and docs/K3S-DEV.md explain the profiles. Press r to try again."))),
-        Cluster::Forbidden(m) => Some(("This account may not read the cluster".into(), format!("{m}. Ask for a read role in this namespace."))),
-        Cluster::Failed(m) => Some(("kubectl failed".into(), format!("{m}. Press r to try again."))),
-    }
-}
+pub use iyakki_shared::k8s::banner_for;
 
 #[derive(Clone, Debug, PartialEq)]
 enum Drawer {
@@ -1467,7 +1458,7 @@ mod tests {
         let cx = switch_cx("ide-k8s-switch");
         for (w, h, s, x0) in [(360.0f32, 740.0f32, 1.0f32, 0.0f32), (800.0, 480.0, 1.0, 0.0), (1280.0, 720.0, 1.0, 0.0), (1920.0, 1080.0, 1.5, 0.0), (2560.0, 1600.0, 2.0, 0.0), (900.0, 520.0, 1.0, 300.0)] {
             let mut v = K8sView::new(Arc::new(sample_cluster(NOW)), Target { namespace: "shop-dev".into(), ..Default::default() });
-            v.host = Some(crate::apps::cluster_host::ClusterHost::new(SWITCH_BASE, &cx, "Shop"));
+            v.host = Some(crate::apps::cluster_host::new(SWITCH_BASE, &cx, "Shop"));
             let area = R::new(x0, 20.0, w, h);
             let mut g = Gfx::new((w + x0) as u32, (h + 20.0) as u32);
             v.draw(&mut g, area, s, true, CYAN, 1, "Shop", None);
@@ -1497,7 +1488,7 @@ mod tests {
     fn with_one_cluster_the_header_is_unchanged_and_switching_asks_the_owner_to_find_the_cluster_again() {
         let cx = crate::apps::tests::cx_with_admin_store("ide-k8s-switch-one");
         let mut v = K8sView::new(Arc::new(sample_cluster(NOW)), Target { namespace: "shop-dev".into(), ..Default::default() });
-        v.host = Some(crate::apps::cluster_host::ClusterHost::new(SWITCH_BASE, &cx, "Shop"));
+        v.host = Some(crate::apps::cluster_host::new(SWITCH_BASE, &cx, "Shop"));
         let mut g = Gfx::new(1280, 720);
         v.draw(&mut g, R::new(0.0, 0.0, 1280.0, 720.0), 1.0, true, CYAN, 1, "Shop", None);
         assert!(switch_hits(&g).is_empty(), "one cluster: nothing of the switcher");
@@ -1505,7 +1496,7 @@ mod tests {
         // several: choosing a row switches (saved, audited), asks the owner to re-resolve, and Manage asks for Settings -> Clusters
         let cx = switch_cx("ide-k8s-switch-two");
         let mut v = K8sView::new(Arc::new(sample_cluster(NOW)), Target { namespace: "shop-dev".into(), ..Default::default() });
-        v.host = Some(crate::apps::cluster_host::ClusterHost::new(SWITCH_BASE, &cx, "Shop"));
+        v.host = Some(crate::apps::cluster_host::new(SWITCH_BASE, &cx, "Shop"));
         v.draw(&mut g, R::new(0.0, 0.0, 1280.0, 720.0), 1.0, true, CYAN, 1, "Shop", None);
         v.handle(&Event::Tab(SWITCH_BASE));
         g.clear_hits();
@@ -1531,7 +1522,7 @@ mod tests {
         let (dir, user) = (cx.data_dir().to_path_buf(), cx.session.user.clone());
         iyakki_agent::clusters::switch_workspace(&dir, &user, cx.session.role, "Shop", Some("local")).unwrap();
         let mut v = K8sView::new(Arc::new(sample_cluster(NOW)), Target { namespace: "shop-dev".into(), ..Default::default() });
-        v.host = Some(crate::apps::cluster_host::ClusterHost::new(SWITCH_BASE, &cx, "Shop"));
+        v.host = Some(crate::apps::cluster_host::new(SWITCH_BASE, &cx, "Shop"));
         let mut g = Gfx::new(1280, 720);
         v.draw(&mut g, R::new(0.0, 0.0, 1280.0, 720.0), 1.0, true, CYAN, 1, "Shop", None);
         v.handle(&Event::Tab(SWITCH_BASE));

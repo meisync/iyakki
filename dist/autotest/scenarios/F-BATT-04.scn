@@ -1,0 +1,22 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 9ed8c30aaa7f173c; honest subset only: everything not checked is under not-covered.
+row: F-BATT-04
+targets: real
+feature-sha: 9ed8c30aaa7f173c
+doc: the Battery page of Settings on a laptop shows its three switches (read only)
+clause: 1 on a laptop Settings > Battery shows the switches Low battery warnings and Shut down at critical level
+human: battery-look | Open Settings, Battery on a laptop on battery power, then plug the charger in. Expect: The bar, the status line and the time change with the charger, and the percentage switch adds or removes the number in the top bar.
+not-covered: the bar, status, time to empty or full and health facts are not read
+not-covered: the percentage in the top bar switch is not flipped
+not-covered: the page is absent on a machine without a battery (skipped there)
+not-covered: administrators only for the shut-down switch
+needs-hw: a laptop with a battery
+key s
+wait app=Settings
+skip-unless-button Battery
+click-sidebar Battery
+wait app=Settings page=Battery
+shot page
+expect-not-blank
+expect-text Low battery warnings
+expect-text Shut down at
+expect-page Battery

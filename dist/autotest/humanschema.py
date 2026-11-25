@@ -12,8 +12,9 @@ import re
 
 SCHEMA = 1
 VERDICTS = ("pass", "fail", "cannot-test")
-ROW_RE = re.compile(r"^F-[A-Z0-9]+-\d+$")
+ROW_RE = re.compile(r"^F-[A-Z0-9]+-\d+[a-z]?$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$")          # a clause id and a machine id
+BY_ROLES = ("owner", "admin", "person")   # the role of whoever answered; a name is never collected. owner and admin are the team; person is anybody else
 MACHINE_KINDS = ("any", "qemu", "mac-mini-2014", "mac-mini-2018", "macbook-pro", "lenovo", "hp", "t7-ssd", "other")
 MAX_TEXT = 2000
 
@@ -94,7 +95,8 @@ def validate_human(h):
         bad.append("machine is not a plain machine id")
     if not re.match(r"^[0-9a-f]{7,40}$", str(h.get("image_commit", ""))):
         bad.append("image_commit must be the commit of the image under test (7 to 40 hex digits)")
-    _txt(h.get("by"), "by", bad)
+    if h.get("by") not in BY_ROLES:
+        bad.append("by must be one of %s (a role, never a name)" % ", ".join(BY_ROLES))
     if h.get("verdict") not in VERDICTS:
         bad.append("verdict must be one of %s" % ", ".join(VERDICTS))
     if not re.match(r"^\d{4}-\d\d-\d\d(T\d\d:\d\d:\d\d)?$", str(h.get("date", ""))):

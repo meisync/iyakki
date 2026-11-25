@@ -3,9 +3,11 @@
 
 use std::sync::Arc;
 
+use crate::apps::settings::network_port::NetworkSettingsPort;
+
 impl super::SettingsApp {
     /// Called on every tick: reads the signal and runs the sign-in check on the timers while the Network page is open.
-    pub(super) fn link_tick(&mut self, cx: &super::AppCx) {
+    pub(super) fn link_tick(&mut self, p: &dyn NetworkSettingsPort) {
         if self.tab() != super::Tab::Network {
             return;
         }
@@ -14,13 +16,13 @@ impl super::SettingsApp {
         let Some(iface) = self.wifi.iface() else { return };
         let w = self.wifi.wifi.clone();
         let link: iyakki_shared::wifilink::LinkJob = Arc::new(move || w.link_text(&iface));
-        let probe: Option<iyakki_shared::wifilink::ProbeJob> = iyakki_shared::wifilink::probe_job(cx.data_dir());
+        let probe: Option<iyakki_shared::wifilink::ProbeJob> = iyakki_shared::wifilink::probe_job(p.data_root());
         self.link.tick(now, Some(link), probe);
     }
 
     /// The key `o`: the page asked for a sign-in (a hotel or cafe network) is opened in the Browser tile. Only an http or https address
     /// the sign-in check found is opened; with none, it says so and nothing opens.
-    pub(super) fn open_sign_in(&mut self, _cx: &super::AppCx) {
+    pub(super) fn open_sign_in(&mut self, _p: &dyn NetworkSettingsPort) {
         match self.link.sign_in_url().filter(|u| u.starts_with("http://") || u.starts_with("https://")) {
             Some(u) => {
                 crate::apps::browser::request_open(&u);
@@ -32,7 +34,7 @@ impl super::SettingsApp {
     }
 
     /// The key `v`: with two or more WiFi adapters, use the next one for scanning and joining; remembered in `wifi-adapter.txt`.
-    pub(super) fn use_next_adapter(&mut self, _cx: &super::AppCx) {
+    pub(super) fn use_next_adapter(&mut self, _p: &dyn NetworkSettingsPort) {
         let all = self.wifi.adapters();
         if all.len() < 2 {
             return self.fail("This computer has one WiFi adapter (or none): there is nothing to switch.");

@@ -1,0 +1,106 @@
+{
+ "schema": 1,
+ "row": "F-CAM-07",
+ "feature_sha": "c9dacc63151446ec",
+ "title": "CAMERA app: preview, photos, timer, mirror and controls (manual until automated)",
+ "clauses": [
+  {
+   "id": "preview-photo",
+   "text": "The CAMERA app shows a live preview, and a photo is saved as a JPEG in Pictures with a flash and a strip of recent shots.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Open the CAMERA app, choose the camera, and take a photo with the photo control.",
+     "expect": "The screen flashes, the photo appears in the strip of recent shots, and a JPEG is in Pictures."
+    }
+   ]
+  },
+  {
+   "id": "viewer",
+   "text": "A recent shot opens in a viewer.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Click a shot in the strip.",
+     "expect": "A larger view of the photo opens."
+    }
+   ]
+  },
+  {
+   "id": "timer",
+   "text": "A 3 or 10 second timer counts down before the shot, and Esc cancels it.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Choose the 10 second timer, start it, then press Esc during the count.",
+     "expect": "The count shows the seconds, and Esc cancels it before any photo is taken."
+    }
+   ]
+  },
+  {
+   "id": "mirror-controls",
+   "text": "The mirror switch flips the picture, and brightness and contrast change it where the camera has them.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Turn mirror on and off. Move brightness and contrast.",
+     "expect": "The picture flips left and right. Brightness and contrast change it. A camera without these controls shows no change."
+    }
+   ]
+  },
+  {
+   "id": "pickers",
+   "text": "The camera picker and the picture-size picker change the camera and its size.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Choose another camera (if you have two) and another picture size.",
+     "expect": "The preview switches to that camera and size."
+    }
+   ]
+  },
+  {
+   "id": "replug",
+   "text": "The app follows a USB camera being unplugged and plugged back in.",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Unplug the USB camera while the app shows it, then plug it back in.",
+     "expect": "The app shows that the camera is gone, and the picture comes back after it is plugged in."
+    }
+   ]
+  },
+  {
+   "id": "smooth",
+   "text": "The preview runs smoothly with natural colours (not yet checked on real hardware).",
+   "machines": [
+    "lenovo",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Watch the preview for a minute at its default size.",
+     "expect": "Colours look natural and motion is smooth. Note any stutter or wrong colour, and the size you used."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,11 @@
+# The Raspberry Pi kernel source of the rpi5 variant: fetched at BUILD time from the vendor tree, never kept in this repository (GPL-2.0-only,
+# the source offer for the binary is the pinned tag below; legal-info records it for the Buildroot route). One tag, one tarball hash.
+# Read by dist/rpi/build-pi-kernel.sh and build.sh (a change here rebuilds the kernel).
+TAG=oldstable_20261103
+VERSION=6.12.115
+URL=https://codeload.github.com/raspberrypi/linux/tar.gz/refs/tags/oldstable_20261103
+SHA256=ee3fdf3b41cb4d351a25d124cdbf83f2229b7860f62ac02ee8a083cb0fcaa9e0
+DEFCONFIG=bcm2712_defconfig
+DTB=broadcom/bcm2712-rpi-5-b.dtb
+OVERLAY=vc4-kms-v3d-pi5.dtbo
+COMMIT=2569533d6c33c15231fbc21704c87fcebc67173c

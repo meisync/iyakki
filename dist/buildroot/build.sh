@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build an IYAKKI image.   [ARCH=x86_64|aarch64] ./build.sh [libre|hw|mac|web|macweb|headless] [output-dir]
+# Build an IYAKKI image.   [ARCH=x86_64|aarch64] ./build.sh [libre|hw|mac|web|macweb|headless|rpi5|kv260] [output-dir]
 #   libre: no proprietary firmware (default).  hw: adds linux-firmware blobs for WiFi/NIC/GPU.
 #   mac: x86_64 only, OPTIONAL, not built by default: hw + the Intel Mac drivers (applesmc, hid_apple, Cirrus audio, ...). docs/MAC-HARDWARE.md.
 #   macweb: x86_64 only, OPTIONAL: mac + web in one image (Intel Macs that should run YouTube and modern sites). Output in
@@ -12,6 +12,7 @@
 #        and base as libre, but the program is built with `--no-default-features --features headless` (no shell, no screen, no browser engine),
 #        /etc/iyakki/service.json is the cloud profile, and no graphics, sound or browser package is added. Output in target/buildroot-headless.
 #        dist/buildroot/headless-size.sh measures the release (fat LTO) size of the program and of the image files.
+#   kv260: aarch64 only, OPTIONAL (F-KV260-*): SD-card image for the AMD Kria KV260 Starter Kit (linux-xlnx kernel, extlinux, no GRUB). Output in target/buildroot-kv260-aarch64.
 #   WITH_PODMAN=1 (any variant but the release image): also build podman, conmon, crun and netavark for the "k3s in Podman" variant of Settings -> Dev
 #        cluster: configs/iyakki_cluster.fragment (adds tens of MB; native k3s needs none of it).
 #   WITH_FFMPEG=1 (any variant): also build ffmpeg + ffprobe (LGPL, no ffplay) into the image: configs/iyakki_media.fragment.
@@ -84,6 +85,15 @@ if [ "$VARIANT" = "macweb" ]; then
   # firmware + Mac drivers first, then the web engine: the Mac fragment sets the kernel fragment list, the web fragment the rootfs
   # overlay and post-build hooks; no option is set by both, so the order does not change the result
   cat "$FWFRAG" "$HERE/configs/iyakki_mac.fragment" >> "$OUT/defconfig"
+fi
+if [ "$VARIANT" = "rpi5" ]; then
+  [ "$ARCH" = "aarch64" ] || { echo "the rpi5 variant is aarch64 only (ARCH=aarch64 build.sh rpi5; docs/BOARD-RPI5-FIRST-BOOT.md)" >&2; exit 2; }
+  cat "$HERE/configs/iyakki_rpi5.fragment" >> "$OUT/defconfig"
+fi
+if [ "$VARIANT" = "kv260" ]; then
+  # AMD Kria KV260 SD-card image (docs/BOARD-KV260-FIRST-BOOT.md): AMD's linux-xlnx kernel at a pinned commit, extlinux for the board's own U-Boot
+  [ "$ARCH" = "aarch64" ] || { echo "the kv260 variant is aarch64 only: ARCH=aarch64 ./build.sh kv260" >&2; exit 2; }
+  cat "$HERE/configs/iyakki_kv260.fragment" >> "$OUT/defconfig"
 fi
 if [ "$VARIANT" = "headless" ]; then
   [ "$ARCH" = "x86_64" ] || { echo "the headless variant is x86_64 only for now" >&2; exit 2; }
@@ -178,9 +188,19 @@ case "$PATCH_DIR_LINE" in *board/iyakki/patches*) KSTATE="$KSTATE
 $(cat "$HERE/board/iyakki/linux.fragment" 2>/dev/null || true)" ;; esac
 case "$PATCH_DIR_LINE" in *board/iyakki/patches*) KSTATE="$KSTATE
 $(cat "$HERE/board/iyakki/linux-mac.fragment")" ;; esac
+# the Raspberry Pi 5 variant's kernel state: its fragment and the pinned source (a new option or a new tag rebuilds the kernel)
+if grep -q 'board/iyakki-rpi5/linux.fragment' "$OUT/.config"; then
+  KSTATE="$KSTATE
+$(cat "$HERE/board/iyakki-rpi5/linux.fragment" "$ROOT/dist/rpi/kernel.pin")"
+fi
 # the compressed-module fragment (opt-in) counts too, so asking for it rebuilds the kernel; without it the record is what it was
 [ "${IYAKKI_MODULE_COMPRESS:-0}" != 1 ] || KSTATE="$KSTATE
 $(cat "$HERE/board/iyakki/linux-modcompress.fragment")"
+# the KV260 kernel (linux-xlnx) is recorded by its pinned commit and its two fragments, so changing either rebuilds it
+if [ "$VARIANT" = "kv260" ]; then
+  KSTATE="$(grep '^BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION' "$OUT/.config")
+$(cat "$HERE/board/iyakki-aarch64/linux.fragment" "$HERE/board/iyakki-kv260/linux.fragment")"; LNEW=new
+fi
 rebuild_if_changed linux "$KSTATE" "$LNEW"
 # An out-of-tree module is built against the kernel tree: when the kernel is rebuilt, so is apple-bce (Mac variant).
 if grep -q '^BR2_PACKAGE_APPLE_BCE=y' "$OUT/.config"; then
@@ -228,6 +248,16 @@ else
   (cd "$ROOT" && cargo build $PFLAG --target "$RUST_TARGET" -p iyakki-core)
   export IYAKKI_BIN="$ROOT/target/$RUST_TARGET/$PROFILE/iyakki"
 fi
+# The UI as its own program (F-SPLIT-03, docs/development/UI-BOUNDARY.md "Booted proof"): OFF by default (it is a second copy of the shell, tens of MB, and
+# the core starts it only for `iyakki.ui=process`); IYAKKI_WITH_UI_PROGRAM=1 builds it (dist/buildroot/ui-program.sh) and the post-build hook installs it at
+# /usr/bin/iyakki-ui, the ui layer's file. A build that fails only costs that file.
+if [ "${IYAKKI_WITH_UI_PROGRAM:-0}" = 1 ] && [ "$VARIANT" != "headless" ]; then
+  if IYAKKI_PROFILE="$PROFILE" "$HERE/ui-program.sh" --target "$RUST_TARGET" > "$OUT/ui-program.path"; then
+    export IYAKKI_UI_BIN="$(tail -n1 "$OUT/ui-program.path")"
+  else
+    echo "build.sh: WARNING: iyakki-ui did not build; the image will not carry it" >&2
+  fi
+fi
 # The small static private store server goes into the image too (/usr/share/iyakki/store-server/<arch>/), so the Private store wizard
 # finds it without building anything. A build that fails only costs that file: the image build goes on (post-build.sh warns).
 if (cd "$ROOT" && cargo build $PFLAG --target "$RUST_TARGET" -p iyakki-store-server); then
@@ -257,5 +287,7 @@ JL="${JOBS:-$(nproc)}"
 make -C "$BR_DIR" O="$OUT" BR2_JLEVEL="$JL" -j"$JL"
 # Corresponding source + license manifest for every GPL/LGPL component in the image:
 make -C "$BR_DIR" O="$OUT" legal-info
-if [ "$ARCH" = "aarch64" ]; then echo "disk image: $OUT/images/iyakki-aarch64.img"; else echo "ISO:        $OUT/images/rootfs.iso9660"; fi
+if [ "$VARIANT" = "rpi5" ]; then echo "Raspberry Pi 5 kernel pieces: $OUT/images/rpi5/ (then dist/rpi/make-pi-image.sh)"
+elif [ "$VARIANT" = "kv260" ]; then echo "SD image:  $OUT/images/iyakki-kv260.img (write it with dist/buildroot/kv260-write-sd.sh)"
+elif [ "$ARCH" = "aarch64" ]; then echo "disk image: $OUT/images/iyakki-aarch64.img"; else echo "ISO:        $OUT/images/rootfs.iso9660"; fi
 echo "legal info: $OUT/legal-info/"

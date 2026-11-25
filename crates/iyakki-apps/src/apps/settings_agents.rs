@@ -4,44 +4,50 @@
 //! the vendor's own command, run in a terminal by the person.
 
 use super::*;
-use iyakki_shared::extagent::{self, ExternalAgent};
+use super::apps_port::AgentsPort;
+use iyakki_shared::extagent::ExternalAgent;
 use iyakki_extagentx::CustomCfg;
 
 impl SettingsApp {
-    fn agents_cfg(cx: &AppCx) -> iyakki_shared::extagentcfg::AgentsCfg {
-        cx.agents_cfg()
+    fn agents_cfg(p: &dyn AgentsPort) -> iyakki_shared::extagentcfg::AgentsCfg {
+        p.agents_cfg()
     }
 
     /// The agents in list order: the ids and a snapshot of each one's look.
-    pub(super) fn agent_ids(cx: &AppCx) -> Vec<String> {
-        Self::agents_cfg(cx).all().iter().map(|a| a.id()).collect()
+    pub(super) fn agent_ids(p: &dyn AgentsPort) -> Vec<String> {
+        Self::agents_cfg(p).all().iter().map(|a| a.id()).collect()
     }
 
-    fn agent_by_id(cx: &AppCx, id: &str) -> Option<Box<dyn ExternalAgent>> {
-        Self::agents_cfg(cx).agent(id)
+    fn agent_by_id(p: &dyn AgentsPort, id: &str) -> Option<Box<dyn ExternalAgent>> {
+        Self::agents_cfg(p).agent(id)
     }
 
-    fn set_agents(&mut self, cx: &AppCx, f: impl FnOnce(&mut iyakki_shared::extagentcfg::AgentsCfg), done: String) {
-        let r = cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| f(&mut s.agents));
+    fn set_agents(&mut self, p: &dyn AgentsPort, f: impl FnOnce(&mut iyakki_shared::extagentcfg::AgentsCfg), done: String) {
+        let mut f = Some(f);
+        let r = p.settings_update(&mut |s| {
+            if let Some(f) = f.take() {
+                f(&mut s.agents)
+            }
+        });
         match r {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.agents", &done);
+                p.audit("settings.agents", &done);
                 self.ok(done);
             }
-            Err(e) => self.fail(e.to_string()),
+            Err(e) => self.fail(e.message()),
         }
     }
 
     /// The workspace whose project context the two switches below change: the one last opened in the AI IDE.
-    fn context_workspace(cx: &AppCx) -> Option<(String, std::path::PathBuf)> {
-        let reg = iyakki_shared::workspace::Registry::load(cx.data_dir(), &cx.session.user);
+    fn context_workspace(p: &dyn AgentsPort) -> Option<(String, std::path::PathBuf)> {
+        let reg = iyakki_shared::workspace::Registry::load(&p.data_dir(), &p.user());
         let id = reg.last.clone().or_else(|| reg.ordered().first().map(|w| w.id.clone()))?;
         let w = reg.get(&id)?;
         std::path::Path::new(&w.root).is_dir().then(|| (w.name.clone(), std::path::PathBuf::from(&w.root)))
     }
 
-    fn context_setting(&mut self, k: &Key, cx: &AppCx) {
-        let Some((name, root)) = Self::context_workspace(cx) else { return self.fail("Open a workspace in the AI IDE first: the project context belongs to a workspace.") };
+    fn context_setting(&mut self, k: &Key, p: &dyn AgentsPort) {
+        let Some((name, root)) = Self::context_workspace(p) else { return self.fail("Open a workspace in the AI IDE first: the project context belongs to a workspace.") };
         let r = iyakki_shared::notes::edit(&root, |n| {
             if matches!(k, Key::Char('c')) {
                 n.settings.agents_may_add = n.settings.agents_may_add.next();
@@ -53,15 +59,15 @@ impl SettingsApp {
         });
         match r {
             Ok(m) => {
-                cx.audit.record(&cx.session.user, "context.setting", &name);
+                p.audit("context.setting", &name);
                 self.ok(m)
             }
             Err(e) => self.fail(e),
         }
     }
 
-    pub(super) fn handle_agents(&mut self, k: &Key, cx: &AppCx) {
-        let ids = Self::agent_ids(cx);
+    pub(super) fn handle_agents(&mut self, k: &Key, p: &dyn AgentsPort) {
+        let ids = Self::agent_ids(p);
         match k {
             Key::Up => return self.move_sel(-1, ids.len()),
             Key::Down => return self.move_sel(1, ids.len()),
@@ -69,13 +75,13 @@ impl SettingsApp {
         }
         // the project context of the workspace last opened (shared with everyone who clones it): not an administrator's setting
         if matches!(k, Key::Char('c') | Key::Char('g')) {
-            return self.context_setting(k, cx);
+            return self.context_setting(k, p);
         }
         // signing in is personal (the login is kept in the person's own home folder): not an administrator's setting
         if matches!(k, Key::Char('l') | Key::Char('o')) {
             let Some(id) = ids.get(self.sel()) else { return };
             match crate::agent_login::AGENTS.iter().find(|a| **a == id.as_str()) {
-                Some(a) if cx.ext_status().get(id).is_some_and(|s| s.installed) => {
+                Some(a) if p.ext_status().get(id).is_some_and(|s| s.installed) => {
                     crate::agent_login::request(a, *k == Key::Char('o'));
                 }
                 Some(_) => self.fail(format!("{} is not installed yet; press i to install it first.", crate::agent_login::name_of(id))),
@@ -83,30 +89,30 @@ impl SettingsApp {
             }
             return;
         }
-        if !self.admin(cx) {
+        if !self.admin(p) {
             return;
         }
-        let cfg = Self::agents_cfg(cx);
+        let cfg = Self::agents_cfg(p);
         let Some(id) = ids.get(self.sel()).cloned() else { return };
         let Some(agent) = cfg.agent(&id) else { return };
         let label = agent.label();
         match k {
             Key::Char('d') | Key::Char('r') => {
-                cx.ext_status().refresh(cfg);
+                p.ext_status().refresh(cfg);
                 self.ok("Looking at the agents (their --version and sign-in status; no model is called)…");
             }
             Key::Char('i') => {
-                if cx.ext_status().get(&id).is_some_and(|s| s.installed) {
+                if p.ext_status().get(&id).is_some_and(|s| s.installed) {
                     return self.ok(format!("{label} is already installed."));
                 }
                 // the same catalogue entry and the same install as the CLI tile: one place that knows what is installed
                 let Some(cli) = cli_id(&id) else { return self.fail(format!("{label} is a command you installed yourself; install it the vendor's way, then press d.")) };
-                match Self::svc(cx).clis().install_plan(cli) {
+                match p.cli_install_plan(cli) {
                     Some(plan) => self.modal = Some(Modal::Confirm(ConfirmKind::AgentInstall(id.clone()), format!("Install {label}? {plan}"))),
                     None => self.fail(format!("{label} cannot be installed from here; use the CLI tile.")),
                 }
             }
-            Key::Char('k') => match cx.vault().system_names() {
+            Key::Char('k') => match p.secret_system_names() {
                 Ok(names) => {
                     let mut items = vec!["(none: use the program's own sign-in)".to_string()];
                     items.extend(names);
@@ -115,13 +121,13 @@ impl SettingsApp {
                 Err(_) => self.fail("The system vault is locked or empty. Add the key in Settings → Vault first."),
             },
             Key::Char('m') => {
-                let items = model_items(&*cx.ext_status(), agent.as_ref());
+                let items = model_items(&*p.ext_status(), agent.as_ref());
                 self.modal = Some(Modal::Pick(PickKind::AgentModel(id.clone()), Picker::new(&format!("Model for {label}"), items)));
             }
             Key::Char('a') => {
                 let on = cfg.cfg_of(&id).is_some_and(|c| c.0);
                 if on {
-                    self.set_auto(cx, &id, false);
+                    self.set_auto(p, &id, false);
                 } else {
                     self.modal = Some(Modal::Confirm(ConfirmKind::AgentAuto(id.clone()), format!("Allow the approval mode Auto for {label}? Its edits in the workspace and ordinary commands then run without asking. Deleting things, secrets, anything outside the workspace and cluster teardown still ask.")));
                 }
@@ -129,7 +135,7 @@ impl SettingsApp {
             Key::Char('p') => {
                 let to = !cfg.native_pdf_output(&id);
                 self.set_agents(
-                    cx,
+                    p,
                     |a| match id.as_str() {
                         iyakki_extagentx::CLAUDE_CODE => a.claude.native_pdf_output = to,
                         iyakki_extagentx::COPILOT => a.copilot.native_pdf_output = to,
@@ -145,13 +151,13 @@ impl SettingsApp {
             Key::Char('v') if id == iyakki_extagentx::COPILOT => {
                 let to = !cfg.copilot.advisor_only;
                 self.set_agents(
-                    cx,
+                    p,
                     |a| a.copilot.advisor_only = to,
                     if to { "GitHub Copilot is an advisor now: read-only, no IYAKKI tools; you apply its edits.".to_string() } else { "GitHub Copilot works through IYAKKI's tools and approvals again (its own write, shell and web tools stay off).".to_string() },
                 );
             }
-            Key::Char('u') => self.set_agents(cx, |a| a.default = Some(id.clone()), format!("New chats start with {label}.")),
-            Key::Char('U') => self.set_agents(cx, |a| a.default = None, "New chats start with the built-in model.".to_string()),
+            Key::Char('u') => self.set_agents(p, |a| a.default = Some(id.clone()), format!("New chats start with {label}.")),
+            Key::Char('U') => self.set_agents(p, |a| a.default = None, "New chats start with the built-in model.".to_string()),
             Key::Char('x') => {
                 let (enabled, built_in) = match id.as_str() {
                     iyakki_extagentx::CLAUDE_CODE => (cfg.claude.enabled, true),
@@ -162,7 +168,7 @@ impl SettingsApp {
                     return self.fail("A custom agent is removed with r (or edited with e).");
                 }
                 self.set_agents(
-                    cx,
+                    p,
                     |a| {
                         let c = if id == iyakki_extagentx::CLAUDE_CODE { &mut a.claude } else { &mut a.copilot };
                         c.enabled = !enabled;
@@ -187,22 +193,19 @@ impl SettingsApp {
     }
 
     /// Choose a model from the list (empty id: the agent's own default).
-    fn save_model(&mut self, cx: &AppCx, id: &str, model: &str) {
-        match self.write_model(cx, id, model, false) {
+    fn save_model(&mut self, p: &dyn AgentsPort, id: &str, model: &str) {
+        match self.write_model(p, id, model, false) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.agents", &format!("{id} model {model}"));
+                p.audit("settings.agents", &format!("{id} model {model}"));
                 self.ok(if model.is_empty() { "The agent chooses its own model.".to_string() } else { format!("Model: {model}.") })
             }
             Err(e) => self.fail(e),
         }
     }
 
-    fn write_model(&mut self, cx: &AppCx, id: &str, model: &str, remember: bool) -> Result<(), String> {
+    fn write_model(&mut self, p: &dyn AgentsPort, id: &str, model: &str, remember: bool) -> Result<(), String> {
         let m = model.to_string();
-        Self::svc(cx)
-            .settings()
-            .lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-            .update(|s| {
+        p.settings_update(&mut |s| {
                 let (cur, list) = match id {
                     iyakki_extagentx::CLAUDE_CODE => (&mut s.agents.claude.model, Some(&mut s.agents.claude.custom_models)),
                     iyakki_extagentx::COPILOT => (&mut s.agents.copilot.model, Some(&mut s.agents.copilot.custom_models)),
@@ -214,17 +217,17 @@ impl SettingsApp {
                 *cur = m.clone();
                 if let (true, Some(l)) = (remember && !m.is_empty(), list) {
                     if !l.contains(&m) && l.len() < 12 {
-                        l.push(m);
+                        l.push(m.clone());
                     }
                 }
-            })
-            .map_err(|e| e.to_string())
+        })
+        .map_err(|e| e.message())
     }
 
-    fn set_auto(&mut self, cx: &AppCx, id: &str, on: bool) {
-        let label = Self::agent_by_id(cx, id).map_or(id.to_string(), |a| a.label());
+    fn set_auto(&mut self, p: &dyn AgentsPort, id: &str, on: bool) {
+        let label = Self::agent_by_id(p, id).map_or(id.to_string(), |a| a.label());
         self.set_agents(
-            cx,
+            p,
             |a| match id {
                 iyakki_extagentx::CLAUDE_CODE => a.claude.allow_auto = on,
                 iyakki_extagentx::COPILOT => a.copilot.allow_auto = on,
@@ -248,18 +251,18 @@ impl SettingsApp {
     }
 
     /// Saving the forms of this page. `Err` keeps the form open with the message.
-    pub(super) fn agents_submit(&mut self, cx: &AppCx, kind: &FormKind, form: &Form) -> Option<Result<String, String>> {
+    pub(super) fn agents_submit(&mut self, p: &dyn AgentsPort, kind: &FormKind, form: &Form) -> Option<Result<String, String>> {
         match kind {
             FormKind::AgentModel(id) => {
                 let m = form.value(0).trim().to_string();
                 if !iyakki_extagentx::valid_model_id(&m) {
                     return Some(Err("A model id uses letters, digits and . _ - : / @ + [ ] only: no spaces, quotes or shell characters.".into()));
                 }
-                Some(self.write_model(cx, id, &m, true).map(|_| format!("Model set to {m} (remembered for this agent).")))
+                Some(self.write_model(p, id, &m, true).map(|_| format!("Model set to {m} (remembered for this agent).")))
             }
             FormKind::AgentCustom(editing) => {
                 let c = CustomCfg { id: form.value(0).trim().to_string(), name: form.value(1).trim().to_string(), command: form.value(2).trim().to_string(), key_env: form.value(3).trim().to_string(), models_command: form.value(4).trim().to_string(), ..Default::default() };
-                let r = cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| {
+                let r = p.settings_update(&mut |s| {
                     if let Some(old) = s.agents.custom.iter_mut().find(|x| Some(&x.id) == editing.as_ref()) {
                         let keep = old.clone();
                         *old = CustomCfg { model: keep.model, custom_models: keep.custom_models, key_ref: keep.key_ref, allow_auto: keep.allow_auto, native_pdf_output: keep.native_pdf_output, ..c.clone() };
@@ -267,28 +270,28 @@ impl SettingsApp {
                         s.agents.custom.push(c.clone());
                     }
                 });
-                Some(r.map(|_| format!("Saved the custom agent `{}`. Press d to check it.", c.id)).map_err(|e| e.to_string()))
+                Some(r.map(|_| format!("Saved the custom agent `{}`. Press d to check it.", c.id)).map_err(|e| e.message()))
             }
             _ => None,
         }
     }
 
-    pub(super) fn agents_pick(&mut self, cx: &AppCx, kind: &PickKind, item: &str) -> bool {
+    pub(super) fn agents_pick(&mut self, p: &dyn AgentsPort, kind: &PickKind, item: &str) -> bool {
         if let PickKind::AgentModel(id) = kind {
-            let Some(agent) = Self::agent_by_id(cx, id) else { return true };
+            let Some(agent) = Self::agent_by_id(p, id) else { return true };
             if item.starts_with("Custom model id") {
                 let f = Form::new(&format!("Custom model id for {}", agent.label())).text("Model id", "", "letters, digits and . _ - : / @ + [ ] only, e.g. claude-sonnet-5");
                 self.open_form(FormKind::AgentModel(id.clone()), f);
                 return true;
             }
-            let Some(mi) = iyakki_shared::extagent::models_with(cx.ext_status().cli_models(&agent.as_ref().id()), agent.as_ref()).into_iter().find(|m| model_item(m) == item) else { return true };
-            self.save_model(cx, id, &mi.id);
+            let Some(mi) = iyakki_shared::extagent::models_with(p.ext_status().cli_models(&agent.as_ref().id()), agent.as_ref()).into_iter().find(|m| model_item(m) == item) else { return true };
+            self.save_model(p, id, &mi.id);
             return true;
         }
         let PickKind::AgentKey(id) = kind else { return false };
         let key_ref = if item.starts_with('(') { String::new() } else { format!("vault:{item}") };
         self.set_agents(
-            cx,
+            p,
             |a| match id.as_str() {
                 iyakki_extagentx::CLAUDE_CODE => a.claude.key_ref = key_ref.clone(),
                 iyakki_extagentx::COPILOT => a.copilot.key_ref = key_ref.clone(),
@@ -303,13 +306,13 @@ impl SettingsApp {
         true
     }
 
-    pub(super) fn agents_confirm(&mut self, cx: &AppCx, kind: &ConfirmKind) -> bool {
+    pub(super) fn agents_confirm(&mut self, p: &dyn AgentsPort, kind: &ConfirmKind) -> bool {
         match kind {
-            ConfirmKind::AgentAuto(id) => self.set_auto(cx, id, true),
+            ConfirmKind::AgentAuto(id) => self.set_auto(p, id, true),
             ConfirmKind::AgentRemove(id) => {
                 let id = id.clone();
                 self.set_agents(
-                    cx,
+                    p,
                     |a| {
                         a.custom.retain(|c| c.id != id);
                         if a.default.as_deref() == Some(&format!("custom:{id}")) {
@@ -321,34 +324,33 @@ impl SettingsApp {
             }
             ConfirmKind::AgentInstall(id) => {
                 let Some(cli) = cli_id(id) else { return true };
-                cx.audit.record(&cx.session.user, "cli.install", cli);
-                match Self::svc(cx).clis().install(cli, &cx.session.user) {
+                p.audit("cli.install", cli);
+                match p.cli_install(cli) {
                     Ok(()) => self.ok(format!("Installing {cli} (progress is in the CLI tile; this page updates when it is done).")),
                     Err(e) => self.fail(e),
                 }
             }
             ConfirmKind::AgentTest(id) => {
-                let Some(agent) = Self::agent_by_id(cx, id) else { return true };
-                let (svc, cfg, id) = (Self::svc(cx).clone(), Self::agents_cfg(cx), id.clone());
-                cx.audit.record(&cx.session.user, "agents.test", &id);
-                let key = cfg.cfg_of(&id).filter(|c| !c.1.is_empty()).and_then(|c| svc.secrets().resolve(&c.1, None).ok());
+                let Some(agent) = Self::agent_by_id(p, id) else { return true };
+                let (tester, cfg, id) = (p.agent_tester(), Self::agents_cfg(p), id.clone());
+                p.audit("agents.test", &id);
+                let key_ref = cfg.cfg_of(&id).filter(|c| !c.1.is_empty()).map(|c| c.1.clone());
                 let agent: std::sync::Arc<dyn ExternalAgent> = std::sync::Arc::from(agent);
-                let ws = std::env::temp_dir();
-                self.start("testing", move || JobOut::Msg(test_agent(&*svc.ext_status(), svc.extagent_facet(), agent, &ws, key)));
+                self.start("testing", move || JobOut::Msg(tester.test(agent, key_ref)));
             }
-            ConfirmKind::CheckModels(id) if self.admin(cx) => {
-                let (svc, id) = (Self::svc(cx).clone(), id.clone());
-                cx.audit.record(&cx.session.user, "settings.models.check", &id);
-                self.start("checking which models your key can use", move || JobOut::Msg(svc.check_models(&id, None).map(|r| r.words())));
+            ConfirmKind::CheckModels(id) if self.admin(p) => {
+                let (tester, id) = (p.agent_tester(), id.clone());
+                p.audit("settings.models.check", &id);
+                self.start("checking which models your key can use", move || JobOut::Msg(tester.check_models(&id)));
             }
             _ => return false,
         }
         true
     }
 
-    pub(super) fn render_agents(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let cfg = Self::agents_cfg(cx);
-        let cache = &cx.ext_status();
+    pub(super) fn render_agents(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn AgentsPort) {
+        let cfg = Self::agents_cfg(p);
+        let cache = &p.ext_status();
         let all = cfg.all();
         let intro = g.fit(14.0 * s, "Coding agents you installed and signed into. They answer the chat next to the built-in models (Ctrl+P in the chat) and obey IYAKKI's approvals.", Face::Sans, a.w);
         g.text(a.x, a.y, 14.0 * s, MUTED, &intro, Face::Sans);
@@ -418,7 +420,7 @@ impl SettingsApp {
             }
             // the sign-in: who is signed in, the Login button, and "Sign in first" while it is not
             if let (Some(aid), true) = (crate::agent_login::AGENTS.iter().find(|a| **a == id.as_str()), cache.get(&id).is_some_and(|s| s.installed)) {
-                let st = crate::agent_login::state(cx, aid, true);
+                let st = p.agent_login_state(aid, true);
                 let (chip_text, col) = crate::agent_login::chip(&st);
                 let head = if st == crate::agent_login::State::SignedOut { "Sign in first: ".to_string() } else { "Sign-in: ".to_string() };
                 let hw = g.text_width(13.0 * s, &head, Face::Bold);
@@ -431,7 +433,7 @@ impl SettingsApp {
         }
         // the project context's two switches, for the workspace last opened (they live in its committed .iyakki/context.json)
         y += 8.0 * s;
-        match Self::context_workspace(cx) {
+        match Self::context_workspace(p) {
             Some((name, root)) => {
                 let (n, _) = iyakki_shared::notes::load(&root);
                 let head = g.fit(13.0 * s, &format!("Project context of {name} (shared with everyone who clones this project):"), Face::Bold, a.w);
@@ -469,40 +471,4 @@ fn cli_id(agent: &str) -> Option<&'static str> {
         iyakki_extagentx::COPILOT => Some("github-copilot"),
         _ => None,
     }
-}
-
-/// The test button: the version, the sign-in status, then one tiny request through the same machinery a chat uses.
-fn test_agent(status: &dyn iyakki_agent_api::ExtStatusApi, runner: std::sync::Arc<dyn iyakki_agent_api::ExtAgentFacet>, agent: std::sync::Arc<dyn ExternalAgent>, ws: &std::path::Path, key: Option<zeroize::Zeroizing<String>>) -> Result<String, String> {
-    let st = extagent::detect(agent.as_ref(), crate::agent().exec().system().as_ref(), ws);
-    status.set(&agent.id(), st.clone());
-    if !st.ready() {
-        return Err(st.fix);
-    }
-    let req = iyakki_agent_api::ExtRunSpec {
-        agent: agent.id(),
-        workspace: ws.to_path_buf(),
-        prompt: "Reply with the single word OK.".into(),
-        system: std::sync::Arc::new(String::new),
-        model: agent.cfg_model(),
-        resume: None,
-        tools: std::sync::Arc::new(iyakki_shared::agent::NoTools),
-        limits: iyakki_shared::agent::RunLimits { max_steps: 1, max_seconds: 90, ..Default::default() },
-        allow_auto: false,
-        key,
-        audit: std::sync::Arc::new(|_, _| {}),
-        exe: std::env::current_exe().unwrap_or_default(),
-        on_session: std::sync::Arc::new(|_| {}),
-        on_usage: std::sync::Arc::new(|_, _, _, _| {}),
-        no_tools: false,
-    };
-    let h = runner.start(req);
-    while let Ok(e) = h.events.recv_timeout(std::time::Duration::from_secs(120)) {
-        match e {
-            iyakki_shared::agent::RunEvent::Final { text } => return Ok(format!("{} {}: answered “{}”.", agent.label(), st.version, text.trim().chars().take(40).collect::<String>())),
-            iyakki_shared::agent::RunEvent::Failed { error } => return Err(error),
-            iyakki_shared::agent::RunEvent::Stopped { reason } => return Err(reason),
-            _ => {}
-        }
-    }
-    Err("No answer within two minutes.".into())
 }

@@ -6,34 +6,9 @@ use serde::Serialize;
 /// The id of the provider this module keeps in Settings -> Models.
 pub const PROVIDER_ID: &str = "google-gemini";
 
-pub const KEY_REF: &str = "vault:gemini-key";
+pub use iyakki_voice_model::KEY_REF;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Tier {
-    /// Google's free tier: small limits; Google may use what is sent to improve its products.
-    #[default]
-    Free,
-    /// The person's own paid key.
-    Paid,
-}
-
-impl Tier {
-    pub fn label(self) -> &'static str {
-        match self {
-            Tier::Free => "free",
-            Tier::Paid => "paid",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Tier> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "free" => Some(Tier::Free),
-            "paid" => Some(Tier::Paid),
-            _ => None,
-        }
-    }
-}
+pub use iyakki_voice_model::Tier;
 
 /// Where the consent of one person stands for the tier chosen now.
 #[derive(Clone, Debug, PartialEq, Eq)]

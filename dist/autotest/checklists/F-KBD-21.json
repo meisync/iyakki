@@ -1,0 +1,40 @@
+{
+ "schema": 1,
+ "row": "F-KBD-21",
+ "feature_sha": "00de6e6ce493ffc2",
+ "title": "Home swipe between groups",
+ "clauses": [
+  {
+   "id": "pad-swipe",
+   "text": "a sideways three-finger swipe on the touchpad moves Home to the next or previous group, and a vertical one does nothing",
+   "machines": [
+    "lenovo",
+    "macbook-pro",
+    "hp"
+   ],
+   "steps": [
+    {
+     "do": "On Home, swipe three fingers left across the trackpad, then three fingers right.",
+     "expect": "Home slides to the next group, then back to the previous one."
+    },
+    {
+     "do": "Swipe three fingers up or down.",
+     "expect": "Nothing changes. The swipe does nothing while an app, a dialog or a text field has the focus."
+    }
+   ]
+  },
+  {
+   "id": "touch-swipe",
+   "text": "on a touch screen, one finger from the group area moves Home to the next group",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "On a touch screen, drag one finger sideways from the group area on Home.",
+     "expect": "Home moves to the next or previous group with a short slide, which is not shown when reduced motion is on."
+    }
+   ]
+  }
+ ]
+}

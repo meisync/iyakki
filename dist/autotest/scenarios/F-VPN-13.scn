@@ -1,0 +1,8 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 6f5811554d584b1b; honest subset only: everything not checked is under not-covered.
+row: F-VPN-13
+targets: qemu
+profile: ram
+feature-sha: 6f5811554d584b1b
+doc: vpn_add, vpn_enable, vpn_disable and vpn_delete ask every time and the list shows no keys
+human: vpn-cards | Ask the assistant to list VPN profiles, then add one from your own file, then turn it on and off. Expect: The list shows no keys; each change asks first and a key pasted into the chat is refused.
+not-covered: vpn_add, vpn_enable, vpn_disable and vpn_delete ask every time and the list shows no keys

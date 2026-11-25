@@ -84,12 +84,15 @@ struct Rt {
     /// The network the tunnel was built on (the default route's interface and gateway) and when the heartbeat last looked: a change of the
     /// first is roaming, a long gap in the second is a resume from sleep (F-VPN-05).
     net_sig: Option<(String, Option<std::net::Ipv4Addr>)>,
+    /// The last look found no uplink at all (no physical interface with a route): the tunnel is built again when one is back, even if it is
+    /// the same interface and gateway (F-LIFE-19, audit P-12).
+    uplink_gone: bool,
     last_watch: u64,
 }
 
 impl Rt {
     fn new() -> Rt {
-        Rt { status: Status::default(), applied: None, started: 0, fwd: None, host_routes: Arc::default(), dns: None, net_sig: None, last_watch: 0 }
+        Rt { status: Status::default(), applied: None, started: 0, fwd: None, host_routes: Arc::default(), dns: None, net_sig: None, uplink_gone: false, last_watch: 0 }
     }
 
     /// One event for the forwarder, if this profile has one.
@@ -1126,6 +1129,17 @@ impl Manager {
         rt.last_watch = now;
         if gap {
             return Some("resume");
+        }
+        // no uplink at all (an empty interface name, or no answer): remember it, and build the tunnel again when one is back
+        let none_now = sig.as_ref().is_none_or(|n| n.0.is_empty());
+        if none_now {
+            rt.uplink_gone = true;
+            return None;
+        }
+        if rt.uplink_gone {
+            rt.uplink_gone = false;
+            rt.net_sig = sig;
+            return Some("roam");
         }
         match (&rt.net_sig, sig) {
             (Some(old), Some(new)) if *old != new && !new.0.is_empty() => Some("roam"),

@@ -16,7 +16,19 @@ pub fn random_token() -> Result<String, String> {
     Ok(b.iter().map(|x| format!("{x:02x}")).collect())
 }
 
+/// Seconds of wall-clock time (the monotonic `Instant` does not run while the machine sleeps).
+fn wall_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Has the session been idle for [`IDLE`]? By the monotonic clock, or by the wall clock (a machine that slept for a day has been idle
+/// for a day: LIFECYCLE-AUDIT L-07). A wall clock that went back counts as no time at all, never as a huge one.
+pub(crate) fn idle_over(mono: Duration, last_wall: u64, now_wall: u64) -> bool {
+    mono >= IDLE || now_wall.saturating_sub(last_wall) >= IDLE.as_secs()
+}
+
 pub struct Session {
+    last_wall: u64,
     pub user: String,
     pub csrf: String,
     pub created: Instant,
@@ -52,24 +64,27 @@ impl Sessions {
     /// [`Sessions::create`] for a session opened with a device key (`via_key` is the key's fingerprint).
     pub fn create_via(&self, user: &str, screen: Box<dyn Screen>, via_key: Option<String>) -> Result<(String, String), String> {
         let mut m = self.map.lock().map_err(|_| "busy".to_string())?;
-        m.retain(|_, s| s.last_seen.elapsed() < IDLE);
+        let wall = wall_secs();
+        m.retain(|_, s| !idle_over(s.last_seen.elapsed(), s.last_wall, wall));
         if m.len() >= MAX_SESSIONS {
             return Err("too many people are signed in".into());
         }
         let (token, csrf) = (random_token()?, random_token()?);
         let now = Instant::now();
-        m.insert(token.clone(), Session { user: user.into(), csrf: csrf.clone(), created: now, last_seen: now, via_key, screen: Arc::new(Mutex::new(screen)) });
+        m.insert(token.clone(), Session { last_wall: wall, user: user.into(), csrf: csrf.clone(), created: now, last_seen: now, via_key, screen: Arc::new(Mutex::new(screen)) });
         Ok((token, csrf))
     }
 
     pub fn find(&self, token: &str) -> Option<Found> {
         let mut m = self.map.lock().ok()?;
         let s = m.get_mut(token)?;
-        if s.last_seen.elapsed() >= IDLE {
+        let wall = wall_secs();
+        if idle_over(s.last_seen.elapsed(), s.last_wall, wall) {
             m.remove(token);
             return None;
         }
         s.last_seen = Instant::now();
+        s.last_wall = wall;
         Some(Found { user: s.user.clone(), csrf: s.csrf.clone(), screen: s.screen.clone() })
     }
 
@@ -195,5 +210,38 @@ mod tests {
         assert!(same("abc", "abc"));
         assert!(!same("abc", "abd"));
         assert!(!same("abc", "abcd"));
+    }
+
+    #[test]
+    fn a_session_is_idle_by_either_clock_and_a_wall_clock_set_back_is_no_time() {
+        let hour = 3600;
+        assert!(!idle_over(Duration::from_secs(10), 1_000, 1_000 + 7 * hour), "just under eight hours by both clocks");
+        assert!(idle_over(Duration::from_secs(10), 1_000, 1_000 + 8 * hour), "the machine slept: the wall clock says eight hours");
+        assert!(idle_over(IDLE, 1_000, 1_000), "the monotonic clock says so");
+        assert!(!idle_over(Duration::from_secs(10), 5_000_000, 1_000), "a clock set back is not a long idle time");
+    }
+
+    #[test]
+    fn a_session_that_slept_past_the_limit_is_gone_at_the_next_request() {
+        let s = Sessions::new();
+        let (tok, _) = s.create("ann", Box::new(Dummy)).unwrap();
+        assert!(s.find(&tok).is_some());
+        s.map.lock().unwrap().get_mut(&tok).unwrap().last_wall = wall_secs().saturating_sub(IDLE.as_secs() + 1);
+        assert!(s.find(&tok).is_none());
+        assert_eq!(s.count(), 0);
+    }
+
+    #[test]
+    fn a_session_whose_wall_clock_was_set_back_stays_and_one_just_under_the_limit_stays_too() {
+        let s = Sessions::new();
+        let (tok, _) = s.create("ann", Box::new(Dummy)).unwrap();
+        // the clock was corrected backwards: the last use is "in the future", which counts as no time at all
+        s.map.lock().unwrap().get_mut(&tok).unwrap().last_wall = wall_secs() + 5_000_000;
+        assert!(s.find(&tok).is_some(), "a clock set back does not end a session");
+        assert_eq!(s.count(), 1);
+        // just under the limit by the wall clock: still there; the use refreshes it
+        s.map.lock().unwrap().get_mut(&tok).unwrap().last_wall = wall_secs().saturating_sub(IDLE.as_secs() - 60);
+        assert!(s.find(&tok).is_some());
+        assert!(wall_secs().saturating_sub(s.map.lock().unwrap().get(&tok).unwrap().last_wall) < 60, "a request counts as use");
     }
 }

@@ -7,6 +7,7 @@
 
 use crate::safeclamp::SafeClamp;
 use super::*;
+use super::super::settings_device_port::{KeyboardPort, SoundPort};
 use crate::fnkeys;
 use iyakki_shared::inputprofile;
 use iyakki_shared::keyboard::{self, KeyboardSettings};
@@ -141,22 +142,22 @@ impl SettingsApp {
         self
     }
 
-    fn kbd_settings(cx: &AppCx) -> KeyboardSettings {
-        cx.settings().lock().map(|s| s.get().keyboard.clone()).unwrap_or_default()
+    fn kbd_settings(p: &dyn KeyboardPort) -> KeyboardSettings {
+        p.settings_get().keyboard
     }
 
     /// Change the saved choices, then apply them to the kernel now.
-    fn kbd_update(&mut self, cx: &AppCx, what: &str, f: impl FnOnce(&mut KeyboardSettings)) -> Option<KeyboardSettings> {
-        if !self.admin(cx) {
+    fn kbd_update(&mut self, p: &dyn KeyboardPort, what: &str, f: impl FnOnce(&mut KeyboardSettings)) -> Option<KeyboardSettings> {
+        if !self.admin(p) {
             return None;
         }
-        let r = cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| f(&mut s.keyboard));
-        if let Err(e) = r {
-            self.fail(e.to_string());
+        let mut f = Some(f);
+        if let Err(e) = p.settings_update(&mut |s| if let Some(f) = f.take() { f(&mut s.keyboard) }) {
+            self.fail(e.message());
             return None;
         }
-        cx.audit.record(&cx.session.user, "settings.keyboard", what);
-        let k = Self::kbd_settings(cx);
+        p.audit("settings.keyboard", what);
+        let k = Self::kbd_settings(p);
         match apply_keyboard(&k, &self.kbd.sys) {
             Ok(()) => Some(k),
             Err(e) => {
@@ -166,23 +167,23 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn handle_keyboard(&mut self, k: &Key, cx: &AppCx) {
-        let cur = Self::kbd_settings(cx);
-        let st = cx.agent.keyboard_apple().apple_state(&self.kbd.sys);
+    pub(super) fn handle_keyboard(&mut self, k: &Key, p: &dyn KeyboardPort) {
+        let cur = Self::kbd_settings(p);
+        let st = p.apple_state(&self.kbd.sys);
         let driver = st.driver || st.spi;
         match k {
             Key::Up => self.sel[self.tab] = self.sel[self.tab].saturating_sub(1),
             Key::Down => self.sel[self.tab] = (self.sel[self.tab] + 1).min(fnkeys::KEYS.len().saturating_sub(1)),
             Key::Char('v') => {
                 let next = inputprofile::next_choice(&cur.profile);
-                if self.kbd_update(cx, &format!("profile={}", inputprofile::label(next)), |s| s.profile = next.to_string()).is_some() {
+                if self.kbd_update(p, &format!("profile={}", inputprofile::label(next)), |s| s.profile = next.to_string()).is_some() {
                     self.ok(format!("Input profile: {}. {}", inputprofile::label(next), crate::inputprofile::status_line()));
                 }
             }
             Key::Char('x') => {
                 let profile = crate::inputprofile::resolved();
                 let name = if profile == inputprofile::Resolved::Mac { "Mac" } else { "PC" };
-                if self.kbd_update(cx, &format!("pointer defaults={name}"), |s| s.reset_pointer(profile)).is_some() {
+                if self.kbd_update(p, &format!("pointer defaults={name}"), |s| s.reset_pointer(profile)).is_some() {
                     self.ok(format!("Pointer choices are back to the {name} profile's defaults (trackpad natural, tap to click, wheel classic, speed 100%)."));
                 }
             }
@@ -193,7 +194,7 @@ impl SettingsApp {
                     "fkeys" => "auto",
                     _ => "",
                 };
-                if self.kbd_update(cx, &format!("fn_mode={next}"), |s| s.fn_mode = next.to_string()).is_some() {
+                if self.kbd_update(p, &format!("fn_mode={next}"), |s| s.fn_mode = next.to_string()).is_some() {
                     let tail = if driver { "" } else { " (no Apple keyboard driver is loaded here; it is applied when one appears)" };
                     self.ok(format!("Function keys: {}{tail}.", mode_label(next)));
                 }
@@ -205,7 +206,7 @@ impl SettingsApp {
                     "keys" => "off",
                     _ => "",
                 };
-                if self.kbd_update(cx, &format!("touchbar={next}"), |s| s.touchbar = next.to_string()).is_some() {
+                if self.kbd_update(p, &format!("touchbar={next}"), |s| s.touchbar = next.to_string()).is_some() {
                     self.ok(format!("Touch Bar: {}.", touchbar_label(next)));
                 }
             }
@@ -213,13 +214,13 @@ impl SettingsApp {
                 let at = STRIP_SETS.iter().position(|set| set.iter().map(|x| x.to_string()).collect::<Vec<_>>() == cur.touchbar_strips).map_or(0, |i| (i + 1) % STRIP_SETS.len());
                 let next: Vec<String> = STRIP_SETS[at].iter().map(|x| x.to_string()).collect();
                 let name = if next.is_empty() { "all four".to_string() } else { next.join(", ") };
-                if self.kbd_update(cx, &format!("touchbar_strips={name}"), |s| s.touchbar_strips = next.clone()).is_some() {
+                if self.kbd_update(p, &format!("touchbar_strips={name}"), |s| s.touchbar_strips = next.clone()).is_some() {
                     self.ok(format!("Touch Bar strips: {name}."));
                 }
             }
             Key::Char('l') => {
                 let next = (cur.touchbar_flip + 1) % 4;
-                if self.kbd_update(cx, &format!("touchbar_flip={next}"), |s| s.touchbar_flip = next).is_some() {
+                if self.kbd_update(p, &format!("touchbar_flip={next}"), |s| s.touchbar_flip = next).is_some() {
                     self.ok(format!("Touch Bar picture flip {next} (0 as is, 1 mirrored along the bar, 2 mirrored across, 3 both)."));
                 }
             }
@@ -232,7 +233,7 @@ impl SettingsApp {
                     Some(false) => None,
                 };
                 let name = if iso { "ISO layout" } else { "Option and Command swapped" };
-                if self.kbd_update(cx, &format!("{name}={}", tri(next)), |s| if iso { s.iso_layout = next } else { s.swap_opt_cmd = next }).is_some() {
+                if self.kbd_update(p, &format!("{name}={}", tri(next)), |s| if iso { s.iso_layout = next } else { s.swap_opt_cmd = next }).is_some() {
                     self.ok(format!("{name}: {}. A keyboard plugged in later may need to be plugged in again.", tri(next)));
                 }
             }
@@ -241,25 +242,25 @@ impl SettingsApp {
                 let (t, n) = cur.trackpad();
                 let next = !(if tap { t } else { n });
                 let name = if tap { "Trackpad tap to click" } else { "Trackpad natural scrolling" };
-                if self.kbd_update(cx, &format!("{name}={}", if next { "on" } else { "off" }), |s| if tap { s.trackpad_tap = Some(next) } else { s.trackpad_natural = Some(next) }).is_some() {
+                if self.kbd_update(p, &format!("{name}={}", if next { "on" } else { "off" }), |s| if tap { s.trackpad_tap = Some(next) } else { s.trackpad_natural = Some(next) }).is_some() {
                     self.ok(format!("{name}: {}.", if next { "on" } else { "off" }));
                 }
             }
             Key::Char('j') => {
                 let next = !cur.three_finger_drag_on();
-                if self.kbd_update(cx, &format!("Trackpad three-finger drag={}", if next { "on" } else { "off" }), |s| s.three_finger_drag = Some(next)).is_some() {
+                if self.kbd_update(p, &format!("Trackpad three-finger drag={}", if next { "on" } else { "off" }), |s| s.three_finger_drag = Some(next)).is_some() {
                     self.ok(format!("Trackpad three-finger drag: {}. {}", if next { "on" } else { "off" }, if next { "Three fingers moving hold the button and drag; lift a finger to drop." } else { "Three fingers do nothing." }));
                 }
             }
             Key::Char('a') => {
                 let next = !cur.home_swipe_on();
-                if self.kbd_update(cx, &format!("Home swipe={}", if next { "on" } else { "off" }), |s| s.home_swipe = Some(next)).is_some() {
+                if self.kbd_update(p, &format!("Home swipe={}", if next { "on" } else { "off" }), |s| s.home_swipe = Some(next)).is_some() {
                     self.ok(format!("Home swipe between groups: {}. {}", if next { "on" } else { "off" }, if next { "Swipe sideways on the trackpad (or a finger on a touch screen) while Home is shown." } else { "Swiping does nothing." }));
                 }
             }
             Key::Char('c') => {
                 let next = if cur.home_swipe_fingers_n() == 3 { 2 } else { 3 };
-                if self.kbd_update(cx, &format!("Home swipe fingers={next}"), |s| s.home_swipe_fingers = next).is_some() {
+                if self.kbd_update(p, &format!("Home swipe fingers={next}"), |s| s.home_swipe_fingers = next).is_some() {
                     self.ok(format!("Home swipe: {next} fingers on a touchpad.{}", if next == 3 && cur.three_finger_drag_on() { " Three-finger drag is on, so it wins; use two fingers or turn the drag off." } else { "" }));
                 }
             }
@@ -268,12 +269,12 @@ impl SettingsApp {
                 let now = cur.wheel_natural.unwrap_or(false);
                 let next = !now;
                 if wheel {
-                    if self.kbd_update(cx, &format!("wheel_natural={}", if next { "on" } else { "off" }), |s| s.wheel_natural = Some(next)).is_some() {
+                    if self.kbd_update(p, &format!("wheel_natural={}", if next { "on" } else { "off" }), |s| s.wheel_natural = Some(next)).is_some() {
                         self.ok(format!("Mouse wheel direction: {}.", if next { "natural (rolling towards you moves the page up)" } else { "traditional (rolling away from you moves the page up)" }));
                     }
                 } else {
                     let m = cur.scroll().smooth;
-                    if self.kbd_update(cx, &format!("scroll_smooth={}", if m { "off" } else { "on" }), |s| s.scroll_smooth = Some(!m)).is_some() {
+                    if self.kbd_update(p, &format!("scroll_smooth={}", if m { "off" } else { "on" }), |s| s.scroll_smooth = Some(!m)).is_some() {
                         self.ok(format!("Smooth scrolling: {}.", if m { "off" } else { "on" }));
                     }
                 }
@@ -283,13 +284,13 @@ impl SettingsApp {
                 if speed {
                     let now = cur.scroll().speed_pct;
                     let next = SPEEDS.iter().copied().find(|v| *v > now).unwrap_or(SPEEDS[0]);
-                    if self.kbd_update(cx, &format!("scroll_speed_pct={next}"), |s| s.scroll_speed_pct = next).is_some() {
+                    if self.kbd_update(p, &format!("scroll_speed_pct={next}"), |s| s.scroll_speed_pct = next).is_some() {
                         self.ok(format!("Scroll speed: {next}%."));
                     }
                 } else {
                     let now = cur.scroll().wheel_lines;
                     let next = WHEEL_LINES.iter().copied().find(|v| *v > now).unwrap_or(WHEEL_LINES[0]);
-                    if self.kbd_update(cx, &format!("wheel_lines={next}"), |s| s.wheel_lines = next).is_some() {
+                    if self.kbd_update(p, &format!("wheel_lines={next}"), |s| s.wheel_lines = next).is_some() {
                         self.ok(format!("A mouse wheel click moves {next} line{}.", if next == 1 { "" } else { "s" }));
                     }
                 }
@@ -300,56 +301,55 @@ impl SettingsApp {
                 let (mouse, touch) = cur.pointer_speeds();
                 let next = pointer_next(if pad { touch } else { mouse }, up, preset);
                 let (name, key) = if pad { ("Touchpad speed", "touchpad_speed_pct") } else { ("Mouse speed", "pointer_speed_pct") };
-                if self.kbd_update(cx, &format!("{key}={next}"), |s| if pad { s.touchpad_speed_pct = next } else { s.pointer_speed_pct = next }).is_some() {
+                if self.kbd_update(p, &format!("{key}={next}"), |s| if pad { s.touchpad_speed_pct = next } else { s.pointer_speed_pct = next }).is_some() {
                     self.ok(format!("{name}: {next}%."));
                 }
             }
             Key::Char('m') => {
                 let m = cur.scroll().momentum;
-                if self.kbd_update(cx, &format!("scroll_momentum={}", if m { "off" } else { "on" }), |s| s.scroll_momentum = Some(!m)).is_some() {
+                if self.kbd_update(p, &format!("scroll_momentum={}", if m { "off" } else { "on" }), |s| s.scroll_momentum = Some(!m)).is_some() {
                     self.ok(format!("Trackpad momentum: {}.", if m { "off" } else { "on" }));
                 }
             }
             Key::Char('d') => {
                 let next = next_in(&DELAYS, cur.repeat_delay_ms);
-                if self.kbd_update(cx, &format!("repeat_delay={next}"), |s| s.repeat_delay_ms = next).is_some() {
+                if self.kbd_update(p, &format!("repeat_delay={next}"), |s| s.repeat_delay_ms = next).is_some() {
                     self.ok(if next == 0 { "Key repeat delay: the kernel's own.".to_string() } else { format!("Key repeat starts after {next} ms.") });
                 }
             }
             Key::Char('r') => {
                 let next = next_in(&RATES, cur.repeat_rate);
-                if self.kbd_update(cx, &format!("repeat_rate={next}"), |s| s.repeat_rate = next).is_some() {
+                if self.kbd_update(p, &format!("repeat_rate={next}"), |s| s.repeat_rate = next).is_some() {
                     self.ok(if next == 0 { "Key repeat rate: the kernel's own.".to_string() } else { format!("Key repeat: {next} per second.") });
                 }
             }
             Key::Char('b') => {
-                if !self.admin(cx) {
+                if !self.admin(p) {
                     return;
                 }
                 let sys = self.kbd.sys.clone();
                 self.start("testing the screen brightness", move || JobOut::Msg(fnkeys::test_panel(&sys)));
             }
             Key::Char('h') => {
-                if !self.admin(cx) {
+                if !self.admin(p) {
                     return;
                 }
                 let sys = self.kbd.sys.clone();
-                let agent = cx.agent.clone();
-                let level = cx.agent.touchprobe_next_level();
-                cx.audit.record(&cx.session.user, "settings.touch.probe", &format!("step {level}"));
-                self.start("probing the touch screen", move || JobOut::Msg(Ok(agent.helpers_b4().touch_probe(&sys, level))));
+                let level = p.touch_next_level();
+                p.audit("settings.touch.probe", &format!("step {level}"));
+                let job = p.touch_probe_job(sys, level);
+                self.start("probing the touch screen", move || JobOut::Msg(Ok(job())));
             }
             Key::Char('z') => {
-                if !self.admin(cx) {
+                if !self.admin(p) {
                     return;
                 }
-                cx.audit.record(&cx.session.user, "settings.touch.reset", "ladder: re-open, HID rebind, bus reset, module reload");
-                let up = cx.agent.doctor_uptime_secs();
-                let agent = cx.agent.clone();
-                self.start("resetting the touch screen (touch it now and then)", move || JobOut::Msg(Ok(agent.helpers_b4().touch_reset_now(up))));
+                p.audit("settings.touch.reset", "ladder: re-open, HID rebind, bus reset, module reload");
+                let job = p.touch_reset_job();
+                self.start("resetting the touch screen (touch it now and then)", move || JobOut::Msg(Ok(job())));
             }
             Key::Char('k') => {
-                if !self.admin(cx) {
+                if !self.admin(p) {
                     return;
                 }
                 let mut last = 0;
@@ -363,12 +363,12 @@ impl SettingsApp {
                 }
             }
             Key::Char('t') => {
-                if !self.admin(cx) {
+                if !self.admin(p) {
                     return;
                 }
-                let svc = Self::svc(cx).clone();
-                cx.audit.record(&cx.session.user, "settings.sound.test", "keyboard page");
-                self.start("playing a test sound", move || JobOut::Msg(svc.test_sound(None)));
+                p.audit("settings.sound.test", "keyboard page");
+                let job = p.test_sound_job(None);
+                self.start("playing a test sound", move || JobOut::Msg(job()));
             }
             _ => {}
         }
@@ -393,9 +393,9 @@ impl SettingsApp {
     }
 
     /// (label, value, warn) rows above the table.
-    pub(super) fn kbd_rows(&self, cx: &AppCx) -> Vec<(String, String, bool)> {
-        let k = Self::kbd_settings(cx);
-        let a = cx.agent.keyboard_apple().apple_state(&self.kbd.sys);
+    pub(super) fn kbd_rows(&self, p: &dyn KeyboardPort) -> Vec<(String, String, bool)> {
+        let k = Self::kbd_settings(p);
+        let a = p.apple_state(&self.kbd.sys);
         let (last_key, last_scroll) = crate::inputprofile::live_rows();
         let mut v: Vec<(String, String, bool)> = vec![
             ("Input profile".into(), format!("{}: {}", inputprofile::label(&k.profile), crate::inputprofile::status_line()), false),
@@ -430,12 +430,12 @@ impl SettingsApp {
             None => "the kernel's own (250 ms, 30 per second)".into(),
         }, false));
         v.push(("Layout".into(), "US keyboard (other layouts are planned)".into(), false));
-        let panels = cx.agent.helpers_b4().touch_panel_names(&self.kbd.sys);
+        let panels = p.touch_panel_names(&self.kbd.sys);
         v.push(("Touch screen".into(), match panels.len() {
             0 => "no USB touch screen listed".to_string(),
             n => format!("{n} found ({}). Touch not working right now? Click Probe touch screen: it switches the screen's USB device off and on", panels.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ")),
         }, false));
-        v.push(("Touch recovery".into(), format!("{}. Click Reset touch screen: re-opens the input, rebinds the driver, resets that one device", cx.agent.touchrecover_status()), false));
+        v.push(("Touch recovery".into(), format!("{}. Click Reset touch screen: re-opens the input, rebinds the driver, resets that one device", p.touch_recover_status()), false));
         let panel = fnkeys::panel_backlights(&self.kbd.sys);
         v.push(("Screen brightness".into(), match panel.first() {
             Some(l) => format!("{} {}% (steps: {})", l.name, l.percent(), fnkeys::brightness_levels(l.max).len()),
@@ -450,14 +450,14 @@ impl SettingsApp {
             Some(l) => format!("{} {}% (max {})", l.name, l.percent(), l.max),
             None => "none found".into(),
         }, false));
-        let snd = cx.sound_settings();
-        v.push(("Sound".into(), format!("IYAKKI volume {}%{}{}", snd.volume_pct, if snd.muted { ", muted" } else { "" }, if fnkeys::sound_present(&*cx.core) { "" } else { " (no sound output found)" }), false));
+        let snd = SoundPort::sound_settings(p);
+        v.push(("Sound".into(), format!("IYAKKI volume {}%{}{}", snd.volume_pct, if snd.muted { ", muted" } else { "" }, if p.sound_output_present() { "" } else { " (no sound output found)" }), false));
         let seen = fnkeys::seen();
         v.push(("Last special keys".into(), if seen.is_empty() { "press a media or Fn key to see its code here".into() } else { seen.iter().rev().map(|c| fnkeys::describe_code(*c)).collect::<Vec<_>>().join(" | ") }, false));
         v
     }
 
-    pub(super) fn render_keyboard(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+    pub(super) fn render_keyboard(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn KeyboardPort) {
         let mut y = a.y;
         // on a wide page the Scroll test sits in a column on the right; on a narrow one it goes under the rows when there is room
         let wide = a.w >= 900.0 * s;
@@ -470,7 +470,7 @@ impl SettingsApp {
             self.kbd.test.layout(R::new(0.0, 0.0, 0.0, 0.0), 0.0, 22.0 * s, s);
         }
         let label_w = (210.0 * s).min(rows_w * 0.38);
-        for (label, value, warn) in self.kbd_rows(cx) {
+        for (label, value, warn) in self.kbd_rows(p) {
             if y + 24.0 * s > a.y + a.h {
                 break; // a row that would run past the bottom of a short page is left out
             }

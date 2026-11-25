@@ -36,6 +36,8 @@ mod gen_flows_jobs;
 mod served_flows;
 mod served_policy;
 mod served_auth;
+mod served_login;
+pub use served_login::{TicketClock, TICKET_TTL_MS};
 #[cfg(test)]
 mod served_auth_audit;
 pub use served_tiles::{RemoteTileRt, RemoteWasmTile};
@@ -253,6 +255,7 @@ impl Rpc {
     /// noticing (D-SPLIT-03-STORE: the store's catalogs are bigger than a line): arguments over [`INLINE_MAX`] are uploaded and named in the call
     /// (`{"$up": id}`), an answer over it is a download the UI reads (`{"$big": id}`).
     pub fn call<T: DeserializeOwned>(&self, iface: &str, obj: u64, method: &str, args: Value) -> Result<T, String> {
+        let args = self.with_ticket(iface, method, args)?;
         let spooled = !spool_free(iface, method);
         let (args, _guard) = if spooled { self.spool_args(args)? } else { (args, None) };
         let v = self.conn.lock().unwrap_or_else(PoisonError::into_inner).call("rpc.call", json!({"obj": obj, "iface": iface, "method": method, "args": args})).map_err(|e| why(&e))?;
@@ -261,6 +264,20 @@ impl Rpc {
             _ => v,
         };
         serde_json::from_value(v).map_err(|e| format!("the answer to {iface}::{method} has the wrong shape: {e}"))
+    }
+
+    /// A call that carries an approval the person gave on the card asks the core for the ticket first and sends it as one more argument
+    /// (served_login.rs). A call that is not approved, or takes no approval, is sent as it is.
+    fn with_ticket(&self, iface: &str, method: &str, mut args: Value) -> Result<Value, String> {
+        if let Some(tk) = served_login::ticketed(iface, method) {
+            if args.get(tk.approved).and_then(Value::as_bool) == Some(true) && args.as_array().map(Vec::len) == Some(tk.wire_args) {
+                let tok: String = self.call("Approval", 0, "issue", json!([iface, method, args.clone()]))?;
+                if let Some(a) = args.as_array_mut() {
+                    a.push(Value::String(tok));
+                }
+            }
+        }
+        Ok(args)
     }
 
     fn spool_args(&self, args: Value) -> Result<(Value, Option<served_hosts::Sent>), String> {
@@ -345,6 +362,8 @@ pub struct Host {
     next: AtomicU64,
     /// What the core supplies in place of what the UI used to pass (D-SPLIT-03-APPS2, D-SPLIT-03-STORE).
     side: Mutex<CoreSide>,
+    /// Who signed in on each connection and the approval tickets (served_login.rs).
+    login: Mutex<served_login::Login>,
 }
 
 /// The core's own objects that stand in for the services, the web fetch, the audit callback and the person's account a UI would have passed. A
@@ -423,6 +442,10 @@ impl Host {
 
 impl RpcServe for Host {
     fn call(&self, ctx: &CallContext, conn: u64, obj: u64, iface: &str, method: &str, args: Value) -> CallResult<Value> {
+        if iface == "Approval" && method == "issue" {
+            let reg = Registry { host: self, conn };
+            return served_login::issue(&reg, args).map_err(|m| CallError::new(ErrorCode::InvalidInput, "rpc.call_failed", &m));
+        }
         let o = self.find(conn, obj, iface).ok_or_else(|| CallError::new(ErrorCode::NotFound, "rpc.no_object", &format!("There is no {iface} object {obj} on this connection.")))?;
         let reg = Registry { host: self, conn };
         // the FLOWS calls name the scope they need (D-S5-02); a socket without it is refused before anything is asked of the core
@@ -439,8 +462,11 @@ impl RpcServe for Host {
         };
         // every claim of a right in the arguments is replaced by the core's own reading, or the call is refused (served_auth.rs)
         let mut args = args;
+        served_login::gate(&reg, iface, method, &mut args).map_err(failed)?;
         served_auth::vouch(&reg, iface, method, &mut args).map_err(failed)?;
+        let sent = args.clone();
         let v = o.serve(&reg, method, args).map_err(failed)?;
+        served_login::settle(&reg, iface, method, &sent, &v);
         // an answer bigger than a line is a download the UI reads
         if spooled {
             let text = v.to_string();
@@ -456,6 +482,9 @@ impl RpcServe for Host {
         match obj {
             None => {
                 all.remove(&conn);
+                drop(all);
+                self.forget_login(conn);
+                return;
             }
             Some(id) => {
                 if let Some(m) = all.get_mut(&conn) {

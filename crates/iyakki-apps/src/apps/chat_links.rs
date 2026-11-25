@@ -3,6 +3,7 @@
 //! opened at all. The pure decisions (what an address is, what is wrong with it) are in `crate::links`.
 
 use crate::safeclamp::SafeClamp;
+use crate::apps::chat_port::CxChat;
 use super::*;
 use crate::ctxmenu::Item;
 use crate::links::{self, Kind};
@@ -132,7 +133,7 @@ impl ChatApp {
     /// The person clicked a link (or pressed Enter on it, or chose Open in its menu).
     pub fn activate_link(&mut self, l: &LinkRef, how: OpenHow, cx: &AppCx) {
         let url = l.url.trim().to_string();
-        cx.audit.record(&cx.session.user, "chat.link", &links::shown(&url, 120));
+        CxChat(cx).audit("chat.link", &links::shown(&url, 120));
         self.links.card = None;
         match links::classify(&url) {
             Kind::Http { .. } => self.open_http(&url, l, how),
@@ -205,11 +206,11 @@ impl ChatApp {
             return;
         }
         // elsewhere: the person's own folders, as the file tools see them
-        let policy = &cx.session.policy;
-        let roots = cx.core.file_scope().roots(policy, &cx.session.user, cx.data_dir());
-        let cwd = self.session.as_ref().and_then(|s| cx.session_workdir(&cx.session.user, &s.id).ok()).unwrap_or_else(|| roots.home.clone());
+        let policy = CxChat(cx).policy();
+        let roots = CxChat(cx).core().file_scope().roots(policy, CxChat(cx).user(), CxChat(cx).data_dir());
+        let cwd = self.session.as_ref().and_then(|s| CxChat(cx).session_workdir(&s.id).ok()).unwrap_or_else(|| roots.home.clone());
         let real = match roots.resolve(&cwd, path) {
-            Ok(r) if roots.read_ok(policy, &cx.session.user, &r) => r,
+            Ok(r) if roots.read_ok(policy, CxChat(cx).user(), &r) => r,
             Ok(r) => {
                 self.error = Some(format!("{} is outside the folders your account may read, so it is not opened.", r.display()));
                 return;

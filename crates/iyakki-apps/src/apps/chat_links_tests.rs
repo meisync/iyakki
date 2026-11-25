@@ -188,6 +188,7 @@ fn the_text_that_shows_another_address_insecure_http_and_lookalike_hosts_are_mar
 
 #[test]
 fn nothing_opens_by_itself_not_while_drawing_not_while_waiting_and_not_for_an_autopilot_turn() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     let (mut app, cx) = chat_with("lnk6", ANSWER, Some("fetched https://example.com/docs and https://evil.test/x"));
     crate::ui::clipboard::clear();
     for _ in 0..5 {

@@ -1120,3 +1120,16 @@ mod tests {
         }
     }
 }
+
+/// A small turning arc (a spinner): `tick` advances it, `c` is its colour.
+pub fn spinner(g: &mut Gfx, cx: f32, cy: f32, r: f32, tick: u64, c: [u8; 4]) {
+    let a0 = tick as f32 * 0.35;
+    let n = 10;
+    let mut prev = (cx + a0.cos() * r, cy + a0.sin() * r);
+    for k in 1..=n {
+        let a = a0 + 1.7 * k as f32 / n as f32;
+        let p = (cx + a.cos() * r, cy + a.sin() * r);
+        g.line(prev.0, prev.1, p.0, p.1, 2.0, with_alpha(c, (60 + k * 19) as u8));
+        prev = p;
+    }
+}

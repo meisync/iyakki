@@ -4,15 +4,13 @@
 //! for a session. The history is the signed-in person's own.
 
 use std::sync::Arc;
-
+use crate::apps::chat_port::ChatPort;
 use iyakki_memx::history::History;
 use iyakki_shared::settings::ProviderLimits;
 use iyakki_shared::settingstools::{Entry};
 use iyakki_shared::settingstools::{arg_bool, arg_str, no_args};
 use super::chat_settings::Env;
 use serde_json::{json, Value};
-
-use super::AppCx;
 
 const TAB: &str = "Assistant";
 
@@ -31,9 +29,9 @@ fn words(v: u32) -> String {
     if v == 0 { "default".into() } else { format!("{v} s") }
 }
 
-pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
+pub fn entries(cx: &dyn ChatPort, env: &Env) -> Vec<Entry> {
     let kb = cx.kb_source();
-    let user = cx.session.user.clone();
+    let user = cx.user().to_string();
     let mut v = Vec::new();
     {
         let (e, kb, user) = (env.clone(), kb.clone(), user.clone());

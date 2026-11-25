@@ -10,7 +10,7 @@ Name: **FLOWS** (short, fits the tile, says what it is). The graph is a *flow*, 
 *node*.
 
 ```
- screen (apps/flows.rs, flows_canvas.rs, flows_run.rs, flows_board.rs)       assistant tools (agent/flows/tools.rs)
+ screen (tile-flows: flows.rs, flows_canvas.rs, flows_run.rs, flows_board.rs)      assistant tools (agent/flows/tools.rs)
         |  polls snapshots; commands go over a channel                              |  same Env, same engine
         v                                                                           v
    iyakki_agent::flows   glue: Host (http, cli, browser, agent, notify, vault), runners (local, k3s Job), tools, Env
@@ -481,7 +481,9 @@ the properties form is generated from it), `ports()` (for example `condition` ha
 severity), `run()` (given the resolved config, the input and a `NodeCx` with the host, the cancel flag, the timeout of this attempt and a
 logger) and `classify_error()` (see the retry table). Test it with `FakeHost`.
 
-## The screen (`apps/flows*.rs`)
+## The screen (`crates/iyakki-tile-flows`)
+
+The tile is its own crate (alpha.8 N1): it depends on the toolkit and on the leaf crates `iyakki-flow`, `iyakki-flows-model` (the data and the `FlowsPort` jobs), `iyakki-querybox` and `iyakki-clock`, and asks the shell only for the assistant pane (`ChatPane`), one imported file (`FlowsShell`) and its own picture files (`PictureFiles`). The shell adapter is `crates/iyakki-apps/src/apps/flows.rs`; the real port is `flows_port.rs`. Its tests run against a fake port (`fake_tests.rs`); `flows_tests.rs` in the apps crate runs the same screens on the real environment.
 
 Tabs: **DESIGN** (canvas), **RUN** (live run over the same graph), **BOARD** (lanes Scheduled · Running · Needs you · Failed · Done,
 filters, search, next runs, run history, run detail), with a header of chips (running n, needs you m, scheduled k), a version chip (draft or

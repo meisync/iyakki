@@ -2,6 +2,7 @@
 //! such a file. The rules, the format and the checks are in `iyakki_shared::backup`; the page only asks, shows what is included and
 //! what a file contains, and runs the work in the background. See `docs/BACKUP.md`.
 
+use super::account_port::BackupPort;
 use crate::safeclamp::SafeClamp;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -85,30 +86,27 @@ impl SettingsApp {
         self
     }
 
-    fn backup_layout(&self, cx: &AppCx) -> Layout {
-        self.backup.layout.clone().unwrap_or_else(|| {
-            let data = cx.data_dir().to_path_buf();
-            Layout { home: cx.core.file_scope().home_root(&cx.session.user, &data), data, user: cx.session.user.clone() }
-        })
+    fn backup_layout(&self, p: &dyn BackupPort) -> Layout {
+        self.backup.layout.clone().unwrap_or_else(|| Layout { home: p.backup_home(), data: p.data_dir(), user: p.backup_user() })
     }
 
     fn backup_on(&self) -> BTreeSet<String> {
         bk::all_areas().into_iter().filter(|a| !self.backup.off.contains(a)).collect()
     }
 
-    fn backup_preview(&mut self, cx: &AppCx) -> Result<Vec<AreaInfo>, String> {
+    fn backup_preview(&mut self, p: &dyn BackupPort) -> Result<Vec<AreaInfo>, String> {
         if self.backup.preview.is_none() {
-            let l = self.backup_layout(cx);
+            let l = self.backup_layout(p);
             self.backup.preview = Some(bk::preview(&l, &bk::all_areas()).map_err(|e| e.to_string()));
         }
         self.backup.preview.clone().unwrap_or(Ok(Vec::new()))
     }
 
     /// The rows of the page: the areas of the opened file, else the areas a backup would take now.
-    pub(super) fn backup_rows(&mut self, cx: &AppCx) -> Vec<AreaInfo> {
+    pub(super) fn backup_rows(&mut self, p: &dyn BackupPort) -> Vec<AreaInfo> {
         match &self.backup.loaded {
             Some(l) => l.contents.areas.clone(),
-            None => self.backup_preview(cx).unwrap_or_default(),
+            None => self.backup_preview(p).unwrap_or_default(),
         }
     }
 
@@ -128,8 +126,8 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn handle_backup(&mut self, k: &Key, cx: &AppCx) {
-        let rows = self.backup_rows(cx);
+    pub(super) fn handle_backup(&mut self, k: &Key, p: &dyn BackupPort) {
+        let rows = self.backup_rows(p);
         let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
         match k {
             Key::Up => self.move_sel(-1, rows.len()),
@@ -143,14 +141,14 @@ impl SettingsApp {
             }
             Key::Char('k') => self.backup.preview = None,
             Key::Char('s') => match (&self.backup.progress, self.is_busy()) {
-                (Some(p), true) => {
-                    p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                (Some(job), true) => {
+                    job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                     self.ok("Stopping the backup: the half file is removed.");
                 }
                 _ => self.fail("No backup is running."),
             },
             Key::Char('h') if self.backup.loaded.is_none() => {
-                let s = Schedule::load(cx.data_dir(), &cx.session.user);
+                let s = Schedule::load(&p.data_dir(), &p.backup_user());
                 let f = Form::new("Back up on a schedule")
                     .text("Every how many days (1 to 31)", &s.every_days.to_string(), "1 is every day")
                     .text("From which hour (0 to 23)", &s.hour.to_string(), "a computer that was off runs it when you next sign in")
@@ -163,14 +161,14 @@ impl SettingsApp {
                 self.open_form(FormKind::Backup(BackupForm::Schedule), f);
             }
             Key::Char('u') if self.backup.loaded.is_none() => {
-                let mut s = Schedule::load(cx.data_dir(), &cx.session.user);
+                let mut s = Schedule::load(&p.data_dir(), &p.backup_user());
                 if !s.enabled {
                     return self.ok("There is no scheduled backup.");
                 }
                 s.enabled = false;
-                match s.save(cx.data_dir(), &cx.session.user) {
+                match s.save(&p.data_dir(), &p.backup_user()) {
                     Ok(()) => {
-                        cx.audit.record(&cx.session.user, "backup.schedule", "off");
+                        p.audit("backup.schedule", "off");
                         self.ok("The scheduled backup is off (its settings are kept).");
                     }
                     Err(e) => self.fail(e),
@@ -188,7 +186,7 @@ impl SettingsApp {
                 self.open_form(FormKind::Backup(BackupForm::Share), f);
             }
             Key::Char('y') if self.backup.loaded.is_none() => {
-                if !cx.session.policy.manage_settings {
+                if !p.may_manage_settings() {
                     return self.fail("Only an administrator may back up the machine's own settings and keys.");
                 }
                 let f = Form::new("Back up the machine's own settings and keys")
@@ -198,7 +196,7 @@ impl SettingsApp {
                 self.open_form(FormKind::Backup(BackupForm::System), f);
             }
             Key::Char('z') if self.backup.loaded.is_none() => {
-                if !cx.session.policy.manage_settings {
+                if !p.may_manage_settings() {
                     return self.fail("Only an administrator may restore the machine's own settings and keys.");
                 }
                 let f = Form::new("Restore the machine's own settings and keys")
@@ -263,10 +261,10 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn backup_submit(&mut self, cx: &AppCx, kind: &BackupForm, form: &mut Form) -> Result<String, String> {
-        let layout = self.backup_layout(cx);
+    pub(super) fn backup_submit(&mut self, p: &dyn BackupPort, kind: &BackupForm, form: &mut Form) -> Result<String, String> {
+        let layout = self.backup_layout(p);
         let now = iyakki_schema::now_secs() as i64;
-        let user = cx.session.user.clone();
+        let user = p.backup_user();
         match kind {
             BackupForm::Make => {
                 let dest = form.value(0).trim().to_string();
@@ -283,7 +281,7 @@ impl SettingsApp {
                 }
                 self.backup.last_dir = dest.clone();
                 let opts = bk::CreateOptions { areas: self.backup_on(), passphrase: pass.clone(), now, release: env!("CARGO_PKG_VERSION").to_string() };
-                cx.audit.record(&user, "backup.create", &format!("{} area(s) to {}, {}", opts.areas.len(), dest, if pass.is_some() { "encrypted" } else { "not encrypted" }));
+                p.audit("backup.create", &format!("{} area(s) to {}, {}", opts.areas.len(), dest, if pass.is_some() { "encrypted" } else { "not encrypted" }));
                 let pr = std::sync::Arc::new(bk::Progress::default());
                 self.backup.progress = Some(pr.clone());
                 self.start("Backing up", move || JobOut::Backup(BackupOut::Made(bk::create_with_progress(&layout, std::path::Path::new(&dest), &opts, &pr).map_err(|e| e.to_string()))));
@@ -291,7 +289,7 @@ impl SettingsApp {
             }
             BackupForm::Schedule => {
                 let num = |i: usize, what: &str, lo: u32, hi: u32| -> Result<u32, String> { form.value(i).trim().parse::<u32>().ok().filter(|n| (lo..=hi).contains(n)).ok_or_else(|| format!("{what}: a whole number from {lo} to {hi}.")) };
-                let mut s = Schedule::load(cx.data_dir(), &user);
+                let mut s = Schedule::load(&p.data_dir(), &user);
                 s.every_days = num(0, "Days", 1, 31)?;
                 s.hour = num(1, "Hour", 0, 23)? as u8;
                 s.dest = form.value(2).trim().to_string();
@@ -305,8 +303,8 @@ impl SettingsApp {
                 if s.share.is_empty() && !std::path::Path::new(&s.dest).is_dir() {
                     return Err("The folder is not there yet: make it, or plug in the stick, then try again.".into());
                 }
-                s.save(cx.data_dir(), &user)?;
-                cx.audit.record(&user, "backup.schedule", &format!("on, every {} day(s){}, {}", s.every_days, if s.share.is_empty() { "" } else { ", to a share" }, if s.passphrase_file.is_empty() { "not encrypted" } else { "encrypted" }));
+                s.save(&p.data_dir(), &user)?;
+                p.audit("backup.schedule", &format!("on, every {} day(s){}, {}", s.every_days, if s.share.is_empty() { "" } else { ", to a share" }, if s.passphrase_file.is_empty() { "not encrypted" } else { "encrypted" }));
                 Ok(s.describe(&iyakki_clock::Zone::system_with(None), now))
             }
             BackupForm::Share => {
@@ -321,9 +319,9 @@ impl SettingsApp {
                 if pass.as_ref().is_some_and(|p| p.chars().count() < bk::MIN_PASSPHRASE) {
                     return Err(format!("The passphrase needs at least {} characters (or leave it empty for no encryption).", bk::MIN_PASSPHRASE));
                 }
-                let work = cx.data_dir().join("backup-share-work");
+                let work = p.data_dir().join("backup-share-work");
                 let opts = bk::CreateOptions { areas: self.backup_on(), passphrase: pass.clone(), now, release: env!("CARGO_PKG_VERSION").to_string() };
-                cx.audit.record(&user, "backup.share", &format!("{}, {}", spec.source(), if pass.is_some() { "encrypted" } else { "not encrypted" }));
+                p.audit("backup.share", &format!("{}, {}", spec.source(), if pass.is_some() { "encrypted" } else { "not encrypted" }));
                 let mounter = self.backup.mounter.clone();
                 self.start("Backing up to the share", move || {
                     let r = (|| {
@@ -336,7 +334,7 @@ impl SettingsApp {
                 Ok("Backing up to the share…".into())
             }
             BackupForm::System => {
-                let proof = bk::AdminProof::of(cx.session.policy.manage_settings).ok_or("Only an administrator may back up the machine's own settings and keys.")?;
+                let proof = bk::AdminProof::of(p.may_manage_settings()).ok_or("Only an administrator may back up the machine's own settings and keys.")?;
                 let dest = form.value(0).trim().to_string();
                 if dest.is_empty() {
                     return Err("Choose the folder or stick to write to.".into());
@@ -350,7 +348,7 @@ impl SettingsApp {
                 }
                 self.backup.last_dir = dest.clone();
                 let opts = bk::CreateOptions { areas: Default::default(), passphrase: Some(pass), now, release: env!("CARGO_PKG_VERSION").to_string() };
-                cx.audit.record(&user, "backup.system.create", &dest);
+                p.audit("backup.system.create", &dest);
                 self.start("Backing up the machine's data", move || {
                     JobOut::Backup(BackupOut::Said(bk::create_system(&layout, std::path::Path::new(&dest), &opts, &bk::Progress::default(), proof).map(|c| format!("Wrote {} ({} files, {}), encrypted.", c.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), c.files, bk::human(c.bytes))).map_err(|e| e.to_string())))
                 });
@@ -365,7 +363,7 @@ impl SettingsApp {
                 let pass = Some(form.raw(2)).filter(|p| !p.is_empty());
                 self.backup.last_dir = dest.clone();
                 let opts = bk::CreateOptions { areas: self.backup_on(), passphrase: pass.clone(), now, release: env!("CARGO_PKG_VERSION").to_string() };
-                cx.audit.record(&user, "backup.incremental", &format!("{} file(s) before", chain.len()));
+                p.audit("backup.incremental", &format!("{} file(s) before", chain.len()));
                 self.start("Adding a link", move || {
                     let r = bk::chain_state(&layout, &chain, pass.as_deref()).and_then(|base| bk::create_incremental(&layout, std::path::Path::new(&dest), &opts, &bk::Progress::default(), &base).map(|c| (base.links, c)));
                     JobOut::Backup(BackupOut::Said(r.map(|(n, c)| format!("Wrote {} ({} changed files, {}). Keep it after the {n} file(s) before it, in that order.", c.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), c.files, bk::human(c.bytes))).map_err(|e| e.to_string())))
@@ -373,7 +371,7 @@ impl SettingsApp {
                 Ok("Adding a link…".into())
             }
             BackupForm::SystemRestore => {
-                let proof = bk::AdminProof::of(cx.session.policy.manage_settings).ok_or("Only an administrator may restore the machine's own settings and keys.")?;
+                let proof = bk::AdminProof::of(p.may_manage_settings()).ok_or("Only an administrator may restore the machine's own settings and keys.")?;
                 let file = PathBuf::from(form.value(0).trim());
                 if file.as_os_str().is_empty() {
                     return Err("Choose the system backup file.".into());
@@ -388,7 +386,7 @@ impl SettingsApp {
                 if form.value(3).trim() != "RESTORE" {
                     return Err("Type RESTORE exactly to go on.".into());
                 }
-                cx.audit.record(&user, "backup.system.restore", &file.display().to_string());
+                p.audit("backup.system.restore", &file.display().to_string());
                 self.start("Restoring the machine's data", move || {
                     JobOut::Backup(BackupOut::Said(bk::restore_system(&layout, &file, Some(&pass), now, false, proof).map(|r| format!("Restored {}. The old data was kept as: {}.", r.restored.iter().map(|x| x.label.clone()).collect::<Vec<_>>().join(", "), r.kept.iter().filter_map(|k| k.file_name().map(|n| n.to_string_lossy().into_owned())).collect::<Vec<_>>().join(", "))).map_err(|e| e.to_string())))
                 });
@@ -410,9 +408,9 @@ impl SettingsApp {
                 if form.value(3).trim() != "RESTORE" {
                     return Err("Type RESTORE exactly to go on.".into());
                 }
-                let scratch = cx.data_dir().join("backup-chain-scratch");
+                let scratch = p.data_dir().join("backup-chain-scratch");
                 let req = bk::RestoreRequest { areas, allow_other_account: false, now };
-                cx.audit.record(&user, "backup.chain.restore", &format!("{} area(s) from {} file(s)", req.areas.len(), chain.len()));
+                p.audit("backup.chain.restore", &format!("{} area(s) from {} file(s)", req.areas.len(), chain.len()));
                 self.start("Restoring from the chain", move || {
                     let r = std::fs::create_dir_all(&scratch).map_err(|e| e.to_string()).and_then(|()| bk::restore_chain(&layout, &chain, pass.as_deref(), &scratch, &req).map_err(|e| e.to_string()));
                     let _ = std::fs::remove_dir(&scratch);
@@ -441,7 +439,7 @@ impl SettingsApp {
                 }
                 let req = bk::RestoreRequest { areas: self.backup.pick.clone(), allow_other_account: !l.contents.same_account, now };
                 let (path, pass) = (l.path.clone(), l.pass.clone());
-                cx.audit.record(&user, "backup.restore", &format!("{} area(s) from {}", req.areas.len(), path.display()));
+                p.audit("backup.restore", &format!("{} area(s) from {}", req.areas.len(), path.display()));
                 self.start("Restoring", move || JobOut::Backup(BackupOut::Restored(bk::restore(&layout, &path, pass.as_deref(), &req).map_err(|e| e.to_string()))));
                 Ok("Restoring…".into())
             }
@@ -472,11 +470,11 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn render_backup(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let rows = self.backup_rows(cx);
+    pub(super) fn render_backup(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn BackupPort) {
+        let rows = self.backup_rows(p);
         let mut y = a.y;
-        if let (Some(p), true) = (&self.backup.progress, self.is_busy()) {
-            let (done, total) = (p.done.load(std::sync::atomic::Ordering::Relaxed), p.total.load(std::sync::atomic::Ordering::Relaxed));
+        if let (Some(job), true) = (&self.backup.progress, self.is_busy()) {
+            let (done, total) = (job.done.load(std::sync::atomic::Ordering::Relaxed), job.total.load(std::sync::atomic::Ordering::Relaxed));
             let frac = if total == 0 { 0.0 } else { (done as f32 / total as f32).min(1.0) };
             g.rrect(a.x, y, a.w, 10.0 * s, 5.0 * s, rgb(30, 38, 68));
             g.rrect(a.x, y, (a.w * frac).max(if total == 0 { 0.0 } else { 6.0 * s }), 10.0 * s, 5.0 * s, ACCENT);
@@ -485,7 +483,7 @@ impl SettingsApp {
             g.text(a.x, y + 14.0 * s, 13.0 * s, TEXT, &t, Face::Sans);
             y += 36.0 * s;
         } else if self.backup.loaded.is_none() {
-            let line = Schedule::load(cx.data_dir(), &cx.session.user).describe(&iyakki_clock::Zone::system_with(None), iyakki_clock::now_unix());
+            let line = Schedule::load(&p.data_dir(), &p.backup_user()).describe(&iyakki_clock::Zone::system_with(None), iyakki_clock::now_unix());
             for w in g.wrap(13.0 * s, &line, Face::Sans, a.w).into_iter().take(2) {
                 g.text(a.x, y, 13.0 * s, DIM, &w, Face::Sans);
                 y += 18.0 * s;
@@ -533,7 +531,7 @@ impl SettingsApp {
             y += 4.0 * s;
         }
         if self.backup.loaded.is_none() {
-            if let Err(e) = self.backup_preview(cx) {
+            if let Err(e) = self.backup_preview(p) {
                 let shown = g.fit(13.0 * s, &e, Face::Sans, a.w);
                 g.text(a.x, y, 13.0 * s, ERR, &shown, Face::Sans);
                 return;

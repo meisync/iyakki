@@ -9,6 +9,7 @@
 //! on/off, `u` or Esc back to developer mode, Up/Down scroll the steps.
 
 use super::*;
+use super::super::settings_device_port::UsbcPort;
 use iyakki_shared::directlink::checks::{self, Action, Speed, State};
 use iyakki_shared::directlink::{self as dl, Env};
 use std::sync::{Arc, Mutex};
@@ -115,19 +116,18 @@ fn run_job(env: &dyn Env, sh: &Mutex<Shared>, job: Job, code: &str) {
 }
 
 impl SettingsApp {
-    fn usb_env(&mut self, cx: &AppCx) -> Arc<dyn Env> {
+    fn usb_env(&mut self, p: &dyn UsbcPort) -> Arc<dyn Env> {
         if self.devel.usb.env.is_none() {
-            let home = cx.data_dir().join("devmode").join("client").join(&cx.session.user);
-            self.devel.usb.env = crate::agent().direct_link_b8().real_env(cx.data_dir(), &home);
+            self.devel.usb.env = p.direct_link_env();
         }
         self.devel.usb.env.clone().unwrap_or_else(|| Arc::new(dl::fake::FakeEnv::new()))
     }
 
-    fn usb_job(&mut self, cx: &AppCx, job: Job, what: &'static str) {
+    fn usb_job(&mut self, p: &dyn UsbcPort, job: Job, what: &'static str) {
         if self.devel.usb.lock().running.is_some() {
             return;
         }
-        let env = self.usb_env(cx);
+        let env = self.usb_env(p);
         self.devel.usb.lock().running = Some(what);
         self.devel.usb.started = Some(std::time::Instant::now());
         let shared = self.devel.usb.shared.clone();
@@ -143,10 +143,10 @@ impl SettingsApp {
     }
 
     /// While the page is open the list looks again every few seconds (on a worker; never two at once).
-    fn usb_refresh(&mut self, cx: &AppCx) {
+    fn usb_refresh(&mut self, p: &dyn UsbcPort) {
         let due = self.devel.usb.started.is_none_or(|t| t.elapsed().as_secs() >= REFRESH_SECS);
         if due && self.devel.usb.lock().running.is_none() {
-            self.usb_job(cx, Job::Check, "Looking at the cable...");
+            self.usb_job(p, Job::Check, "Looking at the cable...");
         }
     }
 
@@ -167,7 +167,7 @@ impl SettingsApp {
     }
 
     /// Events of the page that must not reach the rest of Settings: typing the pairing code, Esc, Up/Down. True when consumed.
-    pub(super) fn usb_event(&mut self, ev: &Event, cx: &AppCx) -> bool {
+    pub(super) fn usb_event(&mut self, ev: &Event, p: &dyn UsbcPort) -> bool {
         if !self.devel.usb_open {
             return false;
         }
@@ -194,9 +194,9 @@ impl SettingsApp {
                     }
                     Key::Enter => {
                         self.devel.usb.code_focus = false;
-                        if self.admin(cx) {
-                            cx.audit.record(&cx.session.user, "directlink.pair", "pairing with the computer on the cable");
-                            self.usb_job(cx, Job::Pair, "Pairing...");
+                        if self.admin(p) {
+                            p.audit("directlink.pair", "pairing with the computer on the cable");
+                            self.usb_job(p, Job::Pair, "Pairing...");
                         }
                         self.devel.usb.code.clear();
                     }
@@ -222,31 +222,31 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn handle_usb(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_usb(&mut self, k: &Key, p: &dyn UsbcPort) {
         match k {
             Key::Char('u') => self.devel.usb_open = false,
-            Key::Char('r') => self.usb_job(cx, Job::Check, "Looking at the cable..."),
+            Key::Char('r') => self.usb_job(p, Job::Check, "Looking at the cable..."),
             Key::Char('c') => match self.devel.usb.report() {
                 Some(r) => {
-                    let env = self.usb_env(cx);
+                    let env = self.usb_env(p);
                     crate::ui::clipboard::copy(&r.diagnostic(env.as_ref()));
                     self.ok("The diagnostic text is copied (no keys, no pairing codes in it).");
                 }
                 None => self.fail("Nothing to copy yet: the first check is still running."),
             },
-            Key::Char('z') | Key::Char('p') | Key::Char('s') | Key::Char('f') | Key::Char('m') if !self.admin(cx) => {}
+            Key::Char('z') | Key::Char('p') | Key::Char('s') | Key::Char('f') | Key::Char('m') if !self.admin(p) => {}
             Key::Char('z') => {
-                cx.audit.record(&cx.session.user, "directlink.authorize", "approve the Thunderbolt device on the cable");
-                self.usb_job(cx, Job::Authorize, "Approving...");
+                p.audit("directlink.authorize", "approve the Thunderbolt device on the cable");
+                self.usb_job(p, Job::Authorize, "Approving...");
             }
             Key::Char('p') => {
                 self.devel.usb.code_focus = true;
                 self.ok("Type the code shown on the other computer, then Enter. Esc cancels.");
             }
-            Key::Char('s') => self.usb_job(cx, Job::Speed, "Sending 64 MiB..."),
-            Key::Char('w') => self.usb_job(cx, Job::Watch, "Unplug the cable now, wait five seconds, plug it back in. Watching the port for 30 seconds..."),
+            Key::Char('s') => self.usb_job(p, Job::Speed, "Sending 64 MiB..."),
+            Key::Char('w') => self.usb_job(p, Job::Watch, "Unplug the cable now, wait five seconds, plug it back in. Watching the port for 30 seconds..."),
             Key::Char('f') | Key::Char('m') => {
-                let env = self.usb_env(cx);
+                let env = self.usb_env(p);
                 let mut c = env.config();
                 if matches!(k, Key::Char('f')) {
                     c.fixed_pair = !c.fixed_pair;
@@ -255,7 +255,7 @@ impl SettingsApp {
                 }
                 match env.save_config(&c) {
                     Ok(()) => {
-                        cx.audit.record(&cx.session.user, "directlink.config", &format!("fixed pair {}, allow more {}", c.fixed_pair, c.allow_more));
+                        p.audit("directlink.config", &format!("fixed pair {}, allow more {}", c.fixed_pair, c.allow_more));
                         self.ok(if matches!(k, Key::Char('f')) {
                             format!("Fixed private addresses 10.77.0.1 / 10.77.0.2 on the cable: {}.", if c.fixed_pair { "on" } else { "off" })
                         } else if c.allow_more {
@@ -271,8 +271,8 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn render_usb(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        self.usb_refresh(cx);
+    pub(super) fn render_usb(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn UsbcPort) {
+        self.usb_refresh(p);
         let (report, running, note, speed) = {
             let sh = self.devel.usb.lock();
             (sh.report.clone(), sh.running, sh.note.clone(), sh.speed)
@@ -361,7 +361,7 @@ impl SettingsApp {
         }
         // the link, as the network page would show it
         y += controls::section_title(g, a.x, y, s, "The link");
-        let cfg = self.usb_env(cx).config();
+        let cfg = self.usb_env(p).config();
         let line = match (&report.link, &report.peer) {
             (Some(l), p) => format!(
                 "{} · {} · {} · other computer: {}",

@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-14",
+  "feature_sha": "f66cd6ace989637c",
+  "title": "stall guard and file errors",
+  "clauses": [
+    {
+      "id": "file-error-explained",
+      "text": "A file where a folder is needed is named and the assistant goes on",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Ask the assistant to save notes/a.txt in a workspace where notes is already a file.",
+          "expect": "The answer names the path part that is the problem and what to do, and the assistant continues with a tool."
+        }
+      ]
+    }
+  ]
+}

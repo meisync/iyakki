@@ -71,6 +71,26 @@ class SeventyRule(unittest.TestCase):
         self.f.add("run1")
         self.f.add("run2", when="2026-11-22T02:30:00", **kw2)
 
+    def test_a_program_over_an_older_base_counts_only_when_the_scenario_says_it_provides_the_clauses(self):
+        f = Fix(self)
+        f.add("run1", base_commit="0f987f0c")
+        f.add("run2", when="2026-11-22T02:30:00", base_commit="0f987f0c")
+        new, rep = f.run(features(), image_commit="abc12345")
+        self.assertIsNone(rep[0][2], rep)
+        self.assertIn("provided-by: program", rep[0][3])
+        self.assertIn("| 100/50 |", new)
+        open(os.path.join(f.repo, "dist/autotest/scenarios/F-T-1.scn"), "w").write("row: F-T-1\nprovided-by: program  # the iyakki binary gives every clause\n")
+        new, rep = f.run(features(), image_commit="abc12345")
+        self.assertEqual(rep[0][1:3], (50, 70), rep)
+        self.assertIn("program abc12345 over base 0f987f0c", rep[0][3])
+
+    def test_a_result_with_the_same_base_and_program_needs_no_header(self):
+        f = Fix(self)
+        f.add("run1", base_commit="abc12345")
+        f.add("run2", when="2026-11-22T02:30:00", base_commit="abc12345")
+        _new, rep = f.run(features(), image_commit="abc12345")
+        self.assertEqual(rep[0][1:3], (50, 70), rep)
+
     def test_one_pass_is_not_enough(self):
         self.f.add("run1")
         self.refused("one PASS so far")
@@ -237,6 +257,85 @@ class HundredRule(unittest.TestCase):
         self.human("ears")
         _n, rep = self.f.run(features(test="70", manual="needed"))
         self.assertEqual(rep[0][2], 100, rep)
+
+    def human_at(self, clause, folder=None, **kw):
+        """A human file written into human/ or, like an import, into human/<folder>/."""
+        base = os.path.join(self.f.out, "human", folder) if folder else os.path.join(self.f.out, "human")
+        os.makedirs(base, exist_ok=True)
+        rec = {"schema": 1, "row": "F-T-1", "clause": clause, "machine": "lenovo-t7", "by": "owner", "verdict": "pass", "date": "2026-11-22", "image_commit": "abc12345"}
+        rec.update(kw)
+        with open(os.path.join(base, "F-T-1.%s.%s.json" % (clause, rec["machine"])), "w") as fh:
+            json.dump(rec, fh)
+
+    def test_every_role_of_the_allow_list_is_a_human_pass(self):
+        for role in ("owner", "admin", "person"):
+            g = Fix(self)
+            g.add("run1")
+            g.add("run2", when="2026-11-22T02:30:00")
+            self.f = g
+            self.real(needs_human=["ears"])
+            self.human("ears", by=role)
+            _n, rep = g.run(features(test="70", manual="needed"))
+            self.assertEqual(rep[0][2], 100, (role, rep))
+
+    def test_a_name_or_an_unknown_role_is_not_a_human_pass(self):
+        self.real(needs_human=["ears"])
+        for who in ("ana", "root", ""):
+            self.human("ears", by=who)
+            _n, rep = self.f.run(features(test="70", manual="needed"))
+            self.assertIsNone(rep[0][2], who)
+            self.assertIn("breaks the schema", rep[0][3])
+
+    def test_a_record_with_an_unknown_field_is_refused(self):
+        self.real(needs_human=["ears"])
+        self.human_at("ears", who="ana")
+        _n, rep = self.f.run(features(test="70", manual="needed"))
+        self.assertIsNone(rep[0][2])
+        self.assertIn("unknown field", rep[0][3])
+
+    def test_imported_evidence_under_human_machine_is_read(self):
+        self.real(needs_human=["ears"])
+        self.human_at("ears", folder="lenovo-t7")
+        _n, rep = self.f.run(features(test="70", manual="needed"))
+        self.assertEqual(rep[0][2], 100, rep)
+        # another machine's folder does not stand in for this machine
+        os.remove(os.path.join(self.f.out, "human", "lenovo-t7", "F-T-1.ears.lenovo-t7.json"))
+        self.human_at("ears", folder="hp")
+        _n, rep = self.f.run(features(test="70", manual="needed"))
+        self.assertIsNone(rep[0][2])
+
+    def test_a_pass_of_a_team_member_counts_and_the_owner_sample_is_recorded(self):
+        picked = next(c for c in ("c%d" % i for i in range(500)) if evidence.sampled_for_owner({"row": "F-T-1", "clause": c, "machine": "lenovo-t7", "image_commit": "abc12345", "by": "admin"}))
+        skipped = next(c for c in ("c%d" % i for i in range(500)) if not evidence.sampled_for_owner({"row": "F-T-1", "clause": c, "machine": "lenovo-t7", "image_commit": "abc12345", "by": "admin"}))
+        self.real(needs_human=[picked, skipped])
+        self.human(picked, by="admin")
+        self.human(skipped, by="person")
+        _n, rep = self.f.run(features(test="70", manual="needed"))
+        self.assertEqual(rep[0][2], 100, rep)
+        self.assertIn("owner review sampled (10 percent rule): %s (by admin)" % picked, rep[0][3])
+        self.assertNotIn(skipped, rep[0][3])
+        # the owner's own pass is never sampled; the same pass by admin would be
+        self.human(picked, by="owner")
+        _n, rep = self.f.run(features(test="70", manual="needed"))
+        self.assertNotIn("sampled", rep[0][3])
+        self.assertFalse(evidence.sampled_for_owner({"by": "owner", "row": "F-T-1", "clause": picked, "machine": "lenovo-t7", "image_commit": "abc12345"}))
+
+    def test_about_a_tenth_of_the_other_passes_are_sampled_and_the_choice_is_stable(self):
+        hits = [evidence.sampled_for_owner({"row": "F-T-1", "clause": "c%d" % i, "machine": "m", "image_commit": "abc1234", "by": "person"}) for i in range(2000)]
+        self.assertGreater(sum(hits), 120)
+        self.assertLess(sum(hits), 290)
+        self.assertEqual(hits, [evidence.sampled_for_owner({"row": "F-T-1", "clause": "c%d" % i, "machine": "m", "image_commit": "abc1234", "by": "person"}) for i in range(2000)])
+
+    def test_the_review_queue_lists_sampled_passes_of_both_folders(self):
+        picked = [c for c in ("c%d" % i for i in range(60)) if evidence.sampled_for_owner({"row": "F-T-1", "clause": c, "machine": "lenovo-t7", "image_commit": "abc12345", "by": "person"})]
+        self.assertTrue(picked)
+        self.human_at(picked[0], by="person")
+        if len(picked) > 1:
+            self.human_at(picked[1], folder="lenovo-t7", by="admin")
+        self.human_at(picked[0] + "x", by="person", verdict="fail")
+        q = evidence.review_queue(os.path.join(self.f.out, "human"))
+        self.assertEqual(sorted(e["clause"] for e in q), sorted(picked[:2]))
+        self.assertEqual(evidence.review_queue(os.path.join(self.f.out, "nothing")), [])
 
     def test_a_real_result_with_a_not_covered_clause_gives_nothing(self):
         self.real(not_covered=["sound"])

@@ -2,12 +2,44 @@
 //! `Hub::tick`, which takes the hub's lease on the tenant volume. Nothing else in the process calls `tick`, so a lease file with
 //! this process as holder proves the loop ticked the hub, and that stopping the thread ends the loop. Own test binary on purpose:
 //! `start` installs process-wide hooks (sandbox runner, flow callbacks) that must not leak into the library's other tests.
-//! Takes about ten seconds (the loop steps every five).
+//! The loop's wait between two steps is a `Pacer` (the product waits five seconds of wall time): the test's pacer lets the loop take
+//! exactly the steps the test grants and says when the loop is waiting again, so how fast the machine is cannot change the result
+//! (the old test waited 25 s for the lease and 8 s for the stop and failed in the gate under a load above 100).
 
 use iyakki_core_api::{ApiError, ApiResult, AuditSink, Authenticator, Principal};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+
+/// Grants steps one at a time; counts how often the loop has come back to wait.
+#[derive(Default)]
+struct Steps {
+    st: Mutex<(u32, u32)>, // (permits granted and not yet used, times the loop has waited)
+    cv: Condvar,
+}
+impl Steps {
+    fn grant(&self) {
+        self.st.lock().unwrap().0 += 1;
+        self.cv.notify_all();
+    }
+    fn wake(&self) {
+        self.cv.notify_all();
+    }
+    fn waited(&self) -> u32 {
+        self.st.lock().unwrap().1
+    }
+}
+impl iyakki_agent::cloudflows::real::Pacer for Steps {
+    fn wait(&self, stop: &AtomicBool) {
+        let mut g = self.st.lock().unwrap();
+        g.1 += 1;
+        self.cv.notify_all();
+        while g.0 == 0 && !stop.load(Ordering::Relaxed) {
+            g = self.cv.wait_timeout(g, Duration::from_millis(50)).unwrap().0;
+        }
+        g.0 = g.0.saturating_sub(1);
+    }
+}
 
 struct Off;
 impl iyakki_proxy::Upstream for Off {
@@ -47,12 +79,14 @@ fn the_cloud_flows_loop_ticks_the_notification_hub_and_stops_with_its_flag() {
 
     let stop = Arc::new(AtomicBool::new(false));
     let audit = Arc::new(Lines(Default::default()));
-    let handle = iyakki_agent::cloudflows::real::start(svc.clone(), Arc::new(NoAccounts), audit, stop.clone()).expect("the thread starts");
+    let steps = Arc::new(Steps::default());
+    let handle = iyakki_agent::cloudflows::real::start_with_pacer(svc.clone(), Arc::new(NoAccounts), audit, stop.clone(), steps.clone()).expect("the thread starts");
 
-    let began = Instant::now();
-    while !lease.exists() && began.elapsed() < Duration::from_secs(25) {
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    // step 1 ran at once (the loop waits for the first time); one granted step makes step 2, which ticks the hub (every second step)
+    iyakki_testkit::wait_until(Duration::from_secs(120), || steps.waited() >= 1);
+    assert!(!lease.exists(), "one step does not tick the hub");
+    steps.grant();
+    iyakki_testkit::wait_until(Duration::from_secs(120), || steps.waited() >= 2);
     assert!(lease.exists(), "after two steps of the loop the hub took its lease (it was ticked)");
     let rec: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&lease).unwrap()).unwrap();
     assert_eq!(rec["holder"].as_str().unwrap(), format!("pid{}", std::process::id()), "this process holds the hub's lease");
@@ -68,9 +102,10 @@ fn the_cloud_flows_loop_ticks_the_notification_hub_and_stops_with_its_flag() {
     assert_eq!(mine[0].title, "Nightly check failed");
     assert!(hub.inbox.list("bob").is_empty(), "nobody else gets it");
 
+    // stopping: no step is granted any more, so the loop can only end because of the flag (it does not wait for another step)
     stop.store(true, Ordering::Relaxed);
-    let t = Instant::now();
+    steps.wake();
+    iyakki_testkit::wait_until(Duration::from_secs(120), || handle.is_finished());
     handle.join().expect("the loop ends when its flag is set");
-    assert!(t.elapsed() < Duration::from_secs(8), "stopping does not wait for another full step");
     let _ = std::fs::remove_dir_all(&dir);
 }

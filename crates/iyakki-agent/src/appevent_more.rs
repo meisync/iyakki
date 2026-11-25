@@ -74,6 +74,7 @@ impl MoreWatch {
     /// The events between two looks (the first look only remembers; a value that was already wrong at the first look is remembered as told).
     pub fn observe(&mut self, now: MoreFacts) -> Vec<(&'static str, Payload)> {
         let mut out: Vec<(&'static str, Payload)> = Vec::new();
+        let was_low = self.low.clone();
         for (v, p) in &now.free_percent {
             if *p <= LOW_SPACE {
                 self.low.insert(v.clone());
@@ -136,8 +137,8 @@ impl MoreWatch {
                 out.push(("peers.changed", payload(&[("device", word(n)), ("change", word("forgotten"))])));
             }
             for (v, p) in &now.free_percent {
-                let was = prev.free_percent.get(v).copied();
-                if *p <= LOW_SPACE && was.is_none_or(|w| w > LOW_SPACE) {
+                // told when it falls to the low mark, and again only after it was over the recovered mark (a rise to 7 and a fall to 4 is the same low)
+                if *p <= LOW_SPACE && !was_low.contains(v) {
                     out.push(("storage.volume", payload(&[("volume", word(v)), ("change", word("low_space"))])));
                 }
             }

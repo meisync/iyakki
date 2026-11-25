@@ -1,0 +1,8 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 45d65254eb9f7ac2; honest subset only: everything not checked is under not-covered.
+row: F-RAG-08
+targets: qemu
+profile: ram
+feature-sha: 45d65254eb9f7ac2
+doc: rag_sources_add_folder asks every time and shows the folder and file count
+human: rag-folder-card | Ask the assistant to add a folder to the knowledge base. Expect: A card shows the folder and the file count and asks every time, also in Auto mode; searching and reading ask nothing.
+not-covered: rag_sources_add_folder asks every time and shows the folder and file count

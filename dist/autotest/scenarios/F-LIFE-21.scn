@@ -1,0 +1,19 @@
+# lifecycle audit lane LC1 (2026-11-24). Written against the Feature text with sha b19fb85071aeacd3; honest subset only: nothing about a real sleep is checked.
+row: F-LIFE-21
+targets: qemu
+profile: ram
+feature-sha: b19fb85071aeacd3
+doc: the Power page of Settings states what sleep, idle sleep and the power button do
+clause: 1 the Power page of Settings shows the idle sleep and the power button cards with their words
+not-covered: a real sleep, a lid, or the lock that sleep puts first (a QEMU guest has no lid and no sleep state)
+not-covered: that a running install or job holds sleep back
+key s
+wait app=Settings
+skip-unless-button Power
+click-sidebar Power
+wait app=Settings page=Power
+shot page
+expect-not-blank
+expect-text Sleep when idle
+expect-text Power button
+expect-page Power

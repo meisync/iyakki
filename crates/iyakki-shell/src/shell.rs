@@ -421,7 +421,7 @@ impl ShellEnv {
         // model downloads report their progress over time, like the radio
         services.set_streamer(Arc::new(iyakki_proxy::https::UreqStreamer::default()));
         // model answers are read as they are written; a local model may need minutes to load before its first word
-        services.set_chat_streamer(Arc::new(iyakki_proxy::https::UreqStreamer::with_response_timeout(std::time::Duration::from_secs(600))));
+        services.set_chat_streamer(iyakki_proxy::https::chat_streamer(std::time::Duration::from_secs(600)));
         migrate_legacy_chat(&*services, &cfg);
         // the time zone the person chose in Settings -> Time applies to every front end from the start
         if let Ok(st) = services.settings().lock() {
@@ -439,6 +439,8 @@ impl ShellEnv {
         log::info!("boot: shell environment took {} ms (services {}, sound {}, accounts {})", t0.elapsed().as_millis(), t_services.as_millis(), t_sound.as_millis(), t2.elapsed().as_millis());
         let audit = Arc::new(AuditLog::new(std::path::Path::new(&p.audit)));
         audit.flush_notes();
+        // temp files a crash or a power cut left behind (a save that never reached its rename)
+        sweep_leftover_temp(std::path::Path::new(&p.data), &audit, &iyakki_schema::pid_alive);
         Ok(ShellEnv {
             store: crate::accounts::UsersRef::of_store(&Arc::new(Mutex::new(store))),
             audit,
@@ -714,6 +716,9 @@ fn remember_user(env: &ShellEnv, name: &str) {
         let _ = std::fs::write(env.data_dir().join("last-user"), format!("{name}\n"));
     }
 }
+
+/// What a person sees after the shell crashed and was not restored (F-LIFE-16).
+pub const UNEXPECTED_END_NOTICE: &str = "The screen restarted. Please sign in again; anything you had not saved in an open app may be lost.";
 
 pub struct Shell {
     env: ShellEnv,
@@ -1426,7 +1431,10 @@ impl Shell {
         }
         self.env.audit.record(&s.user, "login", s.role.name());
         // the machine's sound belongs to the person signed in last (it may go to their client device, EXPERIMENTAL)
-        crate::soundowner::signed_in(&s.user);
+        if let Some(before) = crate::soundowner::signed_in(&s.user) {
+            // another person had the sound: their sound sources end now (D-SESSION-END)
+            self.end_session(&before, iyakki_shared::sessionend::Why::SoundSwitch, true);
+        }
         // a local model is loaded in the background now, so the first question is not the slow one
         if s.policy.agent {
             self.env.services.warm_up_chat();
@@ -1576,6 +1584,29 @@ impl Shell {
         self.say_info("Welcome back: you were signed in when the desktop restarted. Your vault stays locked until you sign in with your password.");
     }
 
+    /// After a crash of the shell: a person who was not put back (developer mode off, or no ticket) is told, in plain words, that the
+    /// screen restarted (F-LIFE-16). Nothing is restored by this; one audit line. `ended` is whether the core reported an unexpected end.
+    fn say_unexpected_end(&mut self, ended: bool) {
+        if !ended || self.session.is_some() {
+            return;
+        }
+        self.env.audit.record("system", "shell.restarted", "the screen ended unexpectedly while somebody was signed in; the person was not put back");
+        self.toast = Some((UNEXPECTED_END_NOTICE.to_string(), self.tick + 600, true));
+    }
+
+    /// Once in a while for a signed-in person: a drive of their `media` folder that was pulled out while open is let go of, its stale
+    /// folder removed, and the person told what happened (F-LIFE-12).
+    pub(super) fn drives_tick(&mut self) {
+        let Some(s) = &self.session else { return };
+        let mut who = iyakki_shared::disks::Actor::new(&s.user, s.role);
+        who.home = iyakki_apps::agent().scope_home_root(&s.user, std::path::Path::new("/var/lib/iyakki")).display().to_string();
+        let (audit, user) = (self.env.audit.clone(), s.user.clone());
+        let said = self.osguard.os_for("shell", &s.user).disk_engine().after_unplug(&who, &|a, d| audit.record(&user, a, d));
+        if let Some(m) = said {
+            self.toast = Some((m, self.tick + 900, false));
+        }
+    }
+
     /// The ids of the apps that are open: the one held aside first, the one on the screen last (what the resume ticket carries; ids only).
     fn open_app_ids(&self) -> Vec<String> {
         let mut v = Vec::new();
@@ -1641,6 +1672,15 @@ impl Shell {
         }
     }
 
+    /// Run the end-of-session hooks (the process-wide registry and this shell's own) once and audit what stopped.
+    pub(crate) fn end_session(&mut self, user: &str, why: iyakki_shared::sessionend::Why, sound_owner: bool) -> iyakki_shared::sessionend::Report {
+        let ctx = iyakki_shared::sessionend::Ctx { user: user.to_string(), why, sound_owner };
+        let (audit, who) = (self.env.audit.clone(), user.to_string());
+        let rep = iyakki_shared::sessionend::SessionEnd::end_many(&[iyakki_shared::sessionend::global(), &self.wake.ends], &ctx, &|a, d| audit.record(&who, a, d));
+        self.wake_apply_end();
+        rep
+    }
+
     fn sign_out(&mut self) {
         // a person who signs out is not put back after a restart
         self.core.session_resume().forget();
@@ -1651,6 +1691,12 @@ impl Shell {
         // the sign-out sound starts first and plays while the rest is done; the screen changes when it is over, or after
         // `LOGOUT_WAIT` at the latest (a slow or stuck output never holds sign-out back)
         let cue = self.session.is_some().then(|| crate::cues::start(&*self.core, &self.cloud, iyakki_core_api::soundtypes::Cue::Logout));
+        // everything the person started that makes sound or captures stops, before the screen changes (one registry, D-SESSION-END); the
+        // sign-out sound above is the shell's own cue and goes on
+        if let Some(user) = self.session.as_ref().map(|s| s.user.clone()) {
+            let owner = crate::soundowner::is_owner(&user);
+            self.end_session(&user, iyakki_shared::sessionend::Why::SignOut, owner);
+        }
         crate::uisize::apply(None);
         crate::theme::apply(None);
         iyakki_uikit::wallpaper::apply(None);
@@ -2014,7 +2060,7 @@ impl Shell {
         self.brand.mac_leftover = iyakki_apps::agent().macfw_leftovers(self.env.data_dir());
         self.brand.mac_cache = iyakki_apps::agent().macfw_card_status(self.env.data_dir());
         self.brand.mac_bt_held = iyakki_apps::agent().macfw_bluetooth_held(std::path::Path::new("/lib/modules"));
-        self.brand.mac_busy = self.installs.jobs().iter().any(|j| j.running() && qi::item_of(j) == Some(qi::Item::MacFirmware));
+        self.brand.mac_busy = self.installs.jobs().iter().any(|j| j.running() && qi::item_of_command(&j.command) == Some(qi::Item::MacFirmware));
     }
 
     /// "Load the Bluetooth driver anyway" (administrators): give the held drivers back and load them in the background (a driver that finds
@@ -2663,6 +2709,16 @@ impl Shell {
                 mark_stale!(self);
             }
         }
+        // the assistant asked (and the person approved) for a shell in a pod: the Terminal opens on it and asks for the session itself
+        if self.session.is_some() {
+            if let Some(item) = iyakki_shared::podterm::take() {
+                self.open_linked_from_app("cli");
+                if let (Some(cx), Screen::App(a, _)) = (self.cx(), &mut self.screen) {
+                    a.open_item(&item, &cx);
+                }
+                mark_stale!(self);
+            }
+        }
         // the click on the red sign "a page is using your camera / microphone / screen" stops it (the browser obeys at its next beat)
         if matches!(ev, Event::Tab(913)) {
             crate::apps::browser_media::ask_stop();
@@ -2809,6 +2865,10 @@ impl Shell {
             }
             if self.tick % 15 == 3 {
                 self.loss_tick();
+            }
+            // a drive pulled out while it was open: let go of it and say so (the tests call `drives_tick` themselves, they touch no real drive)
+            if !cfg!(test) && self.tick % 30 == 7 {
+                self.drives_tick();
             }
             self.devask_tick();
             self.tzask_tick();
@@ -2996,7 +3056,9 @@ impl Shell {
             Event::Tick => {
                 if !self.resume_tried {
                     self.resume_tried = true;
+                    let ended = self.core.session_resume().take_unexpected_end();
                     self.try_resume();
+                    self.say_unexpected_end(ended);
                 }
                 // the ticket says "still here" every few seconds while somebody is signed in (only written when developer mode allows it)
                 if self.tick % 30 == 0 {
@@ -7937,6 +7999,16 @@ mod views_tests;
 
 #[path = "shell_layout.rs"]
 mod layout_impl;
+/// Remove the temp files of dead processes under the data folder (three folders deep) and audit how many went as `data.tmp.swept`
+/// (nothing is audited when nothing was left). Returns the count. `alive` says whether a process id is a live process.
+pub(crate) fn sweep_leftover_temp(data: &std::path::Path, audit: &AuditLog, alive: &dyn Fn(u32) -> bool) -> usize {
+    let swept = iyakki_schema::sweep_stale_tmp(data, 3, alive);
+    if !swept.is_empty() {
+        audit.record("system", "data.tmp.swept", &format!("{} leftover temp file(s) removed", swept.len()));
+    }
+    swept.len()
+}
+
 use layout_impl::GroupRef;
 
 #[cfg(test)]
@@ -8083,3 +8155,7 @@ pub(crate) mod remote_sign_tests;
 mod cameras_tests;
 #[cfg(test)]
 use home_impl::draw_custom_tile;
+
+#[cfg(test)]
+#[path = "shell_sweep_tests.rs"]
+mod sweep_tests;

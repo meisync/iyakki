@@ -1,0 +1,20 @@
+# OPTIONAL "kv260" variant (aarch64 only): the AMD Kria KV260 Starter Kit (K26 SOM, Zynq UltraScale+ MPSoC, 4 GB). Appended to
+# iyakki_aarch64_defconfig by `ARCH=aarch64 ./build.sh kv260` (output in target/buildroot-kv260-aarch64). docs/BOARD-KV260-FIRST-BOOT.md.
+# The kernel is AMD's linux-xlnx tree (GPL-2.0), fetched at build time from the vendor at the pinned commit (dist/kv260/PINS; the tag is
+# xlnx_rebase_v6.12_LTS_2025.2, a 6.12.40 base); nothing of it is kept in this repository. Its own xilinx_defconfig is the base, then the
+# shared aarch64 fragment, then board/iyakki-kv260/linux.fragment. No GRUB and no UEFI loader: the board's primary boot firmware (U-Boot in
+# the SOM's QSPI flash) reads extlinux/extlinux.conf from the SD card. No vendor blob goes into the image or the repository.
+BR2_LINUX_KERNEL_CUSTOM_VERSION=n
+BR2_LINUX_KERNEL_CUSTOM_GIT=y
+BR2_LINUX_KERNEL_CUSTOM_REPO_URL="https://github.com/Xilinx/linux-xlnx.git"
+BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="31626ef92ff11f9d3dee01926720572666fcc65a"
+BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=n
+BR2_LINUX_KERNEL_USE_DEFCONFIG=y
+BR2_LINUX_KERNEL_DEFCONFIG="xilinx"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki-aarch64/linux.fragment $(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki-kv260/linux.fragment"
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="xilinx/zynqmp-smk-k26-revA-sck-kv-g-revA xilinx/zynqmp-smk-k26-revA-sck-kv-g-revB"
+# the headers the toolchain was built with stay 6.12 (the tree is a 6.12 kernel)
+BR2_TARGET_GRUB2=n
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki-kv260/post-image.sh support/scripts/genimage.sh"
+BR2_ROOTFS_POST_SCRIPT_ARGS="-c $(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki-kv260/genimage.cfg"

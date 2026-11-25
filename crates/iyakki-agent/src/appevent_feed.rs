@@ -85,7 +85,7 @@ pub fn quiet_now(data: &Path, now: u64) -> Option<bool> {
         let p = book.policy();
         if p.quiet.is_some() {
             any = true;
-            inside |= p.rules().in_quiet(now);
+            inside |= iyakki_shared::flows_channel_policy::rules_of(&p).in_quiet(now);
         }
     }
     any.then_some(inside)

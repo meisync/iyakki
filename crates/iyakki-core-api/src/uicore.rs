@@ -223,6 +223,11 @@ pub trait SessionResume: Send + Sync {
     fn items(&self) -> Vec<(String, String)> {
         Vec::new()
     }
+    /// Did the shell end unexpectedly while somebody was signed in, in this boot (F-LIFE-16)? True once (the marker is taken), for every
+    /// person, in developer mode or not: it only lets the new screen say so; nothing is restored by it. False by default.
+    fn take_unexpected_end(&self) -> bool {
+        false
+    }
 }
 
 /// The machine's settings, read as text by the UI (the first domain a UI program outside the process gets over the contract socket).

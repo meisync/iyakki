@@ -435,6 +435,16 @@ impl Scheduler {
                                 _ => self.next_tick(t, now_ms),
                             };
                         }
+                        // the clock was set back: a tick is never later than the first one after now, so a later one was made under the old
+                        // clock and would leave this trigger silent for as long as the clock was moved (LIFECYCLE-AUDIT L-05)
+                        if known && !matches!(t.kind, TriggerKind::Once { .. }) {
+                            if let (Some(n), Some(first)) = (e.next_ms, self.next_tick(t, now_ms)) {
+                                if n > first {
+                                    e.next_ms = Some(first);
+                                    self.dirty = true;
+                                }
+                            }
+                        }
                         if paused_flow || e.paused {
                             // while paused, ticks pass and are remembered as due; resuming applies the missed policy
                             self.state.entries.insert(k, e);
@@ -544,6 +554,7 @@ mod tests {
     use super::*;
 
     const MIN: i64 = 60_000;
+    const HOUR: i64 = 60 * MIN;
 
     fn env<'a>(busy: &'a dyn Fn(&str) -> bool) -> TickEnv<'a> {
         TickEnv { busy, fingerprint: &|_| None, calendar: &|_, _, _| vec![] }
@@ -699,6 +710,42 @@ mod tests {
         let fires = s.tick(5 * MIN + 1000, &[f.clone()], &env(&idle));
         assert_eq!(fires.len(), 1, "resuming applies the missed policy (run once)");
         assert!(fires[0].missed);
+    }
+
+    #[test]
+    fn a_clock_set_back_does_not_silence_a_timed_trigger() {
+        let idle = |_: &str| false;
+        for kind in [TriggerKind::Interval { every_s: 60, anchor_ms: None }, TriggerKind::Cron { expr: "* * * * *".into(), tz: String::new() }] {
+            let f = flow_with(Trigger::new("t", kind));
+            let mut s = Scheduler::new(None, default_resolver());
+            s.tick(10 * HOUR, &[f.clone()], &env(&idle));
+            // the clock is set back ten hours (a wrong clock corrected): the next run is within a minute, not ten hours away
+            assert!(s.tick(1000, &[f.clone()], &env(&idle)).is_empty(), "no run for the jump itself");
+            assert_eq!(s.entry("f", "t").unwrap().next_ms, Some(MIN));
+            assert_eq!(s.tick(MIN + 500, &[f.clone()], &env(&idle)).len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_clock_set_back_is_followed_through_a_restart_and_the_trigger_keeps_firing_every_minute() {
+        let dir = std::env::temp_dir().join(format!("flow-sched-back-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("sched.json");
+        let idle = |_: &str| false;
+        let f = flow_with(Trigger::new("t", TriggerKind::Interval { every_s: 60, anchor_ms: None }));
+        let mut s = Scheduler::new(Some(path.clone()), default_resolver());
+        s.tick(10 * HOUR, &[f.clone()], &env(&idle));
+        // the clock is corrected ten hours back; the new next run is saved
+        s.tick(1000, &[f.clone()], &env(&idle));
+        assert_eq!(s.entry("f", "t").unwrap().next_ms, Some(MIN));
+        // the machine restarts on the corrected clock: the saved state must not hold the trigger back until the old time
+        let mut s2 = Scheduler::new(Some(path.clone()), default_resolver());
+        let mut fired = 0;
+        for minute in 1..=5 {
+            fired += s2.tick(minute * MIN + 10, &[f.clone()], &env(&idle)).len();
+        }
+        assert_eq!(fired, 5, "one run per minute after the restart, none lost to the old time");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

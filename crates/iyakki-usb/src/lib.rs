@@ -43,6 +43,8 @@ pub mod sbenroll;
 pub mod sbenroll_cli;
 pub mod sbenroll_write;
 pub mod resize_step;
+pub mod rpiboot;
+pub mod rpifirmware;
 pub mod screen;
 pub mod stickupdate;
 pub mod macos;

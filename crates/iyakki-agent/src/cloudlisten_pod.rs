@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::process::Child;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -85,14 +85,8 @@ impl ServiceDialer for ClusterDns {
     }
 }
 
-/// A started process, as far as the forwarder needs it.
-pub trait Proc: Send {
-    fn alive(&mut self) -> bool;
-    fn kill(&mut self);
-}
-
-/// Start `kubectl` with these arguments; returns the process and the lines it prints on standard output.
-pub type Spawn = Box<dyn Fn(&[String]) -> Result<(Box<dyn Proc>, Receiver<String>), String> + Send + Sync>;
+/// A started process, the spawn function and the line parser are the core facet's (`iyakki_core_api::portforward`).
+pub use iyakki_core_api::portforward::{forwarding_port, Proc, Spawn};
 
 struct Real(Child);
 
@@ -201,12 +195,6 @@ impl PortForward {
     pub fn running(&self) -> usize {
         self.live.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
-}
-
-/// `Forwarding from 127.0.0.1:41234 -> 80` gives 41234.
-pub fn forwarding_port(line: &str) -> Option<u16> {
-    let rest = line.strip_prefix("Forwarding from 127.0.0.1:")?;
-    rest.split_whitespace().next()?.parse().ok().filter(|p| *p != 0)
 }
 
 impl ServiceDialer for PortForward {

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::AppCx;
+use super::chat_port::UserData;
 
 pub const HISTORY_MAX: usize = 2000;
 pub const BOOKMARKS_MAX: usize = 1000;
@@ -82,16 +82,16 @@ pub struct Suggestion {
 
 /// The reader browser's data file: beside the data folder, or inside the sealed browser profile while that is protected and open
 /// (`profilepolicy::reader_data_path`); None while it is sealed, so nothing is read or written beside the sealed file.
-fn path(cx: &AppCx) -> Option<std::path::PathBuf> {
-    cx.agent.profilepolicy_reader_data_path(cx.data_dir(), &cx.session.user, &super::browser_config::who(cx))
+fn path(cx: &dyn UserData) -> Option<std::path::PathBuf> {
+    cx.agent().profilepolicy_reader_data_path(cx.data_root(), &cx.acting_user(), &super::browser_config::who(cx))
 }
 
-pub fn load(cx: &AppCx) -> Data {
+pub fn load(cx: &dyn UserData) -> Data {
     let Some(p) = path(cx) else { return Data::default() };
     iyakki_schema::read_plain("browser data", &p, iyakki_schema::now_secs()).unwrap_or_default()
 }
 
-pub fn save(cx: &AppCx, d: &Data) {
+pub fn save(cx: &dyn UserData, d: &Data) {
     let Some(p) = path(cx) else { return };
     if let Ok(t) = serde_json::to_string(d) {
         super::browser_config::write_checked("browser data", &p, &t);

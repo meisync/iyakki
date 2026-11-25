@@ -255,8 +255,8 @@ impl Setup {
         used
     }
 
-    pub fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
-        self.admin = cx.session.policy.manage_settings;
+    pub fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &dyn StorePort, tick: u64) {
+        self.admin = cx.manage_settings();
         if !self.started {
             self.enter(cx);
         }
@@ -264,10 +264,10 @@ impl Setup {
         self.fix_cursor();
         // the cluster switcher of the popups (read now and then, never slow)
         match self.host.as_mut() {
-            Some(h) => h.tick(&|_| None),
-            None => self.host = Some(crate::apps::cluster_host::ClusterHost::new(SWITCH, cx, "")),
+            Some(h) => h.tick(),
+            None => self.host = Some(cx.cluster_host(SWITCH, "")),
         }
-        self.cluster = self.host.as_ref().and_then(|h| h.effective().cloned());
+        self.cluster = self.host.as_ref().and_then(|h| h.effective());
         let (x, w) = (area.x, area.w);
         let mut y = area.y;
         // search box and the count
@@ -553,9 +553,9 @@ impl Setup {
             row(g, &mut v, "Memory", &format!("about {} GB or more", item.min_ram_mb().div_ceil(1024)), MUTED);
         }
         // what the pod asks for and may use (the manifest carries the same numbers), and what was measured while it was idle
-        if let Some(r) = qi::resources::of(item) {
+        if !item.info().res_lines.is_empty() {
             if !(item == Item::Ollama && self.ollama_on_host()) {
-                for (k, t) in r.lines() {
+                for (k, t) in &item.info().res_lines {
                     row(g, &mut v, &k, &t, MUTED);
                 }
             }

@@ -1895,14 +1895,14 @@ impl StoryStore {
         e.favourite = cur.entry.favourite;
         e.created = cur.entry.created;
         let mp = self.check_write(&self.md_path(id)?)?;
-        std::fs::write(&mp, format!("{}{}", front_matter(&e), story.markdown())).map_err(|e| format!("could not save: {e}"))?;
+        iyakki_schema::write_atomic(&mp, format!("{}{}", front_matter(&e), story.markdown()).as_bytes(), 0o644).map_err(|e| format!("could not save: {e}"))?;
         self.read_doc(id)
     }
 
     /// The conversation kept with a story (`chat.json`): the version in use and the messages shown beside the story.
     pub fn save_chat(&self, id: &str, chat: &StoryChat) -> Result<(), String> {
         let p = self.check_write(&self.story_dir(id)?.join("chat.json"))?;
-        std::fs::write(&p, serde_json::to_string_pretty(chat).map_err(|e| e.to_string())?).map_err(|e| format!("could not save the conversation: {e}"))
+        iyakki_schema::write_atomic(&p, serde_json::to_string_pretty(chat).map_err(|e| e.to_string())?.as_bytes(), 0o644).map_err(|e| format!("could not save the conversation: {e}"))
     }
 
     pub fn load_chat(&self, id: &str) -> Option<StoryChat> {
@@ -1918,7 +1918,7 @@ impl StoryStore {
         self.check_write(&self.dir)?;
         std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
         let path = self.check_write(&self.dir.join(".prefs.json"))?;
-        std::fs::write(path, serde_json::to_string_pretty(p).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+        iyakki_schema::write_atomic(&path, serde_json::to_string_pretty(p).map_err(|e| e.to_string())?.as_bytes(), 0o644)
     }
 }
 

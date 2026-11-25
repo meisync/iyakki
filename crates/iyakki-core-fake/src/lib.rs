@@ -30,6 +30,7 @@ pub use fakecore::{FakeCore, FakeMixer, FakeMonitors, FakeResume};
 mod netscan;
 mod router;
 mod fleet;
+mod portforward;
 mod hardware;
 mod drivers;
 pub mod diskengine;
@@ -46,6 +47,7 @@ pub use screenfacts::FakeScreenFacts;
 pub use netscan::FakeNetScan;
 pub use router::FakeRouter;
 pub use fleet::FakeFleet;
+pub use portforward::FakePortForwards;
 pub use hardware::FakeHardware;
 pub use drivers::FakeDrivers;
 pub use audioroute::FakeAudioRoute;
@@ -129,6 +131,7 @@ pub struct FakeOs {
     netscan: std::sync::Arc<FakeNetScan>,
     router: std::sync::Arc<FakeRouter>,
     fleet: std::sync::Arc<FakeFleet>,
+    port_forwards: std::sync::Arc<FakePortForwards>,
 }
 
 impl FakeOs {
@@ -140,7 +143,7 @@ impl FakeOs {
         FakeOs::default()
     }
     pub fn with(canned: Canned) -> FakeOs {
-        FakeOs { canned: Mutex::new(canned), calls: Mutex::new(vec![]), memory: Default::default(), installer: Default::default(), drivers: Default::default(), disk_engine: Default::default(), audio_route: Default::default(), hardware: Default::default(), crashlog: Default::default(), startup_disk: Default::default(), bt_audio: Default::default(), output_state: Default::default(), screen_facts: Default::default(), netscan: Default::default(), router: Default::default(), fleet: Default::default() }
+        FakeOs { canned: Mutex::new(canned), calls: Mutex::new(vec![]), memory: Default::default(), installer: Default::default(), drivers: Default::default(), disk_engine: Default::default(), audio_route: Default::default(), hardware: Default::default(), crashlog: Default::default(), startup_disk: Default::default(), bt_audio: Default::default(), output_state: Default::default(), screen_facts: Default::default(), netscan: Default::default(), router: Default::default(), fleet: Default::default(), port_forwards: Default::default() }
     }
     /// Change the canned answers while a test runs.
     pub fn set(&self, f: impl FnOnce(&mut Canned)) {
@@ -173,6 +176,10 @@ impl FakeOs {
     /// The router part of this fake (what was asked, a switch to refuse).
     pub fn router_fake(&self) -> std::sync::Arc<FakeRouter> {
         self.router.clone()
+    }
+    /// The port-forward part of this fake (a scripted kubectl, what was started, a way to end a process).
+    pub fn port_forwards_fake(&self) -> std::sync::Arc<FakePortForwards> {
+        self.port_forwards.clone()
     }
     /// The fleet part of this fake (what was asked, a switch to refuse).
     pub fn fleet_fake(&self) -> std::sync::Arc<FakeFleet> {
@@ -274,6 +281,9 @@ impl iyakki_core_api::Os for FakeOs {
     }
     fn fleet(&self) -> std::sync::Arc<dyn iyakki_core_api::fleet::Fleet> {
         self.fleet.clone()
+    }
+    fn port_forwards(&self) -> std::sync::Arc<dyn iyakki_core_api::portforward::PortForwards> {
+        self.port_forwards.clone()
     }
 }
 

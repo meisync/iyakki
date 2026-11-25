@@ -40,6 +40,7 @@ pub const CRASHLOG_WRITE: &str = "system.crashlog.write";
 pub const NET_SCAN: &str = "net.scan";
 pub const ROUTER_USE: &str = "router.use";
 pub const ROUTER_STRATEGY_SET: &str = "router.strategy.set";
+pub const K8S_PORTFORWARD: &str = "k8s.portforward";
 pub const FLEET_READ: &str = "fleet.read";
 pub const FLEET_JOIN: &str = "fleet.join";
 pub const FLEET_MANAGE: &str = "fleet.manage";
@@ -406,6 +407,37 @@ impl Os for GuardedOs {
     fn fleet(&self) -> Arc<dyn crate::fleet::Fleet> {
         Arc::new(GuardedFleet { gate: self.gate.clone(), inner: self.inner.fleet() })
     }
+    fn port_forwards(&self) -> Arc<dyn crate::portforward::PortForwards> {
+        Arc::new(GuardedPortForwards { gate: self.gate.clone(), inner: self.inner.port_forwards() })
+    }
+}
+
+struct GuardedPortForwards {
+    gate: Arc<Gate>,
+    inner: Arc<dyn crate::portforward::PortForwards>,
+}
+
+impl crate::portforward::PortForwards for GuardedPortForwards {
+    fn start(&self, req: &crate::portforward::Request) -> Result<crate::portforward::Info, String> {
+        let label = format!("forward {}/{}:{} in {}", req.kind.prefix(), req.name, req.remote, req.namespace);
+        self.gate.check(K8S_PORTFORWARD, &label).map_err(|d| d.to_string())?;
+        self.inner.start(req)
+    }
+    fn list(&self) -> Vec<crate::portforward::Info> {
+        match self.gate.check(READ, "the running port-forwards") {
+            Ok(()) => self.inner.list(),
+            Err(_) => Vec::new(),
+        }
+    }
+    fn stop(&self, id: u32) -> bool {
+        self.gate.check(READ, "stop a port-forward").is_ok() && self.inner.stop(id)
+    }
+    fn stop_all(&self) -> usize {
+        match self.gate.check(READ, "stop the port-forwards") {
+            Ok(()) => self.inner.stop_all(),
+            Err(_) => 0,
+        }
+    }
 }
 
 struct GuardedFleet {
@@ -748,6 +780,11 @@ impl crate::diskmodel::DiskEngine for GuardedDiskEngine {
         // closing the person's drives at sign-out is a change: without the capability nothing is closed and nothing is said
         self.gate.check(DISK_MOUNT, "close the drives of the person who signs out").ok()?;
         self.inner.at_sign_out(who, audit)
+    }
+    fn after_unplug(&self, who: &crate::diskmodel::Actor, audit: crate::diskmodel::AuditFn) -> Option<String> {
+        // letting go of a mount of a drive that is gone is an unmount: without the capability nothing is touched and nothing is said
+        self.gate.check(DISK_MOUNT, "close what a pulled-out drive left open").ok()?;
+        self.inner.after_unplug(who, audit)
     }
     fn refusal(&self, who: &crate::diskmodel::Actor, d: &crate::diskmodel::Disk) -> Option<String> {
         match self.gate.check(READ, "see whether a drive may be changed") {

@@ -5,16 +5,16 @@
 use super::chat_settings::{arg_bool, no_args, Entry, Env};
 use serde_json::json;
 
-use super::AppCx;
+use super::chat_port::ChatPort;
 
 pub const TOOLS: [&str; 2] = ["embedded_media_status", "embedded_media_set"];
 
 pub const PROMPT_RULE: &str = "\nEMBEDDED MEDIA PLAYER (Settings -> Sound): embedded_media_status says whether apps may play sound inside their own windows (a sound player in an app, with its own play, pause and seek) and how many players are open now (free). embedded_media_set switches that on or off (asks first); off stops every open player at once. An app plays the person's own sound files; an internet address or a radio station asks the person first. The sound goes through the same mixer as everything else, so the person's volume applies.";
 
-pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
+pub fn entries(cx: &dyn ChatPort, env: &Env) -> Vec<Entry> {
     let mut v = Vec::new();
     {
-        let (core, user) = (cx.core.clone(), cx.session.user.clone());
+        let (core, user) = (cx.core(), cx.user().to_string());
         v.push(Entry::read("Sound", "embedded_media_status", "Say whether apps may play sound in their own windows for this person, and how many embedded players are open now. Read only.", no_args(), move |_| {
             let m = core.media();
             Ok(format!("Embedded sound players are {} for you. {} open now.", if m.enabled(&user) { "on" } else { "off (or this system has none)" }, match m.open_sessions(&user) {
@@ -25,7 +25,7 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let (core, user, e) = (cx.core.clone(), cx.session.user.clone(), env.clone());
+        let (core, user, e) = (cx.core(), cx.user().to_string(), env.clone());
         let schema = json!({"type": "object", "properties": {"on": {"type": "boolean"}}, "required": ["on"]});
         v.push(Entry::change("Sound", "embedded_media_set", "Switch embedded sound players in apps on or off for this person. Off stops every open player. The person approves a card first.", schema, |a| format!("Turn embedded sound players {}", if a["on"].as_bool().unwrap_or(true) { "on" } else { "off" }), move |a| {
             let on = arg_bool(a, "on")?;
@@ -69,7 +69,7 @@ mod tests {
         let user = cx.session.user.clone();
         core.media_fake().add_file(&user, "a.mp3", 5000, false);
         let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.settings(), audit: Arc::new(|_, _| {}) };
-        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&crate::apps::chat_port::CxChat(&cx), &env));
         let defs = t.defs();
         let risk = |n: &str| defs.iter().find(|d| d.spec.name == n).unwrap_or_else(|| panic!("{n}")).risk;
         assert_eq!(risk("embedded_media_status"), Risk::Safe);

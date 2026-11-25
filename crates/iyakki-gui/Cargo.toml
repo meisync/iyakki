@@ -4,7 +4,7 @@
 
 [package]
 name = "iyakki-gui"
-version = "0.1.0-alpha.7-dev"
+version = "0.1.0-alpha.10-dev"
 edition = "2021"
 license = "Apache-2.0"
 

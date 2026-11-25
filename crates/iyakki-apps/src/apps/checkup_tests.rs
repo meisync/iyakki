@@ -6,8 +6,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use iyakki_shared::checkup::{Outcome, Said, ScreenOut};
-use iyakki_shared::checkup::{Adapter, Inventory, PowerFacts, StepId};
+use iyakki_shared::checkup::ScreenOut;
+use iyakki_tile_api::checkup::{Outcome, Said};
+use iyakki_shared::checkup::{Adapter, Inventory, PowerFacts};
+use iyakki_tile_api::checkup::StepId;
 use iyakki_shared::voicedesk::{Mic};
 use iyakki_shared::voicedesk::{Capture, Recorders};
 use iyakki_sec::policy::{Policy, Role};
@@ -221,10 +223,10 @@ impl Fx {
         self.key(Key::Enter);
     }
     fn outcome(&self, id: StepId) -> Outcome {
-        self.app.results[StepId::ALL.iter().position(|s| *s == id).unwrap()].outcome
+        self.app.tile.results[StepId::ALL.iter().position(|s| *s == id).unwrap()].outcome
     }
-    fn result(&self, id: StepId) -> &iyakki_shared::checkup::StepResult {
-        &self.app.results[StepId::ALL.iter().position(|s| *s == id).unwrap()]
+    fn result(&self, id: StepId) -> &iyakki_tile_api::checkup::StepResult {
+        &self.app.tile.results[StepId::ALL.iter().position(|s| *s == id).unwrap()]
     }
     fn has_hit(&self, e: &Event) -> bool {
         self.g.hits.iter().any(|h| &h.ev == e)
@@ -236,7 +238,7 @@ impl Fx {
     fn settle(&mut self) {
         let __wall = std::time::Instant::now();
         while __wall.elapsed() < std::time::Duration::from_secs(30) {
-            if !self.app.live() {
+            if !self.app.tile.live() {
                 return;
             }
             self.app.wants_redraw();
@@ -280,8 +282,8 @@ const SIZES: [(u32, u32, f32); 6] = [(360, 740, 1.0), (800, 480, 1.0), (1280, 72
 #[test]
 fn it_lists_every_step_not_done_yet_and_opens_the_chosen_one() {
     let f = fixture("list");
-    assert_eq!(f.app.results.len(), 14);
-    assert!(f.app.results.iter().all(|r| r.outcome == Outcome::Pending));
+    assert_eq!(f.app.tile.results.len(), 14);
+    assert!(f.app.tile.results.iter().all(|r| r.outcome == Outcome::Pending));
     assert!(f.g.hits.iter().filter(|h| h.label == "step").count() >= 5, "the steps are rows");
     let t = f.text();
     assert!(t.contains("0 passed, 0 failed, 0 skipped, 14 not done yet") && t.contains("Screen") && t.contains("Shows four colour bars"), "{t}");
@@ -310,15 +312,15 @@ fn the_machines_own_steps_answer_at_once_and_the_list_moves_on() {
 fn up_and_down_choose_steps_and_enter_starts_the_chosen_one() {
     let mut f = fixture("nav");
     f.key(Key::Down);
-    assert_eq!(f.app.sel, 1);
+    assert_eq!(f.app.tile.sel, 1);
     f.key(Key::Up);
     f.key(Key::Up);
-    assert_eq!(f.app.sel, 0);
+    assert_eq!(f.app.tile.sel, 0);
     for _ in 0..30 {
         f.key(Key::Down);
     }
-    assert_eq!(f.app.sel, 13, "stays on the last step");
-    assert!(f.app.active.is_none(), "choosing never starts anything");
+    assert_eq!(f.app.tile.sel, 13, "stays on the last step");
+    assert!(f.app.tile.active.is_none(), "choosing never starts anything");
     assert!(matches!(f.key(Key::Esc), Flow::Back));
 }
 
@@ -329,11 +331,11 @@ fn the_screen_step_shows_bars_and_y_or_n_decides() {
     let mut f = fixture("display");
     f.chr('x');
     f.start(StepId::Display);
-    assert!(matches!(f.app.active, Some(Active::Bars)));
+    assert!(matches!(f.app.tile.active, Some(Active::Bars)));
     assert!(f.text().contains("four colour bars") && f.has_hit(&Event::Tab(T_YES)) && f.has_hit(&Event::Tab(T_NO)));
     f.chr('y');
     assert_eq!(f.outcome(StepId::Display), Outcome::Pass);
-    assert_eq!(f.app.sel, 1, "the next step is open");
+    assert_eq!(f.app.tile.sel, 1, "the next step is open");
     f.start(StepId::Display);
     f.chr('n');
     let r = f.result(StepId::Display).clone();
@@ -358,7 +360,7 @@ fn touch_is_skipped_without_a_touch_screen_and_otherwise_wants_the_circle_touche
     st.inv.touchscreens = 1;
     let mut f = fixture_with("touch", st);
     f.start(StepId::Touch);
-    assert!(matches!(f.app.active, Some(Active::Target)) && f.has_hit(&Event::Tab(T_TARGET)));
+    assert!(matches!(f.app.tile.active, Some(Active::Target)) && f.has_hit(&Event::Tab(T_TARGET)));
     f.ev(Event::Tab(T_TARGET));
     assert_eq!(f.outcome(StepId::Touch), Outcome::Pass);
     f.start(StepId::Touch);
@@ -373,7 +375,7 @@ fn the_keyboard_step_passes_after_three_different_keys_and_fails_on_enter_with_f
     // while listening every key is a test key, even the letters that are shortcuts elsewhere
     f.chr('y');
     f.chr('y');
-    assert!(matches!(&f.app.active, Some(Active::Keys(k)) if k.len() == 1), "the same key twice counts once");
+    assert!(matches!(&f.app.tile.active, Some(Active::Keys(k)) if k.len() == 1), "the same key twice counts once");
     assert!(f.text().contains("1 so far"));
     f.chr('r');
     assert_eq!(f.outcome(StepId::Keyboard), Outcome::Pending);
@@ -386,7 +388,7 @@ fn the_keyboard_step_passes_after_three_different_keys_and_fails_on_enter_with_f
     assert!(f.result(StepId::Keyboard).note.contains("Only 1 key"));
     f.start(StepId::Keyboard);
     f.key(Key::Esc);
-    assert!(f.app.active.is_none(), "Esc stops listening");
+    assert!(f.app.tile.active.is_none(), "Esc stops listening");
     assert_eq!(f.outcome(StepId::Keyboard), Outcome::Fail, "the earlier result stays");
 }
 
@@ -456,7 +458,7 @@ fn nothing_is_recorded_until_the_person_starts_the_microphone_step() {
     f.goto(StepId::Microphone);
     f.draw();
     assert!(f.spy.recs.started.lock().unwrap().is_empty(), "choosing the step opens no microphone");
-    assert!(f.app.active.is_none() && f.signs().is_empty(), "and lights no sign");
+    assert!(f.app.tile.active.is_none() && f.signs().is_empty(), "and lights no sign");
     assert!(f.text().contains("Starts only when you press the button") && f.has_hit(&Event::Tab(T_RUN)));
     // r (check again), s (share) and Down never start it either
     f.chr('r');
@@ -474,22 +476,22 @@ fn the_microphone_step_records_two_seconds_shows_the_sign_and_a_level_and_keeps_
     f.cx.services.set_voice_mic("plughw:2,0").unwrap();
     f.start(StepId::Microphone);
     assert!(f.spy.recs.started.lock().unwrap()[0].contains("-D plughw:2,0"), "the microphone chosen for the Voice tile is the one used: {:?}", f.spy.recs.started.lock().unwrap());
-    assert!(matches!(f.app.active, Some(Active::Record { .. })));
+    assert!(matches!(f.app.tile.active, Some(Active::Record { .. })));
     assert_eq!(f.signs().last().copied(), Some(MIC), "the same sign the browser lights");
     assert!(f.text().contains("Microphone on") && f.text().contains("USB Audio plughw:2,0"), "{}", f.text());
     f.spy.recs.ms.store(1000, Ordering::SeqCst);
     f.app.wants_redraw();
     f.draw();
-    assert!(f.app.level > 0.3, "the meter moves: {}", f.app.level);
-    assert!((f.app.progress - 0.5).abs() < 0.01);
-    assert!(f.app.live() && f.has_hit(&Event::Tab(T_STOP)));
+    assert!(f.app.tile.level > 0.3, "the meter moves: {}", f.app.tile.level);
+    assert!((f.app.tile.progress - 0.5).abs() < 0.01);
+    assert!(f.app.tile.live() && f.has_hit(&Event::Tab(T_STOP)));
     f.spy.recs.ms.store(2000, Ordering::SeqCst);
     f.settle();
     assert_eq!(f.outcome(StepId::Microphone), Outcome::Pass);
     assert!(f.result(StepId::Microphone).note.contains("nothing was kept"));
     assert_eq!(f.signs().last().copied(), Some(0), "the sign goes out");
-    assert!(f.app.active.is_none());
-    assert_eq!(f.app.level, 0.0);
+    assert!(f.app.tile.active.is_none());
+    assert_eq!(f.app.tile.level, 0.0);
 }
 
 #[test]
@@ -504,17 +506,17 @@ fn a_silent_microphone_fails_and_the_stop_button_and_the_signs_click_throw_the_r
     let mut f = fixture("mic-stop");
     f.start(StepId::Microphone);
     f.ev(Event::Tab(T_STOP));
-    assert!(f.app.active.is_none() && f.outcome(StepId::Microphone) == Outcome::Pending);
+    assert!(f.app.tile.active.is_none() && f.outcome(StepId::Microphone) == Outcome::Pending);
     assert_eq!(f.signs().last().copied(), Some(0));
     // the click on the shell's sign
     f.start(StepId::Microphone);
     f.spy.stop.store(true, Ordering::SeqCst);
     f.app.wants_redraw();
-    assert!(f.app.active.is_none() && f.outcome(StepId::Microphone) == Outcome::Pending, "stopped by the sign");
+    assert!(f.app.tile.active.is_none() && f.outcome(StepId::Microphone) == Outcome::Pending, "stopped by the sign");
     // Esc
     f.start(StepId::Microphone);
     f.key(Key::Esc);
-    assert!(f.app.active.is_none());
+    assert!(f.app.tile.active.is_none());
 }
 
 #[test]
@@ -522,7 +524,7 @@ fn leaving_the_tile_or_the_step_while_recording_lets_go_and_puts_the_sign_out() 
     let mut f = fixture("mic-leave");
     f.start(StepId::Microphone);
     f.key(Key::Up);
-    assert!(f.app.active.is_none(), "moving to another step stops the recording");
+    assert!(f.app.tile.active.is_none(), "moving to another step stops the recording");
     assert_eq!(f.signs().last().copied(), Some(0));
     f.start(StepId::Microphone);
     let signs = f.spy.signs.clone();
@@ -567,13 +569,13 @@ fn the_camera_is_not_opened_until_the_person_starts_the_step_then_shows_one_pict
     assert_eq!(f.outcome(StepId::Camera), Outcome::Pass);
     assert!(f.result(StepId::Camera).note.contains("USB Camera") && f.result(StepId::Camera).note.contains("nothing was kept"));
     assert_eq!(f.signs().last().copied(), Some(0));
-    assert!(f.app.preview.is_some(), "the picture is shown");
+    assert!(f.app.tile.preview.is_some(), "the picture is shown");
     f.goto(StepId::Camera);
     assert_hits_sane(&f, "camera preview");
     assert!(f.audit().contains("checkup.camera"));
     f.key(Key::Down);
     f.key(Key::Up);
-    assert!(f.app.preview.is_none(), "the picture is dropped when the person moves on");
+    assert!(f.app.tile.preview.is_none(), "the picture is dropped when the person moves on");
 }
 
 #[test]
@@ -592,7 +594,7 @@ fn the_sign_click_stops_a_camera_that_is_being_opened() {
     f.start(StepId::Camera);
     f.spy.stop.store(true, Ordering::SeqCst);
     f.app.wants_redraw();
-    assert!(f.app.active.is_none() && f.outcome(StepId::Camera) == Outcome::Pending);
+    assert!(f.app.tile.active.is_none() && f.outcome(StepId::Camera) == Outcome::Pending);
     assert_eq!(f.signs().last().copied(), Some(0));
 }
 
@@ -618,7 +620,7 @@ fn the_result_goes_to_share_diagnostics_through_doctors_preview() {
     assert!(text.contains("=== Check-up ===") && text.contains("Network: Pass"), "{text}");
     f.chr('r');
     assert!(iyakki_shared::checkup::last_report().is_empty(), "check again starts over");
-    assert!(f.app.results.iter().all(|r| r.outcome == Outcome::Pending));
+    assert!(f.app.tile.results.iter().all(|r| r.outcome == Outcome::Pending));
 }
 
 #[test]
@@ -648,8 +650,8 @@ fn a_whole_check_up_by_keyboard_alone() {
     // speaker
     f.key(Key::Enter);
     f.key(Key::Enter);
-    assert_eq!(f.app.sel, 5, "now at the microphone");
-    assert!(f.app.active.is_none(), "the guided walk stops in front of the microphone");
+    assert_eq!(f.app.tile.sel, 5, "now at the microphone");
+    assert!(f.app.tile.active.is_none(), "the guided walk stops in front of the microphone");
     assert_eq!(
         [StepId::Display, StepId::Touch, StepId::Keyboard, StepId::Pointer, StepId::Speaker].map(|i| f.outcome(i)),
         [Outcome::Pass, Outcome::Skipped, Outcome::Pass, Outcome::Skipped, Outcome::Pass]
@@ -687,7 +689,7 @@ fn it_draws_inside_its_area_at_every_size_and_in_every_state() {
         f.settle();
         f.goto(StepId::Camera);
         assert_hits_sane(&f, &format!("{w}x{h} camera picture"));
-        f.app.fail("Something failed with a rather long explanation that has to be cut to the width of the screen somewhere.");
+        f.app.tile.fail("Something failed with a rather long explanation that has to be cut to the width of the screen somewhere.");
         f.draw();
         assert_hits_sane(&f, &format!("{w}x{h} message"));
     }
@@ -714,11 +716,11 @@ fn a_long_open_step_scrolls_and_the_chosen_step_stays_in_view() {
     f.start(StepId::Display);
     f.chr('n');
     f.goto(StepId::Display);
-    assert!(f.app.list.scrolls());
+    assert!(f.app.tile.list.scrolls());
     for _ in 0..11 {
         f.key(Key::Down);
     }
-    assert!(f.app.list.offset > 0.0, "followed the choice down");
+    assert!(f.app.tile.list.offset > 0.0, "followed the choice down");
     assert!(f.app.scroll_px(-120, &f.cx));
     assert_hits_sane(&f, "scrolled");
 }
@@ -731,7 +733,7 @@ fn the_wheel_and_the_drawing_do_not_start_anything() {
         f.draw();
     }
     f.app.scroll_px(-300, &f.cx);
-    assert!(f.app.active.is_none() && f.spy.played.load(Ordering::SeqCst) == 0 && f.spy.recs.started.lock().unwrap().is_empty() && f.spy.camera_opened.load(Ordering::SeqCst) == 0);
+    assert!(f.app.tile.active.is_none() && f.spy.played.load(Ordering::SeqCst) == 0 && f.spy.recs.started.lock().unwrap().is_empty() && f.spy.camera_opened.load(Ordering::SeqCst) == 0);
     assert!(f.signs().is_empty());
 }
 
@@ -747,7 +749,7 @@ fn the_real_readers_run_on_this_computer_without_panicking() {
     for id in [StepId::Monitor, StepId::Network, StepId::Wifi, StepId::Bluetooth, StepId::Power] {
         let i = StepId::ALL.iter().position(|s| *s == id).unwrap();
         a.begin(i, &super::checkup_port::CxPort(&cx));
-        assert_ne!(a.results[i].outcome, Outcome::Pending, "{id:?}");
+        assert_ne!(a.tile.results[i].outcome, Outcome::Pending, "{id:?}");
     }
 }
 
@@ -756,25 +758,25 @@ fn a_finished_check_up_leaves_a_signed_result_that_maps_to_the_matrix_and_a_half
     let mut f = fixture("signed");
     let file = f.cx.data_dir().join(iyakki_shared::checkup_result::FILE_NAME);
     let _ = std::fs::remove_file(&file);
-    f.app.results[0].outcome = Outcome::Pass;
-    f.app.keep_report();
+    f.app.tile.results[0].outcome = Outcome::Pass;
+    f.app.keep_report(&super::checkup_port::CxPort(&f.cx));
     assert!(!file.exists(), "steps are still not done");
-    for r in f.app.results.iter_mut() {
+    for r in f.app.tile.results.iter_mut() {
         r.outcome = Outcome::Pass;
     }
-    f.app.results[9].outcome = Outcome::Fail;
+    f.app.tile.results[9].outcome = Outcome::Fail;
     // the graphics card step has not been able to ask the cluster: the GPU cell is not guessed
     let gi = StepId::ALL.iter().position(|s| *s == StepId::Gpu).unwrap();
-    f.app.results[gi].outcome = Outcome::Skipped;
-    f.app.keep_report();
+    f.app.tile.results[gi].outcome = Outcome::Skipped;
+    f.app.keep_report(&super::checkup_port::CxPort(&f.cx));
     let b = iyakki_shared::checkup_result::verify(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(b.cells.iter().find(|c| c.capability == "Wi-Fi").unwrap().status, "failing");
     assert_eq!(b.cells.iter().find(|c| c.capability == "Display, internal").unwrap().status, "verified");
     assert!(b.cells.iter().any(|c| c.capability == "GPU for k3s" && c.status == "untested"), "the GPU was not asked, so it is not guessed");
     // the cluster saw it: the cell is verified, with the step's own words
-    f.app.results[gi].outcome = Outcome::Pass;
-    f.app.results[gi].note = "AMD Radeon 780M (amdgpu): the dev cluster sees 1 GPU.".into();
-    f.app.keep_report();
+    f.app.tile.results[gi].outcome = Outcome::Pass;
+    f.app.tile.results[gi].note = "AMD Radeon 780M (amdgpu): the dev cluster sees 1 GPU.".into();
+    f.app.keep_report(&super::checkup_port::CxPort(&f.cx));
     let b = iyakki_shared::checkup_result::verify(&std::fs::read_to_string(&file).unwrap()).unwrap();
     let c = b.cells.iter().find(|c| c.capability == "GPU for k3s").unwrap();
     assert!(c.status == "verified" && c.note.contains("sees 1 GPU"), "{c:?}");
@@ -852,9 +854,9 @@ fn fake_port_the_steps_that_only_read_finish_from_the_ports_inventory_and_audit_
     let mut app = CheckupApp::with_port(&port, parts);
     for id in [StepId::Monitor, StepId::Network, StepId::Wifi, StepId::Bluetooth] {
         app.begin(step(id), &port);
-        assert_ne!(app.results[step(id)].outcome, Outcome::Pending, "{id:?}");
+        assert_ne!(app.tile.results[step(id)].outcome, Outcome::Pending, "{id:?}");
     }
-    assert_eq!(app.results[step(StepId::Network)].outcome, Outcome::Pass, "the port says the route is up");
+    assert_eq!(app.tile.results[step(StepId::Network)].outcome, Outcome::Pass, "the port says the route is up");
     assert!(port.audit.lock().unwrap().is_empty());
     assert!(signs.lock().unwrap().is_empty());
 }
@@ -868,7 +870,7 @@ fn fake_port_the_speaker_step_plays_through_the_port_and_a_refusal_is_said_in_wo
     let mut app = CheckupApp::with_port(&port, parts);
     app.begin(step(StepId::Speaker), &port);
     assert_eq!(port.played.load(Ordering::SeqCst), 1);
-    match &app.active {
+    match &app.tile.active {
         Some(Active::Tone { played, .. }) => assert_eq!(played, &Err("No sound card answered.".to_string())),
         _ => panic!("the tone step is not open"),
     }
@@ -881,7 +883,7 @@ fn fake_port_the_microphone_step_uses_the_ports_voice_settings_audits_and_lights
     let (parts, recs, signs) = fake_parts();
     let mut app = CheckupApp::with_port(&port, parts);
     app.begin(step(StepId::Microphone), &port);
-    assert!(matches!(app.active, Some(Active::Record { .. })));
+    assert!(matches!(app.tile.active, Some(Active::Record { .. })));
     assert_eq!(recs.started.lock().unwrap().len(), 1, "one recording started");
     assert_eq!(port.audit_text(), "checkup.microphone ");
     assert_eq!(signs.lock().unwrap().as_slice(), [MIC]);
@@ -894,10 +896,10 @@ fn fake_port_the_camera_step_audits_and_lights_the_sign() {
     let (parts, _, signs) = fake_parts();
     let mut app = CheckupApp::with_port(&port, parts);
     app.begin(step(StepId::Camera), &port);
-    assert!(matches!(app.active, Some(Active::Grab(_))));
+    assert!(matches!(app.tile.active, Some(Active::Grab(_))));
     assert!(port.audit_text().contains("checkup.camera"));
     assert_eq!(signs.lock().unwrap().as_slice(), [CAM]);
-    app.end_active();
+    app.end_active(&port);
 }
 
 #[test]
@@ -908,10 +910,10 @@ fn fake_port_a_failed_step_offers_its_fix_and_the_fix_is_audited_by_step_name() 
     let mut app = CheckupApp::with_port(&port, parts);
     let i = step(StepId::Display);
     app.begin(i, &port);
-    assert!(matches!(app.active, Some(Active::Bars)));
-    app.answer(Said::No);
-    assert_eq!(app.results[i].outcome, Outcome::Fail);
-    app.sel = i;
+    assert!(matches!(app.tile.active, Some(Active::Bars)));
+    app.answer(Said::No, &port);
+    assert_eq!(app.tile.results[i].outcome, Outcome::Fail);
+    app.tile.sel = i;
     app.do_fix(&port);
     assert_eq!(app.take_request(), Some(("settings".into(), "tab:display".into())));
     assert_eq!(port.audit_text(), "checkup.fix display");

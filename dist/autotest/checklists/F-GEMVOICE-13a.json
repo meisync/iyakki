@@ -1,0 +1,42 @@
+{
+ "schema": 1,
+ "row": "F-GEMVOICE-13a",
+ "feature_sha": "212cb3821871d3c1",
+ "title": "Gemini voice page is its own page and says it is experimental (manual until automated)",
+ "clauses": [
+  {
+   "id": "own-page",
+   "text": "Gemini voice (experimental) is a page of its own in Settings and says it is experimental.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings and find Gemini voice (experimental).",
+     "expect": "It opens as its own page, and the page says EXPERIMENTAL."
+    }
+   ]
+  },
+  {
+   "id": "sizes",
+   "text": "The page draws at every window size and text scale, with every row and button inside the window and clicks working.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Make the window small and then large, and raise the text size if the system offers it. Click a row and a button.",
+     "expect": "Every row and button stays inside the window, and each click does what its label says."
+    }
+   ]
+  }
+ ]
+}

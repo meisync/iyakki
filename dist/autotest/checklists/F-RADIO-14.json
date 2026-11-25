@@ -1,0 +1,25 @@
+{
+ "schema": 1,
+ "row": "F-RADIO-14",
+ "feature_sha": "a0d0290b5116cd8a",
+ "title": "helper installed in the image: Ogg Vorbis plays without the add-on (manual until automated)",
+ "clauses": [
+  {
+   "id": "no-addon",
+   "text": "On a device without the ffmpeg add-on, Ogg Vorbis stations play.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Check that the ffmpeg add-on is not installed on the device. Then play a live Ogg Vorbis station.",
+     "expect": "The station plays."
+    }
+   ]
+  }
+ ]
+}

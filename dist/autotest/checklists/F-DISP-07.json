@@ -1,0 +1,42 @@
+{
+ "schema": 1,
+ "row": "F-DISP-07",
+ "feature_sha": "c43f081533226ac1",
+ "title": "touch screens on several displays go to their own display",
+ "clauses": [
+  {
+   "id": "touch-own-display",
+   "text": "a touch on an external touch screen or digitizer lands on that display, not on the built-in screen",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "With the built-in screen and one external display connected, touch the external display near its top left corner.",
+     "expect": "The pointer appears on the external display where the finger touched, not on the built-in screen."
+    },
+    {
+     "do": "Open Settings, Displays and press t (Touch screen) and then d (Next touch screen).",
+     "expect": "The choice of touch screen moves to the next one and the touch is then mapped to the display shown for it."
+    }
+   ]
+  },
+  {
+   "id": "touch-calibration",
+   "text": "with several external displays the touch calibration asks one display at a time, and Esc skips",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Connect two external displays and a touch screen that the computer cannot place by itself. In Settings, Displays press c (Touch calibration).",
+     "expect": "The screen asks you to touch the highlighted display, one display at a time."
+    },
+    {
+     "do": "Touch each highlighted display, then start again and press Esc at the first step.",
+     "expect": "Each touch is placed on the display that was highlighted, and Esc skips the step without changing the mapping."
+    }
+   ]
+  }
+ ]
+}

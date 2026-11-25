@@ -1,9 +1,10 @@
 //! The AI hardware profile in Store -> Setup (docs/AI-HARDWARE.md): which AI cards a machine shows, the reasons on the cards, the
 //! "Show all AI tools" switch, the facts line, and the layout with and without the hidden cards.
 use super::*;
+use crate::apps::store_port::CxPort;
 use crate::apps::store::StoreApp;
 use crate::apps::App;
-use iyakki_shared::aiprofile::{Vis};
+use iyakki_tile_store::ai::Vis;
 use iyakki_agent::aiprofile::{self};
 use iyakki_sec::policy::Role;
 
@@ -27,7 +28,8 @@ fn fake(tag: &str, ram_gb: u64, model: &str, card: Option<(&str, &str)>) -> aipr
 }
 
 fn machine(p: Option<aiprofile::AiProfile>, show_all: bool, gpus: usize, nvidia: bool) -> Machine {
-    Machine { ram_mb: 16_000, gpus, nvidia, ai: p.map(|p| std::sync::Arc::new(p) as std::sync::Arc<dyn iyakki_agent_api::AiMachine>), show_all_ai: show_all, ..Default::default() }
+    crate::apps::store_port::install_table();
+    Machine { ram_mb: 16_000, gpus, nvidia, ai: p.map(|p| std::sync::Arc::new(crate::apps::store_port::AgentAi(std::sync::Arc::new(p))) as std::sync::Arc<dyn iyakki_tile_store::ai::AiProfilePort>), show_all_ai: show_all, ..Default::default() }
 }
 
 #[test]
@@ -116,7 +118,7 @@ fn the_tab_lists_only_the_cards_the_profile_allows_and_stays_inside_its_rect_at_
             let cx = super::super::tests::cx(&format!("ssai-{w}-{show_all}"), Role::Admin);
             let mut a = StoreApp::new(&cx);
             a.setup.set_machine(machine(Some(fake("lay", 8, "PC", None)), show_all, 0, false));
-            a.setup.enter(&cx);
+            a.setup.enter(&CxPort(&cx));
             assert_eq!(a.setup.eligible().contains(&Item::Lemonade), show_all);
             let s = crate::ui::scale_for(w, h);
             let area = R::new(0.0, 46.0 * s, w as f32, h as f32 - 46.0 * s);

@@ -1,0 +1,14 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 7d2172fcc25aefa5; honest subset only: everything not checked is under not-covered.
+row: F-WEB-17
+targets: browser
+feature-sha: 7d2172fcc25aefa5
+doc: web page Cloud access: members of the tenant, namespaces, the audit trail, tenant switch
+clause: 1 the page shows the members of the current tenant and, after the switch, the other tenant's own members
+clause: 2 a namespace and a person added on the page exist on the service and a bad namespace name is refused
+clause: 3 the audit trail lists the role change just made
+not-covered: change role and remove with a confirm
+not-covered: join
+not-covered: the key-rotation sentence after a removal
+not-covered: delete namespace
+not-covered: the server decides every action (not probed with a hostile client)
+suite: run_pages.py --only more,functions

@@ -1,0 +1,60 @@
+{
+ "schema": 1,
+ "row": "F-GEMVOICE-06",
+ "feature_sha": "f91e706cae454caf",
+ "title": "Gemini voice chat tools: status, set and stop (manual until automated)",
+ "clauses": [
+  {
+   "id": "status-free",
+   "text": "gemini_voice_status answers at once and asks nothing.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant: what is the Gemini voice status?",
+     "expect": "It answers with the status at once, with no approval card."
+    }
+   ]
+  },
+  {
+   "id": "set-asks",
+   "text": "gemini_voice_set asks every time, is for administrators, and shows the consent text when turning on.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "As an administrator, ask the assistant to turn Gemini voice on.",
+     "expect": "An approval card appears and shows the consent text. Nothing changes until you agree. The consent itself is still given by you on the Settings page, not by the card. A person who is not an administrator is refused."
+    }
+   ]
+  },
+  {
+   "id": "no-key-no-consent",
+   "text": "The assistant cannot type the Gemini key or give the consent.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant to set the Gemini key, or to say yes to the microphone for you.",
+     "expect": "It refuses or says it has no way to do so. The key and the consent do not change."
+    }
+   ]
+  },
+  {
+   "id": "stop-free",
+   "text": "gemini_voice_stop closes the microphone at once and says whether a session was open.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant to stop Gemini voice.",
+     "expect": "There is no approval card, and the reply says whether a session was open."
+    }
+   ]
+  }
+ ]
+}

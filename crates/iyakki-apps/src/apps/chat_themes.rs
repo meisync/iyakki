@@ -5,8 +5,10 @@
 pub(super) use iyakki_shared::settingstools::{no_args, Entry};
 pub(super) use super::chat_settings::Env;
 use serde_json::json;
+use crate::apps::chat_port::ChatPort;
+#[cfg(test)]
+use crate::apps::chat_port::CxChat;
 
-use super::AppCx;
 
 pub const TOOLS: [&str; 16] = ["display_type", "display_type_set", "display_themes", "display_theme_set", "display_wallpaper", "display_wallpaper_set", "display_fonts", "display_font_set", "display_board", "display_board_set", "display_look", "display_look_set", "display_dock", "display_dock_set", "display_sdk_apps", "display_sdk_apps_set"];
 
@@ -25,7 +27,7 @@ fn dock_state(data: &std::path::Path, user: &str) -> (Vec<String>, Vec<String>) 
     (pinned.into_iter().filter(|p| available.contains(p)).take(DOCK_MAX).collect(), available)
 }
 
-pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
+pub fn entries(cx: &dyn ChatPort, env: &Env) -> Vec<Entry> {
     let mut v = Vec::new();
     {
         let (data, user) = (cx.data_dir().to_path_buf(), env.user.clone());
@@ -371,7 +373,7 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let core = cx.core.clone();
+        let core = cx.core().clone();
         let user = env.user.clone();
         v.push(Entry::read("Display", "display_sdk_apps", "Say which of EDIT and CLI opens as its version written on the UI SDK (experimental) and which as the usual screen.", no_args(), move |_| {
             let kept = core.app_data().get(&user, iyakki_shared::sdkapps::APP, iyakki_shared::sdkapps::KEY);
@@ -379,7 +381,7 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let (core, user, e1) = (cx.core.clone(), env.user.clone(), env.clone());
+        let (core, user, e1) = (cx.core().clone(), env.user.clone(), env.clone());
         let schema = json!({"type": "object", "properties": {"app": {"type": "string", "description": "edit or cli."}, "enabled": {"type": "boolean", "description": "true: open the version written on the UI SDK (experimental); false: the usual screen."}}, "required": ["app", "enabled"]});
         v.push(Entry::change("Display", "display_sdk_apps_set", "Choose, for EDIT or CLI, the version written on the UI SDK (experimental) or the usual screen. It applies the next time the app is opened. The person approves a card first.", schema, |a| format!("{}: {}", a["app"].as_str().unwrap_or("?").to_uppercase(), if a["enabled"].as_bool() == Some(true) { "the SDK version" } else { "the usual screen" }), move |a| {
             let app = a.get("app").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
@@ -429,7 +431,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("themes")).unwrap();
         std::fs::write(dir.join("themes/midnight-blue.theme"), "name = Midnight blue\nbase = dark\nbg_top = #0b1020\n").unwrap();
         std::fs::write(dir.join("themes/dull.theme"), "name = Dull\ntext = #111111\n").unwrap();
-        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&CxChat(&cx), &env));
         let d = t.defs();
         assert_eq!(d.iter().find(|x| x.spec.name == "display_themes").unwrap().risk, Risk::Safe);
         assert_eq!(d.iter().find(|x| x.spec.name == "display_theme_set").unwrap().risk, Risk::Ask);
@@ -455,7 +457,7 @@ mod tests {
         let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(|_, _| {}) };
         let dir = cx.data_dir().to_path_buf();
         iyakki_shared::bundle_members::put_theme(&dir, None, "dusk", &json!({"name": "Dusk", "base": "dark", "bg_top": "#101830"})).unwrap();
-        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&CxChat(&cx), &env));
         assert!(t.call("display_themes", &json!({})).unwrap().contains("Theme file bundle-dusk: Dusk"));
         assert!(t.call("display_theme_set", &json!({"theme": "bundle-dusk"})).unwrap().contains("Dusk is chosen"));
         assert_eq!(iyakki_uikit::theme::load_choice(&dir, "root").as_deref(), Some("user:bundle-dusk"));
@@ -470,7 +472,7 @@ mod tests {
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
         let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         let dir = cx.data_dir().to_path_buf();
-        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&CxChat(&cx), &env));
         let d = t.defs();
         assert_eq!(d.iter().find(|x| x.spec.name == "display_wallpaper").unwrap().risk, Risk::Safe);
         assert_eq!(d.iter().find(|x| x.spec.name == "display_wallpaper_set").unwrap().risk, Risk::Ask);
@@ -494,7 +496,7 @@ mod tests {
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
         let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         let dir = cx.data_dir().to_path_buf();
-        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&CxChat(&cx), &env));
         let d = t.defs();
         assert_eq!(d.iter().find(|x| x.spec.name == "display_fonts").unwrap().risk, Risk::Safe);
         assert_eq!(d.iter().find(|x| x.spec.name == "display_font_set").unwrap().risk, Risk::Ask);
@@ -523,7 +525,7 @@ mod tests {
         let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         let dir = cx.data_dir().to_path_buf();
         typeset::set_current(Prefs::default());
-        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&CxChat(&cx), &env));
         let d = t.defs();
         assert_eq!(d.iter().find(|x| x.spec.name == "display_type").unwrap().risk, Risk::Safe);
         assert_eq!(d.iter().find(|x| x.spec.name == "display_type_set").unwrap().risk, Risk::Ask);
@@ -550,7 +552,7 @@ mod tests {
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
         let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         let dir = cx.data_dir().to_path_buf();
-        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&CxChat(&cx), &env));
         let d = t.defs();
         assert_eq!(d.iter().find(|x| x.spec.name == "display_board").unwrap().risk, Risk::Safe);
         assert_eq!(d.iter().find(|x| x.spec.name == "display_board_set").unwrap().risk, Risk::Ask);
@@ -584,7 +586,7 @@ mod tests {
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
         let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         let dir = cx.data_dir().to_path_buf();
-        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&CxChat(&cx), &env));
         let d = t.defs();
         assert_eq!(d.iter().find(|x| x.spec.name == "display_look").unwrap().risk, Risk::Safe);
         assert_eq!(d.iter().find(|x| x.spec.name == "display_look_set").unwrap().risk, Risk::Ask);
@@ -627,7 +629,7 @@ mod tests {
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
         let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
         let dir = cx.data_dir().to_path_buf();
-        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&CxChat(&cx), &env));
         let d = t.defs();
         assert_eq!(d.iter().find(|x| x.spec.name == "display_dock").unwrap().risk, Risk::Safe);
         assert_eq!(d.iter().find(|x| x.spec.name == "display_dock_set").unwrap().risk, Risk::Ask);
@@ -662,7 +664,7 @@ mod tests {
         let a2 = audits.clone();
         let settings = Arc::new(Mutex::new(iyakki_shared::settings::SettingsStore::open(&cx.data_dir().join("settings.json")).unwrap()));
         let env = Env { dir: cx.data_dir().to_path_buf(), user: "root".into(), admin: true, settings: iyakki_shared::settings_ref::SettingsRef::of_store(&settings), audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))) };
-        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&CxChat(&cx), &env));
         let d = t.defs();
         assert_eq!(d.iter().find(|x| x.spec.name == "display_sdk_apps").unwrap().risk, Risk::Safe);
         assert_eq!(d.iter().find(|x| x.spec.name == "display_sdk_apps_set").unwrap().risk, Risk::Ask);

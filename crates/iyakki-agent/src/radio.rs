@@ -274,8 +274,17 @@ struct Inner {
     notice: Mutex<Option<String>>,
     /// When the current connection made its first sound (the recovery clock's milliseconds).
     first_sound: AtomicU64,
+    /// Whether the network link has a way out (a parked radio starts again when it returns); tests put a scripted one here.
+    net_probe: Mutex<LinkProbe>,
     /// Where the sound output's device, generation and gain come from (the process-wide selector; tests put a made-up state here).
     output: Mutex<Arc<dyn crate::audioout::OutputState>>,
+}
+
+/// Whether the machine has a network link with a way out (an interface that is up and a default route through it).
+pub type LinkProbe = Arc<dyn Fn() -> bool + Send + Sync>;
+
+fn real_link_probe() -> LinkProbe {
+    Arc::new(crate::routeevents::route_up)
 }
 
 /// Where the retry count and the auto-switch choice come from (the machine settings).
@@ -294,7 +303,7 @@ type Allow = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 impl Default for RadioPlayer {
     fn default() -> Self {
-        RadioPlayer { inner: Arc::new(Inner { state: Mutex::new(RadioState::Idle), generation: AtomicU64::new(0), paused: std::sync::atomic::AtomicBool::new(false), volume: AtomicU8::new(80), link: Mutex::new(None), streamer: Mutex::new(None), retry_wait: Mutex::new(Duration::from_secs(2)), levels: Mutex::new([0.0; BANDS]), aac: Mutex::new(None), hls_scale: std::sync::atomic::AtomicU32::new(1), problem: Mutex::new(None), recover: Mutex::new(None), clock: Mutex::new(Arc::new(crate::radio_recover::RealClock::default())), notice: Mutex::new(None), first_sound: AtomicU64::new(0), output: Mutex::new(crate::audioout::output_state()) }) }
+        RadioPlayer { inner: Arc::new(Inner { state: Mutex::new(RadioState::Idle), generation: AtomicU64::new(0), paused: std::sync::atomic::AtomicBool::new(false), volume: AtomicU8::new(80), link: Mutex::new(None), streamer: Mutex::new(None), retry_wait: Mutex::new(Duration::from_secs(2)), levels: Mutex::new([0.0; BANDS]), aac: Mutex::new(None), hls_scale: std::sync::atomic::AtomicU32::new(1), problem: Mutex::new(None), recover: Mutex::new(None), clock: Mutex::new(Arc::new(crate::radio_recover::RealClock::default())), notice: Mutex::new(None), first_sound: AtomicU64::new(0), net_probe: Mutex::new(real_link_probe()), output: Mutex::new(crate::audioout::output_state()) }) }
     }
 }
 
@@ -375,6 +384,39 @@ impl RadioPlayer {
     /// Time for the recovery (tests: a manual clock; real use: the system clock).
     pub fn set_recover_clock(&self, c: Arc<dyn crate::radio_recover::RecoverClock>) {
         *self.inner.clock.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = c;
+    }
+
+    /// Whether the network has a way out (tests: a scripted answer; real use: the interfaces and the default route).
+    pub fn set_link_probe(&self, p: LinkProbe) {
+        *self.inner.net_probe.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = p;
+    }
+
+    fn link_up(&self) -> bool {
+        let p = self.inner.net_probe.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        p()
+    }
+
+    /// A parked radio (every station of the list failed): shows the plain message and waits for the link to return or for the slow
+    /// retry time (1, 5, then every 15 minutes). `false` when the person stopped or started something else meanwhile.
+    fn park(&self, gen: u64, clock: &Arc<dyn crate::radio_recover::RecoverClock>, station: &Station, why: &str, round: &mut usize) -> bool {
+        use crate::radio_recover::{ParkWait, PARK_SLICE};
+        let up = self.link_up();
+        let mut wait = ParkWait::new(clock.now_ms(), *round, up);
+        let text = if up { format!("{why} It tries again by itself.") } else { format!("There is no network, so the radio stopped. It starts again by itself when the network returns. ({why})") };
+        self.set_state(gen, RadioState::Failed { station: station.name.clone(), why: text });
+        self.set_notice(gen, Some(wait.notice(up)));
+        loop {
+            clock.wait(PARK_SLICE, &|| self.current(gen));
+            if !self.current(gen) {
+                return false;
+            }
+            let up = self.link_up();
+            if wait.look(clock.now_ms(), up).is_some() {
+                *round += 1;
+                return true;
+            }
+            self.set_notice(gen, Some(wait.notice(up)));
+        }
     }
 
     fn clock(&self) -> Arc<dyn crate::radio_recover::RecoverClock> {
@@ -510,6 +552,7 @@ impl RadioPlayer {
         let mut rec = crate::radio_recover::Recovery::new(retries, auto, &around.list);
         let clock = self.clock();
         let mut station = first.clone();
+        let mut park_round = 0usize;
         loop {
             if !self.current(gen) {
                 return;
@@ -526,7 +569,20 @@ impl RadioPlayer {
                 Err(StreamEnd::Stopped) => return,
                 Err(StreamEnd::Failed(why)) => {
                     let played_ms = played.then(|| clock.now_ms().saturating_sub(self.inner.first_sound.load(Ordering::SeqCst)));
+                    if played_ms.is_some_and(|ms| ms >= crate::radio_recover::STABLE_MS) {
+                        park_round = 0;
+                    }
                     match rec.on_end(&station, played_ms, &why) {
+                        crate::radio_recover::Step::Park(why) => {
+                            if !self.park(gen, &clock, &station, &why, &mut park_round) {
+                                return;
+                            }
+                            rec = crate::radio_recover::Recovery::new(retries, auto, &around.list);
+                            rec.after_park();
+                            station = first.clone();
+                            self.set_notice(gen, Some("Trying again".into()));
+                            self.set_state(gen, RadioState::Connecting(station.name.clone()));
+                        }
                         crate::radio_recover::Step::GiveUp(why) => {
                             self.set_notice(gen, None);
                             self.set_state(gen, RadioState::Failed { station: station.name.clone(), why });
@@ -1279,6 +1335,25 @@ mod tests {
         assert_eq!(u16::from_le_bytes([wav[22], wav[23]]), 2);
         assert!(wav.len() > 44 + 4608, "audio followed the header: {} bytes", wav.len());
         assert!(wav[44..].iter().all(|b| *b == 0), "the fixture is silence");
+    }
+
+    #[test]
+    fn a_playing_station_stops_when_its_owner_signs_out_and_not_for_another_person() {
+        use iyakki_shared::sessionend::{Ctx, Why};
+        let _route = crate::mixer::pin_command_route();
+        let f = fake(vec![("https://r.example.org/live.mp3", ok_mp3(60))]);
+        let p = player(f);
+        p.play(&st("https://r.example.org/live.mp3"), allow_all(), "cat");
+        wait_for(&p, |s| matches!(s, RadioState::Playing { .. }));
+        // someone who does not own the machine's sound signs out: the radio goes on
+        let other = Ctx { user: "sam".into(), why: Why::SignOut, sound_owner: false };
+        assert!(!crate::sessionend_hooks::end_radio(&p, &other));
+        assert!(matches!(p.state(), RadioState::Playing { .. } | RadioState::Connecting(_)));
+        // the owner signs out: it stops at once
+        let owner = Ctx { user: "maya".into(), why: Why::SignOut, sound_owner: true };
+        assert!(crate::sessionend_hooks::end_radio(&p, &owner));
+        assert_eq!(p.state(), RadioState::Idle);
+        assert!(!crate::sessionend_hooks::end_radio(&p, &owner), "nothing left to stop");
     }
 
     #[test]

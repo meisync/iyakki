@@ -85,6 +85,8 @@ pub trait Io {
 
 /// How often the interfaces are looked at while a session runs.
 const HEALTH_MS: u64 = 2000;
+/// How often a sharing that stopped because its uplink lost the route looks for the route again (F-LIFE-17).
+const RESUME_MS: u64 = 10_000;
 
 struct Session {
     plan: Plan,
@@ -111,6 +113,9 @@ pub struct Manager {
     session: Option<Session>,
     /// The request id that already failed or ended (no retry until the request changes).
     settled_for: Option<u64>,
+    /// The request that stopped only because its uplink lost the route (F-LIFE-17, owner decision P-02): the id and when the route was
+    /// last looked for. Sharing starts again by itself when the uplink returns; a changed or switched-off request ends the wait.
+    waiting: Option<(u64, u64)>,
     status: Status,
 }
 
@@ -165,13 +170,30 @@ impl Manager {
                 self.stop(os, why, State::Off, String::new());
             }
         }
+        let mut resumed = false;
+        if let Some((id, last)) = self.waiting {
+            if self.session.is_some() || !req.on || id != req.id {
+                self.waiting = None;
+            } else if now.saturating_sub(last) >= RESUME_MS {
+                self.waiting = Some((id, now));
+                if os.interfaces().iter().any(|i| i.up && i.default_route && req.uplink.as_ref().is_none_or(|u| *u == i.name)) {
+                    self.settled_for = None;
+                    resumed = true;
+                }
+            }
+        }
         if self.session.is_none() && req.on && self.settled_for != Some(req.id) {
             match self.start(os, req) {
                 Ok(s) => {
                     self.session = Some(s);
                     self.settled_for = None;
+                    if resumed {
+                        self.waiting = None;
+                        os.audit("share: started again, the uplink is back");
+                    }
                 }
                 Err(e) => {
+                    self.waiting = None;
                     os.audit(&format!("share: could not start: {}", e.line()));
                     self.settled_for = Some(req.id);
                     self.status = Status { state: State::Failed, note: e.line(), request_id: req.id, updated: now / 1000, idle_hours: req.idle_hours, isolate: req.isolate, ..Status::default() };
@@ -328,7 +350,12 @@ impl Manager {
             None
         };
         if let Some((e, why)) = verdict {
-            self.stop(os, why, State::Failed, e.line());
+            let lost = matches!(e, ShareError::UplinkLost(_));
+            let note = if lost { format!("{} It starts again by itself when the uplink returns.", e.line()) } else { e.line() };
+            self.stop(os, why, State::Failed, note);
+            if lost {
+                self.waiting = self.settled_for.map(|id| (id, now_ms));
+            }
             return;
         }
         let Some(s) = self.session.as_mut() else { return };

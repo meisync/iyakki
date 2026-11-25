@@ -167,8 +167,7 @@ impl PluginStore {
 
     fn save(&self, v: &[Plugin]) -> Result<(), String> {
         let text = serde_json::to_string_pretty(v).map_err(|e| e.to_string())?;
-        let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &self.path)).map_err(|e| format!("could not save the plug-ins: {e}"))
+        iyakki_schema::write_atomic(&self.path, text.as_bytes(), 0o600).map_err(|e| format!("could not save the plug-ins: {e}"))
     }
 
     fn change(&self, f: impl FnOnce(&mut Vec<Plugin>) -> Result<Plugin, String>) -> Result<Plugin, String> {

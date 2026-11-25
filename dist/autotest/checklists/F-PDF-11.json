@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-PDF-11",
+ "feature_sha": "9fc806be2f1d190b",
+ "title": "PDF text in Greek, Cyrillic and symbols",
+ "clauses": [
+  {
+   "id": "glyphs-drawn",
+   "text": "A PDF with Greek, Cyrillic, Latin Extended and symbol text shows every letter as written, in an embedded DejaVu font.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant to make a PDF with a short Greek paragraph and a short Russian paragraph, with a bold heading and a code block (pdf_create). Open the PDF in a PDF viewer (a browser or another PDF app).",
+     "expect": "The Greek and Russian letters are drawn as typed, with no boxes, question marks or missing letters. The bold heading is bold and the code block is in a monospace face."
+    }
+   ]
+  }
+ ]
+}

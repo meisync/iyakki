@@ -8,10 +8,10 @@
 use std::sync::Mutex;
 
 use super::browser::{open_target, BrowserApp};
-use super::AppCx;
+use super::chat_port::UserData;
 
 /// The tile that opens this saved file and its full path, or the sentence that says why not.
-pub fn resolve(cx: &AppCx, name: &str) -> Result<(&'static str, String), String> {
+pub fn resolve(cx: &dyn UserData, name: &str) -> Result<(&'static str, String), String> {
     let Some((tile, _)) = open_target(name).filter(|_| !name.is_empty() && !name.contains(['/', '\\']) && !name.starts_with('.')) else {
         return Err("That file has no tile that opens it.".into());
     };
@@ -20,7 +20,7 @@ pub fn resolve(cx: &AppCx, name: &str) -> Result<(&'static str, String), String>
     if !path.is_file() {
         return Err(format!("{name} is not in Downloads any more."));
     }
-    cx.core.file_scope().check_read(&cx.session.policy, &cx.session.user, &path)?;
+    cx.core_handle().file_scope().check_read(&cx.acting_policy(), &cx.acting_user(), &path)?;
     Ok((tile, path.to_string_lossy().into_owned()))
 }
 
@@ -55,7 +55,7 @@ pub fn take_chat(user: &str) -> Option<(String, String)> {
 }
 
 /// The saved downloads as sentences for the assistant: name, size, and the tile that opens it (or that none does).
-pub fn describe(cx: &AppCx) -> Vec<String> {
+pub fn describe(cx: &dyn UserData) -> Vec<String> {
     super::browser_data::load(cx)
         .downloads
         .iter()

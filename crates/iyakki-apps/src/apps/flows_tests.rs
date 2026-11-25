@@ -14,8 +14,8 @@ use iyakki_flow::StartRequest;
 use serde_json::json;
 
 use super::flows::*;
-use super::flows_canvas::*;
-use super::flows_props::Props;
+use iyakki_tile_flows::flows_canvas::*;
+use iyakki_tile_flows::flows_props::Props;
 use super::tests::cx_with_admin_store;
 use super::{App, AppCx};
 use crate::gfx::Gfx;
@@ -586,7 +586,7 @@ fn the_fix_card_appears_in_the_run_view_and_its_buttons_reach_the_engine() {
     f.env.store.publish(&id, &PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
     click(&mut f, "Run (r)");
     let run = f.app.run_id.clone().unwrap();
-    f.env.engine.wait_for(&run, Duration::from_secs(30), |r| r.heal.iter().any(|c| c.state == CardState::Proposed) || r.status.is_terminal()).unwrap();
+    f.env.engine.wait_for(&run, Duration::from_secs(30), |r| (r.heal.iter().any(|c| c.state == CardState::Proposed) && r.status == RunStatus::Blocked) || r.status.is_terminal()).unwrap();
     tick(&mut f, 12);
     let r = f.env.engine.get_run(&run).unwrap();
     assert_eq!(r.status, RunStatus::Blocked, "{:?}", r.heal);
@@ -685,7 +685,7 @@ fn flows_are_listed_exported_imported_and_deleted() {
     std::fs::write(&path, &exported).unwrap();
     let home = iyakki_agent::scope::home_root(&f.cx.session.user, f.cx.data_dir());
     let _ = home;
-    let imported = f.app.import_path(path.to_str().unwrap());
+    let imported = f.app.import_path_in(&f.cx, path.to_str().unwrap());
     // a path outside the account's folders is refused, one inside is read
     match imported {
         Ok(new_id) => assert_eq!(new_id, "check-2"),
@@ -1403,7 +1403,7 @@ fn a_run_with_browser_steps_shows_its_session_live_its_pictures_and_a_report_tha
     key(&mut f, Key::Char('h'));
     assert!(f.app.take_host_save().is_some());
     // a picture outside the program's own folder is never read for the screen or the report
-    assert!(!f.app.own_picture("/etc/hostname"));
+    assert!(iyakki_tile_flows::PictureFiles::bytes(&super::flows::OwnPictures, &f.env.data, "/etc/hostname").is_none());
     // at every size the run view with these tabs stays inside the window
     for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480), (480, 600)] {
         for tab in [RunTab::Pictures, RunTab::Report] {
@@ -1729,14 +1729,14 @@ fn opening_a_failed_flow_with_the_assistant_open_makes_it_offer_once_and_never_e
     f.app.open_flow(&flow);
     tick(&mut f, 4);
     assert!(f.app.fail.is_some() && f.app.pending_note.is_none());
-    assert!(!f.app.chat.messages().iter().any(|m| m.content.contains("Want me to")));
+    assert!(!f.app.chat_app().messages().iter().any(|m| m.content.contains("Want me to")));
     f.app.close_flow();
     // chat open: a short message appears in the thread, with Yes and Not now beside it
     f.app.chat_open = true;
     f.app.open_flow(&flow);
     tick(&mut f, 6);
-    let said: Vec<_> = f.app.chat.messages().iter().filter(|m| m.content.contains("Want me to look into it")).collect();
-    assert_eq!(said.len(), 1, "{:?}", f.app.chat.messages().iter().map(|m| m.content.clone()).collect::<Vec<_>>());
+    let said: Vec<_> = f.app.chat_app().messages().iter().filter(|m| m.content.contains("Want me to look into it")).collect();
+    assert_eq!(said.len(), 1, "{:?}", f.app.chat_app().messages().iter().map(|m| m.content.clone()).collect::<Vec<_>>());
     assert!(said[0].content.contains("failed at step Call the site"));
     assert!(f.app.book.announced(&run));
     let g = draw(&mut f);
@@ -1746,7 +1746,7 @@ fn opening_a_failed_flow_with_the_assistant_open_makes_it_offer_once_and_never_e
     tick(&mut f, 2);
     f.app.open_flow(&flow);
     tick(&mut f, 6);
-    let n = f.app.chat.messages().iter().filter(|m| m.content.contains("Want me to look into it")).count();
+    let n = f.app.chat_app().messages().iter().filter(|m| m.content.contains("Want me to look into it")).count();
     assert!(n <= 1, "said {n} times");
     assert!(f.app.pending_note.is_none());
     // nothing was changed or run by the offer
@@ -1786,11 +1786,11 @@ fn ask_the_agent_to_fix_loads_the_failure_without_secrets_is_bounded_and_changes
         assert_eq!(f.app.book.attempts(&flow), n, "attempt {n}");
         assert!(f.app.chat_open && f.app.focus == Focus::Chat, "the assistant opens on the flow");
         // the request is in the thread: flow, run, step, input names only
-        let asked: Vec<String> = f.app.chat.messages().iter().filter(|m| m.content.starts_with("FLOW FAILURE REQUEST")).map(|m| m.content.clone()).collect();
+        let asked: Vec<String> = f.app.chat_app().messages().iter().filter(|m| m.content.starts_with("FLOW FAILURE REQUEST")).map(|m| m.content.clone()).collect();
         assert!(asked.last().unwrap().contains(&format!("attempt {n} of 3")) && asked.last().unwrap().contains(&flow) && asked.last().unwrap().contains(&run) && asked.last().unwrap().contains("step `call`"));
         f.app.focus = Focus::Canvas;
     }
-    let all: String = f.app.chat.messages().iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
+    let all: String = f.app.chat_app().messages().iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
     assert!(!all.contains(&token), "no input value reaches the conversation");
     assert!(all.contains("api"), "the input's name does");
     // the fourth is refused, with the reason, and spends nothing
@@ -2105,7 +2105,7 @@ fn node_center(f: &Fx, id: &str) -> (i32, i32) {
 
 #[test]
 fn every_node_kind_has_an_icon_that_draws_and_every_run_state_has_its_own_badge() {
-    use super::flows_icons::*;
+    use iyakki_tile_flows::flows_icons::*;
     let reg = iyakki_flow::Registry::builtin();
     for id in reg.ids() {
         assert!(has_icon(&id), "{id} has no icon");
@@ -2151,7 +2151,7 @@ fn a_node_card_shows_the_whole_short_name_at_every_size_and_keeps_its_ports_wher
                 if n.kind == "start" || n.kind == "end" || n.title().len() > 20 {
                     continue;
                 }
-                let shown = super::flows_paint::card_title(&mut g, &n, s, 1.0);
+                let shown = iyakki_tile_flows::flows_paint::card_title(&mut g, &n, s, 1.0);
                 assert_eq!(shown, n.title(), "{tpl} {w}x{h}: `{}` is cut to `{shown}` although it fits", n.title());
             }
             // the card has no second line of cut text: the subtitle is not drawn (checked by the card's pixel rows below the title)
@@ -2337,7 +2337,7 @@ fn the_webhook_panel_makes_a_hook_shows_its_address_once_and_switches_it_on_and_
 
 #[test]
 fn card_text_grows_with_the_window_scale_a_little_and_a_short_name_still_fits() {
-    use super::flows_paint::{card_text_size, text_boost};
+    use iyakki_tile_flows::flows_paint::{card_text_size, text_boost};
     assert_eq!(text_boost(1.0), 1.0);
     assert_eq!(text_boost(0.7), 1.0);
     assert!(text_boost(1.5) > 1.0 && text_boost(1.5) <= text_boost(2.5) && text_boost(9.0) <= 1.15);
@@ -2354,7 +2354,7 @@ fn card_text_grows_with_the_window_scale_a_little_and_a_short_name_still_fits() 
             if n.kind == "start" || n.kind == "end" || n.title().len() > 20 {
                 continue;
             }
-            let shown = super::flows_paint::card_title(&mut g, &n, 3.0, 1.0);
+            let shown = iyakki_tile_flows::flows_paint::card_title(&mut g, &n, 3.0, 1.0);
             assert_eq!(shown, n.title(), "`{}` is cut to `{shown}` at the largest boost", n.title());
         }
     }
@@ -2362,7 +2362,7 @@ fn card_text_grows_with_the_window_scale_a_little_and_a_short_name_still_fits() 
 
 // ------------------------------------------------------------------------------------------------ the Assist and messages page
 
-fn dv(f: &Fx) -> &super::flows_defaults::DefView {
+fn dv(f: &Fx) -> &iyakki_tile_flows::flows_defaults::DefView {
     match &f.app.modal {
         Some(Modal::Defaults(v)) => v,
         _ => panic!("the Assist and messages page is not open"),
@@ -2445,7 +2445,7 @@ fn the_defaults_page_sets_the_account_switches_the_agent_profile_and_the_message
     let id = open_flow(&mut f, two_steps());
     f.app.close_flow();
     f.app.reload_flows();
-    f.app.open_defaults(super::flows_defaults::DefTab::Messages);
+    f.app.open_defaults(iyakki_tile_flows::flows_defaults::DefTab::Messages);
     assert!(dv(&f).rows.iter().any(|r| r.label.starts_with("Quiet hours") && r.value == "off"));
     def_row(&mut f, "Quiet hours");
     key(&mut f, Key::Enter);
@@ -2494,7 +2494,7 @@ fn the_activity_page_shows_what_the_agent_did_and_the_whole_flow_trial_runs_only
     let id = assisted_failure(&mut f, "Activity flow", AssistMode::Copilot);
     f.env.assist_tick();
     f.app.reload_flows();
-    f.app.open_defaults(super::flows_defaults::DefTab::Activity);
+    f.app.open_defaults(iyakki_tile_flows::flows_defaults::DefTab::Activity);
     let text: Vec<String> = dv(&f).lines.iter().map(|l| l.0.clone()).collect();
     assert!(text[0].contains("Activity flow") && text[0].contains("copilot"), "{text:?}");
     assert!(text.iter().any(|l| l.contains("suggestion") && l.contains("ago") || l.contains("just now")), "{text:?}");
@@ -2527,7 +2527,7 @@ fn the_defaults_page_fits_every_size_on_every_page_and_never_leaves_the_screen()
     f.env.assist_tick();
     f.app.reload_flows();
     for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480), (480, 600)] {
-        for (n, tab) in [super::flows_defaults::DefTab::Assist, super::flows_defaults::DefTab::Agent, super::flows_defaults::DefTab::Messages, super::flows_defaults::DefTab::Activity].into_iter().enumerate() {
+        for (n, tab) in [iyakki_tile_flows::flows_defaults::DefTab::Assist, iyakki_tile_flows::flows_defaults::DefTab::Agent, iyakki_tile_flows::flows_defaults::DefTab::Messages, iyakki_tile_flows::flows_defaults::DefTab::Activity].into_iter().enumerate() {
             f.app.open_defaults(tab);
             let g = fits(&mut f, w, h, &format!("defaults page {n}"));
             for l in ["Close (Esc)", "Next page (Tab)"] {

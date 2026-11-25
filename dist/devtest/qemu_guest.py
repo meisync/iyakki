@@ -101,8 +101,9 @@ class Guest:
         time.sleep(4)
         first = self.shot("first-screen")
         self.smoke.append(("first-screen", first))
-        # the first-start screen: create the administrator (scratch account of this throw-away guest)
-        self.vm.typ("admin"); self._cmd("sendkey tab", 0.3); self.vm.typ(SCRATCH_PASSWORD); self._cmd("sendkey tab", 0.3); self.vm.typ(SCRATCH_PASSWORD); self._cmd("sendkey ret", 0.5)
+        # the first-start screen: create the administrator (scratch account of this throw-away guest). 2.5 s after each Tab: at 0.3 s (and 1 s) the shell
+        # of alpha.10 (device build, boot services still starting) handled the typed letters of a frame before the Tab and the second password landed in the first field (Q1, 2026-11-21).
+        self.vm.typ("admin"); self._cmd("sendkey tab", 2.5); self.vm.typ(SCRATCH_PASSWORD); self._cmd("sendkey tab", 2.5); self.vm.typ(SCRATCH_PASSWORD); self._cmd("sendkey ret", 0.5)
         home = self._wait_screen_change(first, 90, "home")
         time.sleep(8)
         self._cmd("sendkey n", 0.5)

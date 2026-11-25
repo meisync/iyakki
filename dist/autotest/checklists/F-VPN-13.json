@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-VPN-13",
+ "feature_sha": "6f5811554d584b1b",
+ "title": "vpn_add, vpn_enable, vpn_disable and vpn_delete ask every time and the",
+ "clauses": [
+  {
+   "id": "vpn-cards",
+   "text": "vpn_add, vpn_enable, vpn_disable and vpn_delete ask every time and the list shows no keys",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant to list VPN profiles, then add one from your own file, then turn it on and off.",
+     "expect": "The list shows no keys; each change asks first and a key pasted into the chat is refused."
+    }
+   ]
+  }
+ ]
+}

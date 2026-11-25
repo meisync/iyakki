@@ -248,6 +248,40 @@ impl MediaPlayer {
         Some(label)
     }
 
+    /// The end of a person's session (D-SESSION-END): what plays for them stops and their queue is dropped. A track started by somebody else
+    /// is left alone. Returns whether something stopped.
+    pub fn end_session(&self, user: &str) -> bool {
+        let mut ended = false;
+        {
+            let mut g = self.cur.lock().unwrap_or_else(|e| e.into_inner());
+            if g.as_ref().is_some_and(|c| c.user == user) {
+                if let Some(mut c) = g.take() {
+                    c.run.stop();
+                    ended = true;
+                }
+            }
+        }
+        let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if q.user == user && (q.active || !q.items.is_empty()) {
+            *q = QueueState { rev: q.rev + 1, ..QueueState::default() };
+            ended = true;
+        }
+        ended
+    }
+
+    /// The Bluetooth headphones left by themselves (F-LIFE-14, P-05): the program that plays cannot be paused (it offers only alive and stop), so
+    /// it is stopped and the queue and its place are kept; the person presses play and it carries on from the same track on the speakers. True
+    /// when something was playing.
+    pub fn pause_for_route_lost(&self) -> bool {
+        match self.cur.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            Some(mut c) => {
+                c.run.stop();
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn stop(&self) {
         if let Some(mut c) = self.cur.lock().unwrap_or_else(|e| e.into_inner()).take() {
             c.run.stop();
@@ -676,6 +710,21 @@ pub mod tests {
         assert_eq!(p.now_playing(), None);
         *l.fail.lock().unwrap() = true;
         assert!(p.play("alice", "x", "/y").unwrap_err().contains("no media player"));
+    }
+
+    #[test]
+    fn a_lost_headset_stops_the_playing_track_and_keeps_the_queue() {
+        let l = Arc::new(FakeLauncher::default());
+        let p = MediaPlayer::new(l.clone());
+        assert!(!p.pause_for_route_lost(), "nothing was playing");
+        p.set_queue("alice", vec!["/m/a.mp3".into(), "/m/b.mp3".into()], 1, true);
+        p.play("alice", "b", "/m/b.mp3").unwrap();
+        assert!(p.pause_for_route_lost());
+        assert!(l.procs.lock().unwrap()[0].lock().unwrap().1, "the program was stopped");
+        assert_eq!(p.now_playing(), None);
+        let q = p.queue_state();
+        assert!(q.active && q.pos == 1 && q.items.len() == 2, "the queue and its place stay");
+        assert!(!p.pause_for_route_lost(), "asked again: nothing to pause");
     }
 
     #[test]

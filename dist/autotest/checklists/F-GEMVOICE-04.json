@@ -1,0 +1,93 @@
+{
+ "schema": 1,
+ "row": "F-GEMVOICE-04",
+ "feature_sha": "4f510c36e10e2df4",
+ "title": "Gemini voice safety: off by default, consent card, microphone sign (manual until automated)",
+ "clauses": [
+  {
+   "id": "off-and-labelled",
+   "text": "The Gemini voice assistant is off by default and labelled EXPERIMENTAL in every string it shows.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings and open Gemini voice (experimental).",
+     "expect": "The switch is off. The page and its labels say EXPERIMENTAL."
+    }
+   ]
+  },
+  {
+   "id": "consent-names",
+   "text": "Its own consent names the open microphone and the tool results.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "On that page press C (Consent card) and read the card.",
+     "expect": "The card is titled Send my microphone to Google? (EXPERIMENTAL). It names the open microphone and that tool results are sent."
+    }
+   ]
+  },
+  {
+   "id": "speech-not-mic",
+   "text": "A yes to speech-to-text is not a yes to the open microphone.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Give the ordinary speech-to-text yes (the voice setting), then press C to look at the Gemini consent.",
+     "expect": "The Gemini consent still says Not given: nothing is sent."
+    }
+   ]
+  },
+  {
+   "id": "taking-back",
+   "text": "Taking the yes back with C closes the microphone at once and sends nothing more.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "After giving the Gemini yes on the card, press C and take it back.",
+     "expect": "The status says Not given: nothing is sent. If a session was open, the red band goes out too."
+    }
+   ]
+  },
+  {
+   "id": "red-band",
+   "text": "While the microphone is open, the shell's one red band shows it.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "With a Gemini key set up on this machine and the yes given, start a live session and speak. (If no key is set up, mark this clause cannot-test.)",
+     "expect": "The red band shows while the microphone is open and goes out when the session ends."
+    }
+   ]
+  }
+ ]
+}

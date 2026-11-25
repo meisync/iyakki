@@ -1,0 +1,22 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 14ac2acf5353b6f9; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-APPS-48
+targets: qemu
+profile: ram
+feature-sha: 14ac2acf5353b6f9
+doc: Settings, Clusters, Platform services lists the Registry row (read only)
+clause: 1 Settings, Clusters, P: the Platform services panel lists the Registry row that creates the local image registry in one step
+not-covered: the registry pod pulled by the cluster
+not-covered: Enter creating it and Remove (no cluster in a scratch guest)
+key s
+wait app=Settings
+skip-unless-button Clusters
+click-sidebar Clusters
+wait app=Settings page="Clusters"
+shot page
+expect-not-blank
+key P
+wait app=Settings text="Platform services"
+shot page
+expect-not-blank
+expect-text Registry
+expect-page Clusters

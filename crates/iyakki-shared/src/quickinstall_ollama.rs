@@ -44,7 +44,7 @@ pub fn mode_file(data: &Path) -> PathBuf {
 
 pub fn write_mode(data: &Path, m: Mode) -> Result<(), String> {
     std::fs::create_dir_all(state_dir(data)).map_err(|e| e.to_string())?;
-    std::fs::write(mode_file(data), if m == Mode::Move { "move" } else { "fresh" }).map_err(|e| e.to_string())
+    iyakki_schema::write_atomic(&mode_file(data), if m == Mode::Move { b"move" } else { b"fresh" }, 0o600)
 }
 
 /// The waiting choice, taken (removed) at once.

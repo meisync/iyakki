@@ -1,0 +1,22 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 845e9640a5ffb236; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-MSG-06
+targets: qemu
+profile: ram
+feature-sha: 845e9640a5ffb236
+doc: Store, Setup lists the Matrix server (chat of your own) (read only, nothing is installed)
+clause: 1 Store, Setup lists the item Matrix server (chat of your own)
+not-covered: the namespace, volume and limits of the pod
+not-covered: the registration token going to the vault
+not-covered: the account form at the cluster address
+skip-unless-button group Devices & System
+click group Devices & System
+skip-unless-button STORE
+click STORE
+wait text="Setup"
+skip-unless-button Setup
+click Setup
+wait text="This machine"
+scroll down
+shot page
+expect-not-blank
+expect-text Matrix

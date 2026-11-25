@@ -43,6 +43,7 @@ or `date not recorded`.
 | K | Raspberry Pi 5 | none | Planned; out of 1.0.0 (proposal) |
 | L | Raspberry Pi 3 (IYAKKI lite) | none | Planned; out of 1.0.0 (proposal) |
 | M | NVIDIA Jetson | none | Not planned |
+| N | AMD Kria KV260 Starter Kit (K26 SOM, Zynq UltraScale+ MPSoC, 4 GB), SD-card image | none yet: image built and booted in QEMU only (2026-11-21); a real board test is the owner's, see ../BOARD-KV260-FIRST-BOOT.md | Optional board; not a 1.0.0 gate machine (proposal) |
 
 Note on D: [../HARDWARE.md](../HARDWARE.md) said "one AMD PC booted, model and GPU not written down". The owner now says the AMD + NVIDIA PC booted. This page
 treats them as the same machine; that is an assumption, and the boot cell is only `partly` because nothing but the owner's word exists.
@@ -52,54 +53,54 @@ treats them as the same machine; that is an assumption, and the boot cell is onl
 Column letters are the ids of section 1.
 
 
-| Capability | A | B | C | D | E | F | G | H | I | J | K | L | M |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Boot from USB | verified | verified | partly | partly | untested | verified | untested | verified | verified | not supported | not supported | not supported | not supported |
-| Install to internal disk | partly | untested | untested | untested | untested | untested | untested | verified | not supported | not supported | not supported | not supported | not supported |
-| Install to USB drive | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported |
-| Upgrade from previous release | untested | untested | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
-| Secure Boot | untested | untested | not supported | untested | untested | verified | untested | verified | not supported | not supported | not supported | not supported | not supported |
-| Display, internal | verified | not supported | not supported | untested | untested | untested | untested | verified | verified | untested | not supported | not supported | not supported |
-| Display, external monitor | verified | verified | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| Display, hot-plug | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| Touch screen mapping | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| Keyboard (and pointer) | verified | verified | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
-| Touch Bar | partly | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported |
-| Fn keys | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| Sound out | verified | verified | partly | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
-| Sound in (built-in) | not supported | not supported | not supported | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| USB camera | partly | verified | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| USB microphone | verified | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| Built-in camera | verified | not supported | not supported | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| Wi-Fi | verified | untested | failing | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| Ethernet | partly | verified | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
-| Bluetooth | mixed | 2026-11-10 | owner on a MacBook Pro 14,1 (2026-11-08): pair, phone sound and tether with internet; the Mac mini 2018 (BCM4364, no patch file in macOS images): the page scans and lists devices, pairing untried | In-house stack. MacBook Pro 14,1 works; on the Mac mini 2018 the controller runs in its ROM state, so a USB dongle is the fallback. |
-| USB-C link and internet sharing | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| k3s start | verified | verified | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
-| GPU for k3s | untested | untested | untested | untested | untested | untested | partly | not supported | not supported | untested | not supported | not supported | not supported |
-| Browser, software drawing | verified | verified | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
-| Browser, hardware drawing | partly | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| Video decode | partly | partly | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
-| Battery and power source | untested | not supported | not supported | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| Sleep (idle, lid) | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| Suspend to RAM | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| Shutdown | untested | untested | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
-| Developer mode pairing | partly | untested | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
-| Firewall | partly | untested | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
+| Capability | A | B | C | D | E | F | G | H | I | J | K | L | M | N |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Boot from USB | verified | verified | partly | partly | untested | verified | untested | verified | verified | not supported | not supported | not supported | not supported | not supported |
+| Install to internal disk | partly | untested | untested | untested | untested | untested | untested | verified | not supported | not supported | not supported | not supported | not supported | not supported |
+| Install to USB drive | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
+| Upgrade from previous release | untested | untested | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported |
+| Secure Boot | untested | untested | not supported | untested | untested | verified | untested | verified | not supported | not supported | not supported | not supported | not supported | not supported |
+| Display, internal | verified | not supported | not supported | untested | untested | untested | untested | verified | verified | untested | not supported | not supported | not supported | not supported |
+| Display, external monitor | verified | verified | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported | untested |
+| Display, hot-plug | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported | untested |
+| Touch screen mapping | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported | not supported |
+| Keyboard (and pointer) | verified | verified | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | untested |
+| Touch Bar | partly | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported |
+| Fn keys | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported | not supported |
+| Sound out | verified | verified | partly | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | untested |
+| Sound in (built-in) | not supported | not supported | not supported | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported | not supported |
+| USB camera | partly | verified | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported | untested |
+| USB microphone | verified | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported | untested |
+| Built-in camera | verified | not supported | not supported | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported | not supported |
+| Wi-Fi | verified | untested | failing | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported | not supported |
+| Ethernet | partly | verified | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | untested |
+| Bluetooth | mixed | 2026-11-10 | owner on a MacBook Pro 14,1 (2026-11-08): pair, phone sound and tether with internet; the Mac mini 2018 (BCM4364, no patch file in macOS images): the page scans and lists devices, pairing untried | In-house stack. MacBook Pro 14,1 works; on the Mac mini 2018 the controller runs in its ROM state, so a USB dongle is the fallback. | not supported |
+| USB-C link and internet sharing | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported | not supported |
+| k3s start | verified | verified | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | untested |
+| GPU for k3s | untested | untested | untested | untested | untested | untested | partly | not supported | not supported | untested | not supported | not supported | not supported | not supported |
+| Browser, software drawing | verified | verified | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | untested |
+| Browser, hardware drawing | partly | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported | not supported |
+| Video decode | partly | partly | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported |
+| Battery and power source | untested | not supported | not supported | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported | not supported |
+| Sleep (idle, lid) | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported | not supported |
+| Suspend to RAM | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported | not supported |
+| Shutdown | untested | untested | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | untested |
+| Developer mode pairing | partly | untested | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | untested |
+| Firewall | partly | untested | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | untested |
 
 ## 3. Counts
 
-416 cells = 32 capabilities x 13 machines.
+448 cells = 32 capabilities x 14 machines (machine N, the KV260, added 2026-11-21: 12 `untested` and 20 `not supported`; the table and the per-machine counts below were last computed for A to M, so add those 12 and 20 to their rows).
 
 | Status | Cells |
 |---|---|
 | verified | 26 |
 | partly | 14 |
 | failing | 3 |
-| untested | 204 |
-| not supported | 169 |
+| untested | 216 |
+| not supported | 189 |
 | waived | 0 |
-| **total** | **416** |
+| **total** | **448** |
 
 Of the 169 `not supported` cells, 50 are `no such part` (a Mac mini has no battery, a VM has no Touch Bar) and the rest are decisions or plans (Apple Silicon bare metal, Raspberry Pi, Jetson, the aarch64 installer, Secure Boot on a Mac mini 2014).
 3 of the `untested` cells were last seen failing and have a built, unverified fix.
@@ -121,6 +122,7 @@ Per machine:
 | K | 0 | 0 | 0 | 0 | 32 | 0 |
 | L | 0 | 0 | 0 | 0 | 32 | 0 |
 | M | 0 | 0 | 0 | 0 | 32 | 0 |
+| N | 0 | 0 | 0 | 12 | 20 | 0 |
 
 
 The machines that count for the gate are A to E. Their 146 cells that apply (no `no such part`) are: 20 verified, 13 partly, 3 failing, 110 untested (counts updated 2026-11-12 for machine C only; see section 10).
@@ -507,15 +509,19 @@ stage 1 on this machine; the rebuilt kernel boots it (docs/development/HP-LAPTOP
 
 ### K. Raspberry Pi 5
 
-Planned, see docs/development/RASPBERRY-PI-PLAN.md; nothing built or booted. Every cell is `not supported` (2026-10-26, [../HARDWARE.md](../HARDWARE.md) and [../development/RASPBERRY-PI-PLAN.md](../development/RASPBERRY-PI-PLAN.md)). Nothing to test.
+Alpha.8 (2026-11-21): the image, the boot volume files, the kernel (Raspberry Pi tree 6.12.115, 4 KiB pages) and the SD-card writer path are built and the same files boot in QEMU's `virt` machine (stage 1, data volume, agent start); **nothing was run on a real Pi 5**. Every cell stays `not supported` until the owner's first-boot checklist F-RPI-08 (`docs/BOARD-RPI5-FIRST-BOOT.md`) is answered by a person (2026-10-26, [../HARDWARE.md](../HARDWARE.md) and [../development/RASPBERRY-PI-PLAN.md](../development/RASPBERRY-PI-PLAN.md)). Nothing to test.
 
 ### L. Raspberry Pi 3 (IYAKKI lite)
 
-Planned as IYAKKI lite (headless), docs/development/RASPBERRY-PI-PLAN.md section 5; nothing built. Every cell is `not supported` (2026-10-26, [../HARDWARE.md](../HARDWARE.md) and [../development/RASPBERRY-PI-PLAN.md](../development/RASPBERRY-PI-PLAN.md)). Nothing to test.
+Planned as IYAKKI lite (headless), docs/development/RASPBERRY-PI-PLAN.md sections 5 and 13.2 (design only, nothing built; the boot firmware pack is pinned but cannot be fetched). Every cell is `not supported` (2026-10-26, [../HARDWARE.md](../HARDWARE.md) and [../development/RASPBERRY-PI-PLAN.md](../development/RASPBERRY-PI-PLAN.md)). Nothing to test.
 
 ### M. NVIDIA Jetson
 
 Not planned (RASPBERRY-PI-PLAN.md note on Jetson). Every cell is `not supported` (2026-10-26, [../HARDWARE.md](../HARDWARE.md) and [../development/RASPBERRY-PI-PLAN.md](../development/RASPBERRY-PI-PLAN.md)). Nothing to test.
+
+### N. AMD Kria KV260 Starter Kit
+
+Optional board (docs/development/KV260-PLAN.md; first-boot guide ../BOARD-KV260-FIRST-BOOT.md). 2026-11-21: the SD-card image recipe, the kernel fragment for AMD's linux-xlnx tree, the extlinux menu and the SD writer exist and their layout is checked by `dist/buildroot/test-kv260-layout.sh`; the userspace boots in QEMU (`dist/buildroot/qemu-test-kv260.sh`). **Nothing has run on a real board.** Boot is from the SD card (the board's own U-Boot reads extlinux/extlinux.conf), so the `Boot from USB` cell is `not supported`. Cells that need the board are `untested` until the owner's test (Manual column of F-KV260-01 and the checklist in dist/autotest/checklists/F-KV260-01.json); everything with no such part or no code is `not supported`.
 
 ## 5. Re-rank: release-blocking for 1.0.0, or waivable in writing
 

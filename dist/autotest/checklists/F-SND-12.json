@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-SND-12",
+  "feature_sha": "671efaa51fbe701b",
+  "title": "browser and video sound shared with the radio",
+  "clauses": [
+    {
+      "id": "av-sync",
+      "text": "Picture and sound of a video played in the browser pane stay together, and the radio is shared with it",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "Play a video in the browser pane with the radio also on, then press the volume key once.",
+          "expect": "Picture and sound are together (no obvious lip-sync delay). The radio is quieter during a speech cue and moves with the one volume."
+        }
+      ]
+    }
+  ]
+}

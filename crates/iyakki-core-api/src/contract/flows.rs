@@ -80,3 +80,31 @@ pub trait Flows: Send + Sync {
     fn events(&self, ctx: &CallContext, run: Option<&RunId>, resume: Resume, limit: usize) -> CallResult<EventBatch<FlowEvent>>;
     fn approve(&self, ctx: &CallContext, run: &RunId, approval_id: &str, allow: bool) -> CallResult<RunStatus>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_succeeded_failed_and_stopped_runs_count_as_finished() {
+        assert!(RunState::Succeeded.is_finished());
+        assert!(RunState::Failed.is_finished());
+        assert!(RunState::Stopped.is_finished());
+        assert!(!RunState::Running.is_finished());
+        assert!(!RunState::WaitingApproval.is_finished());
+    }
+
+    #[test]
+    fn a_run_state_from_a_newer_release_is_not_finished_so_a_caller_asks_again_later() {
+        assert!(!RunState::Unknown.is_finished());
+        let s: RunState = serde_json::from_str("\"paused_by_a_newer_release\"").unwrap();
+        assert_eq!(s, RunState::Unknown);
+        assert!(!s.is_finished());
+    }
+
+    #[test]
+    fn the_known_run_states_read_from_their_snake_case_names() {
+        assert_eq!(serde_json::from_str::<RunState>("\"waiting_approval\"").unwrap(), RunState::WaitingApproval);
+        assert_eq!(serde_json::from_str::<RunState>("\"succeeded\"").unwrap(), RunState::Succeeded);
+    }
+}

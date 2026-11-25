@@ -1,0 +1,52 @@
+{
+ "schema": 1,
+ "row": "F-KBD-19",
+ "feature_sha": "1e44af93e8c9d09e",
+ "title": "input profile Mac or PC with Automatic",
+ "clauses": [
+  {
+   "id": "profile",
+   "text": "the input profile Automatic, Mac or PC is set on the Keyboard page and applies at once",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Keyboard and choose Mac, then choose PC, then choose Automatic.",
+     "expect": "Each choice applies without a restart and the help line under the control says what it does."
+    }
+   ]
+  },
+  {
+   "id": "mac-keys",
+   "text": "in the Mac profile Command does what Control does on a PC",
+   "machines": [
+    "macbook-pro",
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "With the Mac profile set, in a text field, press Command+C, Command+V, Command+A, then Command+Left and Command+Right.",
+     "expect": "Command+C, Command+V and Command+A copy, paste and select all; Command+Left and Command+Right go to the start and the end of the line. Control+C stays Control+C."
+    },
+    {
+     "do": "Press Ctrl+Cmd+Q, then Ctrl+Cmd+L.",
+     "expect": "Ctrl+Cmd+Q asks to sign out and Ctrl+Cmd+L locks the screen. Report what each does, since this mapping was changed in November."
+    }
+   ]
+  },
+  {
+   "id": "three-finger",
+   "text": "three-finger drag is off by default and when it is on, three fingers drag with the left button",
+   "machines": [
+    "macbook-pro"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Keyboard and check the three-finger drag switch (key J), which should be off. Turn it on, then move three fingers on the trackpad.",
+     "expect": "With it on, three fingers moving hold the left button and move the pointer, and lifting the fingers drops it. Turn it off again afterwards."
+    }
+   ]
+  }
+ ]
+}

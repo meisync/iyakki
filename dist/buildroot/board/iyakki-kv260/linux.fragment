@@ -1,0 +1,49 @@
+# Kernel options for the AMD Kria KV260 Starter Kit (K26 SOM, Zynq UltraScale+ MPSoC). Applied ON TOP of AMD's own `xilinx_defconfig`
+# (linux-xlnx, pinned in dist/kv260/PINS) and AFTER board/iyakki-aarch64/linux.fragment (the shared aarch64 options: cgroups, nftables,
+# zram, WireGuard, USB network cards...). Everything here is a driver the board needs for a first boot with NO programmable-logic (PL)
+# bitstream; `dist/buildroot/verify-kernel-config.sh` (VARIANT=kv260) checks that kconfig keeps every line.
+# Verified in the linux-xlnx tree at the pinned tag: the device trees zynqmp-smk-k26-revA-sck-kv-g-revA/revB.dtb exist, the console is
+# `serial1:115200n8` (PS UART1, Linux name ttyPS1), the SD slot is sdhci1 (`mmc1`), the eMMC node is disabled on the starter kit.
+CONFIG_ARCH_ZYNQMP=y
+# platform management: the PMU firmware interface, power domains, clocks and resets all go through the firmware; without them the
+# SD, USB, Ethernet and DisplayPort blocks are never powered
+CONFIG_ZYNQMP_FIRMWARE=y
+CONFIG_ZYNQMP_PM_DOMAINS=y
+CONFIG_COMMON_CLK_ZYNQMP=y
+CONFIG_RESET_ZYNQMP=y
+CONFIG_XILINX_ZYNQMP_DMA=y
+CONFIG_PHY_XILINX_ZYNQMP=y
+# serial console (the micro-USB connector is an FTDI bridge to PS UART1)
+CONFIG_SERIAL_XILINX_PS_UART=y
+CONFIG_SERIAL_XILINX_PS_UART_CONSOLE=y
+# SD card (the board's boot medium) and its host controller
+CONFIG_MMC_SDHCI_PLTFM=y
+CONFIG_MMC_SDHCI_OF_ARASAN=y
+# Ethernet: Cadence GEM
+CONFIG_MACB=y
+# USB: Synopsys DWC3 with the Xilinx glue, host mode (xHCI), mass storage, and the on-board hub (USB5744) that needs its own driver
+CONFIG_USB_DWC3=y
+CONFIG_USB_DWC3_XILINX=y
+CONFIG_USB_DWC3_HOST=y
+CONFIG_USB_XHCI_HCD=y
+CONFIG_USB_STORAGE=y
+CONFIG_USB_ONBOARD_DEV=y
+# DisplayPort: the ZynqMP display subsystem (DRM/KMS) with its DMA engine, and the framebuffer emulation the shell draws to
+CONFIG_DRM=y
+CONFIG_DRM_ZYNQMP_DPSUB=y
+CONFIG_XILINX_ZYNQMP_DPDMA=y
+CONFIG_DRM_FBDEV_EMULATION=y
+CONFIG_CMA=y
+CONFIG_CMA_SIZE_MBYTES=128
+# buses the SOM and carrier card use (EEPROMs with the board identity, GPIO, I2C)
+CONFIG_I2C_CADENCE=y
+CONFIG_GPIO_ZYNQ=y
+CONFIG_EEPROM_AT24=y
+CONFIG_CADENCE_WATCHDOG=y
+CONFIG_RTC_DRV_ZYNQMP=y
+# SAFETY (the owner's rule: IYAKKI never writes the boot flash). The QSPI flash on the SOM holds the board's primary boot firmware; with no
+# SPI NOR and no MTD block driver in the kernel there is no /dev/mtd* to write by mistake, and the generic quad-SPI controller driver is off.
+# These lines are "is not set": the verify script checks that the options really are off.
+# CONFIG_MTD_SPI_NOR is not set
+# CONFIG_SPI_ZYNQMP_GQSPI is not set
+# CONFIG_MTD_BLOCK is not set

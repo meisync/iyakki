@@ -1738,6 +1738,7 @@ mod tests {
 
     #[test]
     fn cells_rows_and_selections_copy_to_the_clipboard() {
+        let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
         let (mut v, _d, _) = view("dv-copy", 200);
         let g = frame(&mut v, 1280, 700);
         crate::ui::clipboard::clear();

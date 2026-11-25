@@ -6,7 +6,8 @@
 
 use super::*;
 use iyakki_shared::cloudroles::{Change, NsRole, TenantRole};
-use iyakki_shared::cloudroles::{self, Roles};
+use iyakki_shared::cloudroles::Roles;
+use super::account_port::CloudRolesPort;
 use std::time::{Duration, Instant};
 
 const FIELD_ID: usize = 932;
@@ -90,26 +91,22 @@ fn section(i: &Item) -> u8 {
 }
 
 impl SettingsApp {
-    fn roles_file(cx: &AppCx) -> std::path::PathBuf {
-        cloudroles::path(cx.data_dir())
-    }
-
-    fn roles_fresh(&mut self, cx: &AppCx) -> Loaded {
-        let l = cloudroles::load(&Self::roles_file(cx));
+    fn roles_fresh(&mut self, p: &dyn CloudRolesPort) -> Loaded {
+        let l = p.roles_load();
         self.roles.cache = Some((Instant::now(), l.clone()));
         l
     }
 
-    fn roles_cached(&mut self, cx: &AppCx) -> Loaded {
+    fn roles_cached(&mut self, p: &dyn CloudRolesPort) -> Loaded {
         match &self.roles.cache {
             Some((at, l)) if at.elapsed() < REREAD => l.clone(),
-            _ => self.roles_fresh(cx),
+            _ => self.roles_fresh(p),
         }
     }
 
-    pub(super) fn roles_len(&mut self, cx: &AppCx) -> usize {
-        match self.roles_cached(cx) {
-            Ok(Some(r)) => items(&r, &cx.session.user).len(),
+    pub(super) fn roles_len(&mut self, p: &dyn CloudRolesPort) -> usize {
+        match self.roles_cached(p) {
+            Ok(Some(r)) => items(&r, &p.user()).len(),
             _ => 0,
         }
     }
@@ -133,7 +130,7 @@ impl SettingsApp {
     }
 
     /// Keys and paste while a name is being typed or a removal waits for its answer. True when the event was taken.
-    pub(super) fn roles_event(&mut self, ev: &Event, cx: &AppCx) -> bool {
+    pub(super) fn roles_event(&mut self, ev: &Event, p: &dyn CloudRolesPort) -> bool {
         if !self.roles_open() {
             return false;
         }
@@ -147,7 +144,7 @@ impl SettingsApp {
             match ev {
                 Event::Key(Key::Char('y')) | Event::Key(Key::Char('Y')) => {
                     if let Some(s) = self.roles.sure.take() {
-                        self.roles_confirmed(s, cx);
+                        self.roles_confirmed(s, p);
                     }
                 }
                 Event::Key(_) => {
@@ -164,7 +161,7 @@ impl SettingsApp {
             }
             Event::Key(Key::Enter) => {
                 if let Some((ask, f)) = self.roles.ask.take() {
-                    self.roles_submit(ask, f.value.trim().to_string(), cx);
+                    self.roles_submit(ask, f.value.trim().to_string(), p);
                 }
             }
             Event::Key(k) => {
@@ -188,26 +185,25 @@ impl SettingsApp {
     }
 
     /// Run a change as the signed-in account: the model checks who may, the lists are saved, the trail and the app audit log get a line.
-    fn roles_apply(&mut self, cx: &AppCx, f: impl FnOnce(&mut Roles, &str) -> Result<Change, String>) {
-        let me = cx.session.user.clone();
-        let mut r = match self.roles_fresh(cx) {
+    fn roles_apply(&mut self, p: &dyn CloudRolesPort, f: impl FnOnce(&mut Roles, &str) -> Result<Change, String>) {
+        let me = p.user();
+        let mut r = match self.roles_fresh(p) {
             Ok(Some(r)) => r,
             Ok(None) => return self.fail("This machine has no roles yet: choose Make me the owner first."),
             Err(e) => return self.fail(e),
         };
         match f(&mut r, &me) {
             Err(e) => {
-                cx.audit.record(&me, "settings.cloud_roles.refused", &e);
+                p.audit("settings.cloud_roles.refused", &e);
                 self.fail(format!("Refused: {e}."));
             }
             Ok(c) => {
-                let file = Self::roles_file(cx);
                 let now = iyakki_clock::now_unix().max(0) as u64;
-                if let Err(e) = cloudroles::save(&file, &r) {
+                if let Err(e) = p.roles_save(&r) {
                     return self.fail(e);
                 }
-                let trail = cloudroles::append_audit(&cloudroles::audit_path(cx.data_dir()), now, &c);
-                cx.audit.record(&me, "settings.cloud_roles", &c.0);
+                let trail = p.roles_trail_append(now, &c);
+                p.audit("settings.cloud_roles", &c.0);
                 self.roles.cache = Some((Instant::now(), Ok(Some(r))));
                 match trail {
                     Ok(()) => self.ok(c.0),
@@ -238,7 +234,7 @@ impl SettingsApp {
         Ok(s)
     }
 
-    fn roles_submit(&mut self, ask: Ask, text: String, cx: &AppCx) {
+    fn roles_submit(&mut self, ask: Ask, text: String, p: &dyn CloudRolesPort) {
         if matches!(ask, Ask::Vault) {
             return match Self::vault_setting_from(&text) {
                 Ok(s) => self.roles.sure = Some(Sure::Vault(s)),
@@ -265,7 +261,7 @@ impl SettingsApp {
         }
         match ask {
             Ask::Vault => {}
-            Ask::Namespace => self.roles_apply(cx, |r, me| r.create_namespace(me, &name)),
+            Ask::Namespace => self.roles_apply(p, |r, me| r.create_namespace(me, &name)),
             Ask::TenantMember => {
                 let role = match role_word.as_deref() {
                     None | Some("member") => TenantRole::Member,
@@ -273,7 +269,7 @@ impl SettingsApp {
                     Some("owner") => TenantRole::Owner,
                     Some(w) => return self.fail(format!("\"{w}\" is not a role: owner, admin or member.")),
                 };
-                self.roles_apply(cx, |r, me| r.add_tenant_member(me, &name, role));
+                self.roles_apply(p, |r, me| r.add_tenant_member(me, &name, role));
             }
             Ask::NsMember(ns) => {
                 let role = match role_word.as_deref() {
@@ -282,34 +278,34 @@ impl SettingsApp {
                     Some("viewer") => NsRole::Viewer,
                     Some(w) => return self.fail(format!("\"{w}\" is not a role: admin, editor or viewer.")),
                 };
-                self.roles_apply(cx, |r, me| r.add_namespace_member(me, &ns, &name, role));
+                self.roles_apply(p, |r, me| r.add_namespace_member(me, &ns, &name, role));
             }
         }
     }
 
-    fn roles_confirmed(&mut self, s: Sure, cx: &AppCx) {
+    fn roles_confirmed(&mut self, s: Sure, p: &dyn CloudRolesPort) {
         match s {
-            Sure::RemoveTenant(who) => self.roles_apply(cx, |r, me| r.remove_tenant_member(me, &who)),
-            Sure::RemoveNs(ns, who) => self.roles_apply(cx, |r, me| r.remove_namespace_member(me, &ns, &who)),
-            Sure::DeleteNs(ns) => self.roles_apply(cx, |r, me| r.delete_namespace(me, &ns)),
+            Sure::RemoveTenant(who) => self.roles_apply(p, |r, me| r.remove_tenant_member(me, &who)),
+            Sure::RemoveNs(ns, who) => self.roles_apply(p, |r, me| r.remove_namespace_member(me, &ns, &who)),
+            Sure::DeleteNs(ns) => self.roles_apply(p, |r, me| r.delete_namespace(me, &ns)),
             Sure::Vault(setting) => {
-                let me = cx.session.user.clone();
-                match setting.save(cx.data_dir(), &me) {
+                let me = p.user();
+                match p.shared_vault_save(&setting, &me) {
                     Ok(()) => {
-                        cx.audit.record(&me, "settings.shared_vault_provider", setting.provider.word());
+                        p.audit("settings.shared_vault_provider", setting.provider.word());
                         self.ok(format!("{} Secrets already stored are not moved to the other system.", setting.summary()));
                     }
                     Err(e) => self.fail(e),
                 }
             }
         }
-        let len = self.roles_len(cx);
+        let len = self.roles_len(p);
         let i = &mut self.sel[self.tab];
         *i = (*i).min(len.saturating_sub(1));
     }
 
-    pub(super) fn handle_cloudroles(&mut self, k: &Key, cx: &AppCx) {
-        let len = self.roles_len(cx);
+    pub(super) fn handle_cloudroles(&mut self, k: &Key, p: &dyn CloudRolesPort) {
+        let len = self.roles_len(p);
         match k {
             Key::Up => return self.move_sel(-1, len),
             Key::Down => return self.move_sel(1, len),
@@ -318,15 +314,15 @@ impl SettingsApp {
             Key::Char('m' | 'n' | 'a' | 'j' | 'x' | 'd' | 'o' | 'v') => {}
             _ => return,
         }
-        if !self.admin(cx) {
+        if !self.admin(p) {
             return;
         }
         if matches!(k, Key::Char('v')) {
             self.roles.ask = Some((Ask::Vault, TextField::new("builtin, or: external ADDRESS PATH TOKEN-SECRET-NAME [MOUNT] [NAMESPACE]", false)));
             return;
         }
-        let me = cx.session.user.clone();
-        let loaded = self.roles_fresh(cx);
+        let me = p.user();
+        let loaded = self.roles_fresh(p);
         let Ok(roles) = loaded else { return self.fail("The roles file cannot be read.") };
         let Some(roles) = roles else {
             if matches!(k, Key::Char('o')) {
@@ -334,13 +330,12 @@ impl SettingsApp {
                 match Roles::new(&me) {
                     Ok(r) => {
                         let c = Change(format!("tenant: {me} made themselves the first owner of this machine's tenant"));
-                        let file = Self::roles_file(cx);
-                        if let Err(e) = cloudroles::save(&file, &r) {
+                        if let Err(e) = p.roles_save(&r) {
                             return self.fail(e);
                         }
                         let now = iyakki_clock::now_unix().max(0) as u64;
-                        let _ = cloudroles::append_audit(&cloudroles::audit_path(cx.data_dir()), now, &c);
-                        cx.audit.record(&me, "settings.cloud_roles", &c.0);
+                        let _ = p.roles_trail_append(now, &c);
+                        p.audit("settings.cloud_roles", &c.0);
                         self.roles.cache = Some((Instant::now(), Ok(Some(r))));
                         self.ok(format!("{me} is the owner of this machine's tenant."));
                     }
@@ -367,7 +362,7 @@ impl SettingsApp {
                 None => self.fail("Choose a namespace first."),
             },
             Key::Char('j') => match ns_of(&sel) {
-                Some(ns) => self.roles_apply(cx, |r, me| r.add_namespace_member(me, &ns, me, NsRole::Editor)),
+                Some(ns) => self.roles_apply(p, |r, me| r.add_namespace_member(me, &ns, me, NsRole::Editor)),
                 None => self.fail("Choose a namespace first."),
             },
             Key::Char('x') => match sel {
@@ -393,9 +388,9 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn render_cloudroles(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let me = cx.session.user.clone();
-        let loaded = self.roles_cached(cx);
+    pub(super) fn render_cloudroles(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn CloudRolesPort) {
+        let me = p.user();
+        let loaded = self.roles_cached(p);
         let mut y = a.y;
         let line = |g: &mut Gfx, y: &mut f32, size: f32, col: [u8; 4], face: Face, t: &str| {
             let t = g.fit(size * s, t, face, a.w);
@@ -421,7 +416,7 @@ impl SettingsApp {
         let help = if mine >= TenantRole::Admin { "Owners and administrators add people and namespaces; only a namespace's administrators add people to it." } else { "You see the namespaces you are in. Only owners and administrators see the member list." };
         line(g, &mut y, 13.0, MUTED, Face::Sans, help);
         // which cryptography keeps the shared vault, and that it is not externally reviewed (F-CLOUD-15)
-        line(g, &mut y, 12.0, MUTED, Face::Sans, &cx.agent.sharedvault_page_line(cx.data_dir()));
+        line(g, &mut y, 12.0, MUTED, Face::Sans, &p.sharedvault_line());
         y += 4.0 * s;
 
         // the question or the name being typed
@@ -450,7 +445,7 @@ impl SettingsApp {
         }
 
         // the audit trail tail takes what is left at the bottom, up to five lines
-        let trail = std::fs::read_to_string(cloudroles::audit_path(cx.data_dir())).unwrap_or_default();
+        let trail = p.roles_trail_text();
         let trail: Vec<&str> = trail.lines().collect();
         let free = a.y + a.h - y;
         let n_trail = (((free - 150.0 * s) / (17.0 * s)).max(0.0) as usize).min(5).min(trail.len());

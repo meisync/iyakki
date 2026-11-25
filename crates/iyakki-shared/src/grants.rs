@@ -4,11 +4,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-/// The text a card appends to the summary of a call that can never be covered by a session grant.
-pub const ALWAYS_ASKS: &str = "\nalways asks: ";
-
-/// The text a card appends to the summary of a call that "Allow for this session" would cover, and what it would cover.
-pub const SESSION_COVERS: &str = "\nallow for this session covers: ";
+pub use iyakki_chat_model::cardtext::{split_card, split_summary, Card, ALWAYS_ASKS, SESSION_COVERS};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Grant {
@@ -84,32 +80,6 @@ impl Grants {
 
     pub fn clear(&self) {
         self.lock().clear();
-    }
-}
-
-/// Split a card summary into the question and the `always asks` reason, if there is one.
-pub fn split_summary(s: &str) -> (&str, Option<&str>) {
-    match s.split_once(ALWAYS_ASKS) {
-        Some((q, why)) => (q, Some(why)),
-        None => (s, None),
-    }
-}
-
-/// A card summary taken apart: the question, why it always asks (no session button), or what a session grant would cover.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Card<'a> {
-    pub question: &'a str,
-    pub always: Option<&'a str>,
-    pub covers: Option<&'a str>,
-}
-
-pub fn split_card(s: &str) -> Card<'_> {
-    if let (q, Some(why)) = split_summary(s) {
-        return Card { question: q, always: Some(why), covers: None };
-    }
-    match s.split_once(SESSION_COVERS) {
-        Some((q, c)) => Card { question: q, always: None, covers: Some(c) },
-        None => Card { question: s, always: None, covers: None },
     }
 }
 

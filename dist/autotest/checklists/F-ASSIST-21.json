@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-21",
+  "feature_sha": "117d68b65d9ecb2b",
+  "title": "claims of done run the check",
+  "clauses": [
+    {
+      "id": "claim-check",
+      "text": "A claim of done runs the check, and a pass marks the row done",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "In a workspace with a test command set (commands.test in .iyakki/project.json), ask the assistant to implement one row and then claim it is done.",
+          "expect": "The check runs itself. A pass marks the row done; a fail returns the output and the row stays open."
+        }
+      ]
+    }
+  ]
+}

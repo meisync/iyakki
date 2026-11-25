@@ -1,0 +1,10 @@
+[package]
+name = "iyakki-sysinfo-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The figures of the System page as plain data and the pure rules over them (memory, byte and time words, roots, counters, processes, processor use, protected processes), the kubectl trait and the pod table and process rows of sysprocs, as a leaf crate. iyakki_core_api::sysinfo, iyakki_shared::kubectl and iyakki_shared::sysprocs re-export them (alpha.9 P6, D-S2-01)."
+
+[dependencies]
+iyakki-credguard = { workspace = true }
+serde_json = "1"

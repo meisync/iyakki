@@ -30,6 +30,7 @@ fn line_of(app: &ChatApp, start: &str) -> usize {
 
 #[test]
 fn dragging_across_two_blocks_selects_text_and_ctrl_c_copies_exactly_that() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     crate::ui::clipboard::clear();
     let (mut app, cx) = transcript_chat("chatsel1");
     render_with(&mut app, &cx, 1100, 1100);
@@ -62,6 +63,7 @@ fn dragging_across_two_blocks_selects_text_and_ctrl_c_copies_exactly_that() {
 
 #[test]
 fn double_click_selects_a_word_triple_click_a_paragraph_and_shift_click_extends() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     crate::ui::clipboard::clear();
     let (mut app, cx) = transcript_chat("chatsel2");
     render_with(&mut app, &cx, 1100, 1100);
@@ -84,6 +86,7 @@ fn double_click_selects_a_word_triple_click_a_paragraph_and_shift_click_extends(
 
 #[test]
 fn a_click_no_longer_copies_it_clears_the_selection_and_ctrl_c_without_one_copies_nothing() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     crate::ui::clipboard::clear();
     let (mut app, cx) = transcript_chat("chatsel3");
     render_with(&mut app, &cx, 1100, 1100);
@@ -108,6 +111,7 @@ fn a_click_no_longer_copies_it_clears_the_selection_and_ctrl_c_without_one_copie
 
 #[test]
 fn ctrl_a_selects_the_whole_transcript_when_the_box_is_empty_and_the_box_otherwise() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     crate::ui::clipboard::clear();
     let (mut app, cx) = transcript_chat("chatsel4");
     render_with(&mut app, &cx, 1100, 1100);
@@ -123,6 +127,7 @@ fn ctrl_a_selects_the_whole_transcript_when_the_box_is_empty_and_the_box_otherwi
 
 #[test]
 fn the_copy_button_of_a_hovered_message_or_code_block_copies_that_block() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     crate::ui::clipboard::clear();
     let (mut app, cx) = transcript_chat("chatsel5");
     render_with(&mut app, &cx, 1100, 1100);
@@ -159,6 +164,7 @@ fn the_copy_button_of_a_hovered_message_or_code_block_copies_that_block() {
 
 #[test]
 fn the_chat_adds_copy_message_and_copy_code_block_to_the_context_menu() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     use crate::apps::App;
     crate::ui::clipboard::clear();
     let (mut app, cx) = transcript_chat("chatsel6");
@@ -180,6 +186,7 @@ fn the_chat_adds_copy_message_and_copy_code_block_to_the_context_menu() {
 
 #[test]
 fn dragging_past_the_top_or_bottom_edge_scrolls_while_the_button_is_held() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     crate::ui::clipboard::clear();
     let (cx, _d) = cx_with_backend("chatsel7", iyakki_shared::chat::Unconfigured);
     let mut app = ChatApp::new();

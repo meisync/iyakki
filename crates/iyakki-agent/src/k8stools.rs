@@ -26,7 +26,7 @@ use crate::devcluster::{ClusterProfile, Kc};
 use crate::k8s::{self, Target};
 use crate::wsexec::{Out, Runner, Sink};
 
-pub const TOOLS: [&str; 20] = ["k8s_status", "k8s_get", "k8s_describe", "k8s_logs", "k8s_events", "k8s_apply", "k8s_port_forward", "k8s_port_forwards", "k8s_delete", "k8s_rollout_restart", "deploy_build", "deploy_load", "deploy_status", "deploy_run_job", "registry_setup_help", "cluster_setup_plan", "k8s_stop_env", "k8s_teardown", "k8s_registry_cleanup", "registry_setup"];
+pub const TOOLS: [&str; 21] = ["k8s_status", "k8s_get", "k8s_describe", "k8s_logs", "k8s_events", "k8s_apply", "k8s_port_forward", "k8s_port_forwards", "k8s_exec_terminal", "k8s_delete", "k8s_rollout_restart", "deploy_build", "deploy_load", "deploy_status", "deploy_run_job", "registry_setup_help", "cluster_setup_plan", "k8s_stop_env", "k8s_teardown", "k8s_registry_cleanup", "registry_setup"];
 pub const REGISTRY: &str = "localhost:5000";
 mod podfix;
 mod teardown;
@@ -107,7 +107,7 @@ pub struct K8sTools {
     /// it answers "is the system registry up" instead of the network.
     pub registry_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     /// The port-forwards started through `k8s_port_forward` (a field so tests can use a fake `kubectl`).
-    pub forwards: crate::k8sforward::Forwards,
+    pub forwards: Arc<dyn crate::k8sforward::PortForwards>,
     state: Mutex<State>,
 }
 
@@ -199,7 +199,8 @@ pub fn content_tag(dir: &Path) -> String {
 
 impl K8sTools {
     pub fn new(run: Arc<dyn Runner>, profile: ClusterProfile, ns: &str, ws: &str, root: &Path, audit: Arc<dyn Fn(&str, &str) + Send + Sync>) -> K8sTools {
-        let forwards = crate::k8sforward::Forwards::real(&profile.kubeconfig, &profile.context);
+        // the one list of this process (the core facet `Os::port_forwards`): what the tile starts is seen here and the other way round
+        let forwards: Arc<dyn crate::k8sforward::PortForwards> = iyakki_core_local::LocalPortForwards::shared();
         K8sTools { forwards, run, profile, ns: ns.into(), ws: ws.into(), root: root.into(), audit, registries_yaml: "/etc/rancher/k3s/registries.yaml".into(), cluster_phrase: String::new(), registry_setting: String::new(), registry_pull: String::new(), registry_kind: String::new(), registry_probe: None, state: Mutex::new(State::default()) }
     }
 
@@ -282,6 +283,7 @@ impl K8sTools {
             t("k8s_apply", format!("Apply a manifest to namespace \"{ns}\": `manifest_path` (a YAML file in the workspace, such as deploy/app.yaml) or `yaml` (text, saved to deploy/). It is checked first (no privileged containers, hostPath, host networking, added capabilities, cluster-scoped kinds or other namespaces; `imagePullPolicy: IfNotPresent` is set for images you loaded with deploy_load). The person sees the check and `kubectl diff` and approves. Creates the namespace on the first apply."), obj(json!({"manifest_path": {"type": "string"}, "yaml": {"type": "string"}}), &[]), Risk::Ask, false),
             t("k8s_port_forward", format!("Start or stop a port-forward from this machine to namespace \"{ns}\": `action` start (`kind` pod, svc or deployment, `name`, `port` on the object, optional `local_port` of 1024 or more, otherwise a free one is chosen) or stop (`id` from k8s_port_forwards). Only 127.0.0.1 is opened, so nothing else on the network can use it; at most {} run at once and all stop when the session ends. The person approves.", crate::k8sforward::MAX_FORWARDS), obj(json!({"action": {"type": "string"}, "kind": {"type": "string"}, "name": {"type": "string"}, "port": {"type": "integer"}, "local_port": {"type": "integer"}, "id": {"type": "integer"}}), &["action"]), Risk::Ask, false),
             t("k8s_port_forwards", "List the port-forwards this session started (read-only): number, local address, object and port.".into(), obj(json!({}), &[]), Risk::Safe, false),
+            t("k8s_exec_terminal", format!("Open a shell INSIDE a pod of namespace \"{ns}\" in the Terminal (kubectl exec -it): `pod`, optional `container` and `shell` (sh, bash, ash or zsh). The person approves this call, then the Terminal asks once more for the whole session (it is not checked line by line and what is typed is not recorded) and the account needs a full terminal. This tool only asks; you cannot type into the session."), obj(json!({"pod": {"type": "string"}, "container": {"type": "string"}, "shell": {"type": "string"}}), &["pod"]), Risk::Ask, false),
             t("k8s_delete", format!("Delete one object in namespace \"{ns}\" by `kind` and `name` (never a whole namespace or --all). The person approves."), obj(json!({"kind": {"type": "string"}, "name": {"type": "string"}}), &["kind", "name"]), Risk::Ask, false),
             t("k8s_rollout_restart", format!("Restart a deployment in namespace \"{ns}\" (rolling): `name`, optional `kind` (deployment, statefulset, daemonset). The person approves."), obj(json!({"name": {"type": "string"}, "kind": {"type": "string"}}), &["name"]), Risk::Ask, false),
             t("deploy_build", "Build a container image from a folder of the workspace with podman (docker if podman is not installed): `dir` (holds a Dockerfile or Containerfile AND the files it COPYs, such as package.json and the app: keep them in one folder; a COPY that matches no file is refused before any build), `image` name (lowercase, no registry), optional `tag` (default a hash of the files, so every change rolls out). Optional `target` builds one stage of a multi-stage Dockerfile (`--target`); a test target (a stage named test, unit-test…) builds the UNIT-TEST image `<image>-<target>:<tag>`, which runs the tests and coverage while building: the result is \"TEST BUILD (not for deploy)\" with the pass/fail counts, the coverage % and the last test output, a failing test returns the failing output as the error, and that image is never passed to deploy_load. Optional `build_args` (object) become `--build-arg`. Returns the image reference to use. The person approves the command.".into(), obj(json!({"dir": {"type": "string"}, "image": {"type": "string"}, "tag": {"type": "string"}, "dockerfile": {"type": "string"}, "target": {"type": "string"}, "build_args": {"type": "object"}}), &["dir", "image"]), Risk::Ask, false),
@@ -320,6 +322,7 @@ impl K8sTools {
                 _ => format!("forward 127.0.0.1:{} to {} {}:{} in {ctx}{ro}", args.get("local_port").and_then(Value::as_u64).map(|p| p.to_string()).unwrap_or_else(|| "(a free port)".into()), s("kind"), s("name"), args.get("port").and_then(Value::as_u64).unwrap_or(0)),
             },
             "k8s_port_forwards" => "list the port-forwards".into(),
+            "k8s_exec_terminal" => format!("open a shell inside pod {} in the Terminal ({ctx})", s("pod")),
             "k8s_rollout_restart" => format!("restart {} {} in {ctx}{ro}", if arg(args, "kind").is_empty() { "deployment" } else { arg(args, "kind") }, s("name")),
             "deploy_build" => {
                 let (engine, argv) = match self.build_plan(args) {
@@ -371,6 +374,10 @@ impl K8sTools {
                 Err(e) => format!("this would be refused: {e}"),
             }),
             "k8s_port_forward" => Some(self.forward_preview(args)),
+            "k8s_exec_terminal" => Some(match self.exec_request(args) {
+                Ok(e) => format!("kubectl {}\nThe Terminal opens on it and asks you once more before the shell starts.", e.argv().unwrap_or_default().join(" ")),
+                Err(e) => format!("this would be refused: {e}"),
+            }),
             "k8s_delete" => Some(format!("kubectl delete {} {} -n {} (context {})", arg(args, "kind"), arg(args, "name"), self.ns, self.profile.context)),
             _ => None,
         }
@@ -398,6 +405,7 @@ impl K8sTools {
             "k8s_rollout_restart" => self.restart(args),
             "k8s_port_forward" => self.port_forward(args),
             "k8s_port_forwards" => Ok(self.forward_list()),
+            "k8s_exec_terminal" => self.exec_terminal(args),
             "deploy_build" => self.build(args),
             "deploy_load" => self.load(args),
             "deploy_status" => self.deploy_status(args),
@@ -1062,6 +1070,20 @@ impl K8sTools {
         }
     }
 
+    /// The pod session the person asked for, every part checked (the same checks the core makes before it starts `kubectl exec`).
+    fn exec_request(&self, args: &Value) -> Result<iyakki_core_api::terminal::PtyExec, String> {
+        let e = iyakki_core_api::terminal::PtyExec { kubeconfig: self.profile.kubeconfig.clone(), context: self.profile.context.clone(), namespace: self.ns.clone(), pod: arg(args, "pod").to_string(), container: arg(args, "container").to_string(), shell: arg(args, "shell").to_string() };
+        e.check()?;
+        Ok(e)
+    }
+
+    /// Hand the Terminal the pod to open: it asks the person for the session and the core checks the account's level; nothing starts here.
+    fn exec_terminal(&self, args: &Value) -> Result<String, String> {
+        let e = self.exec_request(args)?;
+        crate::k8sforward::queue_pod_terminal(&e);
+        Ok(format!("Asked the Terminal to open a shell inside pod {} (namespace {}). It asks you for a yes before anything starts; the session is yours to type into.", e.pod, e.namespace))
+    }
+
     fn forward_list(&self) -> String {
         let v = self.forwards.list();
         if v.is_empty() {
@@ -1081,7 +1103,7 @@ impl K8sTools {
                     return Err(e);
                 }
                 let (kind, name, remote, local) = self.forward_request(args)?;
-                let i = self.forwards.start(&self.ns, kind, &name, remote, local)?;
+                let i = self.forwards.start(&crate::k8sforward::Request { kubeconfig: self.profile.kubeconfig.clone(), context: self.profile.context.clone(), namespace: self.ns.clone(), kind, name, remote, local })?;
                 Ok(format!("Forwarding: {}\nOpen http://127.0.0.1:{}/ for a web page. Stop it with k8s_port_forward action stop id {}.", i.line(), i.local, i.id))
             }
             other => Err(format!("`action` is start or stop, not `{other}`")),
@@ -1561,7 +1583,7 @@ mod tests {
             std::mem::forget(tx);
             Ok((Box::new(P(d2.clone())) as Box<dyn Proc>, rx))
         });
-        g.t.forwards = crate::k8sforward::Forwards::with_spawn(spawn, Duration::from_secs(1));
+        g.t.forwards = Arc::new(crate::k8sforward::Forwards::with_spawn(spawn, Duration::from_secs(1)));
         let defs = g.t.defs();
         assert_eq!(defs.iter().find(|d| d.spec.name == "k8s_port_forward").unwrap().risk, Risk::Ask);
         assert_eq!(defs.iter().find(|d| d.spec.name == "k8s_port_forwards").unwrap().risk, Risk::Safe);
@@ -1572,7 +1594,7 @@ mod tests {
         assert_eq!(g.t.call("k8s_port_forwards", &json!({})).unwrap(), "No port-forward is running.");
         let out = g.t.call("k8s_port_forward", &args).unwrap();
         assert!(out.contains("#1 127.0.0.1:43111 -> shop-dev/svc/web:80") && out.contains("http://127.0.0.1:43111/"), "{out}");
-        assert_eq!(args_seen.lock().unwrap()[0], ["port-forward", "--address=127.0.0.1", "--namespace=shop-dev", "svc/web", ":80"]);
+        assert_eq!(args_seen.lock().unwrap()[0], ["--kubeconfig=/home/u/.kube/k3s.yaml", "--context=default", "port-forward", "--address=127.0.0.1", "--namespace=shop-dev", "svc/web", ":80"]);
         assert!(g.t.call("k8s_port_forwards", &json!({})).unwrap().contains("#1"));
         assert!(g.audited.lock().unwrap().iter().any(|l| l.starts_with("k8s.k8s_port_forward ") && l.contains(":ok ")));
         for bad in [json!({"action": "start", "kind": "node", "name": "web", "port": 80}), json!({"action": "start", "kind": "pod", "name": "web", "port": 0}), json!({"action": "start", "kind": "pod", "name": "a b", "port": 80}), json!({"action": "start", "kind": "pod", "name": "web", "port": 80, "local_port": 22}), json!({"action": "pause"})] {
@@ -1585,12 +1607,36 @@ mod tests {
     }
 
     #[test]
+    fn exec_terminal_asks_checks_every_part_and_only_queues_the_item_the_terminal_reads() {
+        let _lock = iyakki_testkit::lock("podterm-queue");
+        let _ = iyakki_shared::podterm::take();
+        let g = rig("exec", true);
+        let defs = g.t.defs();
+        assert_eq!(defs.iter().find(|d| d.spec.name == "k8s_exec_terminal").unwrap().risk, Risk::Ask);
+        let args = json!({"pod": "web-1", "container": "app", "shell": "bash"});
+        assert!(g.t.describe("k8s_exec_terminal", &args).contains("open a shell inside pod web-1 in the Terminal"));
+        let pv = g.t.preview("k8s_exec_terminal", &args).unwrap();
+        assert!(pv.contains("exec -it --namespace=shop-dev web-1 -c app -- bash") && pv.contains("asks you once more"), "{pv}");
+        assert!(iyakki_shared::podterm::take().is_none(), "describing and previewing queue nothing");
+        let out = g.t.call("k8s_exec_terminal", &args).unwrap();
+        assert!(out.contains("pod web-1") && out.contains("asks you for a yes"), "{out}");
+        let item = iyakki_shared::podterm::take().expect("the item waits for the shell");
+        assert_eq!(item, "pod:/home/u/.kube/k3s.yaml\ndefault\nshop-dev\nweb-1\napp\nbash");
+        assert!(iyakki_shared::podterm::take().is_none());
+        for bad in [json!({}), json!({"pod": "A b"}), json!({"pod": "web", "container": "A"}), json!({"pod": "web", "shell": "rm -rf /"}), json!({"pod": "-x"})] {
+            assert!(g.t.call("k8s_exec_terminal", &bad).is_err(), "{bad}");
+        }
+        assert!(iyakki_shared::podterm::take().is_none(), "a refused call queues nothing");
+        assert!(g.audited.lock().unwrap().iter().any(|l| l.starts_with("k8s.k8s_exec_terminal ") && l.contains(":ok ")));
+    }
+
+    #[test]
     fn the_tools_are_registered_with_the_right_risks() {
         let g = rig("defs", true);
         let defs = g.t.defs();
         assert_eq!(defs.iter().map(|d| d.spec.name.as_str()).collect::<Vec<_>>(), TOOLS.to_vec());
         for d in &defs {
-            let writes = matches!(d.spec.name.as_str(), "k8s_apply" | "k8s_delete" | "k8s_rollout_restart" | "k8s_port_forward" | "deploy_build" | "deploy_load" | "deploy_run_job" | "registry_setup" | "k8s_stop_env" | "k8s_teardown" | "k8s_registry_cleanup");
+            let writes = matches!(d.spec.name.as_str(), "k8s_apply" | "k8s_delete" | "k8s_rollout_restart" | "k8s_port_forward" | "k8s_exec_terminal" | "deploy_build" | "deploy_load" | "deploy_run_job" | "registry_setup" | "k8s_stop_env" | "k8s_teardown" | "k8s_registry_cleanup");
             assert_eq!(d.risk, if writes { Risk::Ask } else { Risk::Safe }, "{}", d.spec.name);
         }
         assert!(defs[0].spec.description.contains("never start, install or stop k3s"));

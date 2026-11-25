@@ -1,0 +1,8 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha b2586fbcf986b211; honest subset only: everything not checked is under not-covered.
+row: F-FLOW-22
+targets: qemu
+profile: ram
+feature-sha: b2586fbcf986b211
+doc: ask_form asks for a missing flow input with a form in the chat
+human: ask-form | Ask the assistant to build a flow step that needs an input it does not have. Expect: A form with 1 to 6 fields opens over the conversation; the answers arrive as the next message and a secret field is masked.
+not-covered: ask_form asks for a missing flow input with a form in the chat

@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Builds docs/KNOWN-LIMITS.md from KNOWN-ISSUES.md (classes LIMIT and UNPROVEN), FEATURES.md and dist/site/known-limits.src.md.
+
+    python3 dist/site/gen-known-limits.py            # writes docs/KNOWN-LIMITS.md
+    python3 dist/site/gen-known-limits.py --check    # exit 1 when the file is stale or the source breaks a rule
+
+The prose is hand-written for a new user (dist/site/known-limits.src.md) and carries no internal ids; every id it covers sits in braces at the
+end of the item. This script strips the braces, checks that each id exists (a KI id must be a LIMIT, UNPROVEN or BUG entry; an F id must be a row of
+FEATURES.md), adds the generated link table of EVERY LIMIT and UNPROVEN entry, and the experimental and parked rows with their status. Nothing is
+fetched; the output has no date, so the same inputs give the same bytes.
+"""
+import os, re, sys
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+SRC = os.path.join(ROOT, "dist", "site", "known-limits.src.md")
+OUT = os.path.join(ROOT, "docs", "KNOWN-LIMITS.md")
+ID = re.compile(r"\b(?:KI-\d+|F-[A-Z0-9]+-\d+)\b")
+
+
+def read(p):
+    with open(os.path.join(ROOT, p) if not os.path.isabs(p) else p, encoding="utf-8") as f:
+        return f.read()
+
+
+def plain(text):
+    """Markdown noise out of a sentence taken from KNOWN-ISSUES.md: links to their text, no backticks."""
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    return text.replace("`", "").replace("|", "/").strip()
+
+
+def headline(statement, limit=110):
+    s = plain(statement)
+    for _ in range(3):
+        s = re.sub(r"\s*\([^()]*\)", "", s)
+    s = re.sub(r"\s*\([^)]*$", "", s)
+    cut = len(s)
+    for sep in (": ", "; ", ". "):
+        i = s.find(sep)
+        if 25 <= i < cut:
+            cut = i
+    s = s[:cut]
+    if len(s) > limit:
+        s = s[: limit - 3].rsplit(" ", 1)[0] + "..."
+    return s.rstrip(".,;:")
+
+
+def known_issues():
+    """{id: (class, statement, row)} for the entries above the generated appendix."""
+    out = {}
+    for ln in read("KNOWN-ISSUES.md").splitlines():
+        if ln.startswith("## Appendix") or "<!-- appendix:start -->" in ln:
+            break
+        m = re.match(r"\* (KI-\d+) \[(\w+)\] (.*)$", ln)
+        if not m:
+            continue
+        body = m.group(3)
+        row = re.search(r"\| Row: ([^|]+)$", body)
+        stmt = body.split(" | Closes by")[0]
+        out[m.group(1)] = (m.group(2), stmt, row.group(1).strip() if row else "none")
+    return out
+
+
+def features():
+    rows = {}
+    for ln in read("FEATURES.md").splitlines():
+        if ln.startswith("| F-"):
+            c = [x.strip() for x in ln.strip().strip("|").split("|")]
+            rows[c[0]] = (c[3], c[5])
+    return rows
+
+
+def parse_source():
+    sections, cur, errors = [], None, []
+    for n, ln in enumerate(read(SRC).splitlines(), 1):
+        if ln.startswith("#") and not ln.startswith("## "):
+            continue
+        if ln.startswith("## "):
+            cur = [ln[3:].strip(), []]
+            sections.append(cur)
+        elif ln.startswith("- "):
+            if cur is None:
+                errors.append("line %d: an item before the first section" % n)
+                continue
+            m = re.search(r"\s*\{([^}]*)\}\s*$", ln)
+            ids = m.group(1).split() if m else []
+            text = ln[2: m.start()] if m else ln[2:]
+            if not ids:
+                errors.append("line %d: an item without ids in braces" % n)
+            if ID.search(text):
+                errors.append("line %d: an internal id in the text: %s" % (n, ID.search(text).group(0)))
+            cur[1].append((text.strip(), ids))
+        elif ln.strip():
+            errors.append("line %d: not a section, an item or a comment" % n)
+    return sections, errors
+
+
+def build():
+    ki, fr = known_issues(), features()
+    sections, errors = parse_source()
+    where = {}
+    for title, items in sections:
+        for _, ids in items:
+            for i in ids:
+                where.setdefault(i, title)
+                if i.startswith("KI-"):
+                    if i not in ki:
+                        errors.append("%s is not an entry of KNOWN-ISSUES.md" % i)
+                elif i not in fr:
+                    errors.append("%s is not a row of FEATURES.md" % i)
+    listed = {k: v for k, v in ki.items() if v[0] in ("LIMIT", "UNPROVEN")}
+    n_limit = sum(1 for v in listed.values() if v[0] == "LIMIT")
+    n_unp = len(listed) - n_limit
+
+    o = []
+    w = o.append
+    w("# Known limits\n")
+    w("**For:** anyone deciding whether to try IYAKKI, or wondering why something does not work yet.")
+    w("**You will get:** what is limited by design, what is written but was never tried on a real machine or service, what is experimental, and what is parked, in plain words.\n")
+    w("> **Preview for developers and testers.** This page is generated by `python3 dist/site/gen-known-limits.py` from the project's list of known issues ([`../KNOWN-ISSUES.md`](../KNOWN-ISSUES.md), the entries of class LIMIT and UNPROVEN) and a hand-written text, so it cannot drift from them. "
+      "**Limit** means it is that way on purpose. **Unproven** means the code is written and tested with fakes or in a virtual machine, but nobody has tried it on the real machine or service. "
+      "Which machines were tried: [`TESTED-HARDWARE.md`](TESTED-HARDWARE.md). Real defects (class BUG) are in the known-issues list itself.\n")
+    w("Today the list holds **%d limits** and **%d unproven items**; the table at the end lists every one with its identifiers.\n" % (n_limit, n_unp))
+    w("Contents: " + " · ".join("[%s](#%s)" % (t, re.sub(r"[^a-z0-9 -]", "", t.lower()).replace(" ", "-")) for t, _ in sections) + " · [The full list](#the-full-list)\n")
+    for title, items in sections:
+        w("## " + title + "\n")
+        for text, _ in items:
+            w("* " + text)
+        w("")
+    w("## The full list\n")
+    w("Every limit and unproven item, with the identifiers used in the project's own files. **In the text** names the section above where it is explained in plain words; \"table only\" means it is an internal or very narrow item that is not summarised above.\n")
+    w("| Id | Class | In short | Row | In the text |")
+    w("|---|---|---|---|---|")
+    for k in sorted(listed, key=lambda x: int(x[3:])):
+        c, stmt, row = listed[k]
+        w("| %s | %s | %s | %s | %s |" % (k, c.lower(), headline(stmt), "-" if row == "none" else (row if len(row) < 40 else "several"), where.get(k, "table only")))
+    w("")
+    w("### Experimental and parked rows\n")
+    w("Rows named in the experimental and parked sections above, with their state in the feature matrix ([`../FEATURES.md`](../FEATURES.md); status, then Impl/Test: how much is written, how much is proven).\n")
+    w("| Row | Status | Impl/Test | In the text |")
+    w("|---|---|---|---|")
+    for k in sorted(i for i in where if i.startswith("F-")):
+        w("| %s | %s | %s | %s |" % (k, fr[k][0], fr[k][1], where[k]))
+    w("")
+    return "\n".join(o), errors
+
+
+def main():
+    text, errors = build()
+    if errors:
+        print("known-limits: " + "\nknown-limits: ".join(errors), file=sys.stderr)
+        return 1
+    if "--check" in sys.argv:
+        cur = open(OUT, encoding="utf-8").read() if os.path.exists(OUT) else ""
+        if cur != text:
+            print("known-limits: docs/KNOWN-LIMITS.md is stale: run python3 dist/site/gen-known-limits.py", file=sys.stderr)
+            return 1
+        print("known-limits: up to date")
+        return 0
+    with open(OUT, "w", encoding="utf-8") as f:
+        f.write(text)
+    print("known-limits: wrote docs/KNOWN-LIMITS.md")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

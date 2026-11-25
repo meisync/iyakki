@@ -1,0 +1,22 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 7f4b952882669728; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-K8S-16
+targets: qemu
+profile: ram
+feature-sha: 7f4b952882669728
+doc: Settings, Clusters, Platform services panel is there (read only)
+clause: 1 Settings, Clusters, P opens the Platform services panel that deploys services into a cluster the person chooses
+not-covered: the ServiceDef registry, the plan and the exact preview
+not-covered: the approved apply through the Runner
+key s
+wait app=Settings
+skip-unless-button Clusters
+click-sidebar Clusters
+wait app=Settings page="Clusters"
+shot page
+expect-not-blank
+key P
+wait app=Settings text="Platform services"
+shot page
+expect-not-blank
+expect-text Platform services
+expect-page Clusters

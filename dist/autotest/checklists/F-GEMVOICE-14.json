@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-GEMVOICE-14",
+  "feature_sha": "396394915dc876d5",
+  "title": "Gemini voice on every screen (experimental)",
+  "clauses": [
+    {
+      "id": "start-key-talk",
+      "text": "The start key begins a session on any screen, and Esc ends it",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "On any screen, press the start key (Super+V) on a real keyboard, speak a sentence, then press Esc.",
+          "expect": "The session starts with the red band, your sentence is answered, and Esc ends it."
+        }
+      ]
+    }
+  ]
+}

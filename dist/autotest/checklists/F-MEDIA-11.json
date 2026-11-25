@@ -1,0 +1,42 @@
+{
+ "schema": 1,
+ "row": "F-MEDIA-11",
+ "feature_sha": "f536b83c2ef9437c",
+ "title": "casting to a TV and transcoding",
+ "clauses": [
+  {
+   "id": "cast-to-tv",
+   "text": "From the Shares page a shared video is sent to a player on the network and controls work on it.",
+   "machines": [
+    "mac-mini-2014",
+    "mac-mini-2018",
+    "macbook-pro",
+    "lenovo",
+    "hp"
+   ],
+   "steps": [
+    {
+     "do": "Turn the media server on (Shares, m). Press p (Find players), then g (Play on player...) and choose the TV and a shared video.",
+     "expect": "The TV is listed and shows the video, and plays it with picture and sound."
+    }
+   ]
+  },
+  {
+   "id": "transcode-on-the-fly",
+   "text": "A file the TV cannot play is converted on the fly and then plays.",
+   "machines": [
+    "mac-mini-2014",
+    "mac-mini-2018",
+    "macbook-pro",
+    "lenovo",
+    "hp"
+   ],
+   "steps": [
+    {
+     "do": "With the ffmpeg add-on installed, cast a video in a format the TV does not play with g (Play on player...).",
+     "expect": "The TV plays the video with picture and sound even though the file is in a format it does not play."
+    }
+   ]
+  }
+ ]
+}

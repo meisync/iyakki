@@ -4,12 +4,11 @@
 //! `iyakki_agent::msg`; see docs/development/MESSAGING-CONNECTORS-PLAN.md ("Matrix: what is built").
 
 use std::sync::mpsc::Receiver;
-use std::sync::Arc;
 
-use iyakki_shared::gitkeys::AuditFn;
-use iyakki_agent_api::{MatrixAuth, MatrixRoom, MatrixService};
+use iyakki_agent_api::{MatrixAuth, MatrixRoom};
 
 use super::*;
+use super::system_port::MatrixPort;
 
 /// What the page keeps between frames: one background job at a time, as (ok, plain sentence).
 #[derive(Default)]
@@ -20,16 +19,9 @@ pub(super) struct MatrixPanel {
 }
 
 impl SettingsApp {
-    pub(super) fn matrix_service(cx: &AppCx) -> Arc<dyn MatrixService> {
-        let audit = cx.audit.clone();
-        let user = cx.session.user.clone();
-        let log: AuditFn = Arc::new(move |a, d| audit.record(&user, a, d));
-        cx.services.matrix(&cx.session.user, log)
-    }
-
     /// One line for the page: where the person can be reached now.
-    pub(super) fn matrix_reach_line(cx: &AppCx) -> String {
-        let ms = Self::matrix_service(cx);
+    pub(super) fn matrix_reach_line(p: &dyn MatrixPort) -> String {
+        let ms = p.matrix();
         let list = ms.accounts();
         match list.first() {
             None => "Where to reach me: nothing set up. Press a to connect a Matrix account (your own server or any homeserver).".into(),
@@ -85,14 +77,14 @@ impl SettingsApp {
     }
 
     /// The form was filled in: check the address and the network policy, then sign in in the background.
-    pub(super) fn matrix_submit(&mut self, cx: &AppCx, form: &mut Form) -> Result<String, String> {
+    pub(super) fn matrix_submit(&mut self, p: &dyn MatrixPort, form: &mut Form) -> Result<String, String> {
         if self.matrix.pending.is_some() {
             return Err("A Matrix job is still running.".into());
         }
         let (label, server) = (form.value(0), form.value(1));
-        let hs = cx.agent.matrix_check_homeserver(&server)?;
-        if !hs.starts_with("cluster") && !cx.session.policy.allows_host(&cx.agent.gitconn_host_of(&hs)) {
-            return Err(format!("Your account may not reach {} (the network policy of this account).", cx.agent.gitconn_host_of(&hs)));
+        let hs = p.matrix_check_homeserver(&server)?;
+        if !hs.starts_with("cluster") && !p.allows_host(&p.host_of(&hs)) {
+            return Err(format!("Your account may not reach {} (the network policy of this account).", p.host_of(&hs)));
         }
         let secret = form.raw(4);
         if secret.trim().is_empty() {
@@ -107,7 +99,7 @@ impl SettingsApp {
             MatrixAuth::Token(secret.to_string())
         };
         let room = form.value(5);
-        let ms = Self::matrix_service(cx);
+        let ms = p.matrix();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let r = ms.add(&label, &hs, auth, &room);
@@ -136,18 +128,18 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn matrix_test_send(&mut self, cx: &AppCx) {
+    pub(super) fn matrix_test_send(&mut self, p: &dyn MatrixPort) {
         if self.matrix.pending.is_some() {
             self.fail("A Matrix job is still running.");
             return;
         }
-        let ms = Self::matrix_service(cx);
+        let ms = p.matrix();
         let Some(a) = ms.accounts().into_iter().next() else {
             self.fail("Connect a Matrix account first (press a).");
             return;
         };
-        if !a.homeserver.starts_with("cluster") && !cx.session.policy.allows_host(&cx.agent.gitconn_host_of(&a.homeserver)) {
-            self.fail(format!("Your account may not reach {} (the network policy of this account).", cx.agent.gitconn_host_of(&a.homeserver)));
+        if !a.homeserver.starts_with("cluster") && !p.allows_host(&p.host_of(&a.homeserver)) {
+            self.fail(format!("Your account may not reach {} (the network policy of this account).", p.host_of(&a.homeserver)));
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
@@ -162,8 +154,8 @@ impl SettingsApp {
     }
 
     /// `m`: copy new messages of the saved rooms into the INBOX, or stop. Read only; the first copy starts from now (no history).
-    pub(super) fn matrix_mirror_toggle(&mut self, cx: &AppCx) {
-        let ms = Self::matrix_service(cx);
+    pub(super) fn matrix_mirror_toggle(&mut self, p: &dyn MatrixPort) {
+        let ms = p.matrix();
         let Some(a) = ms.accounts().into_iter().next() else {
             self.fail("Connect a Matrix account first (press a).");
             return;
@@ -171,7 +163,7 @@ impl SettingsApp {
         let on = !ms.mirror_on(&a.id);
         match ms.set_mirror(&a.id, on) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "msg.mirror.set", &format!("account={} on={on}", a.id));
+                p.audit("msg.mirror.set", &format!("account={} on={on}", a.id));
                 self.ok(if on { format!("New messages of the rooms you saved for {} are now copied into the INBOX, about once a minute. Nothing is sent because of them.", a.label) } else { format!("Messages of {} are no longer copied into the INBOX.", a.label) });
             }
             Err(e) => self.fail(e),
@@ -179,8 +171,8 @@ impl SettingsApp {
     }
 
     /// `r`: switch one saved room in or out of the copy into the INBOX, going round the rooms one press at a time.
-    pub(super) fn matrix_room_toggle(&mut self, cx: &AppCx) {
-        let ms = Self::matrix_service(cx);
+    pub(super) fn matrix_room_toggle(&mut self, p: &dyn MatrixPort) {
+        let ms = p.matrix();
         let Some(a) = ms.accounts().into_iter().next() else {
             self.fail("Connect a Matrix account first (press a).");
             return;
@@ -194,7 +186,7 @@ impl SettingsApp {
         self.matrix.room_cursor = (self.matrix.room_cursor + 1) % rooms.len();
         match ms.set_room_mirror(&a.id, &r.name, !r.mirror) {
             Ok(now) => {
-                cx.audit.record(&cx.session.user, "msg.mirror.room", &format!("account={} room=\"{}\" on={}", a.id, now.name, now.mirror));
+                p.audit("msg.mirror.room", &format!("account={} room=\"{}\" on={}", a.id, now.name, now.mirror));
                 let more = if rooms.len() > 1 { " Press r again for the next room." } else { "" };
                 self.ok(if now.mirror { format!("The room \"{}\" is copied into the INBOX again.{more}", now.name) } else { format!("The room \"{}\" is left out of the copy into the INBOX; what is there stays.{more}", now.name) });
             }
@@ -202,8 +194,8 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn matrix_remove(&mut self, cx: &AppCx) {
-        let ms = Self::matrix_service(cx);
+    pub(super) fn matrix_remove(&mut self, p: &dyn MatrixPort) {
+        let ms = p.matrix();
         match ms.accounts().into_iter().next() {
             None => self.fail("There is no Matrix account to remove."),
             Some(a) => match ms.remove(&a.id) {

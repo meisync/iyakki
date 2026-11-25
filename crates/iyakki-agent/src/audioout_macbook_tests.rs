@@ -506,3 +506,30 @@ fn speech_at_24_khz_is_brought_to_48_khz_with_twice_the_samples_and_the_same_len
     assert!(crate::audioout::resample_low_rate_wav(b"not a wav").is_none());
     assert!(crate::audioout::resample_low_rate_wav(&[]).is_none());
 }
+
+#[test]
+fn after_a_sleep_that_silenced_the_speakers_the_selector_writes_the_persons_level_again_and_a_muted_person_stays_muted() {
+    // F-LIFE-01: the speakers were set to 0 before sleeping (the fake does what `amixer sset IYAKKI 0%` does); waking must put the level back
+    let t = tree("resume");
+    booting(&t);
+    up(&t);
+    let (sel, fake) = selector(&t, REPORT);
+    let mut p = sel.prefs();
+    p.volume_pct = 40;
+    sel.set_prefs(p.clone());
+    sel.refresh();
+    fake.calls.lock().unwrap().clear();
+    // nothing changed in the settings: a plain refresh does not write the level again (the old cache hid the silence)
+    sel.refresh();
+    assert!(!fake.calls.lock().unwrap().iter().any(|c| c.ends_with("sset IYAKKI 40%")), "{:?}", fake.calls.lock().unwrap());
+    // the machine wakes
+    sel.after_resume();
+    assert!(fake.calls.lock().unwrap().iter().any(|c| c.ends_with("sset IYAKKI 40%")), "the level comes back: {:?}", fake.calls.lock().unwrap());
+    // a person who had muted stays muted after the wake (0 is written, not 40)
+    p.muted = true;
+    sel.set_prefs(p);
+    fake.calls.lock().unwrap().clear();
+    sel.after_resume();
+    let calls = fake.calls.lock().unwrap().clone();
+    assert!(calls.iter().any(|c| c.ends_with("sset IYAKKI 0%")) && !calls.iter().any(|c| c.ends_with("sset IYAKKI 40%")), "{calls:?}");
+}

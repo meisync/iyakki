@@ -7,16 +7,16 @@
 use super::chat_settings::{arg_bool, no_args, Entry, Env};
 use serde_json::json;
 
-use super::AppCx;
+use super::chat_port::ChatPort;
 
 pub const TOOLS: [&str; 2] = ["embedded_cameras_status", "embedded_cameras_set"];
 
 pub const PROMPT_RULE: &str = "\nEMBEDDED CAMERA VIEWS: embedded_cameras_status says whether apps may show this person's cameras inside their own windows (a camera view, like a live picture panel) and how many views are open now (free). embedded_cameras_set switches that on or off (asks first); off closes every open view at once and no picture is pulled. Which cameras a person may watch is decided by each camera's own list of people (cameras_access), and every view asks the person on a card before it shows anything; a snapshot asks again every time.";
 
-pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
+pub fn entries(cx: &dyn ChatPort, env: &Env) -> Vec<Entry> {
     let mut v = Vec::new();
     {
-        let (core, user) = (cx.core.clone(), cx.session.user.clone());
+        let (core, user) = (cx.core(), cx.user().to_string());
         v.push(Entry::read("Cameras", "embedded_cameras_status", "Say whether apps may show this person's cameras in their own windows, and how many embedded camera views are open now. Read only.", no_args(), move |_| {
             let c = core.cameras();
             Ok(format!("Camera views in apps are {} for you. {} open now.", if c.enabled(&user) { "on" } else { "off (or this system has none)" }, match c.open_views(&user) {
@@ -27,7 +27,7 @@ pub fn entries(cx: &AppCx, env: &Env) -> Vec<Entry> {
         }));
     }
     {
-        let (core, user, e) = (cx.core.clone(), cx.session.user.clone(), env.clone());
+        let (core, user, e) = (cx.core(), cx.user().to_string(), env.clone());
         let schema = json!({"type": "object", "properties": {"on": {"type": "boolean"}}, "required": ["on"]});
         v.push(Entry::change("Cameras", "embedded_cameras_set", "Switch camera views in apps on or off for this person. Off closes every open view and nothing more is pulled from a camera. The person approves a card first.", schema, |a| format!("Turn camera views in apps {}", if a["on"].as_bool().unwrap_or(true) { "on" } else { "off" }), move |a| {
             let on = arg_bool(a, "on")?;
@@ -71,7 +71,7 @@ mod tests {
         let user = cx.session.user.clone();
         core.cameras_fake().add(FakeCam::new("front", "Front door", &user));
         let env = Env { dir: cx.data_dir().to_path_buf(), user: user.clone(), admin: true, settings: cx.settings(), audit: Arc::new(|_, _| {}) };
-        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&cx, &env));
+        let t = SettingsTools::new(Arc::new(NoTools), true, entries(&crate::apps::chat_port::CxChat(&cx), &env));
         let defs = t.defs();
         let risk = |n: &str| defs.iter().find(|d| d.spec.name == n).unwrap_or_else(|| panic!("{n}")).risk;
         assert_eq!(risk("embedded_cameras_status"), Risk::Safe);

@@ -417,6 +417,10 @@ pub fn session_command_slot(slot: u32, w: u32, h: u32, program: &[String]) -> Re
     Ok(v)
 }
 
+/// The sandboxed Linux windows that run now, for the end-of-session hook `linux-windows` (D-SESSION-END): a sign-out ends the person's
+/// windows even when the tile that holds them is alive.
+pub static WINDOW_STOPS: crate::sessionend::StopSet = crate::sessionend::StopSet::new();
+
 pub struct Window {
     la_name: String,
     slot: u32,
@@ -427,6 +431,8 @@ pub struct Window {
     pub started: Instant,
     audit: Arc<dyn Fn(&str, &str) + Send + Sync>,
     pub argv: Vec<String>,
+    /// Cut by the end of a session: the sandbox's program is killed at once and `alive` says no.
+    ended: Option<crate::sessionend::StopGuard>,
 }
 
 impl std::fmt::Debug for Window {
@@ -465,7 +471,27 @@ impl Window {
         let log = own.join("session.log");
         let proc = spawn.spawn(&argv, &own, &log)?;
         let nla = la.clone_audit();
-        Ok(Window { la_name: SANDBOX.into(), slot, run_dir, log, proc: Some(proc), program: program.id.clone(), started: Instant::now(), audit: nla, argv })
+        let mut w = Window { la_name: SANDBOX.into(), slot, run_dir, log, proc: Some(proc), program: program.id.clone(), started: Instant::now(), audit: nla, argv, ended: None };
+        w.enter(&WINDOW_STOPS);
+        Ok(w)
+    }
+
+    /// A window around a program that is already started (a test's fake program, or a spawner that starts it itself). It is not in any set
+    /// until [`Window::enter`] puts it in one; [`Window::start_slot`] does that with [`WINDOW_STOPS`].
+    pub fn around(proc: Box<dyn Proc>, program: &str, audit: Arc<dyn Fn(&str, &str) + Send + Sync>) -> Window {
+        Window { la_name: SANDBOX.into(), slot: 0, run_dir: std::env::temp_dir().join("iyakki-window-around"), log: PathBuf::new(), proc: Some(proc), program: program.into(), started: Instant::now(), audit, argv: Vec::new(), ended: None }
+    }
+
+    /// Put this window into a set the end of a session can cut. The sandbox's program is killed by its process id from the cutting thread
+    /// (the sandbox's own processes end with it); the owner reaps it the next time it looks.
+    pub fn enter(&mut self, set: &crate::sessionend::StopSet) {
+        let pid = self.pid();
+        self.ended = Some(set.enter(move || {
+            if let Some(pid) = pid {
+                // SAFETY: a plain kill of the sandbox program this window started; a process that is gone answers ESRCH.
+                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            }
+        }));
     }
 
     pub fn socket(&self) -> PathBuf {
@@ -477,6 +503,10 @@ impl Window {
     }
 
     pub fn alive(&mut self) -> bool {
+        if self.ended.as_ref().is_some_and(|e| e.stopped()) {
+            self.stop();
+            return false;
+        }
         self.proc.as_mut().is_some_and(|p| p.alive())
     }
 
@@ -593,4 +623,55 @@ pub fn cpu_percent(before: Usage, after: Usage, secs: f32) -> f32 {
         return 0.0;
     }
     (((after.ticks - before.ticks) as f32) / 100.0 / secs * 100.0).clamp(0.0, 100_000.0)
+}
+
+#[cfg(test)]
+mod end_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct FakeProc(Arc<AtomicBool>);
+    impl Proc for FakeProc {
+        fn pid(&self) -> Option<u32> {
+            None
+        }
+        fn alive(&mut self) -> bool {
+            !self.0.load(Ordering::SeqCst)
+        }
+        fn kill(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn window(killed: &Arc<AtomicBool>, audit: Arc<dyn Fn(&str, &str) + Send + Sync>) -> Window {
+        Window::around(Box::new(FakeProc(killed.clone())), "xterm", audit)
+    }
+
+    #[test]
+    fn a_window_in_a_stop_set_is_stopped_when_the_set_is_cut_and_is_not_alive_after() {
+        let set = crate::sessionend::StopSet::new();
+        let killed = Arc::new(AtomicBool::new(false));
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let l2 = log.clone();
+        let mut w = window(&killed, Arc::new(move |a, d| l2.lock().unwrap().push(format!("{a} {d}"))));
+        w.enter(&set);
+        assert!(w.alive() && set.live() == 1);
+        assert_eq!(set.stop_all(), 1);
+        assert!(!w.alive(), "the owner sees the end the next time it looks");
+        assert!(killed.load(Ordering::SeqCst), "the program was killed");
+        assert!(log.lock().unwrap().iter().any(|l| l.starts_with("window.stop")), "{:?}", log.lock().unwrap());
+        drop(w);
+        assert_eq!(set.live(), 0);
+    }
+
+    #[test]
+    fn a_window_that_ended_by_itself_is_not_cut_again() {
+        let set = crate::sessionend::StopSet::new();
+        let killed = Arc::new(AtomicBool::new(false));
+        let mut w = window(&killed, Arc::new(|_, _| {}));
+        w.enter(&set);
+        w.stop();
+        drop(w);
+        assert_eq!(set.stop_all(), 0);
+    }
 }

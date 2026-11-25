@@ -1,0 +1,23 @@
+{
+ "schema": 1,
+ "row": "F-BATT-05",
+ "feature_sha": "28aa1f6febf7040a",
+ "title": "battery kernel options show the battery on a laptop",
+ "clauses": [
+  {
+   "id": "battery-node",
+   "text": "after the kernel with the battery options is installed, a laptop lists its battery in the power supply folder",
+   "machines": [
+    "lenovo",
+    "hp",
+    "macbook-pro"
+   ],
+   "steps": [
+    {
+     "do": "On the laptop, open the Terminal tile and run: ls /sys/class/power_supply",
+     "expect": "A BAT0 entry is listed (and AC for the adapter) on a laptop with a battery. Without the battery options only the adapter is listed."
+    }
+   ]
+  }
+ ]
+}

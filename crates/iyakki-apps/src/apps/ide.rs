@@ -7,6 +7,7 @@
 //! * This file holds the state, the event routing and the actions; the drawing is in `ide_ui.rs`.
 
 use std::collections::BTreeSet;
+use crate::apps::ide_port::CxIde;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -351,14 +352,14 @@ impl Ws {
         if self.ro.is_some() {
             return Some("this workspace is open read-only (another session holds it)".into());
         }
-        if cx.session.policy.cli != iyakki_sec::policy::CliLevel::Full {
+        if CxIde(cx).policy().cli != iyakki_sec::policy::CliLevel::Full {
             return Some("your account may not run programs (command-line permission below Full)".into());
         }
         let Some(p) = self.reachable_profile() else { return Some("no cluster is connected (Cluster… chooses one)".into()) };
         if p.looks_like_production() {
             return Some(format!("\"{}\" looks like production, so the assistant and the deploy flow only read from it", p.name));
         }
-        if !p.local && !cx.session.policy.allows_host("*") {
+        if !p.local && !CxIde(cx).policy().allows_host("*") {
             return Some("this cluster is not on this machine and your account may not reach every host".into());
         }
         None
@@ -381,7 +382,7 @@ impl Ws {
         }
         let p = self.reachable_profile()?;
         let (run, _) = cluster_world()?;
-        let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+        let audit = CxIde(cx).audit_sink();
         #[cfg(any(test, feature = "testing"))]
         let probe_run = run.clone();
         #[cfg(any(test, feature = "testing"))]
@@ -394,8 +395,8 @@ impl Ws {
             namespace: self.cfg.namespace(&self.meta.name),
             workspace: self.meta.name.clone(),
             root: self.root(),
-            audit: Arc::new(move |a, d| audit.record(&user, &format!("k8s.{a}"), d)),
-            phrase: cx.agent.clusters_phrase_for(cx.data_dir(), &cx.session.user, &self.meta.name),
+            audit: Arc::new(move |a, d| audit(&format!("k8s.{a}"), d)),
+            phrase: cx.agent.clusters_phrase_for(CxIde(cx).data_dir(), CxIde(cx).user(), &self.meta.name),
             registry: self.cfg.k8s.registry.clone(),
             registry_pull: self.cfg.k8s.registry_pull.clone(),
             registry_kind: self.cfg.k8s.registry_kind.clone(),
@@ -556,10 +557,10 @@ fn state_path(dir: &Path, user: &str, ws: &Workspace) -> PathBuf {
 
 impl IdeApp {
     pub fn new(cx: &AppCx) -> IdeApp {
-        let reg = Registry::load(cx.data_dir(), &cx.session.user);
-        super::ide_bottom::set_cli_bin(cx.clis().bin_dir());
-        cx.agent.linuxapps_set_ide_context(cx.data_dir(), &cx.session.user);
-        let mut app = IdeApp { reg, ws: vec![], active: None, session: session_id(), modal: None, layout: None, area: R::new(0.0, 0.0, 1280.0, 674.0), scale: 1.0, base_scale: 1.0, chat_scale: 1.0, density: super::ide_chrome::Density::from_index(crate::uisize::load_ide_density(cx.data_dir(), &cx.session.user)), mouse: (-1, -1), drag_div: None, redraw: true, ticks: 0, notice: None, last_fetches: 0, dir: cx.data_dir().to_path_buf(), user: cx.session.user.clone(), ctx_row: None, ctx_k8s: false, ctx_tasks: false, top_overflow: vec![], top_overflow_open: false, request: None, preview: None, preview_area: None, preview_room: false, preview_dir: None, publish: None, last_target_chip: None, last_hint: None, platform: None, git: Default::default(), leave_now: false };
+        let reg = Registry::load(CxIde(cx).data_dir(), CxIde(cx).user());
+        super::ide_bottom::set_cli_bin(CxIde(cx).clis().bin_dir());
+        cx.agent.linuxapps_set_ide_context(CxIde(cx).data_dir(), CxIde(cx).user());
+        let mut app = IdeApp { reg, ws: vec![], active: None, session: session_id(), modal: None, layout: None, area: R::new(0.0, 0.0, 1280.0, 674.0), scale: 1.0, base_scale: 1.0, chat_scale: 1.0, density: super::ide_chrome::Density::from_index(crate::uisize::load_ide_density(CxIde(cx).data_dir(), CxIde(cx).user())), mouse: (-1, -1), drag_div: None, redraw: true, ticks: 0, notice: None, last_fetches: 0, dir: CxIde(cx).data_dir().to_path_buf(), user: CxIde(cx).user().to_string(), ctx_row: None, ctx_k8s: false, ctx_tasks: false, top_overflow: vec![], top_overflow_open: false, request: None, preview: None, preview_area: None, preview_room: false, preview_dir: None, publish: None, last_target_chip: None, last_hint: None, platform: None, git: Default::default(), leave_now: false };
         if let Some(id) = app.reg.last.clone() {
             if let Err(e) = app.open_by_id(&id, cx) {
                 app.notice = Some((e, false));
@@ -591,10 +592,10 @@ impl IdeApp {
     // ------------------------------------------------------------------------------------------------ workspaces
 
     fn scope_ok(cx: &AppCx, root: &Path) -> Result<(), String> {
-        if cx.session.policy.allows_read(&cx.session.user, &root.to_string_lossy()) {
+        if CxIde(cx).policy().allows_read(CxIde(cx).user(), &root.to_string_lossy()) {
             Ok(())
         } else {
-            let scopes = cx.session.policy.read_scopes(&cx.session.user).into_iter().take(3).collect::<Vec<_>>().join(", ");
+            let scopes = CxIde(cx).policy().read_scopes(CxIde(cx).user()).into_iter().take(3).collect::<Vec<_>>().join(", ");
             Err(format!("{} is outside the folders your account may read ({scopes}). Choose a folder inside them.", root.display()))
         }
     }
@@ -604,7 +605,7 @@ impl IdeApp {
         let canon = std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
         Self::scope_ok(cx, &canon)?;
         let w = self.reg.add(name, &canon)?;
-        cx.audit.record(&cx.session.user, "ide.workspace.add", &w.root);
+        CxIde(cx).audit("ide.workspace.add", &w.root);
         self.open_by_id(&w.id, cx)
     }
 
@@ -612,8 +613,8 @@ impl IdeApp {
     /// created there and the account may write in it, else a folder of the account's own under the data folder (window mode,
     /// or any machine where the account has no real home).
     pub fn default_parent(&self, cx: &AppCx) -> PathBuf {
-        let user = &cx.session.user;
-        let usable = |p: &Path| cx.session.policy.allows_write(user, &p.to_string_lossy()) && workspace::writable_folder(p).is_ok();
+        let user = CxIde(cx).user();
+        let usable = |p: &Path| CxIde(cx).policy().allows_write(user, &p.to_string_lossy()) && workspace::writable_folder(p).is_ok();
         if let Some(p) = self.reg.parent.as_deref().map(PathBuf::from) {
             if usable(&p) {
                 return p;
@@ -635,7 +636,7 @@ impl IdeApp {
     /// account may already write somewhere, and the window-mode account has no home to keep products in).
     pub fn scoped_cx(&self, cx: &AppCx) -> AppCx {
         let fb = self.fallback_parent().to_string_lossy().into_owned();
-        let user = &cx.session.user;
+        let user = CxIde(cx).user();
         let mut c = cx.clone();
         if !c.session.policy.fs_write.is_empty() && !c.session.policy.allows_write(user, &fb) {
             c.session.policy.fs_write.push(fb.clone());
@@ -652,8 +653,8 @@ impl IdeApp {
             return Err(format!("Choose a parent folder, for example {}, or press Ctrl+U to use it.", suggested.display()));
         }
         let target = parent.join(workspace::slug(name));
-        if !cx.session.policy.allows_write(&cx.session.user, &target.to_string_lossy()) {
-            let scopes = cx.session.policy.write_scopes(&cx.session.user).into_iter().take(3).collect::<Vec<_>>().join(", ");
+        if !CxIde(cx).policy().allows_write(CxIde(cx).user(), &target.to_string_lossy()) {
+            let scopes = CxIde(cx).policy().write_scopes(CxIde(cx).user()).into_iter().take(3).collect::<Vec<_>>().join(", ");
             return Err(format!("{} is outside the folders your account may write ({scopes}). Choose a parent folder inside them, for example {}, or press Ctrl+U to use it.", target.display(), suggested.display()));
         }
         if let Err(e) = workspace::writable_folder(parent) {
@@ -663,7 +664,7 @@ impl IdeApp {
         let w = self.reg.create_with(name, &parent_real, (git && cx.agent.wsexec_git_available()).then_some(&(|d: &Path| cx.agent.exec().git_init(d)) as &dyn Fn(&Path) -> Result<(), String>)).map_err(|e| workspace::friendly_io(&e, &parent_real, &suggested))?;
         self.reg.parent = Some(parent_real.to_string_lossy().into_owned());
         let _ = self.reg.save();
-        cx.audit.record(&cx.session.user, "ide.workspace.create", &w.root);
+        CxIde(cx).audit("ide.workspace.create", &w.root);
         self.open_by_id(&w.id, cx)
     }
 
@@ -686,15 +687,15 @@ impl IdeApp {
         if held {
             self.modal = Some(Modal::Lock(i));
         }
-        cx.audit.record(&cx.session.user, "ide.workspace.open", &self.ws[i].meta.root);
+        CxIde(cx).audit("ide.workspace.open", &self.ws[i].meta.root);
         self.recheck_namespaces(cx);
         Ok(())
     }
 
     fn build_ws(&self, w: Workspace, cx: &AppCx) -> Ws {
         let root = w.root_path();
-        let user = &cx.session.user;
-        let writable = cx.session.policy.allows_write(user, &root.to_string_lossy());
+        let user = CxIde(cx).user();
+        let writable = CxIde(cx).policy().allows_write(user, &root.to_string_lossy());
         let mut status = None;
         let cfg = match if writable { ProjectConfig::ensure(&root, &w.name) } else { ProjectConfig::load(&root) } {
             Ok(c) => c,
@@ -706,11 +707,11 @@ impl IdeApp {
         };
         // a project file must not point the cluster view at a kubeconfig the account may not read
         let mut cfg = cfg;
-        if !cfg.k8s.kubeconfig.is_empty() && !cx.session.policy.allows_read(user, &cfg.k8s.kubeconfig) {
+        if !cfg.k8s.kubeconfig.is_empty() && !CxIde(cx).policy().allows_read(user, &cfg.k8s.kubeconfig) {
             status = Some((format!("project.json names the kubeconfig {}, outside the folders your account may read: ignored.", cfg.k8s.kubeconfig), false));
             cfg.k8s.kubeconfig.clear();
         }
-        let saved: WsSaved = std::fs::read(state_path(&self.dir, &cx.session.user, &w)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let saved: WsSaved = std::fs::read(state_path(&self.dir, CxIde(cx).user(), &w)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         let ro = match cx.agent.workspace_locks().acquire(&root, user, &self.session, now_secs()) {
             LockState::Mine => None,
             LockState::Held(l) => Some(l),
@@ -724,18 +725,17 @@ impl IdeApp {
         let features = cfg.features_path(&root);
         let scope = ProjectScope { name: w.name.clone(), root: root.clone(), key: w.chat_key(user), features: features.clone(), cluster: None };
         let mut tasks = TasksView::new(super::ide_tasks_run::shared_manager(cx, &root, &features, &w.name), &cfg.commands.test);
-        tasks.user = cx.session.user.clone();
-        if ro.is_none() && cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full {
+        tasks.user = CxIde(cx).user().to_string();
+        if ro.is_none() && CxIde(cx).policy().cli == iyakki_sec::policy::CliLevel::Full {
             // fleet (experimental): work another member sends runs as a task of this workspace; its Context may be shared
-            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-            cx.services.fleet_attach_workspace(cx.os.clone(), cx.os.fleet(), Arc::new(move |a, d| audit.record(&user, a, d)), tasks.mgr.clone(), &root, &cfg.commands.test);
+            cx.services.fleet_attach_workspace(cx.os.clone(), cx.os.fleet(), CxIde(cx).audit_sink(), tasks.mgr.clone(), &root, &cfg.commands.test);
         }
-        let mut chat = ChatApp::new().with_agent(cx.session.policy.agent && ro.is_none()).with_project(scope).with_tasks(tasks.mgr.clone()).resumed(cx);
+        let mut chat = ChatApp::new().with_agent(CxIde(cx).policy().agent && ro.is_none()).with_project(scope).with_tasks(tasks.mgr.clone()).resumed(cx);
         chat.set_file_context(None);
         let mut tree = Tree::new(&root);
         tree.expanded = saved.expanded.iter().cloned().collect::<BTreeSet<_>>();
         tree.refresh();
-        let allowed_cli = cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full && ro.is_none();
+        let allowed_cli = CxIde(cx).policy().cli == iyakki_sec::policy::CliLevel::Full && ro.is_none();
         let mut board = BoardView::new(&root, &features);
         board.read_only = ro.is_some();
         {
@@ -748,7 +748,7 @@ impl IdeApp {
             3 => super::board::Mode::Graph,
             _ => super::board::Mode::Kanban,
         };
-        let mut notes_view = NotesView::new(&root, &cx.session.user);
+        let mut notes_view = NotesView::new(&root, CxIde(cx).user());
         {
             let (a, b) = (cx.services.clone(), cx.services.clone());
             notes_view.conflicts_src = Some(Arc::new(move || a.fleet_context_conflicts()));
@@ -756,7 +756,7 @@ impl IdeApp {
         }
         let features_mtime = std::fs::metadata(&features).and_then(|m| m.modified()).ok();
         // the build and run panel starts programs for this person: their own home is their HOME (F-STORE-09)
-        let home = cx.core.file_scope().system_home(&cx.session.user);
+        let home = cx.core.file_scope().system_home(CxIde(cx).user());
         let mut term = Term::new(&root, &saved.term, allowed_cli);
         term.runner.set_home(home.clone());
         let mut problems = Problems::new(&root, &cfg.commands.test);
@@ -891,12 +891,12 @@ impl IdeApp {
     /// Reopen a workspace read-write after the person chose to take the lock over.
     pub fn take_over(&mut self, i: usize, cx: &AppCx) {
         let Some(w) = self.ws.get_mut(i) else { return };
-        cx.agent.workspace_locks().take_over(&w.root(), &cx.session.user, &self.session, now_secs());
+        cx.agent.workspace_locks().take_over(&w.root(), CxIde(cx).user(), &self.session, now_secs());
         w.ro = None;
-        w.term.set_allowed(cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full);
-        w.chat.set_agent_mode(cx.session.policy.agent);
+        w.term.set_allowed(CxIde(cx).policy().cli == iyakki_sec::policy::CliLevel::Full);
+        w.chat.set_agent_mode(CxIde(cx).policy().agent);
         w.say("You took over this workspace; the other session is now read-only.", true);
-        cx.audit.record(&cx.session.user, "ide.workspace.takeover", &w.meta.root);
+        CxIde(cx).audit("ide.workspace.takeover", &w.meta.root);
     }
 
     // ------------------------------------------------------------------------------------------------ actions
@@ -1042,7 +1042,7 @@ impl IdeApp {
         if self.ro_check("measure coverage") {
             return;
         }
-        let allowed = cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full;
+        let allowed = CxIde(cx).policy().cli == iyakki_sec::policy::CliLevel::Full;
         let Some(w) = self.active_mut() else { return };
         if !allowed {
             w.board.cov_note = Some("Measuring coverage needs the full command-line permission for your account.".into());
@@ -1069,7 +1069,7 @@ impl IdeApp {
         if self.ro_check("run the tests") {
             return;
         }
-        let allowed = cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full;
+        let allowed = CxIde(cx).policy().cli == iyakki_sec::policy::CliLevel::Full;
         let Some(w) = self.active_mut() else { return };
         // a file inside a cloned repository that has its own test command: that command, run inside the repository's folder
         let in_repo = w.editor.path().map(|p| workspace::rel_of(&w.root(), p)).and_then(|rel| w.cfg.repos.iter().filter(|r| !r.test.trim().is_empty() && (rel == r.path || rel.starts_with(&format!("{}/", r.path)))).max_by_key(|r| r.path.len()).cloned());
@@ -1227,7 +1227,7 @@ impl IdeApp {
     fn do_file_op(&mut self, kind: FormKind, value: String, cx: &AppCx) -> Result<(), String> {
         let Some(w) = self.active_mut() else { return Ok(()) };
         let root = w.root();
-        if !cx.session.policy.allows_write(&cx.session.user, &root.to_string_lossy()) && !matches!(kind, FormKind::FindFile) {
+        if !CxIde(cx).policy().allows_write(CxIde(cx).user(), &root.to_string_lossy()) && !matches!(kind, FormKind::FindFile) {
             return Err("your account may not write in this workspace".into());
         }
         let name = value.trim().to_string();
@@ -1235,14 +1235,14 @@ impl IdeApp {
             FormKind::NewFile(_) => {
                 workspace::create_file(&root, &name)?;
                 w.tree.expand_to(&name);
-                cx.audit.record(&cx.session.user, "ide.file.create", &name);
+                CxIde(cx).audit("ide.file.create", &name);
                 self.open_file(&name, None, cx);
             }
             FormKind::NewDir(_) => {
                 workspace::create_dir(&root, &name)?;
                 w.tree.expanded.insert(name.trim_end_matches('/').to_string());
                 w.tree.refresh();
-                cx.audit.record(&cx.session.user, "ide.dir.create", &name);
+                CxIde(cx).audit("ide.dir.create", &name);
             }
             FormKind::RenameFile(rel) => {
                 let was_open = w.editor.tab_state(&root.join(&rel)).is_some();
@@ -1254,7 +1254,7 @@ impl IdeApp {
                     w.editor.close_path(&root.join(&rel));
                 }
                 w.tree.refresh();
-                cx.audit.record(&cx.session.user, "ide.file.rename", &format!("{rel} -> {name}"));
+                CxIde(cx).audit("ide.file.rename", &format!("{rel} -> {name}"));
                 if was_open {
                     let r = workspace::rel_of(&root, &to);
                     self.open_file(&r, None, cx);
@@ -1277,7 +1277,7 @@ impl IdeApp {
                         w.editor.close_path(&abs);
                         w.tree.refresh();
                         w.say(format!("Deleted {rel}."), true);
-                        cx.audit.record(&cx.session.user, "ide.file.delete", &rel);
+                        CxIde(cx).audit("ide.file.delete", &rel);
                     }
                     Err(e) => w.say(e, false),
                 }
@@ -1300,7 +1300,7 @@ impl IdeApp {
                     Ok(()) => self.notice = Some(("Removed from the list. The folder and its files were not touched.".into(), true)),
                     Err(e) => self.notice = Some((e, false)),
                 }
-                cx.audit.record(&cx.session.user, "ide.workspace.remove", &id);
+                CxIde(cx).audit("ide.workspace.remove", &id);
                 self.recheck_namespaces(cx);
             }
         }
@@ -1319,7 +1319,7 @@ impl IdeApp {
 
     /// The folders the parent-folder chooser stays inside (the same helper as the other file pickers).
     fn pick_roots(&self, cx: &AppCx) -> iyakki_filescope::FileRoots {
-        cx.core.file_scope().roots(&self.scoped_cx(cx).session.policy, &cx.session.user, &self.dir)
+        cx.core.file_scope().roots(&self.scoped_cx(cx).session.policy, CxIde(cx).user(), &self.dir)
     }
 
     /// A list of the folders inside `dir` (only those the account may read), with "use this folder" on top.
@@ -1331,7 +1331,7 @@ impl IdeApp {
             items.push(".. (up one level)".to_string());
         }
         if let Ok(rd) = std::fs::read_dir(dir) {
-            let mut names: Vec<String> = rd.flatten().filter(|e| e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.') && cx.session.policy.allows_read(&cx.session.user, &e.path().to_string_lossy())).map(|e| format!("{}/", e.file_name().to_string_lossy())).take(400).collect();
+            let mut names: Vec<String> = rd.flatten().filter(|e| e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.') && CxIde(cx).policy().allows_read(CxIde(cx).user(), &e.path().to_string_lossy())).map(|e| format!("{}/", e.file_name().to_string_lossy())).take(400).collect();
             names.sort();
             items.extend(names);
         }
@@ -1388,7 +1388,7 @@ impl IdeApp {
     fn handle_k8s_want(&mut self, i: usize, want: super::ide_k8s::Want, cx: &AppCx) {
         use super::ide_k8s::Want;
         let dir = self.dir.clone();
-        let user = cx.session.user.clone();
+        let user = CxIde(cx).user().to_string();
         match want {
             Want::OpenUrl(u) => self.open_browser(Some(&u), cx),
             Want::Services { connect } => self.open_platform(i, connect, cx),
@@ -1409,7 +1409,7 @@ impl IdeApp {
                 let choice = devcluster::Choice { kubeconfig: p.kubeconfig.clone(), context: p.context.clone() };
                 let _ = choice.save(&dir, &user);
                 // the workspace remembers it too, when the account may read that file (otherwise the per-user choice carries it)
-                if cx.session.policy.allows_read(&user, &p.kubeconfig) && w.ro.is_none() {
+                if CxIde(cx).policy().allows_read(&user, &p.kubeconfig) && w.ro.is_none() {
                     w.sync_registry();
                     w.cfg.k8s.kubeconfig = p.kubeconfig.clone();
                     w.cfg.k8s.profile = p.context.clone();
@@ -1594,7 +1594,7 @@ impl IdeApp {
     /// The chats that left entries in the active workspace's history, and the choices the settings form offers for them.
     fn history_choices(&self, cx: &AppCx) -> Vec<(String, usize)> {
         let Some(w) = self.active_ws() else { return vec![] };
-        iyakki_memx::history::History::sessions_of(&*cx.kb_source(), &cx.session.user, &w.meta.name).into_iter().take(20).collect()
+        iyakki_memx::history::History::sessions_of(&*CxIde(cx).kb_source(), CxIde(cx).user(), &w.meta.name).into_iter().take(20).collect()
     }
 
     /// The project settings with the assistant's memory of this workspace at the end: keep it, forget all of it, or forget what one chat left.
@@ -1602,7 +1602,7 @@ impl IdeApp {
         self.open_settings_form();
         let Some(w) = self.active_ws() else { return };
         let name = w.meta.name.clone();
-        let total = iyakki_memx::history::History::workspaces_of(&*cx.kb_source(), &cx.session.user).into_iter().find(|x| x.name == iyakki_memx::history::History::workspace_key(&name)).map_or(0, |x| x.entries);
+        let total = iyakki_memx::history::History::workspaces_of(&*CxIde(cx).kb_source(), CxIde(cx).user()).into_iter().find(|x| x.name == iyakki_memx::history::History::workspace_key(&name)).map_or(0, |x| x.entries);
         if total == 0 {
             return;
         }
@@ -1684,7 +1684,7 @@ impl IdeApp {
                     return fail(self, kind, f, "Unknown stack. Use one of: Go, JavaScript, TypeScript, Python, Java, Rust, C#, PHP, C, C++ (or leave it empty).".into());
                 }
                 let density = super::ide_chrome::Density::from_index(f.choice_idx(10));
-                if !c.k8s.kubeconfig.is_empty() && !cx.session.policy.allows_read(&cx.session.user, &c.k8s.kubeconfig) {
+                if !c.k8s.kubeconfig.is_empty() && !CxIde(cx).policy().allows_read(CxIde(cx).user(), &c.k8s.kubeconfig) {
                     return fail(self, kind, f, "That kubeconfig is outside the folders your account may read.".into());
                 }
                 if let Err(e) = workspace::resolve_in(&w.root(), &c.features_file) {
@@ -1698,16 +1698,16 @@ impl IdeApp {
                 let ws_name = w.meta.name.clone();
                 w.cfg = c;
                 if forget > 0 {
-                    let user = cx.session.user.clone();
+                    let user = CxIde(cx).user().to_string();
                     let n = if forget == 1 {
-                        iyakki_memx::history::History::forget_workspace_of(&*cx.kb_source(), &user, &ws_name)
+                        iyakki_memx::history::History::forget_workspace_of(&*CxIde(cx).kb_source(), &user, &ws_name)
                     } else {
                         match chats_for_forget.get(forget - 2) {
-                            Some((chat, _)) => iyakki_memx::history::History::forget_session_of(&*cx.kb_source(), &user, &ws_name, chat),
+                            Some((chat, _)) => iyakki_memx::history::History::forget_session_of(&*CxIde(cx).kb_source(), &user, &ws_name, chat),
                             None => 0,
                         }
                     };
-                    cx.audit.record(&user, "settings.assistant.forget", &format!("{ws_name} (IDE): {n} entries"));
+                    CxIde(cx).audit("settings.assistant.forget", &format!("{ws_name} (IDE): {n} entries"));
                 }
                 self.set_density(density);
                 let w = self.active_mut().unwrap();
@@ -1719,12 +1719,12 @@ impl IdeApp {
                     b
                 };
                 let link = w.cluster_link();
-                w.chat.set_project(ProjectScope { name: w.meta.name.clone(), root: w.root(), key: w.meta.chat_key(&cx.session.user), features, cluster: link });
+                w.chat.set_project(ProjectScope { name: w.meta.name.clone(), root: w.root(), key: w.meta.chat_key(CxIde(cx).user()), features, cluster: link });
                 let t = w.target();
                 if let Some(k) = w.k8s.as_mut() {
                     k.set_target(t);
                 }
-                let user = cx.session.user.clone();
+                let user = CxIde(cx).user().to_string();
                 w.start_resolve(&dir, &user, false);
                 w.say("Project settings saved to .iyakki/project.json.", true);
                 self.recheck_namespaces(cx);
@@ -1758,7 +1758,7 @@ impl IdeApp {
                 let (name, choice) = (f.value(1).trim().to_string(), f.choice_idx(0).min(NEW_APP_CHOICES.len() - 1));
                 let Some(w) = self.active_mut() else { return };
                 let root = w.root();
-                if w.ro.is_some() || !cx.session.policy.allows_write(&cx.session.user, &root.to_string_lossy()) {
+                if w.ro.is_some() || !CxIde(cx).policy().allows_write(CxIde(cx).user(), &root.to_string_lossy()) {
                     return fail(self, kind, f, "this workspace is read-only for you".into());
                 }
                 use iyakki_shared::target::Target as AppTarget;
@@ -1772,7 +1772,7 @@ impl IdeApp {
                 let Some(sk) = sk else {
                     // a service on k3s: the workspace is told so, no files yet; the assistant builds it with the deploy tools
                     record(w);
-                    cx.audit.record(&cx.session.user, "ide.target", target.id());
+                    CxIde(cx).audit("ide.target", target.id());
                     w.chat.prefill("This workspace is a web service for k3s. Build it: <say here what it should do>. Use the deploy tools when it is ready.");
                     w.prefs.chat_open = true;
                     w.set_focus(Pane::Chat);
@@ -1780,12 +1780,12 @@ impl IdeApp {
                     w.say("Target: web service on k3s. Say what it should do in the chat.", true);
                     return;
                 };
-                match cx.storeapi().scaffold_project(sk, &name, &root, &name) {
+                match CxIde(cx).storeapi().scaffold_project(sk, &name, &root, &name) {
                     Ok(_) => {
                         w.tree.expanded.insert(name.clone());
                         w.tree.refresh();
                         record(w);
-                        cx.audit.record(&cx.session.user, "ide.app.scaffold", &format!("{sk} {name}"));
+                        CxIde(cx).audit("ide.app.scaffold", &format!("{sk} {name}"));
                         let (skill, note) = if sk == "tile" { ("iyakki-tile-author", " It is an IYAKKI tile app: no server, no Dockerfile, no k3s.") } else { ("iyakki-app-author", "") };
                         w.chat.prefill(&format!("I just created the {sk} project `{name}` in the folder {name}/. Use the {skill} skill.{note} It should: <say here what it should do>. Edit it, run its test, validate it, then {}.", if sk == "tile" { "add it to my launcher with tile_install_dev, and publish it to my private store when I approve" } else { "pack and sign it; publish to my private store (or install it locally for a trial) when I approve" }));
                         w.prefs.chat_open = true;
@@ -1939,7 +1939,7 @@ impl IdeApp {
                 } else {
                     let start = PathBuf::from(f.value(1).trim());
                     let roots = self.pick_roots(cx);
-                    let dir = if start.is_dir() && cx.session.policy.allows_read(&cx.session.user, &start.to_string_lossy()) && std::fs::canonicalize(&start).is_ok_and(|r| roots.contains(&r)) { start } else { self.default_parent(cx) };
+                    let dir = if start.is_dir() && CxIde(cx).policy().allows_read(CxIde(cx).user(), &start.to_string_lossy()) && std::fs::canonicalize(&start).is_ok_and(|r| roots.contains(&r)) { start } else { self.default_parent(cx) };
                     let picker = self.browse_picker(&dir, cx);
                     self.modal = Some(Modal::Browse(Box::new(f), dir, picker));
                 }
@@ -1953,7 +1953,7 @@ impl IdeApp {
                     } else {
                         let next = if label.starts_with("..") { dir.parent().map(Path::to_path_buf).unwrap_or(dir.clone()) } else { dir.join(label.trim_end_matches('/')) };
                         let roots = self.pick_roots(cx);
-                        let next = if cx.session.policy.allows_read(&cx.session.user, &next.to_string_lossy()) && std::fs::canonicalize(&next).is_ok_and(|r| roots.contains(&r)) { next } else { dir.clone() };
+                        let next = if CxIde(cx).policy().allows_read(CxIde(cx).user(), &next.to_string_lossy()) && std::fs::canonicalize(&next).is_ok_and(|r| roots.contains(&r)) { next } else { dir.clone() };
                         let p = self.browse_picker(&next, cx);
                         self.modal = Some(Modal::Browse(f, next, p));
                     }
@@ -2146,7 +2146,7 @@ impl IdeApp {
         let tick = self.ticks;
         let active = self.active;
         let session = self.session.clone();
-        let user = cx.session.user.clone();
+        let user = CxIde(cx).user().to_string();
         let mut acts = Vec::new();
         let mut wants: Vec<(usize, super::ide_k8s::Want)> = Vec::new();
         let mut git_open: Option<String> = None;
@@ -2236,7 +2236,7 @@ impl IdeApp {
             if let Some(k) = w.k8s.as_mut() {
                 k.deploy_block = block;
                 if k.host.is_none() {
-                    k.host = Some(super::cluster_host::ClusterHost::new(super::ide_k8s::SWITCH_BASE, cx, &w.meta.name));
+                    k.host = Some(super::cluster_host::new(super::ide_k8s::SWITCH_BASE, cx, &w.meta.name));
                 }
                 k.tick();
                 let f = k.feed.fetches();
@@ -2342,7 +2342,7 @@ impl IdeApp {
         if text.is_empty() {
             return false;
         }
-        let (root, person, now) = (w.root(), cx.session.user.clone(), iyakki_clock::now_unix() as i64);
+        let (root, person, now) = (w.root(), CxIde(cx).user().to_string(), iyakki_clock::now_unix() as i64);
         // the numbered answer to "which one?"
         let done = if let Some((det, ids)) = w.ctx_pending.clone() {
             let pick = text.trim_end_matches('.').parse::<usize>().ok();
@@ -2405,7 +2405,7 @@ impl IdeApp {
         let ci = cx.agent.context_intent();
         let Some(det) = ci.detect(goal.trim()) else { return Ok(None) };
         let Some(w) = self.active_mut() else { return Ok(None) };
-        let done = ci.apply(&w.root(), &cx.session.user, &det, w.ctx_last.as_deref(), iyakki_clock::now_unix() as i64);
+        let done = ci.apply(&w.root(), CxIde(cx).user(), &det, w.ctx_last.as_deref(), iyakki_clock::now_unix() as i64);
         if done.refused {
             return Ok(None);
         }
@@ -2940,7 +2940,7 @@ impl App for IdeApp {
             None => String::new(),
         };
         let dest = w.root().join(&rel);
-        if !cx.session.policy.allows_write(&cx.session.user, &dest.to_string_lossy()) {
+        if !CxIde(cx).policy().allows_write(CxIde(cx).user(), &dest.to_string_lossy()) {
             return super::DropAction::Ignore("Your account may not write in this workspace folder.".into());
         }
         let label = if rel.is_empty() { "the workspace folder".to_string() } else { format!("the folder {rel}") };

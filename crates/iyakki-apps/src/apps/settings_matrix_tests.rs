@@ -188,7 +188,7 @@ fn store_opens_the_form_at_the_cluster_address_of_the_server_it_installed() {
     let Some(Modal::Form(FormKind::Matrix, f)) = &a.modal else { panic!("the form is open") };
     assert_eq!(f.value(1), "cluster://iyakki-matrix/matrix:8008");
     assert!(hs.seen.lock().unwrap().is_empty());
-    assert_eq!(crate::apps::store::setup::open_target(iyakki_shared::quickinstall::Item::Matrix), Some(("settings", "matrix:add")));
+    assert_eq!(crate::apps::store::setup::open_target(iyakki_tile_api::store_qi::Item::Matrix), Some(("settings", "matrix:add")));
 }
 
 #[test]

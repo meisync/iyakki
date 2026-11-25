@@ -114,6 +114,35 @@ pub enum ScreenKey {
     F(u8),
 }
 
+/// A pod to open a shell in (F-K8S-26): the whole-session terminal runs `kubectl exec -it` into it. The core checks every part and builds the command
+/// itself; the app only names the pod. `kubeconfig` and `context` are the cluster's (empty: kubectl's defaults), `container` and `shell` may be empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PodSession {
+    pub kubeconfig: String,
+    pub context: String,
+    pub namespace: String,
+    pub pod: String,
+    pub container: String,
+    pub shell: String,
+}
+
+/// The prefix of the item another app hands the Terminal to open a pod session ([`PodSession::to_item`]).
+pub const POD_ITEM: &str = "pod:";
+
+impl PodSession {
+    /// The item text: `pod:` and the six parts, one per line (kubeconfig, context, namespace, pod, container, shell).
+    pub fn to_item(&self) -> String {
+        format!("{POD_ITEM}{}\n{}\n{}\n{}\n{}\n{}", self.kubeconfig, self.context, self.namespace, self.pod, self.container, self.shell)
+    }
+
+    /// The session an item names (`None`: not a pod item, or the wrong number of parts). The core checks every part again before anything runs.
+    pub fn from_item(item: &str) -> Option<PodSession> {
+        let mut p = item.strip_prefix(POD_ITEM)?.split('\n');
+        let s = PodSession { kubeconfig: p.next()?.into(), context: p.next()?.into(), namespace: p.next()?.into(), pod: p.next()?.into(), container: p.next()?.into(), shell: p.next()?.into() };
+        p.next().is_none().then_some(s)
+    }
+}
+
 pub trait TerminalPort {
     fn open(&mut self) -> Result<Opened, TermError>;
     fn run(&mut self, line: &str) -> Result<Reply, TermError>;
@@ -123,6 +152,10 @@ pub trait TerminalPort {
     // The whole-session terminal (a real program on a pseudo-terminal: `vi`, `top`, `ssh`). Nothing starts before the person's yes.
     /// Ask for a session of `cols` x `rows`; the answer is the question the person must answer.
     fn screen_open(&mut self, _cols: usize, _rows: usize) -> Result<Question, TermError> {
+        Err(TermError::Unavailable)
+    }
+    /// Ask for a whole session inside a pod (`kubectl exec -it`); the question names the pod. Everything after it is the same as for [`TerminalPort::screen_open`].
+    fn screen_open_pod(&mut self, _cols: usize, _rows: usize, _pod: &PodSession) -> Result<Question, TermError> {
         Err(TermError::Unavailable)
     }
     fn screen_decide(&mut self, _call: &str, _approve: bool) -> Result<(), TermError> {
@@ -158,6 +191,8 @@ pub struct MemTerminal {
     waiting: Option<(String, String)>,
     n: u32,
     pub ran: VecDeque<String>,
+    /// The pod sessions asked for, in order.
+    pub pods: Vec<PodSession>,
 }
 
 struct MemScreen {
@@ -202,6 +237,16 @@ impl TerminalPort for MemTerminal {
         let call = format!("pc{}", self.n);
         self.scr = Some(MemScreen { call: Some(call.clone()), size: (cols, rows), typed: String::new(), lines: vec!["mem$ ".into()], seq: 1, back: 0 });
         Ok(Question { call, summary: "Open a full terminal? Programs in it run as you and are not checked line by line; what you type is not recorded.".into() })
+    }
+
+    fn screen_open_pod(&mut self, cols: usize, rows: usize, pod: &PodSession) -> Result<Question, TermError> {
+        if pod.namespace.is_empty() || pod.pod.is_empty() {
+            return Err(TermError::Refused("name the namespace and the pod".into()));
+        }
+        let mut q = self.screen_open(cols, rows)?;
+        q.summary = format!("Open a shell inside pod {} (namespace {})? It is not checked line by line, and what you type is not recorded.", pod.pod, pod.namespace);
+        self.pods.push(pod.clone());
+        Ok(q)
     }
 
     fn screen_decide(&mut self, call: &str, approve: bool) -> Result<(), TermError> {

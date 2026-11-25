@@ -24,6 +24,7 @@ MIGRATED = os.path.join(ROOT, "crates", "iyakki-core", "tests", "data", "migrate
 AGENT = os.path.join(ROOT, "crates", "iyakki-agent", "src")
 SETTINGS = os.path.join(APPS, "settings.rs")
 OUT = os.path.join(ROOT, "docs", "development", "APP-MIGRATION-INVENTORY.md")
+TILE_REEXPORT = re.compile(r"^\s*pub use iyakki_tile_[a-z0-9_]+::|^use iyakki_tile_[a-z0-9_]+ as tile;", re.M)
 
 CONTEXT = [("services", [r"\.services\b", r"\bServices\b"]), ("host", [r"\bcx\.host\b"]), ("web", [r"\bcx\.web\b"]), ("chat", [r"\bcx\.chat\b"]), ("store", [r"\bcx\.store\b"]), ("session/audit", [r"\bcx\.session\b", r"\bcx\.audit\b"])]
 
@@ -153,7 +154,8 @@ def main():
                 ctx[k] += sum(len(re.findall(p, body)) for p in pats)
             ratchet += allow.get(os.path.relpath(f, ROOT).replace(os.sep, "/"), 0)
         r.update(appcx=appcx, ctx=ctx, lines=lines, ratchet=ratchet, uses=sum(ctx.values()), agent=agentp)
-        r["adapter"] = any(re.search(r"App as TileApp", read(f)) for f in r["files"])
+        # an app whose tile crate is extracted: the shell file is a thin adapter (`App as TileApp`) or re-exports the crate (`pub use iyakki_tile_x::...`)
+        r["adapter"] = any(re.search(r"App as TileApp", read(f)) or TILE_REEXPORT.search(read(f)) for f in r["files"])
         pas = r["cls"][:-3]
         r["port"] = pas + "Port"
         r["tools"] = bool(re.search(r'"(%s|%s)_[a-z_]+"' % (re.escape(r["stem"].split("_")[0]), re.escape(snake(r["papp"]))), agent))

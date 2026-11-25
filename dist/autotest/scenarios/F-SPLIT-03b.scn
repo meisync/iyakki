@@ -1,0 +1,9 @@
+# autotest alpha.10, lane B1 (2026-11-24): the UI as its own program on a booted image. Written against the Feature text with sha cdfe282a641b4e83; honest subset only: everything not checked is under not-covered.
+row: F-SPLIT-03
+targets: qemu
+profile: ui_process
+feature-sha: cdfe282a641b4e83
+doc: the program signs in and opens apps through the core's socket
+clause: 2 the program draws Home and a Settings page through the core's socket and answers keys typed at the guest keyboard (read through dev state)
+not-covered: real hardware (a real display, a touch screen, a GPU), the tiles that need a live object of the core (FLOWS, TALES, LAB, STORE, RADIO, MEDIA: they say so in the program), the apps-only push of a ui layer to a device
+session-check: ui_process_screen

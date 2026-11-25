@@ -9,8 +9,8 @@ use iyakki_shared::mcp::ServerSpec;
 use iyakki_core_api::HostApi;
 
 use crate::accounts::{Session, UserStore};
-use crate::gfx::{Face, Gfx, Icon};
-use crate::ui::{Event, R, TEXT};
+use crate::gfx::{Gfx, Icon};
+use crate::ui::{Event, R};
 
 /// The tiles on the home grid, as (layout key, label, the group the tile is in when left alone), for Settings -> Home layout. The tile
 /// table belongs to the shell; it registers this function once at start (an app never depends on the shell).
@@ -82,6 +82,8 @@ impl iyakki_core_api::PolicySource for StorePolicies {
     }
 }
 pub mod chat_monitor;
+pub mod chat_port;
+pub mod ide_port;
 pub mod chat_resume;
 pub mod firewall_tile;
 pub mod markdown;
@@ -134,26 +136,14 @@ pub mod browser_persist;
 pub mod pdfview;
 pub mod browser_layout;
 pub mod cli;
+pub mod cli_port;
 pub use iyakki_uikit::controls;
 pub mod dash;
-pub mod dash_charts;
-pub mod dash_query;
-pub mod dash_repair;
+pub use iyakki_tile_dash::charts as dash_charts;
+pub use iyakki_tile_dash::query as dash_query;
+pub use iyakki_tile_dash::repair as dash_repair;
 pub mod flows;
-pub mod flows_assist;
-pub mod flows_board;
-pub mod flows_canvas;
-pub mod flows_defaults;
-pub mod flows_fail;
-pub mod flows_hook;
-pub mod flows_icons;
-pub mod flows_tip;
-pub mod flows_keys;
-mod flows_remote;
-pub mod flows_paint;
-pub mod flows_props;
-pub mod flows_run;
-pub mod flows_view;
+mod flows_port;
 pub mod data;
 pub mod data_port;
 pub mod dropattach;
@@ -164,10 +154,12 @@ pub mod mcp_port;
 pub mod media;
 pub mod media_port;
 pub mod mediaplay;
-pub mod multiline;
+pub use iyakki_uikit::multiline;
 pub use iyakki_uikit::neon;
 pub mod mesh;
 pub mod mesh_port;
+#[cfg(test)]
+mod mesh_tests;
 pub mod radio;
 pub mod sample;
 pub mod sdk_apps;
@@ -177,10 +169,14 @@ pub mod assistant_port;
 pub mod cameras_port;
 pub mod radio_port;
 pub mod rag;
+pub mod rag_port;
 pub mod runs;
 pub mod runs_port;
 pub mod scan;
+pub mod scan_models;
 pub mod scan_port;
+#[cfg(test)]
+mod scan_tests;
 pub mod skills;
 pub mod skills_port;
 pub mod store;
@@ -188,15 +184,14 @@ pub(crate) mod store_drivers;
 pub mod unserved;
 pub mod usage;
 pub mod voice;
-mod voice_mine;
-mod voice_rec;
-mod voice_rec_ui;
-mod voice_ui;
+mod voice_port;
+pub(crate) mod store_port;
 pub mod lab;
-mod lab_pic;
-mod lab_ui;
+pub mod lab_port;
 pub mod story;
+pub mod story_port;
 pub mod system;
+pub mod system_port;
 pub mod calendar;
 pub mod camera;
 pub mod camera_port;
@@ -207,6 +202,7 @@ pub mod tile_embed_page;
 pub mod tile_remote;
 pub mod tile_wasm;
 pub mod inbox;
+pub mod inbox_port;
 pub mod jobs_ui;
 pub mod edit;
 pub mod edit_preview;
@@ -216,7 +212,7 @@ pub mod component;
 pub mod ide;
 pub mod ide_browser;
 pub mod ide_bottom;
-pub mod ide_router;
+pub use iyakki_ide_model::router as ide_router;
 pub use iyakki_uikit::ide_chrome;
 pub mod ide_deploy;
 pub mod ide_gitview;
@@ -228,29 +224,23 @@ pub mod devtools;
 pub mod auth;
 pub mod remotefiles;
 pub mod cameras;
-mod learn_lesson;
-mod learn_ui;
-mod git_tile_repo;
-mod git_tile_repo_ui;
-mod git_tile_ui;
+pub mod learn_port;
+mod git_port;
+pub use iyakki_tile_git::{git_tile_repo, git_tile_repo_ui, git_tile_ui};
 pub mod disks_tile;
-mod disks_tile_ui;
 pub mod checkup;
-mod checkup_ui;
 pub mod checkup_port;
 pub mod doctor;
 pub(crate) mod doctor_facts;
-mod doctor_ui;
 mod doctor_manual;
 mod doctor_manual_ui;
 pub mod doctor_port;
 pub mod cluster_host;
-pub mod cluster_switch;
+pub use iyakki_tile_k8s::cluster_switch;
 pub mod clusters_panel;
 pub mod linuxwin;
 pub mod linuxwin_port;
-mod k8s_cloud;
-mod k8s_tile_ui;
+mod k8s_port;
 pub mod platform_services;
 pub mod ide_git;
 pub mod ide_git_ui;
@@ -262,12 +252,14 @@ pub mod embed;
 pub mod ide_preview;
 pub mod ide_tile;
 pub mod ide_tasks_run;
-pub mod ide_layout;
+pub use iyakki_ide_model::layout as ide_layout;
 pub mod ide_tree;
 pub mod ide_ui;
 pub mod bluetooth_page;
 pub mod devices;
 pub mod settings;
+pub(crate) mod settings_port;
+pub(crate) mod settings_device_port;
 pub mod settings_nav;
 pub mod users;
 pub mod users_port;
@@ -806,95 +798,7 @@ pub trait App {
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64);
 }
 
-/// Scrollback of coloured text lines, wrapped to the area width. `scroll` counts visual lines
-/// from the bottom; the newest content is shown by default.
-///
-/// The text can be selected with the pointer (press and drag, double click a word, triple click an entry, Shift+click to
-/// extend) and copied; the owner passes its events to [`ScrollLog::handle`] first.
-pub struct ScrollLog {
-    pub lines: Vec<(String, [u8; 4])>,
-    pub scroll: usize,
-    /// Selection over what was drawn last.
-    pub pane: crate::textsel::Pane,
-    lh: f32,
-    /// Keep each entry on one line (cut with an ellipsis) instead of wrapping it.
-    pub nowrap: bool,
-}
-
-/// The id of the area a scroll log registers for presses (`Event::Area`).
-pub const LOG_AREA: usize = 61_100;
-
-impl Default for ScrollLog {
-    fn default() -> Self {
-        ScrollLog { lines: Vec::new(), scroll: 0, pane: crate::textsel::Pane::new(LOG_AREA), lh: 16.0, nowrap: false }
-    }
-}
-
-impl ScrollLog {
-    pub fn push(&mut self, text: impl Into<String>, color: [u8; 4]) {
-        self.lines.push((text.into(), color));
-        self.scroll = 0;
-        if self.lines.len() > 2000 {
-            self.lines.drain(..500);
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.lines.clear();
-        self.scroll = 0;
-        self.pane.clear();
-    }
-
-    /// Presses, drags and Ctrl+C on the text; true when the event was used.
-    pub fn handle(&mut self, ev: &Event) -> bool {
-        self.pane.handle(ev)
-    }
-
-    /// One heartbeat: a drag held above or below the text scrolls it.
-    pub fn on_tick(&mut self) {
-        let a = self.pane.auto_scroll();
-        if a != 0.0 {
-            self.scroll_by((a / self.lh.max(1.0)).round() as i32 + a.signum() as i32);
-            self.pane.refresh_drag();
-        }
-    }
-
-    pub fn scroll_by(&mut self, delta: i32) {
-        self.scroll = (self.scroll as i32 + delta).max(0) as usize;
-    }
-
-    pub fn render(&mut self, g: &mut Gfx, area: R, size: f32, face: Face) {
-        let lh = g.line_height(size, face);
-        let mut visual: Vec<([u8; 4], String)> = Vec::new();
-        let mut entry_of: Vec<u32> = Vec::new();
-        for (n, (t, c)) in self.lines.iter().enumerate() {
-            if self.nowrap {
-                visual.push((*c, g.fit(size, t, face, area.w)));
-                entry_of.push(n as u32);
-                continue;
-            }
-            for l in g.wrap(size, t, face, area.w) {
-                visual.push((*c, l));
-                entry_of.push(n as u32);
-            }
-        }
-        let fit = (area.h / lh).floor().max(1.0) as usize;
-        let max_scroll = visual.len().saturating_sub(fit);
-        self.scroll = self.scroll.min(max_scroll);
-        let end = visual.len() - self.scroll;
-        let start = end.saturating_sub(fit);
-        for (i, (c, l)) in visual[start..end].iter().enumerate() {
-            g.text(area.x, area.y + i as f32 * lh, size, if *c == [0, 0, 0, 0] { TEXT } else { *c }, l, face);
-        }
-        // the selectable text: every line, those out of view without geometry
-        self.lh = lh;
-        self.pane.begin(area);
-        for (i, (_, l)) in visual.iter().enumerate() {
-            self.pane.line(g, area.x, area.y + (i as f32 - start as f32) * lh, lh, size, face, l, 0, entry_of[i]);
-        }
-        self.pane.end(g, crate::fx::CYAN);
-    }
-}
+pub use iyakki_uikit::scrolllog::{ScrollLog, LOG_AREA};
 
 pub use iyakki_uikit::blink::{blink, caret_allowed, with_caret};
 
@@ -918,6 +822,10 @@ mod ide_tests;
 pub(crate) mod ide_fakeprobe_tests;
 #[cfg(test)]
 mod jobs_screens_tests;
+#[cfg(test)]
+mod runs_tests;
+#[cfg(test)]
+mod jobs_real_tests;
 #[cfg(test)]
 mod dash_tests;
 #[cfg(test)]

@@ -1,0 +1,16 @@
+# autotest alpha.10 batch F (lane Q8, 2026-11-24); split into sub-row F-FLEET-09a on 2026-11-24 (lane SC2): this scenario covers the whole visible clause, the API and rule clauses are F-FLEET-09b.
+row: F-FLEET-09a
+targets: qemu
+profile: ram
+feature-sha: 4ad424a7fd0e6b22
+doc: Settings, Fleet (experimental) is a page of its own (read only, nothing is changed)
+clause: 1 Settings, Fleet (experimental) is a page of its own
+key s
+wait app=Settings
+skip-unless-button Fleet (experimental)
+click-sidebar Fleet (experimental)
+wait app=Settings page="Fleet (experimental)"
+shot page
+expect-not-blank
+expect-text Fleet
+expect-page Fleet (experimental)

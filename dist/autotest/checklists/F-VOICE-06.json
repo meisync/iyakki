@@ -1,0 +1,93 @@
+{
+ "schema": 1,
+ "row": "F-VOICE-06",
+ "feature_sha": "076ad268f9c7c360",
+ "title": "browser voice helper for the desktop window (manual until automated)",
+ "clauses": [
+  {
+   "id": "helper-opens",
+   "text": "When the window's web engine cannot speak, the voice page's button opens the voice helper in the browser.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Voice (or the TALES chip) and press Open voice helper in your browser.",
+     "expect": "Your default browser opens a small page. The window shows that it is connected and has a Disconnect voice helper button."
+    }
+   ]
+  },
+  {
+   "id": "speaks",
+   "text": "The browser page speaks what the window sends, with the browser's voice.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "On the helper page, click once inside the page. Then have IYAKKI read a sentence (for example from the TALES chip).",
+     "expect": "The sentence is spoken through the speakers by the browser's voice. If the browser refuses before the click, the page says a click is needed."
+    }
+   ]
+  },
+  {
+   "id": "disconnect",
+   "text": "Disconnect closes the helper and the window returns to its own state.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Press Disconnect voice helper in the window.",
+     "expect": "The window stops showing connected, and the browser page says it is disconnected."
+    }
+   ]
+  },
+  {
+   "id": "idle-close",
+   "text": "The helper closes when the page goes silent for 45 seconds.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Connect the helper, then leave it without reading anything for about a minute.",
+     "expect": "The helper closes by itself and the window goes back to its own state."
+    }
+   ]
+  },
+  {
+   "id": "never-opened",
+   "text": "A helper link that is never opened closes after 2 minutes.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Press Open voice helper in your browser, then do not open the page.",
+     "expect": "After about 2 minutes the helper link closes and the window returns to its own state."
+    }
+   ]
+  }
+ ]
+}

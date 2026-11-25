@@ -46,7 +46,6 @@ app_events_lock | F-SDK-196 | the screen lock and unlock reach SAMPLE as a sessi
 
 app_events_foreground | F-SDK-188,F-SDK-209 | SAMPLE goes to the back for Settings and comes to the front again: the Heard log says app lifecycle foreground or background
 app_events_volume | F-SDK-197,F-SDK-209 | a hot-plugged disk is mounted and unmounted in the guest: SAMPLE's Heard log says volume mounted, then unmounted
-app_events_usb | F-SDK-203,F-SDK-209 | a USB mouse plugged into the guest through the QEMU monitor and taken out: the Heard log says usb added, then usb removed
 
 app_events_permissions | F-SDK-218 | Settings, App events, Take its permission away: SAMPLE gets app.permissions (needs the cand4 image)
 
@@ -73,3 +72,12 @@ system_tile_pods | F-SYS-06,F-SYS-07,F-SYS-08 | SYSTEM tile on the running clust
 quick_install_registry | F-INST-25,F-INST-21,F-SETUP-19,F-INST-19 | Store, Setup, Data: the in-cluster registry installed by the click (guest internet), limits and volume policy, the answer on the service, Remove with the data question
 quick_install_gitea | F-K8S-30 | Store, Setup, Coding agents: Gitea installed by the click, ClusterIP only, answers on 127.0.0.1:3300
 k3s_popup_stop_start | F-SETUP-09 | the k3s popup: Stop, then Start
+profile: usb
+app_events_usb | F-SDK-203,F-SDK-209 | a USB mouse plugged into the guest through the QEMU monitor and taken out: the Heard log says usb added, then usb removed
+
+profile: ui_process
+ui_process_tree | F-SPLIT-03 | iyakki.ui=process: process 1 is the core and iyakki-ui its child with the core's socket, no shell thread in the core, the boot screen let go of the display, the screen read through `dev state`
+ui_process_screen | F-SPLIT-03,F-SPLIT-07 | the program draws Home and Settings through the socket, driven by keys typed at the guest keyboard (dev input does not reach it), the Account page is found by its search box
+ui_process_socket | F-SPLIT-03,F-SPLIT-07 | the socket is 0600 in a 0700 folder owned by the program's user, an unprivileged peer is refused at the folder and, with the modes opened, by the core's peer check
+ui_process_restart | F-SPLIT-03 | kill -9 of the program: the core restarts it (audit: exit by signal 9, start 2) and the screen is back
+ui_process_stays_up | F-SPLIT-03 | the program is not restarted by itself: after 420 s of guest uptime the audit shows no exit of its own (the 100,000-call cap closed its connection after about four minutes: status 5, signed out)

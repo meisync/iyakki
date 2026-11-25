@@ -70,6 +70,8 @@ fn every_quick_install_item_and_cli_has_an_inventory_row_and_no_row_is_left_over
     // the Apple Silicon VM recipe's pinned downloads (applevm.rs)
     want.extend(["applevm-image", "applevm-k3s", "applevm-k3s-installer"].map(String::from));
     want.push(iyakki_agent::ytdlp::ROW_ID.to_string());
+    // the Raspberry Pi firmware packs (crates/iyakki-usb/src/rpifirmware.rs; its own test ties the pins to these rows)
+    want.extend(["rpi5-wifi", "rpi3-boot"].map(String::from));
     for w in &want {
         assert!(rows.iter().any(|r| &r.id == w), "legal/downloads.txt has no row for `{w}` (add its licence, delivery and pin)");
     }

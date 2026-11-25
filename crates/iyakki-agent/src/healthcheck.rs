@@ -43,13 +43,33 @@ pub fn status_of(reply: &[u8]) -> Option<u16> {
     head.strip_prefix("HTTP/1.")?.split_whitespace().nth(1)?.parse().ok()
 }
 
+/// Connect with a time limit on every address (a plain connect to a black-holed address waits for the system's two minutes).
+pub fn connect_bounded(host: &str, port: u16, limit: Duration) -> Result<TcpStream, String> {
+    use std::net::ToSocketAddrs;
+    let addrs = (host, port).to_socket_addrs().map_err(|e| format!("{host}:{port}: {e}"))?;
+    connect_each(host, port, addrs, limit, &mut |a, l| TcpStream::connect_timeout(a, l))
+}
+
+/// Try each address in turn with the same limit; the first that answers wins, else the last error is named. The connector is injected so a
+/// test can stand in for an address that never answers.
+pub fn connect_each<T>(host: &str, port: u16, addrs: impl IntoIterator<Item = std::net::SocketAddr>, limit: Duration, connector: &mut dyn FnMut(&std::net::SocketAddr, Duration) -> std::io::Result<T>) -> Result<T, String> {
+    let mut last = format!("{host}:{port}: no address");
+    for a in addrs {
+        match connector(&a, limit) {
+            Ok(s) => return Ok(s),
+            Err(e) => last = format!("{host}:{port}: {e}"),
+        }
+    }
+    Err(last)
+}
+
 pub fn check(t: &Target) -> Result<u16, String> {
     let timeout = Duration::from_secs(4);
     if t.tls {
         let r = crate::devmode::client::https(&t.host, t.port, None, "GET", &t.path, &[], b"", timeout)?;
         return Ok(r.status);
     }
-    let mut s = TcpStream::connect((t.host.as_str(), t.port)).map_err(|e| format!("{}:{}: {e}", t.host, t.port))?;
+    let mut s = connect_bounded(&t.host, t.port, timeout)?;
     let _ = s.set_read_timeout(Some(timeout));
     s.write_all(format!("GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", t.path, t.host).as_bytes()).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
@@ -76,6 +96,38 @@ pub fn cli_main(a: &[String], env_url: Option<String>, out: &mut dyn FnMut(&str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bounded_connect_reaches_a_listener_and_names_a_host_that_does_not_resolve() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        assert!(connect_bounded("127.0.0.1", l.local_addr().unwrap().port(), Duration::from_secs(2)).is_ok());
+        let e = connect_bounded("no-such-host.invalid", 80, Duration::from_secs(2)).unwrap_err();
+        assert!(e.starts_with("no-such-host.invalid:80"), "{e}");
+    }
+
+    #[test]
+    fn every_address_gets_the_same_limit_a_black_holed_one_is_skipped_and_the_last_error_is_named() {
+        let a: Vec<std::net::SocketAddr> = vec!["10.255.255.1:80".parse().unwrap(), "[2001:db8::1]:80".parse().unwrap(), "127.0.0.1:80".parse().unwrap()];
+        let limit = Duration::from_millis(1500);
+        // the first two never answer (the injected connector reports what the real one would after the limit); the third does
+        let mut seen = Vec::new();
+        let ok = connect_each("h", 80, a.clone(), limit, &mut |addr, l| {
+            seen.push((*addr, l));
+            if addr.ip().is_loopback() { Ok("connected") } else { Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out")) }
+        });
+        assert_eq!(ok, Ok("connected"));
+        assert_eq!(seen.len(), 3);
+        assert!(seen.iter().all(|(_, l)| *l == limit), "no address is tried without the limit: {seen:?}");
+        // none answers: the walk ends after the last one and names it, no endless wait
+        let mut n = 0;
+        let e = connect_each::<()>("h", 80, a, limit, &mut |_, _| {
+            n += 1;
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("timed out {n}")))
+        })
+        .unwrap_err();
+        assert_eq!((n, e.as_str()), (3, "h:80: timed out 3"));
+        assert_eq!(connect_each::<()>("h", 80, Vec::new(), limit, &mut |_, _| unreachable!()).unwrap_err(), "h:80: no address");
+    }
 
     #[test]
     fn urls_are_split() {

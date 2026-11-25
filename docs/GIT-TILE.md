@@ -6,6 +6,10 @@ pull requests. It also lists the **clones already on this computer**. It is shap
 connection at the top, a table below, a view of the chosen item, a status line, Refresh, retries and "the last list stays on screen".
 **It never changes anything on a host**: every request to a host is a GET, and issues and pull requests are read-only.
 
+## Where the code is
+
+The tile is the crate `crates/iyakki-tile-git` (alpha.8 N1). It depends on the toolkit and on two leaf crates, `iyakki-git-model` (the hosts, the connections and the API client, the repository browser and the data of the jobs) and `iyakki-k8s-model` (the retry timer and the program runner trait), and asks the shell for one trait, `GitPort` (the account and its rules, the audit log, the connections, the AI IDE workspaces, the jobs of a clone, fetch, pull and push, and picture decoding). The shell adapter is `crates/iyakki-apps/src/apps/git_tile.rs` and the real port `git_port.rs`; the AI IDE's Git tab draws the same tile. The tile's own tests run against a fake port; `git_tile_tests.rs` in the apps crate runs the same screens with scripted hosts and a scripted git.
+
 ## Who has it
 
 Administrators, operators and users; not guests. It is remote-safe in Cloud mode ([`CLOUD-MODE.md`](CLOUD-MODE.md)): it needs no sound,

@@ -1,0 +1,12 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 44da32288949f773; honest subset only: everything not checked is under not-covered.
+row: F-NAME-03
+targets: qemu
+profile: ram
+feature-sha: 44da32288949f773
+doc: the stable device name, its mDNS firewall rule, the developer service announced and the startup row
+clause: 1 the stable device name, the firewall rule for mDNS from private networks only, the developer service announced and the startup row Device name (mDNS) on the image
+not-covered: the name is never made from a person's name or the host name (not compared)
+not-covered: the rule is removed when the person removes it and the announcing goes off
+not-covered: off in cloud mode unless chosen
+not-covered: every change is audited
+session-check: device_name

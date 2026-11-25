@@ -6,6 +6,7 @@
 //! (`battery`); the shell reads them at every heartbeat, so a change acts at once. Nothing here runs a program.
 
 use super::*;
+use super::super::settings_port::SettingsDataPort;
 use iyakki_battery as battery;
 use iyakki_battery::{BatteryEnv, BatterySettings, Reading};
 
@@ -60,20 +61,19 @@ impl SettingsApp {
         r
     }
 
-    pub(super) fn bat_settings(cx: &AppCx) -> BatterySettings {
-        cx.settings().lock().map(|s| s.get().battery.clone()).unwrap_or_default()
+    pub(super) fn bat_settings(p: &dyn SettingsDataPort) -> BatterySettings {
+        p.settings_get().battery
     }
 
-    fn bat_update(&mut self, cx: &AppCx, what: &str, f: impl FnOnce(&mut BatterySettings)) {
-        let r = cx.settings().lock().map(|mut s| s.update(|s| f(&mut s.battery)));
-        match r {
-            Ok(Ok(_)) => {
-                cx.audit.record(&cx.session.user, "settings.battery", what);
+    fn bat_update(&mut self, p: &dyn SettingsDataPort, what: &str, f: impl FnOnce(&mut BatterySettings)) {
+        let mut f = Some(f);
+        match p.settings_update(&mut |s| if let Some(f) = f.take() { f(&mut s.battery) }) {
+            Ok(()) => {
+                p.audit("settings.battery", what);
                 self.cache_clear();
                 self.ok("Saved.");
             }
-            Ok(Err(e)) => self.fail(e.to_string()),
-            Err(_) => self.fail("The settings are busy; try again."),
+            Err(e) => self.fail(e.message()),
         }
     }
 
@@ -81,20 +81,20 @@ impl SettingsApp {
         self.bat.cache = None;
     }
 
-    pub(super) fn handle_battery(&mut self, k: &Key, cx: &AppCx) {
-        let cur = Self::bat_settings(cx);
+    pub(super) fn handle_battery(&mut self, k: &Key, p: &dyn SettingsDataPort) {
+        let cur = Self::bat_settings(p);
         match k {
             Key::Char('p') => {
                 let hide = !cur.hide_percent;
-                self.bat_update(cx, &format!("hide_percent={hide}"), |s| s.hide_percent = hide);
+                self.bat_update(p, &format!("hide_percent={hide}"), |s| s.hide_percent = hide);
             }
             Key::Char('w') => {
                 let off = !cur.no_warnings;
-                self.bat_update(cx, &format!("no_warnings={off}"), |s| s.no_warnings = off);
+                self.bat_update(p, &format!("no_warnings={off}"), |s| s.no_warnings = off);
             }
-            Key::Char('s') if self.admin(cx) => {
+            Key::Char('s') if self.admin(p) => {
                 let off = !cur.no_shutdown;
-                self.bat_update(cx, &format!("no_shutdown={off}"), |s| s.no_shutdown = off);
+                self.bat_update(p, &format!("no_shutdown={off}"), |s| s.no_shutdown = off);
             }
             _ => {}
         }
@@ -104,10 +104,10 @@ impl SettingsApp {
         vec![("Percentage in the top bar", ACCENT, 'p'), ("Low battery warnings", TEXT, 'w'), ("Shut down at critical level", TEXT, 's')]
     }
 
-    pub(super) fn render_battery(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+    pub(super) fn render_battery(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn SettingsDataPort) {
         let r = self.bat_reading();
-        let cfg = Self::bat_settings(cx);
-        let admin = cx.session.policy.manage_settings;
+        let cfg = Self::bat_settings(p);
+        let admin = p.is_admin();
         let mut y = a.y;
         if r.readable() {
             // the bar

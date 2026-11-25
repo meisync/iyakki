@@ -16,6 +16,7 @@ use iyakki_agent_api::SshTunnels;
 use iyakki_shared::sshtunnel_mgr::{Row, TestReport};
 
 use super::*;
+use crate::apps::settings::network_port::NetworkSettingsPort;
 
 /// What the page keeps between frames.
 #[derive(Default)]
@@ -44,16 +45,15 @@ impl SettingsApp {
         self.tun.now.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()))
     }
 
-    pub(super) fn tun_mgr(&self, cx: &AppCx) -> Arc<dyn SshTunnels> {
+    pub(super) fn tun_mgr(&self, p: &dyn NetworkSettingsPort) -> Arc<dyn SshTunnels> {
         if let Some(m) = &self.tun.mgr {
             return m.clone();
         }
-        let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-        cx.b4().ssh_tunnels(&cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d)))
+        p.ssh_tunnels()
     }
 
-    pub(super) fn tun_len(&self, cx: &AppCx) -> usize {
-        self.tun_mgr(cx).tunnels().len()
+    pub(super) fn tun_len(&self, p: &dyn NetworkSettingsPort) -> usize {
+        self.tun_mgr(p).tunnels().len()
     }
 
     pub(super) fn tun_buttons(&self) -> Vec<Btn> {
@@ -61,15 +61,15 @@ impl SettingsApp {
     }
 
     /// The heartbeat: collects the answer of a Test, and (only when the supervisor is not doing it) keeps the clients going.
-    pub(super) fn tun_tick(&mut self, cx: &AppCx) {
+    pub(super) fn tun_tick(&mut self, p: &dyn NetworkSettingsPort) {
         if self.tab() == Tab::SshTunnels && self.ticks % 20 == 0 {
-            self.tun_mgr(cx).tick(self.tun_now());
+            self.tun_mgr(p).tick(self.tun_now());
         }
         let Some((id, rx)) = &self.tun.testing else { return };
         let Ok(r) = rx.try_recv() else { return };
         let id = id.clone();
         self.tun.testing = None;
-        let mgr = self.tun_mgr(cx);
+        let mgr = self.tun_mgr(p);
         let name = mgr.get(&id).map(|t| t.name).unwrap_or_default();
         if r.ok {
             self.ok(format!("{name}: {}", r.lines.join(" ")));
@@ -88,22 +88,22 @@ impl SettingsApp {
             .choice("Trust this host key", &["No, do not trust it", "Yes, it matches"], 0)
     }
 
-    fn tun_row(&self, cx: &AppCx) -> Option<Row> {
-        let rows = self.tun_mgr(cx).rows();
+    fn tun_row(&self, p: &dyn NetworkSettingsPort) -> Option<Row> {
+        let rows = self.tun_mgr(p).rows();
         let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
         rows.into_iter().nth(sel)
     }
 
-    pub(super) fn handle_tun(&mut self, k: &Key, cx: &AppCx) {
-        let mgr = self.tun_mgr(cx);
+    pub(super) fn handle_tun(&mut self, k: &Key, p: &dyn NetworkSettingsPort) {
+        let mgr = self.tun_mgr(p);
         let len = mgr.tunnels().len();
-        let row = self.tun_row(cx);
+        let row = self.tun_row(p);
         match k {
             Key::Up => self.move_sel(-1, len),
             Key::Down => self.move_sel(1, len),
-            Key::Char('a') => self.tun_open_form(cx, None),
+            Key::Char('a') => self.tun_open_form(p, None),
             Key::Char('e') => match row {
-                Some(r) => self.tun_open_form(cx, Some(r.tunnel)),
+                Some(r) => self.tun_open_form(p, Some(r.tunnel)),
                 None => self.fail("Choose a tunnel first (Up/Down)."),
             },
             Key::Char('x') => match row {
@@ -169,8 +169,8 @@ impl SettingsApp {
 
     // ------------------------------------------------------------------------------------------------ add and edit
 
-    fn tun_open_form(&mut self, cx: &AppCx, edit: Option<Tunnel>) {
-        let keys: Vec<String> = self.tun_mgr(cx).key_ids();
+    fn tun_open_form(&mut self, p: &dyn NetworkSettingsPort, edit: Option<Tunnel>) {
+        let keys: Vec<String> = self.tun_mgr(p).key_ids();
         let own = edit.as_ref().is_some_and(|t| t.own_key);
         let mut opts: Vec<String> = vec![if own { "Keep the key made for this tunnel".into() } else { "Make a new key for this tunnel".into() }];
         opts.extend(keys.iter().cloned());
@@ -192,8 +192,8 @@ impl SettingsApp {
         self.open_form(FormKind::SshTun(TunForm::Edit(edit.map(|t| t.id))), f);
     }
 
-    pub(super) fn tun_submit(&mut self, cx: &AppCx, kind: &TunForm, form: &mut Form) -> Result<String, String> {
-        let mgr = self.tun_mgr(cx);
+    pub(super) fn tun_submit(&mut self, p: &dyn NetworkSettingsPort, kind: &TunForm, form: &mut Form) -> Result<String, String> {
+        let mgr = self.tun_mgr(p);
         match kind {
             TunForm::Trust(host, port) => {
                 if form.choice_idx(1) != 1 {
@@ -259,11 +259,11 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn tun_delete(&mut self, cx: &AppCx, id: &str) {
-        match self.tun_mgr(cx).remove(id) {
+    pub(super) fn tun_delete(&mut self, p: &dyn NetworkSettingsPort, id: &str) {
+        match self.tun_mgr(p).remove(id) {
             Ok(done) => {
                 self.ok(format!("Deleted {}.", done.join(", ")));
-                let len = self.tun_len(cx);
+                let len = self.tun_len(p);
                 self.sel[self.tab] = self.sel[self.tab].min(len.saturating_sub(1));
             }
             Err(e) => self.fail(e),
@@ -272,8 +272,8 @@ impl SettingsApp {
 
     // ------------------------------------------------------------------------------------------------ drawing
 
-    pub(super) fn render_tun(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let mgr = self.tun_mgr(cx);
+    pub(super) fn render_tun(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn NetworkSettingsPort) {
+        let mgr = self.tun_mgr(p);
         let rows = mgr.rows();
         let now = self.tun_now();
         let mut y = a.y;

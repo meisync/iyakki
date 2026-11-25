@@ -45,16 +45,16 @@ fn a_browser_session_dictates_and_records_with_the_browsers_microphone() {
     let (m, log, _r) = browser(&cx, Policy::allow_all());
     let mut v = VoiceApp::new(&cx).with_recordings_dir(temp_dir("vb-voice-rec"));
     assert_eq!(v.rig.recorders.product(), "web browser");
-    v.look(&cx);
+    v.look(&CxPort(&cx));
     assert_eq!(v.mics.len(), 1, "the browser's microphone is the only one listed");
     // the microphone is off: Record asks the page to show its Allow button and starts nothing
-    v.rec_start(&cx);
+    v.rec_start(&CxPort(&cx));
     assert!(!v.is_recording_to_file());
     assert!(v.status_text().is_some_and(|(t, ok)| t.contains("Allow the microphone in your browser") && !ok), "{:?}", v.status_text());
     assert!(m.take_messages().iter().any(|s| s.contains("media_ask")));
     // the person clicks Allow in the page; now Record works and takes the page's sound
     m.set(Kind::Mic, true).unwrap();
-    v.rec_start(&cx);
+    v.rec_start(&CxPort(&cx));
     assert!(v.is_recording_to_file());
     let mut chunk = vec![CH_MIC];
     chunk.extend(std::iter::repeat_n([0x10u8, 0x10], 800).flatten());
@@ -67,8 +67,8 @@ fn a_denied_browser_microphone_is_refused_in_the_tile() {
     let cx = cx_own_user("vb-denied");
     let (m, log, _r) = browser(&cx, Policy::deny_all());
     let mut v = VoiceApp::new(&cx).with_recordings_dir(temp_dir("vb-denied-rec"));
-    v.look(&cx);
-    v.rec_start(&cx);
+    v.look(&CxPort(&cx));
+    v.rec_start(&CxPort(&cx));
     assert!(!v.is_recording_to_file());
     assert!(v.status_text().is_some_and(|(t, _)| t.contains("may not use the microphone")), "{:?}", v.status_text());
     assert!(log.lock().unwrap().contains(&"browser.media.denied mic".to_string()));

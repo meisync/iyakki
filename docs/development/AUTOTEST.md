@@ -34,8 +34,36 @@ One run at a time per host (lock `~/iyakki-work/.autotest.lock`), never while th
 
 A scenario is `dist/autotest/scenarios/<ROW>.scn`: the `dist/devtest` text format (verbs `key`, `click`, `wait`, `shot`, `expect-text`, `expect-page`, `skip-unless-button`, `restore-click`, ... and its safety guard) plus headers and verbs.
 Headers (before the first step): `row: F-A-1, F-A-2`, `targets: qemu browser real hw:macmini2018`, `profile: ram` (QEMU boot profile), `clause: TEXT` (repeat; covered when the scenario passes), `not-covered: TEXT` (repeat; a non-empty list stops every raise), `needs-hw: TEXT`, `human: CLAUSE-ID | what the person must do`, `feature-sha: HEX` (hash of the Feature cell the clauses were written for; `python3 -c "import results; print(results.feature_sha(TEXT))"` in `dist/autotest`), `session-check: NAME` (adapter: runs a check of `dist/qemu/session_checks_defs.py`), `suite: SCRIPT ARGS` (browser target: a `dist/browsertest` script).
-New verbs: `expect-golden STEP [mask=x,y,w,h] [budget=PCT]`, `expect-audit REGEX`, `expect-serial REGEX`, `expect-sh CMD ==> REGEX`, `expect-config KEY VALUE`, `expect-http URL STATUS [REGEX]` (loopback only), `covers N` (documentation).
+New verbs: `expect-golden STEP [mask=x,y,w,h] [budget=PCT]`, `expect-audit REGEX`, `expect-serial REGEX`, `expect-sh CMD ==> REGEX`, `expect-config KEY VALUE`, `expect-http URL STATUS [REGEX]` (loopback only), `covers N` (documentation), and the sound verbs below.
 Golden screens: `dist/autotest/golden/<ROW>/<step>.png`; the masked tolerance diff ignores mask boxes and passes under the budget (default 0.5 percent of pixels, 24 per channel); a missing golden is `NEW-GOLDEN` (a candidate, never a pass); `--update-golden` writes it and a person reviews it before it is committed. Text expectations (`expect-text`, OCR) carry the proof; the pixel diff is a regression alarm.
+
+### Sound verbs: the guest's playback is recorded and listened to
+
+Sound is judged by `dist/autotest/listen.py`, an in-house WAV listener (standard library only: `struct`, `array`, `math`). It reads PCM WAV of 8, 16 or 24 bit, mono or stereo, any rate. The recording comes from QEMU itself: a scenario group whose scenarios use a sound verb starts the guest with `-audiodev wav,id=snd0,path=OUT/audio-<profile>/guest.wav` instead of `-audiodev none,id=snd0` (the sound device is the same `intel-hda` with `hda-duplex` as before). Every other group keeps `-audiodev none`. The recording stays in the run folder as evidence.
+
+| Verb | Judges the scenario's window (from the moment the scenario began) |
+|---|---|
+| `expect-tone HZ [tol] [left\|right]` | a tone at HZ within `tol` Hz (default 10) at -40 dBFS or louder for 0.2 s or more (Goertzel over 100 ms windows; the mix of the channels when none is named) |
+| `expect-level LOW HIGH` | the RMS of the window is between LOW and HIGH dBFS |
+| `expect-silence` | no 50 ms window is louder than -60 dBFS |
+| `expect-sound-within SECONDS` | the first sound (above -50 dBFS) starts no later than SECONDS after the scenario began |
+| `expect-speech MIN MAX` | the voiced span from the energy envelope (20 ms frames, 12 dB above the noise floor, gaps under 0.25 s bridged) lasts MIN to MAX seconds. It measures how long energy comes and goes; it does NOT recognise words |
+
+A sound verb is refused, never passed, when the run has no recording (the check fails with "refused: ... -audiodev wav"). A scenario with a sound verb names only `targets: qemu`; `--list` reports any other target as a format problem. The unit tests are `dist/autotest/tests/test_listen.py` (WAVs synthesised in the test) and `dist/autotest/tests/test_sound_verbs.py` (parsing, the refusal, the window). Paired machines are not covered by these verbs: a machine's own recording is a later step (decision D-SND-AUTO-01).
+
+Example (documentation only: a scenario file needs a row id, so this is not committed as a row). It plays a chime on the left, then the right, and checks a spoken prompt:
+```
+name: sound-demo
+row: F-XXX-1
+targets: qemu
+clause: 1 the chime plays on the left, then the right
+clause: 2 the spoken prompt lasts a few seconds
+profile: ram
+expect-tone 440 10 left
+expect-tone 880 10 right
+expect-speech 1 4
+```
+`expect-sound-within 2` is the check for a sound that must start at once after the steps that start it.
 
 ## Result record
 
@@ -49,7 +77,7 @@ Dry run by default. Test is raised only upward, only by these rules, and nothing
 * **100 from QEMU: never** by default. The switch `--qemu-counts-as-real` (OFF; owner decision pending: does QEMU count as real for software-only rows) lets a screen-evidenced, two-run PASS set 100 for a row with Manual `none`. A FEATURES row at 100/100 is set `done` (feature_matrix requires it).
 * **100 from a machine**: a PASS at the `machine-<name>` level with `device_ok` (the hardware matches), all clauses covered, and for every `needs_human` clause a human file with verdict `pass` for that machine and image commit; Manual becomes `passed DATE MACHINE`.
 
-## Human checklist contract (shared with the Doctor tab, branch alpha.7/H1)
+## Human checklist contract (shared with the Doctor tab)
 
 Code and validators: `dist/autotest/humanschema.py` (tests `dist/autotest/tests/test_humanschema.py`). Both shapes are JSON with `"schema": 1`. The in-OS Doctor tab and the offline HTML page read the first and write the second, the same.
 
@@ -63,13 +91,102 @@ Rules: ids are plain (`A-Za-z0-9_-`, up to 48), unique per file; steps and expec
 
 **Human evidence file** `human/<ROW>.<clause>.<machine>.json` (the machine id is a plain name such as `lenovo` or `mac-mini-2018`):
 ```
-{"schema":1, "row":"F-X-1", "clause":"ears-1", "machine":"lenovo", "image_commit":"abc1234", "by":"owner", "verdict":"pass"|"fail"|"cannot-test",
+{"schema":1, "row":"F-X-1", "clause":"ears-1", "machine":"lenovo", "image_commit":"abc1234", "by":"owner"|"admin"|"person", "verdict":"pass"|"fail"|"cannot-test",
  "date":"2026-11-22" or "2026-11-22T10:15:00", "note":"optional", "photo":"optional relative path"}
 ```
-No field outside this list is allowed; nothing secret is collected. Only `pass` for the same machine and image commit counts (rule 100 above); `fail` opens a KNOWN-ISSUES draft; `cannot-test` counts for nothing and stays visible.
+No field outside this list is allowed (a file with another field is refused by the enforcer and by the Doctor tab); nothing secret is collected. Only `pass` for the same machine and image commit counts (rule 100 above); `fail` opens a KNOWN-ISSUES draft; `cannot-test` counts for nothing and stays visible.
+
+**`by` is a role, never a name**: `owner`, `admin` (a team member with an administrator account) or `person` (anybody else); the allow-list is `BY_ROLES` in `humanschema.py` and the Rust side (`iyakki_shared::manualtest::BY_ROLES`). A pass of any of the three counts as a human pass. **Sampling rule**: the owner looks again at 10 percent of the passes given by `admin` and `person` (never the owner's own): the clauses are chosen by a hash of row, clause, machine and image commit (the same on every run), named in the enforcer's report line ("owner review sampled") and listed in `OUT/owner-review.json` (written with `--apply`); the sample is recorded, it never blocks a raise.
+
+**Where the enforcer looks**: `OUT/human/<ROW>.<clause>.<machine>.json` and `OUT/human/<machine>/<ROW>.<clause>.<machine>.json` (answers imported from another machine are kept in the machine's own folder).
+
+**The Doctor tab reads both tools' checklists**: the in-house `dist/manual/*.chk` (parser `ChkParser`) and the runner's `dist/autotest/checklists/<ROW>.json` (parser `RunnerParser`; one scenario per row, each clause answered by its last step, `runner_did` and the screenshot named by a step shown; the PNGs are drawn when the file is in `/usr/share/iyakki/manual/checklists/`, installed by post-build.sh). Both are listed in the left navigation; answers are written in the schema above with the machine id of the runner's kinds (`lenovo`, `mac-mini-2018`, ...; the host name when the hardware is none of them) and the commit of the image. The chat tools `manual_tests_list`, `manual_test_open`, `manual_test_record`, `manual_tests_export` and `manual_tests_import` (all but the first two ask) do the same as the tab. The first layout of the tab (`iyakki.human-evidence.1`, no machine in the file name) is still read, never written.
 
 The offline form is `./run.sh autotest --checklist`: one HTML page per machine kind (`OUT/checklist/<machine>.html`), the runner's screenshots embedded, Pass, Fail and Cannot-test buttons. Opened as a file it saves each answer as a download with the right file name; served by `python3 dist/autotest/checklist.py --serve OUT` (loopback only) it writes into `OUT/human/` directly. It works offline and needs no cloud.
 
 ## Nightly and triage
 
 `python3 dist/autotest/nightly.py plan|run STEP|triage|install` (documented only; nothing here enables a cron or a timer). One lock for all steps. 01:00 gate and image on the AMD host, 02:30 autotest QEMU and browser, 04:00 paired machines one at a time (a machine whose sign-in screen shows is skipped as BLOCKED), 06:30 triage. Triage: two FAILs in a row draft a KNOWN-ISSUES entry file (never an invented KI number), a PASS and a FAIL on one commit goes to the FLAKY-TESTS suggestions, stale evidence is flagged and never lowers Test. A scenario named in `dist/autotest/quarantine.txt` counts as BLOCKED, never PASS; the list may only shrink.
+
+## Row splitting for autotest (pilot batch A)
+
+A row whose Feature text is a list of API-level clauses cannot reach rung 70 from a screen alone: the runner can show one visible clause, the rest is proved by unit tests. The scenario therefore names what it covers with `clause:` and the rest with `not-covered:` (a non-empty list stops every raise), and the row would be split into a sub-row for the visible clause and a sub-row for the API clauses. Feature texts of existing rows are not edited by the scenario lane; the candidates, for the owner and the matrix lane to split:
+
+| Row | Visible clause (sub-row A, a scenario can prove it) | API clauses (sub-row B, unit tests only) |
+|---|---|---|
+| F-CORE-20 | `dev info` shows the compatibility report | staged copy, commit after boot confirm, rollback, finish a half commit |
+| F-CORE-29 | `dev info` carries the paired computer as a peer | sessions as kind session, helpers as kind helper, entries vanish, other helpers |
+| F-SDK-189 | the Settings page for app events is served by the facet | the twelve facet methods, `NoAppEvents`, the fake with a test clock |
+| F-SDK-191 | what waited arrives marked late in SAMPLE | `EventsPort`/`MemEvents` semantics, `EventRouter`, `EventActions` |
+| F-SDK-212 | foreground and background reach a listening app | background at the next frame after closing, once a frame from the front app |
+| F-SDK-213 | a permission change reaches the app it is about as `app.permissions` | no other copy hears it, no scope needed, merge, taken-away scope ends registrations, last change kept, names only |
+| F-SDK-214 | the SAMPLE pane shows the last permission change | `on_permissions`, `PermissionChange`, `capabilities()`, recipe, guide, `events-permissions` rule |
+| F-SKIN-07 | Light, High contrast and Dark apply on the real Display page | the widget and ChatView matrix, Paper, shipped skins, live switch |
+
+Done 2026-11-21 (lane SPLIT1): the eight rows are split into `<ID>a` (visible) and `<ID>b` (API) rows; the originals keep their Feature text and their tests, and the scenario files are now `dist/autotest/scenarios/<ID>a.scn` with the sub-row's own `feature-sha` and an empty `not-covered`. A sub-row id is the row id plus one lowercase letter.
+
+No split is needed for F-FLOW-28, F-RADIO-13, F-SDK-193, F-SDK-216 and F-SYS-09 (one clause, answered by a person: `human:` header and a checklist file), nor for F-LAUNCH-22 and F-LOOK-04 (one short clause; the scenario's `not-covered` names what a screen cannot show).
+
+## Wave 2 (alpha.8, lane E8): 51 more scenarios and 20 checklists
+
+Written, not yet run (no QEMU on the build host while the gate holds its lock). Every file names its Feature hash; a Feature edit makes it unattested until rewritten.
+
+* App events and permissions (QEMU, the existing session checks through `session-check:`): F-SDK-188, 190, 192, 195, 196, 197, 199, 203, 209, 218.
+* Update, dev API, image facts (QEMU, session checks): F-UPD-06, 08, 09, 12, 16, F-APPSTORE-02, F-CORE-19, F-DOCTOR-03, F-FW-03, F-BOOT-27, F-NAME-03, F-KBD-05.
+* Settings pages on QEMU and paired machines (read only, text proof): F-A11Y-05, F-HW-05, F-NET-06, F-CLOUD-20, F-K8S-18 (QEMU and real); F-BATT-04 and F-PWR-01 (real only: a laptop, a governor).
+* Browser harness (`suite:`): F-WEB-16, 17, 18, 32, 33, 42, 47, 48, F-INBOX-08.
+* Header-only rows for a person (with a checklist): F-ROUTER-40, F-INST-18, F-GIT-19, F-VPN-13, F-RAG-08, F-DATA-03, F-AI-17, F-FLOW-22, F-BELL-04, F-DEVT-05, F-CLI-07, F-DEV-10, F-APPSTORE-08, and the human half of the page rows above.
+
+Runner gaps found while writing (the scenarios are written to work once these are closed; none is edited here):
+* A `real` scenario cannot use `expect-sh` (the machine path passes no `sh`), so the panic-restart row F-BOOT-33 (`cat /proc/cmdline`, `/proc/sys/kernel/panic`) is not written yet; QEMU boots with `panic=-1` of its own.
+* `expect-http {http}` is skipped on QEMU (no forwarded web port is handed over), so F-WEBSVC-10 and F-WEBSVC-13 (`/metrics`) are not written.
+* Several browser scenarios name the same `run_pages.py --only ...` part and each starts its own Chrome run; a runner that runs one suite call per distinct command line would save about 40 minutes.
+* The `net` profile (a loopback fake model, Gitea, registry and HTTP host) does not exist yet, so the fake-service rows F-ROUTER-13, F-RAG-14, F-APPSTORE-08, F-LINAPP-03 and 04 have no scenario; F-BOOT-39 needs an image built from the device profile.
+
+## Pilot runs of 2026-11-23 (lane Q7, image program built from release/alpha.10 e3ed2d8c)
+
+The image folder was made from the alpha.8 gate's base (kernel and root file system of `target/buildroot-pc-push`, commit 0f987f0c) with a freshly built static `iyakki` (profile `device`, target `x86_64-unknown-linux-musl`, commit e3ed2d8c) laid over it as a second zstd cpio; the same file is the host-side client (`IYAKKI_CLIENT`). The image commit given to the runner is the commit of the program (`--image-commit`). Two QEMU runs of 53 scenarios (34 PASS, 16 NEEDS-HUMAN, 2 SKIP, 1 FAIL each, identical), one browser run (9 of 9 PASS), then two filtered runs of the two rows fixed by the pilot:
+* F-K8S-18: the sidebar button is named Clusters, not Dev cluster; the Platform services panel opens with the P key, so the scenario presses it and reads the panel.
+* F-SDK-203: the image kernel has no ACPI PCI hot-plug (`CONFIG_HOTPLUG_PCI_ACPI` is not set), so an xhci controller added through the monitor was never seen. The new boot profile `usb` starts the guest with the controller present (`dist/autotest/run.py` and `dist/qemu/session-checks.py`, `tests/test_profiles.py` keeps the two lists equal), and the check only hot-plugs the mouse.
+* F-SDK-197 stays SKIP: the guest shell is an unprivileged account and cannot mount the hot-plugged disk (and the same PCI hot-plug limit applies); it needs a root shell or an image that mounts a plugged disk by itself.
+* The runs F-SDK-203 failed before the fix, on the same image commit, so the migrator reports it flaky until a run on a newer image commit passes twice.
+
+## Image basis of the pilot raise (lane Q8, 2026-11-24)
+
+The eight sub-rows raised after the pilot (F-CORE-20a, F-CORE-29a, F-SDK-189a, F-SKIN-07a 0 to 70; F-SDK-191a, F-SDK-212a, F-SDK-213a, F-SDK-214a 50 to 70) rest on two QEMU runs of an image made of the alpha.8 base (kernel and root file system, commit 0f987f0c) with the alpha.10 program (commit e3ed2d8c) laid over it. The question was whether that is a fair "image commit" under the rule that the scenario's clauses must be provided by what ran.
+
+Decision: fair for these eight, with the basis written down and checked by code, not by habit.
+* Evidence. Every clause of the eight is given by the one static `iyakki` program (the core's `dev info` report, the Settings and SAMPLE screens, the app-event facet, the theme code); the kernel and the root file system provide no part of them. Between 0f987f0c and e3ed2d8c no file of the root file system changed (the overlay, the post-build step, the fonts, the samples; `git diff --name-only 0f987f0c e3ed2d8c -- dist/buildroot` lists only `build.sh` and `verify-kernel-config.sh`, the rest are new boards for other machines), so a freshly built alpha.10 image would carry the same base files under the same program.
+* Code. The runner now records the true base: `--base-commit SHA` (default: the image commit) writes `base_commit` into every result next to `commit`, which stays the program's commit. The enforcer (`evidence.py`) refuses a raise when the base differs from the program unless the scenario carries the header `provided-by: program` (clauses given by the program alone); the report line then reads "program X over base Y (provided-by: program)". A scenario without the header needs one image commit. Tests: `test_evidence.py` (a layered result with and without the header, an equal base).
+* Disclosure of the first runs. The pilot results of 2026-11-23 were written before the field existed; their `base_commit` was added afterwards by hand (0f987f0c, the fact recorded in the pilot section above), nothing else in them was touched. The eight scenarios carry the header.
+* What this does not do. It does not make the rows 100: QEMU is not hardware, and rung 100 still needs the real-machine rule. A scenario whose clause could come from the base (a boot, a driver, a rootfs file, the kernel) must not carry the header; it needs an image built from one commit (the gate's image, run twice).
+
+## Batch F (lane Q8, 2026-11-24): 25 more scenarios, run once
+
+Twenty-five read-only Settings-page scenarios, one per row, all with a non-empty `not-covered` (a page being drawn proves the page, not the row), so none can raise a row alone: F-A11Y-02, F-ASSIST-46, F-ASSIST-47, F-BROW-79, F-BROW-92, F-BROX-25, F-DEV-11, F-DISP-14, F-FILE-06, F-FLEET-09, F-FLEET-14, F-FLEET-15, F-GEMVOICE-13, F-HOTSPOT-12, F-LAUNCH-06, F-LAUNCH-12, F-LAUNCH-13, F-LAUNCH-20, F-NET-07, F-SDK-215, F-SKIN-06, F-SND-10, F-SND-15, F-VPN-12, F-WEB-15. They ran on the pilot image (program e3ed2d8c over the 0f987f0c base, `--base-commit` recorded): 25 of 25 PASS (first run 20 PASS and 5 text FAIL, the second run of the five after the scenarios were corrected: OCR misses the blue button pills, so a button is proved with `skip-unless-button`, which can only SKIP, never pass without the button; F-SND-19 was dropped because a guest has no capture device and shows no Microphone section, F-SND-10 took its place). Evidence: `~/iyakki-work/autotest/q8-qemu-runF1` and `q8-qemu-runF2`. A second full run is still needed before any of them could count; none of them is meant to raise a row without a split of the row.
+
+## Batch F split and batch G (lane SC2, 2026-11-24)
+
+Nothing here was run: no QEMU, no Chrome (a later lane runs both batches twice on the AMD host, on one image commit). Validated offline with `./run.sh autotest --list`, `--dry-run` and the autotest unit tests (103 pass; the end-to-end test checks every scenario names a known row with the current `feature-sha`).
+
+**Batch F split.** Every batch-F scenario had a non-empty `not-covered`, so none could raise a row. Each of the 25 rows is now split by the SPLIT1 pattern into `<ID>a` (what the Settings page shows; the scenario moved to `<ID>a.scn`, its `row:` and `feature-sha` are the sub-row's, `not-covered` is empty) and `<ID>b` (the API and rule clauses, with the original's tests). The original keeps its Feature text and tests and gets a Notes line. Where a unit test of the original proves that the page draws (a page-fits-the-window test, an only-administrators-have-it test), it is also cited by the `a` row and the row keeps Test 50; the 8 rows with no such test (F-A11Y-02a, F-BROX-25a, F-DISP-14a, F-LAUNCH-06a, F-LAUNCH-12a, F-LAUNCH-20a, F-NET-07a, F-SDK-215a) cite only their scenario and are at Test 0 until it has run twice. The 25 rows: F-A11Y-02, F-ASSIST-46, F-ASSIST-47, F-BROW-79, F-BROW-92, F-BROX-25, F-DEV-11, F-DISP-14, F-FILE-06, F-FLEET-09, F-FLEET-14, F-FLEET-15, F-GEMVOICE-13, F-HOTSPOT-12, F-LAUNCH-06, F-LAUNCH-12, F-LAUNCH-13, F-LAUNCH-20, F-NET-07, F-SDK-215, F-SKIN-06, F-SND-10, F-SND-15, F-VPN-12, F-WEB-15. The partial ceiling went up by the 50 new ids (listed in `partial-ceiling-raises.txt`). A page being drawn proves the page, not the whole row: only the `a` sub-row can reach 70, the `b` sub-row and the original stay at 50 until their own evidence exists.
+
+**Batch G, 40 new scenarios** for rows at Impl 100, Test 50, Manual none, with no scenario yet (picked by script over FEATURES.md, then by what a QEMU guest or the browser harness can show). Each names its visible clause and lists everything else under `not-covered`, so none of them is meant to raise its row alone (the original rows are not split here); a clause that is only "the page or card is there" proves that and nothing more.
+* Settings pages (21): F-FLOW-38, F-TALES-11, F-EXTA-10, F-CORE-13, F-FLEET-10, F-SET-07, F-HOTSPOT-14, F-WEB-14, F-VAULT-08, F-SHELL-62, F-LOOK-05, F-LOOK-01, F-UPD-07, F-LOCK-03, F-MODELHOST-02, F-CLOUD-09, F-GIT-05, F-CLUSTER-03 and, through the Platform services panel of Clusters, F-APPS-48, F-K8S-16, F-K8S-17.
+* Tiles and launcher entries (8): F-DOCTOR-07, F-LINWIN-06, F-LAB-01, F-LAB-04, F-GIT-06, F-FLOW-30, F-IDE-09, F-GIT-12 (the last two open the AI IDE).
+* Store, Setup cards (8, nothing is installed): F-MEDIA-09, F-LINAPP-06, F-LINWIN-03, F-SETUP-13, F-SETUP-14, F-SETUP-11, F-MSG-06, F-DRIVERS-53. A card below the first screen is looked for after `scroll down`; if it is still out of sight the scenario fails and the number of scrolls is the thing to adjust.
+* The guest itself (1): F-BOOT-38, `expect-sh ls /sys/bus/pci/drivers`, the built-in `vmd` driver of the image kernel. It has no `provided-by: program` header: the kernel comes from the base, so it needs an image built from one commit.
+* Browser harness (2): F-WEBSVC-02 (`run_pages.py --only pages`, the sign-in page) and F-WEBDEV-05 (`run_pages.py --only client`, the Devices panel).
+Scenarios that open a tile start from Home with `click group NAME` then `click TILE`, as the session checks do; the runner returns to Home between scenarios.
+
+**Expected gain once two runs pass on one image commit** (the rule of this file: both PASS, same image commit, every clause covered, `not-covered` empty, Impl 100): the 25 `a` sub-rows go to Test 70 (17 from 50, 8 from 0). The 40 batch-G rows stay at 50 because of their `not-covered` lines; they become raise candidates only after a split like the batch-F one, and they are listed here so the later lane has the evidence ready.
+
+## Fake network camera (lane CAM1, D-CAM-AUTO-01)
+
+`dist/autotest/fakecam.py` is a network camera for scenarios that need one: an HTTP Motion-JPEG stream (`/video.mjpg`, multipart) and a single picture (`/snapshot.jpg`), and an RTSP server over TCP (OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN) that sends RFC 2435 Motion-JPEG as interleaved RTP on channel 0 (payload type 26, the SDP the in-house client in `crates/iyakki-rtsp` reads). Standard library only; it listens on 127.0.0.1 and nothing else. The QEMU guest reaches it at `10.0.2.2:PORT` (QEMU user networking forwards that address to the host's loopback), so a scenario gives the guest that address and the port the runner chose.
+
+* **Start:** `python3 dist/autotest/fakecam.py --rtsp-port 8554 --http-port 8080 --user admin --password-env FAKECAM_PASSWORD --auth digest --schedule "motion at 5 seconds for 10 seconds" --log RESULT/fakecam.jsonl`. Port 0 picks an ephemeral port, and the first line printed on stdout is `fakecam ready http=PORT rtsp=PORT`; the runner waits for that line, not for a sleep. `--no-http` and `--no-rtsp` serve one protocol only. The password is read from the environment variable named by `--password-env`, never from the command line; without `--user` there is no sign-in. `--auth basic` sends Basic instead of Digest (MD5, qop=auth). The process stops on SIGTERM or SIGINT.
+* **Pictures:** three committed 176 x 144 baseline JPEGs in `dist/autotest/data/` (a still scene, and the same scene with a black block at the left and at the right; made by `dist/autotest/fakecam_jpeg.py`). The camera never encodes at run time.
+* **Schedule:** `motion at T seconds for N seconds`, entries separated by `;`, `none` for no motion. T counts from the camera's start. Inside a window the block alternates between the left and the right position on every frame, so motion detection sees movement at a known time; outside it the picture is still.
+* **Log:** `--log FILE` writes JSON lines, one per event, with `t` (seconds since the start): `start` (ports, paths, schedule), `http.request` and `rtsp.request` (the method and path or URI with any user name removed, the status code, and `auth`: `none`, `ok`, `challenge` for the first 401 with no credentials sent, or `refused` for wrong ones), `http.stream.start` and `http.stream.end` (frames and motion frames), `rtsp.stream.start` and `rtsp.stream.end` (with `reason`: `teardown`, `client closed` or `stopped`), `motion.start` and `motion.end` (at the scheduled times), and `stop`. Passwords and Authorization headers are never written. A runner checks the file, for example that a `rtsp.request` with `method` PLAY and `auth` `ok` came before the `motion.start` of the scenario.
+* **Tests:** `python3 -m unittest discover -s dist/autotest/tests` runs `test_fakecam.py`, which starts the camera on an ephemeral loopback port inside each test, speaks HTTP and RTSP to it, checks the JPEG bytes with a validator written for the purpose (it decodes the whole scan), and checks that nothing is listening after `stop()`.

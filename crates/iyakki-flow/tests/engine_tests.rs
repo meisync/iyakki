@@ -639,7 +639,11 @@ fn the_global_limit_holds_across_flows() {
         store.publish(&id, &iyakki_flow::store::PublishReq { by: "u", label: "", changelog: "x", approved_by: None }).unwrap();
         ids.push(engine.start_run(StartRequest::new(&id)).unwrap().run_id);
     }
-    std::thread::sleep(Duration::from_millis(150));
+    // both runs are live once the engine has started them: wait for that, bounded by the clock of the wall, not a fixed pause (a loaded machine is slower)
+    let wall = std::time::Instant::now();
+    while live.load(Ordering::SeqCst) < 2 && wall.elapsed() < Duration::from_secs(30) {
+        std::thread::yield_now();
+    }
     assert_eq!(live.load(Ordering::SeqCst), 2);
     for _ in 0..4 {
         release_tx.send(()).unwrap();

@@ -336,6 +336,11 @@ pub fn quiet_for_shutdown() {
     }
 }
 
+/// Called after the machine woke from sleep: the speakers were silenced before it slept, so the person's volume is set again.
+pub fn restore_after_resume() {
+    crate::audioout::global().after_resume();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

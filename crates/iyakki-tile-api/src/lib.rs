@@ -5,10 +5,20 @@
 //! `App` trait. Tests of a tile crate fill it with fakes. Add a field or a trait here when the next tile needs it, not before.
 
 pub mod calendar;
+pub mod checkup;
+pub mod doctor;
+pub mod inbox;
+pub mod mesh;
 pub mod cameras;
+pub mod linuxwin;
 pub mod pdf;
+pub mod rag;
 pub mod radio;
 pub mod remote;
+pub mod runs;
+pub mod scan;
+pub mod store_qi;
+pub mod system;
 pub mod usage;
 
 #[cfg(feature = "ui")]

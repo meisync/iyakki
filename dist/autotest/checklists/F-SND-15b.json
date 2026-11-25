@@ -1,0 +1,80 @@
+{
+ "schema": 1,
+ "row": "F-SND-15b",
+ "feature_sha": "2ffaa3298744e14b",
+ "title": "browser sound routed through the mixer, behind its own switch (manual until automated)",
+ "clauses": [
+  {
+   "id": "route-plays",
+   "text": "With the mixer on and the browser switch on, the browser's sound plays through IYAKKI's mixer and the row says carrying.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "As an administrator, open Settings, Sound, turn the mixer on, then turn on Browser sound through the mixer (experimental).",
+     "expect": "The row says it applies the next time the web engine starts."
+    },
+    {
+     "do": "Start the web engine (open a web page in the browser) and play a page with sound.",
+     "expect": "The page's sound comes from the speakers and the row says carrying."
+    }
+   ]
+  },
+  {
+   "id": "off-returns",
+   "text": "With the switch off, the browser opens the sound card itself again from the next web engine start.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Turn the browser switch off, restart the web engine and play sound.",
+     "expect": "Sound still plays. The row says the browser opens the sound card itself again from the next web engine start."
+    }
+   ]
+  },
+  {
+   "id": "mixer-off",
+   "text": "With the mixer off the switch does nothing, and the row says so.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Turn the mixer off while the browser switch is on, and read the row.",
+     "expect": "The row says: Browser sound through the mixer on, but it does nothing until the mixer above is on."
+    }
+   ]
+  },
+  {
+   "id": "admins-only",
+   "text": "Only administrators change the switch; everybody may read the row.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Sign in as a person who is not an administrator and open Settings, Sound.",
+     "expect": "The switch cannot be changed by that person: the change is refused or not offered, and the page says why in words."
+    }
+   ]
+  }
+ ]
+}

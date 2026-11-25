@@ -1,0 +1,13 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 5dc28084a44d819f; honest subset only: everything not checked is under not-covered.
+row: F-SDK-209
+targets: qemu
+profile: ram
+feature-sha: 5dc28084a44d819f
+doc: the connectivity check of the QEMU session checks for app events runs on the image
+clause: 1 a connectivity change is delivered to SAMPLE's Events pane (one of the named QEMU session checks of the row)
+not-covered: the queue and registration surviving a restart (check app_events_survive_restart, data profile)
+not-covered: the lock event
+not-covered: a settings change
+not-covered: the Settings page switch (each has its own check name; this file runs one check per scenario)
+not-covered: the names written down in docs/development/QEMU-TESTS.md
+session-check: app_events_connectivity

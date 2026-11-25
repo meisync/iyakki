@@ -9,6 +9,7 @@
 4. The public-hygiene patterns of dist/release/export-public.sh (home paths, private keys, tokens) and e-mail addresses find nothing in site/.
 5. site/ is not in dist/release/public-exclude.txt.
 6. Every file the sitemap names exists.
+7. docs/KNOWN-LIMITS.md is what dist/site/gen-known-limits.py makes from KNOWN-ISSUES.md, FEATURES.md and dist/site/known-limits.src.md.
 """
 import os, re, sys
 
@@ -138,6 +139,11 @@ for loc in re.findall(r"<loc>(.*?)</loc>", rd(os.path.join(SITE, "sitemap.xml"))
     rel = loc[len(base):] or "index.html"
     ok(loc.startswith(base) and os.path.exists(os.path.join(SITE, rel)), "sitemap names a missing file: " + loc)
 ok(os.path.exists(os.path.join(SITE, "img/social-card.png")) and os.path.exists(os.path.join(SITE, "robots.txt")), "social card or robots.txt missing")
+
+# 7. the known-limits page is fresh (generated from KNOWN-ISSUES.md; regenerate with dist/site/gen-known-limits.py)
+import subprocess
+r = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "dist/site/gen-known-limits.py"), "--check"], capture_output=True, text=True)
+ok(r.returncode == 0, "docs/KNOWN-LIMITS.md: " + (r.stderr.strip() or r.stdout.strip()))
 
 if fails:
     print("%d check(s) failed" % len(fails))

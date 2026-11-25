@@ -148,14 +148,18 @@ fn the_accounts_are_a_root_the_actor_is_read_again_in_the_core_and_the_hash_neve
 
     // a forged session: the guest claims to be an administrator. The core reads the role of "gus" from its own store, so nothing changes
     let forged = Session { user: "gus".into(), role: Role::Admin, policy: Role::Admin.template() };
-    assert_eq!(users.lock().unwrap().create_user(&forged, "evil", "evilpass-123", Role::Admin), Err(AccountError::Forbidden));
-    assert_eq!(users.lock().unwrap().set_role(&forged, "gus", Role::Admin), Err(AccountError::Forbidden));
+    // (the connection is signed in as root, so a session of another account is refused before the object runs: alpha.8 SEC3)
+    let refused = |r: Result<(), AccountError>| matches!(&r, Err(AccountError::Forbidden)) || matches!(&r, Err(AccountError::Storage(m)) if m.contains("may not act as gus"));
+    let r = users.lock().unwrap().create_user(&forged, "evil", "evilpass-123", Role::Admin).map(|_| ());
+    assert!(refused(r));
+    let r = users.lock().unwrap().set_role(&forged, "gus", Role::Admin);
+    assert!(refused(r));
     assert!(store.lock().unwrap().get("evil").is_none() && store.lock().unwrap().get("gus").unwrap().role == Role::Guest);
-    // an actor the core has never heard of
+    // an actor the core has never heard of (and not the one signed in)
     let ghost = Session { user: "ghost".into(), role: Role::Admin, policy: Role::Admin.template() };
     // refused before the core's object runs (the vouch step, D-SEC1-VOUCH): "no account ghost", never a deletion
     let refused = users.lock().unwrap().delete_user(&ghost, "gus");
-    assert!(matches!(&refused, Err(AccountError::Forbidden)) || matches!(&refused, Err(AccountError::Storage(m)) if m.contains("no account ghost")), "{refused:?}");
+    assert!(matches!(&refused, Err(AccountError::Forbidden)) || matches!(&refused, Err(AccountError::Storage(m)) if m.contains("may not act as ghost")), "{refused:?}");
     assert!(store.lock().unwrap().get("gus").is_some(), "the ghost deleted nothing");
     // an honest administrator, even with a stale role in the session it sends, is judged by what the core knows
     let stale = Session { user: "root".into(), role: Role::Guest, policy: Role::Guest.template() };

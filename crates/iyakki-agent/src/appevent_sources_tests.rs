@@ -660,3 +660,352 @@ fn a_media_download_that_ended_is_told_as_a_transfer_by_the_files_name_and_a_fai
     assert_eq!(got, ["transfer.finished kind=download name=Song.mp3 outcome=finished", "transfer.finished kind=download name=media outcome=failed"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------------------------- UT2: the further sources, end to end
+// The pulled facts (a fake machine) go through the one look of `SourcedEvents` into the hub and out at the app's poll, as on a machine.
+
+use crate::appevent_more::{MoreFacts, MorePersonFacts, PeerFact};
+
+/// A look source whose machine-wide and per-person facts the test edits between looks.
+fn more_engine(tag: &str, names: &[&str]) -> (Arc<Services>, SourcedEvents, Arc<Mutex<MoreFacts>>, Arc<Mutex<MorePersonFacts>>) {
+    let s = svc(tag);
+    // the person approved SAMPLE for the groups these events belong to (an installed app of that name gets only what was approved)
+    approve(&s, "tile/user/pat/sample", "sample", &["events.network", "events.power", "events.security", "events.reminders", "events.display", "events.locale", "events.devices", "events.storage", "events.updates", "events.models", "events.inbox", "events.voice"]);
+    let facts = Arc::new(Mutex::new(MoreFacts::default()));
+    let person = Arc::new(Mutex::new(MorePersonFacts::default()));
+    let (f1, p1) = (facts.clone(), person.clone());
+    let mut inputs = quiet_inputs(&s, Arc::new(Mutex::new("online")), Arc::new(AtomicU64::new(0)));
+    inputs.more = Box::new(move || f1.lock().unwrap().clone());
+    inputs.more_person = Box::new(move |_| p1.lock().unwrap().clone());
+    let ev = SourcedEvents::new(s.app_events.clone(), inputs);
+    ev.set_flag("wake_word", true); // the experimental wake phrase is switched on, as its own setting does
+    for n in names {
+        ev.register("pat", "sample", n, "").unwrap_or_else(|e| panic!("{n}: {e}"));
+    }
+    ev.start("pat", "sample");
+    ev.look(); // the first look only remembers
+    (s, ev, facts, person)
+}
+
+fn heard(ev: &SourcedEvents) -> Vec<String> {
+    ev.poll("pat", "sample", 50).iter().map(show).collect()
+}
+
+/// F-SDK-204: every clause of the row reaches an app, in order, once each, and nothing at a look that found no change.
+#[test]
+fn connectivity_peers_sleep_shutdown_and_quiet_hours_reach_an_app_once_each() {
+    let (s, ev, facts, _) = more_engine("e2e204", &["connectivity.changed", "power.sleep", "power.shutdown_pending", "quiet_hours.changed", "peers.changed", "peers.battery"]);
+    let set = |f: &dyn Fn(&mut MoreFacts)| f(&mut facts.lock().unwrap());
+    set(&|f| f.metered = true);
+    ev.look();
+    assert_eq!(heard(&ev), ["connectivity.changed state=metered"]);
+    ev.look();
+    assert!(heard(&ev).is_empty(), "an unchanged look says nothing");
+    set(&|f| f.captive = true);
+    ev.look();
+    assert_eq!(heard(&ev), ["connectivity.changed state=captive_portal"]);
+    set(&|f| {
+        f.captive = false;
+        f.metered = false;
+    });
+    ev.look();
+    assert_eq!(heard(&ev), ["connectivity.changed state=online"]);
+    // the sleep side is pushed by the service just before it suspends, the wake side is found by the count of suspends
+    crate::appevent_more::going_to_sleep(&*s.app_events);
+    set(&|f| f.suspends = 1);
+    ev.look();
+    assert_eq!(heard(&ev), ["power.sleep phase=sleep", "power.sleep phase=wake"]);
+    set(&|f| f.shutdown_in = Some(60));
+    ev.look();
+    ev.look();
+    assert_eq!(heard(&ev), ["power.shutdown_pending in_seconds=60"], "told once while it stays scheduled");
+    set(&|f| f.quiet = Some(false));
+    ev.look(); // the setting appears: no change yet
+    set(&|f| f.quiet = Some(true));
+    ev.look();
+    assert_eq!(heard(&ev), ["quiet_hours.changed state=on"]);
+    set(&|f| {
+        f.peers.insert("studio".into(), PeerFact { online: true, battery: Some(80) });
+    });
+    ev.look();
+    assert_eq!(heard(&ev), ["peers.changed change=paired device=studio"], "a new computer is told as paired; its battery is told when it changes");
+    set(&|f| {
+        f.peers.insert("studio".into(), PeerFact { online: true, battery: Some(75) });
+    });
+    ev.look();
+    assert_eq!(heard(&ev), ["peers.battery device=studio percent=75"]);
+    set(&|f| {
+        f.peers.insert("studio".into(), PeerFact { online: false, battery: Some(79) });
+    });
+    ev.look();
+    assert_eq!(heard(&ev), ["peers.changed change=offline device=studio", "peers.battery device=studio percent=79"]);
+    set(&|f| f.peers.clear());
+    ev.look();
+    assert_eq!(heard(&ev), ["peers.changed change=forgotten device=studio"]);
+}
+
+/// F-SDK-205: the audit log and the certificate on a (fake) disk, read by the real readers, become `security.alert` and `cert.expiring`.
+#[test]
+fn failed_sign_ins_new_devices_and_an_expiring_certificate_reach_an_app_from_the_real_readers() {
+    let (_s, ev, facts, person) = more_engine("e2e205", &["security.alert", "cert.expiring"]);
+    let line = |e: &str| format!(r#"{{"ts":1,"user":"-","event":"{e}","detail":"x","prev":"","hash":""}}"#);
+    let mut log = vec![line("login.failed")];
+    let totals = |log: &[String]| crate::appevent_feed::audit_totals(&log.join("\n"));
+    let feed = |log: &[String]| {
+        let t = totals(log);
+        let mut p = person.lock().unwrap();
+        p.failed_signins = t.failed_signins;
+        p.new_paired_devices = t.new_paired_devices;
+    };
+    feed(&log);
+    ev.look();
+    assert_eq!(heard(&ev), ["security.alert count=1 kind=failed_signin"]);
+    log.extend([line("login.failed"), line("login.failed"), line("devicekey.enroll")]);
+    feed(&log);
+    ev.look();
+    let mut got = heard(&ev);
+    got.sort();
+    assert_eq!(got, ["security.alert count=1 kind=new_paired_device", "security.alert count=2 kind=failed_signin"]);
+    ev.look();
+    assert!(heard(&ev).is_empty());
+    person.lock().unwrap().new_place_unlocks = 1;
+    ev.look();
+    assert_eq!(heard(&ev), ["security.alert count=1 kind=vault_unlock_new_place"]);
+    // a real certificate file, its days left through the real reader, told once at each of 30, 7 and 1 days
+    let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("iyakki-e2e205-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("tls")).unwrap();
+    let mut p = rcgen::CertificateParams::new(vec!["a.example".to_string()]).unwrap();
+    p.not_before = rcgen::date_time_ymd(2020, 1, 1);
+    p.not_after = rcgen::date_time_ymd(2030, 1, 11);
+    let cert = p.self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap();
+    std::fs::write(dir.join("tls/cert.pem"), cert.pem()).unwrap();
+    let end = crate::appevent_feed::first_cert_not_after(&cert.pem()).unwrap();
+    for (days_before, expect) in [(100, vec![]), (29, vec!["cert.expiring days=29 what=tls/cert.pem"]), (28, vec![]), (6, vec!["cert.expiring days=6 what=tls/cert.pem"]), (0, vec!["cert.expiring days=0 what=tls/cert.pem"])] {
+        facts.lock().unwrap().certs = crate::appevent_feed::cert_days(&dir, end - days_before * 86_400);
+        ev.look();
+        assert_eq!(heard(&ev), expect, "{days_before} days before the end");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// F-SDK-206: language, resolution and a due calendar entry reach an app; the first sight of each says nothing.
+#[test]
+fn language_resolution_and_a_due_calendar_entry_reach_an_app() {
+    let (_s, ev, facts, person) = more_engine("e2e206", &["locale.changed", "display.changed", "reminder.due"]);
+    let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("iyakki-e2e206-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    facts.lock().unwrap().locale = crate::appevent_more::machine_locale(&dir, "", "en_IN.UTF-8");
+    facts.lock().unwrap().resolution = "1920x1080".into();
+    ev.look();
+    assert!(heard(&ev).is_empty());
+    // the owner puts a `locale` file in the data folder: it wins over the environment
+    std::fs::write(dir.join("locale"), "ta_IN\n").unwrap();
+    facts.lock().unwrap().locale = crate::appevent_more::machine_locale(&dir, "", "en_IN.UTF-8");
+    facts.lock().unwrap().resolution = "3840x2160".into();
+    ev.look();
+    assert_eq!(heard(&ev), ["locale.changed locale=ta_IN", "display.changed what=resolution"]);
+    // an entry whose reminder time has come is told once, by its title, and not again while it stays due
+    let occ = |start: i64| iyakki_shared::calendar::Occurrence { id: "e".into(), title: "Dentist".into(), start, end: start + 3600, all_day: false, repeat: iyakki_shared::calendar::Repeat::None, notes: String::new(), by: "pat".into(), remind: Some(10) };
+    for (now, expect) in [(1_000_000 - 700, vec![]), (1_000_000 - 500, vec!["reminder.due title=Dentist"]), (1_000_000, vec![])] {
+        person.lock().unwrap().reminders_due = crate::appevent_more::reminders_due_now(&[occ(1_000_000)], now);
+        ev.look();
+        assert_eq!(heard(&ev), expect, "at {now}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// F-SDK-207: approvals waiting, an update downloaded and then available, the model host, a download that ended, the wake phrase: the real
+/// readers (a staged update folder, a model host list, the page's download note) feed the one look and the app hears each once.
+#[test]
+fn approvals_updates_model_host_downloads_and_the_wake_phrase_reach_an_app() {
+    let (s, ev, facts, person) = more_engine("e2e207", &["approvals.pending", "updates.changed", "models.host", "transfer.finished", "voice.wake_heard"]);
+    person.lock().unwrap().approvals = 2;
+    ev.look();
+    assert_eq!(heard(&ev), ["approvals.pending count=2"]);
+    // an update waiting unpacked is `downloaded`; an installed item with a newer entry is `available` (the readers take the folder and the ids)
+    std::fs::create_dir_all(crate::sysupdate::staged_root(s.dir()).join("v2")).unwrap();
+    facts.lock().unwrap().updates = crate::appevent_feed::update_phases(s.dir(), &["skill:notes".to_string()]);
+    ev.look();
+    assert_eq!(heard(&ev), ["updates.changed component=skill:notes phase=available", "updates.changed component=system phase=downloaded"]);
+    ev.look();
+    assert!(heard(&ev).is_empty());
+    // the model host: ready with its model, then another default model, then none
+    let model = |m: Option<&str>| crate::appevent_feed::model_host(&["mac".to_string()], &|_| m.map(str::to_string));
+    facts.lock().unwrap().model = model(Some("llama"));
+    ev.look();
+    assert_eq!(heard(&ev), ["models.host model=llama state=ready"]);
+    facts.lock().unwrap().model = model(Some("qwen"));
+    ev.look();
+    assert_eq!(heard(&ev), ["models.host model=qwen state=changed"]);
+    facts.lock().unwrap().model = model(None);
+    ev.look();
+    assert_eq!(heard(&ev), ["models.host model= state=failed"]);
+    // a store install that failed (pushed), then the update centre page's own fetch (a machine-wide note, told once through the pulled source)
+    crate::appevent_more::transfer_finished(&*s.app_events, "pat", "install", "Notes", false);
+    crate::appevent_more::note_download_made(s.dir(), "system update", true);
+    let (n, last) = crate::appevent_more::downloads_made(s.dir());
+    {
+        let mut p = person.lock().unwrap();
+        p.downloads = n;
+        p.download_last = last;
+    }
+    ev.look();
+    ev.look();
+    assert_eq!(heard(&ev), ["transfer.finished kind=install name=Notes outcome=failed", "transfer.finished kind=download name=system update outcome=finished"]);
+    facts.lock().unwrap().wake_heard = 1;
+    ev.look();
+    assert_eq!(heard(&ev), ["voice.wake_heard"]);
+}
+
+/// F-SDK-211: low space (told when it falls, again only after it recovered), disk health, Bluetooth by name, a printer and a hand-made backup.
+#[test]
+fn low_space_disk_health_bluetooth_printers_and_a_hand_made_backup_reach_an_app() {
+    let (s, ev, facts, person) = more_engine("e2e211", &["storage.volume", "backup.finished", "disk.health", "bluetooth.device", "printer.changed"]);
+    let set = |f: &dyn Fn(&mut MoreFacts)| f(&mut facts.lock().unwrap());
+    set(&|f| {
+        f.free_percent.insert("/data".into(), 40);
+        f.disk_ok.insert("nvme0".into(), true);
+    });
+    ev.look();
+    assert!(heard(&ev).is_empty());
+    for (pct, expect) in [(4, vec!["storage.volume change=low_space volume=/data"]), (3, vec![]), (7, vec![]), (4, vec![]), (12, vec![]), (5, vec!["storage.volume change=low_space volume=/data"])] {
+        set(&|f| {
+            f.free_percent.insert("/data".into(), pct);
+        });
+        ev.look();
+        assert_eq!(heard(&ev), expect, "at {pct} percent free");
+    }
+    set(&|f| {
+        f.disk_ok.insert("nvme0".into(), false);
+        f.bluetooth.insert("Buds".into());
+        f.printers.insert(("printer".into(), "lp0".into()));
+    });
+    ev.look();
+    let mut got = heard(&ev);
+    got.sort();
+    assert_eq!(got, ["bluetooth.device change=connected device=Buds", "disk.health disk=nvme0 state=warning", "printer.changed change=added device=lp0 kind=printer"]);
+    set(&|f| {
+        f.bluetooth.clear();
+        f.printers.clear();
+    });
+    ev.look();
+    let mut got = heard(&ev);
+    got.sort();
+    assert_eq!(got, ["bluetooth.device change=disconnected device=Buds", "printer.changed change=removed device=lp0 kind=printer"]);
+    // a backup made by hand leaves a count and the file's own name; the pulled source tells it once
+    crate::appevent_more::note_backup_made(s.dir(), "pat", "pat-2026-11-24.iyb", true);
+    let (n, last) = crate::appevent_more::backups_made(s.dir(), "pat");
+    {
+        let mut p = person.lock().unwrap();
+        p.backups = n;
+        p.backup_last = last;
+    }
+    ev.look();
+    ev.look();
+    assert_eq!(heard(&ev), ["backup.finished name=pat-2026-11-24.iyb outcome=finished"]);
+}
+
+/// F-SDK-217: the real inputs read from the files of a data folder (approvals, users, tenant policy, revocation list) feed the one look; the
+/// app hears each loss once, with its cause: a company policy, a limited grant that ended, a folder the file rule narrowed, a withdrawal.
+#[test]
+fn a_policy_a_grant_that_ended_a_narrowed_folder_and_a_withdrawal_reach_an_app_each_with_its_cause() {
+    use iyakki_core_api::appcaps::{Approval, Grant};
+    let s = svc("e2e217");
+    let dir = s.dir().to_path_buf();
+    for d in ["store", "cloud/config"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    let users = |overrides: &str| format!(r#"{{"schema":1,"users":[{{"name":"pat","hash":"x","role":"user","overrides":{overrides}}}]}}"#);
+    let write_approval = |grants: &[(&str, Option<&str>)], ends: &[(&str, i64)]| {
+        let mut extra = serde_json::Map::new();
+        if !ends.is_empty() {
+            extra.insert("ends".into(), serde_json::Value::Object(ends.iter().map(|(k, v)| (k.to_string(), (*v).into())).collect()));
+        }
+        let a = Approval { who: "pat".into(), app: "sample".into(), app_version: "1.0".into(), app_sha256: "abc".into(), at: 0, grants: grants.iter().map(|(n, p)| Grant { name: n.to_string(), param: p.map(str::to_string) }).collect(), revoked: vec![], extra };
+        std::fs::write(dir.join("store/approvals.json"), serde_json::to_string(&BTreeMap::from([("tile/user/pat/sample".to_string(), a)])).unwrap()).unwrap();
+    };
+    let tenant = |text: &str| std::fs::write(dir.join("cloud/config/tenant-config.json"), text).unwrap();
+    std::fs::write(dir.join("users.json"), users("{}")).unwrap();
+    tenant("v1");
+    write_approval(&[("events.power", None), ("camera.view", None), ("files.read", Some("/home/pat/Documents")), ("files.read", Some("/home/pat/Pictures"))], &[("camera.view", 5000)]);
+    let now = Arc::new(AtomicU64::new(1000));
+    let mut inputs = quiet_inputs(&s, Arc::new(Mutex::new("online")), Arc::new(AtomicU64::new(0)));
+    let (d2, n2) = (dir.clone(), now.clone());
+    inputs.perm = Box::new(move || crate::appevent_permsrc::facts_from_dir(&d2, n2.load(Ordering::SeqCst) as i64));
+    let ev = SourcedEvents::new(s.app_events.clone(), inputs);
+    ev.start("pat", "sample");
+    ev.look(); // the first look only remembers
+    assert!(heard(&ev).is_empty());
+    ev.look();
+    assert!(heard(&ev).is_empty(), "nothing changed, nothing told");
+    // 1. the company policy changed and took the Pictures folder away from the file rule
+    tenant("v2");
+    std::fs::write(dir.join("users.json"), users(r#"{"fs_read":["/home/pat/Documents"]}"#)).unwrap();
+    ev.look();
+    let got = heard(&ev);
+    assert!(got.iter().any(|l| l.starts_with("app.permissions") && l.contains("by=policy") && l.contains("folder:/home/pat/Pictures")), "{got:?}");
+    // 2. the limited grant ends at its second
+    now.store(5000, Ordering::SeqCst);
+    ev.look();
+    let got = heard(&ev);
+    assert!(got.iter().any(|l| l.contains("by=expiry") && l.contains("camera.view")), "{got:?}");
+    // 3. the store's revocation list withdraws the app
+    let root = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let roots = iyakki_shared::store_trust::Roots::with("r", &root);
+    let mut revs = iyakki_shared::store_revocation::Revocations::default();
+    revs.accept(&revs.sign_for_tests(&root, 1, 100, vec![], vec![], vec![("sample".into(), None)]), &roots, 100).unwrap();
+    revs.save(&iyakki_shared::store_revocation::Revocations::path(&dir.join("store"))).unwrap();
+    write_approval(&[("events.power", None)], &[]);
+    ev.look();
+    let got = heard(&ev);
+    assert!(got.iter().any(|l| l.contains("by=store")), "{got:?}");
+    ev.look();
+    assert!(heard(&ev).is_empty(), "each loss was told once");
+}
+
+#[test]
+fn an_app_hears_online_only_when_a_default_route_leaves_by_an_interface_that_is_up_read_from_a_fake_sysfs_and_route_table() {
+    // F-LIFE-09 end to end: fake /sys and fake /proc/net/route -> link_state_routed -> the core's tick -> the app's connectivity.changed
+    let sys = std::env::temp_dir().join(format!("iyakki-evsrc-routed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&sys);
+    std::fs::create_dir_all(sys.join("class/net/eth0")).unwrap();
+    let state = |s: &str| std::fs::write(sys.join("class/net/eth0/operstate"), s).unwrap();
+    state("up\n"); // a cable with no lease yet
+    let head = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n";
+    let lan = format!("{head}eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\n");
+    let dflt = format!("{lan}eth0\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\n");
+    let route = Arc::new(Mutex::new(lan.clone()));
+    let s = svc("routedlink");
+    let steady = Arc::new(AtomicU64::new(0));
+    let mut inputs = quiet_inputs(&s, Arc::new(Mutex::new("online")), steady.clone());
+    let (sys2, route2) = (sys.clone(), route.clone());
+    inputs.link = Box::new(move || link_state_routed(&sys2, &route2.lock().unwrap()));
+    let ev = SourcedEvents::new(s.app_events.clone(), inputs);
+    ev.register("pat", "sample", "connectivity.changed", "").unwrap();
+    ev.start("pat", "sample");
+    steady.store(2_000, Ordering::SeqCst);
+    ev.tick(); // the baseline: up, but no way out, so offline
+    // the lease arrives with a default route: online is announced
+    *route.lock().unwrap() = dflt.clone();
+    steady.store(4_000, Ordering::SeqCst);
+    ev.tick();
+    let got = ev.poll("pat", "sample", 5);
+    assert_eq!(got.iter().map(show).collect::<Vec<_>>(), ["connectivity.changed state=online"], "{got:?}");
+    // the tether loses its way out (route gone, interface still up): offline
+    *route.lock().unwrap() = lan;
+    steady.store(6_000, Ordering::SeqCst);
+    ev.tick();
+    assert_eq!(ev.poll("pat", "sample", 5).iter().map(show).collect::<Vec<_>>(), ["connectivity.changed state=offline"]);
+    // the route is back: online again; then the interface goes down while the route stays: a route through a dead interface is offline
+    *route.lock().unwrap() = dflt;
+    steady.store(8_000, Ordering::SeqCst);
+    ev.tick();
+    assert_eq!(ev.poll("pat", "sample", 5).iter().map(show).collect::<Vec<_>>(), ["connectivity.changed state=online"]);
+    state("down\n");
+    steady.store(10_000, Ordering::SeqCst);
+    ev.tick();
+    assert_eq!(ev.poll("pat", "sample", 5).iter().map(show).collect::<Vec<_>>(), ["connectivity.changed state=offline"]);
+    let _ = std::fs::remove_dir_all(&sys);
+}

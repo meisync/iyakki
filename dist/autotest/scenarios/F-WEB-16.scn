@@ -1,0 +1,12 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha d1bb04e2ddad4f03; honest subset only: everything not checked is under not-covered.
+row: F-WEB-16
+targets: browser
+feature-sha: d1bb04e2ddad4f03
+doc: web UI shell: every page asks nothing from outside and polls within its allowance
+clause: 1 every page of the web UI requests nothing from outside its own origin and its polling stays at or under 30 requests a minute
+clause: 2 the pages follow light and dark and have 44 px targets in the page walk
+not-covered: sign-in with the API session
+not-covered: strict CSP on every file (unit test)
+not-covered: the Cloud access and Remote pages refresh from the events WebSocket and poll every 30 s or 5 s (the socket is not cut here)
+not-covered: the Apache-2.0 header and no outside library
+suite: run_pages.py --only pages,more

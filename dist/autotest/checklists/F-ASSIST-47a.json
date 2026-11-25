@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-47a",
+  "feature_sha": "31e9227c96e39241",
+  "title": "history page (visible part)",
+  "clauses": [
+    {
+      "id": "history-switch",
+      "text": "Settings, Assistant shows the history switch",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Open Settings, Assistant.",
+          "expect": "A history switch is shown and readable."
+        }
+      ]
+    }
+  ]
+}

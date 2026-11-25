@@ -1,0 +1,25 @@
+{
+ "schema": 1,
+ "row": "F-SKIN-03",
+ "feature_sha": "f1408071c00500cf",
+ "title": "skins restyle the UI and stay readable",
+ "clauses": [
+  {
+   "id": "four-skins",
+   "text": "Paper, Glass night, Blueprint and Calm each change the colours and the look, and the text stays readable",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Appearance and choose each skin in turn: Paper, Glass night, Blueprint, Calm. Look at the launcher and the Settings page after each one.",
+     "expect": "Each skin changes the colours and the launcher; the text stays readable on each skin."
+    },
+    {
+     "do": "Choose a skin and open an SDK app that sets its own accent colour.",
+     "expect": "The app's accent colour is kept when it reads well on the skin; otherwise it is moved towards the skin's own colour."
+    }
+   ]
+  }
+ ]
+}

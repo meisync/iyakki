@@ -3,7 +3,7 @@
 //! `iyakki_agent::voiceassist_tests` with a scripted model; here only the tile around it.)
 
 use super::*;
-use crate::apps::voice_mine::*;
+use iyakki_tile_voice::voice_mine::*;
 
 fn mine_app(b: &Bench) -> VoiceApp {
     let mut a = b.app();

@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-GEMVOICE-02",
+  "feature_sha": "d195451aec3dac24",
+  "title": "Gemini session engine (experimental)",
+  "clauses": [
+    {
+      "id": "talk-turn",
+      "text": "A turn ends with Done talking and a reply comes back",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Start a session with Super+V, speak a question, then press Done talking.",
+          "expect": "The reply appears as text in the chat. Stop ends the session."
+        }
+      ]
+    }
+  ]
+}

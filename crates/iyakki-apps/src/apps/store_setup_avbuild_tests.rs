@@ -3,6 +3,7 @@
 //! before anything starts, a message when this IYAKKI version has no map entry. Fakes only: no cluster, no download, no build.
 use iyakki_agent::facets_h::RealServices as _;
 use super::*;
+use crate::apps::store_port::CxPort;
 use iyakki_agent::quickinstall as qi;
 use crate::apps::store::{Section, StoreApp};
 use crate::apps::{App, AppCx};
@@ -21,10 +22,10 @@ fn rig(tag: &str, role: Role, k3s_running: bool, map: &str) -> (StoreApp, AppCx)
     a.setup.set_machine(Machine { ram_mb: 16_000, ..Default::default() });
     a.setup.set_facts(f);
     a.setup.av_map = Some(map.to_string());
-    a.setup.launch = Some(qi::Launch { exe: "/usr/bin/true".into(), data: cx.data_dir().join("qi") });
+    a.setup.launch = Some(iyakki_tile_api::store_qi::Launch { exe: "/usr/bin/true".into(), data: cx.data_dir().join("qi") });
     a.handle(&Event::Tab(4), &cx);
     assert!(a.section == Section::Setup);
-    a.setup.enter(&cx);
+    a.setup.enter(&CxPort(&cx));
     (a, cx)
 }
 

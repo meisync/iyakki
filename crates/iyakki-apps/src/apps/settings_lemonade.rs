@@ -6,6 +6,7 @@
 
 use crate::safeclamp::SafeClamp;
 use super::*;
+use super::apps_port::LemonadePort;
 use iyakki_shared::lemonade::{self, Model, ModelType};
 
 /// What the Lemonade pickers are choosing.
@@ -69,10 +70,9 @@ const STORE_NOT_SERVED: &str = "The story store is not served over the UI socket
 
 impl SettingsApp {
     /// Detect: look for Ollama and Lemonade on this machine and add what answers (never changing a provider already there).
-    pub(super) fn detect_servers(&mut self, cx: &AppCx) {
-        let svc = Self::svc(cx).clone();
-        let _vault = cx.vault();
-        cx.audit.record(&cx.session.user, "settings.provider.detect", "this machine");
+    pub(super) fn detect_servers(&mut self, p: &dyn LemonadePort) {
+        let svc = p.lemonade();
+        p.audit("settings.provider.detect", "this machine");
         self.start("looking for Ollama and Lemonade on this machine", move || {
             let found = svc.detect_local_servers();
             JobOut::Msg(if found.is_empty() {
@@ -84,12 +84,12 @@ impl SettingsApp {
     }
 
     /// The provider form with the type Auto-detect: the address is asked (GET requests only) what it is, then saved as that.
-    pub(super) fn save_provider_auto(&mut self, cx: &AppCx, form: &Form, editing: Option<String>) -> Result<(), String> {
+    pub(super) fn save_provider_auto(&mut self, p: &dyn LemonadePort, form: &Form, editing: Option<String>) -> Result<(), String> {
         let id = editing.clone().unwrap_or_else(|| form.value(0));
         if !valid_provider_id(&id) {
             return Err("provider id: lowercase letters, digits, - and _; must start with a letter".into());
         }
-        if editing.is_none() && Self::providers(cx).iter().any(|p| p.id == id) {
+        if editing.is_none() && p.settings_get().providers.iter().any(|pv| pv.id == id) {
             return Err(format!("A provider named `{id}` already exists."));
         }
         let url = form.value(2);
@@ -97,13 +97,13 @@ impl SettingsApp {
             return Err("Type the server's address (for example http://192.168.1.20:13305) so its type can be detected.".into());
         }
         let (key, model) = (form.raw(3).to_string(), form.value(4));
-        let existing = Self::providers(cx).into_iter().find(|p| Some(&p.id) == editing.as_ref());
-        let svc = Self::svc(cx).clone();
-        let vault = cx.vault();
-        cx.audit.record(&cx.session.user, "settings.provider.detect", &format!("{id} {url}"));
+        let existing = p.settings_get().providers.into_iter().find(|pv| Some(&pv.id) == editing.as_ref());
+        let svc = p.lemonade();
+        let ops = p.detect_ops();
+        p.audit("settings.provider.detect", &format!("{id} {url}"));
         self.start("detecting the server type", move || {
             let headers: Vec<(String, String)> = if key.is_empty() { vec![] } else { vec![("Authorization".into(), format!("Bearer {key}"))] };
-            let server = match lemonade::detect(&url, svc.quick_upstream().as_ref(), &headers) {
+            let server = match lemonade::detect(&url, ops.quick_upstream().as_ref(), &headers) {
                 Ok(s) => s,
                 Err(e) => return JobOut::Msg(Err(e)),
             };
@@ -120,12 +120,12 @@ impl SettingsApp {
                 return JobOut::Msg(Err(e));
             }
             if !key.is_empty() {
-                if let Err(e) = vault.system_set(&format!("{id}-key"), &key) {
+                if let Err(e) = ops.secret_system_set(&format!("{id}-key"), &key) {
                     return JobOut::Msg(Err(e.to_string()));
                 }
             }
-            if let Err(e) = svc.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).upsert_provider(cfg) {
-                return JobOut::Msg(Err(e.to_string()));
+            if let Err(e) = ops.provider_upsert(cfg) {
+                return JobOut::Msg(Err(e));
             }
             let extra = if server.kind() == Kind::Lemonade {
                 match svc.refresh_lemonade(&id) {
@@ -141,10 +141,10 @@ impl SettingsApp {
     }
 
     /// The models of a Lemonade provider in a picker (read from the server first when nothing is known yet).
-    pub(super) fn lem_open(&mut self, cx: &AppCx, id: &str) {
-        let list = Self::svc(cx).lemonade_cached(id);
+    pub(super) fn lem_open(&mut self, p: &dyn LemonadePort, id: &str) {
+        let list = p.lemonade().lemonade_cached(id);
         if list.is_empty() {
-            let (svc, id) = (Self::svc(cx).clone(), id.to_string());
+            let (svc, id) = (p.lemonade(), id.to_string());
             self.start("reading the Lemonade models", move || {
                 JobOut::Msg(svc.refresh_lemonade(&id).map(|l| format!("{id}: {} models read; press l again to choose one.", l.len())).map_err(|e| format!("{id}: {e}")))
             });
@@ -155,19 +155,19 @@ impl SettingsApp {
     }
 
     /// A model chip of the panel was clicked: what can be done with it.
-    pub(super) fn lem_chip(&mut self, i: usize, cx: &AppCx) {
-        let Some(p) = Self::providers(cx).get(self.sel()).filter(|p| p.kind == Kind::Lemonade).cloned() else { return };
-        let Some(m) = Self::svc(cx).lemonade_cached(&p.id).get(i).cloned() else { return };
-        self.lem_actions_for(cx, &p.id, &m);
+    pub(super) fn lem_chip(&mut self, i: usize, p: &dyn LemonadePort) {
+        let Some(pv) = p.settings_get().providers.get(self.sel()).filter(|pv| pv.kind == Kind::Lemonade).cloned() else { return };
+        let Some(m) = p.lemonade().lemonade_cached(&pv.id).get(i).cloned() else { return };
+        self.lem_actions_for(p, &pv.id, &m);
     }
 
-    fn lem_actions_for(&mut self, cx: &AppCx, provider: &str, m: &Model) {
-        if !self.admin(cx) {
+    fn lem_actions_for(&mut self, p: &dyn LemonadePort, provider: &str, m: &Model) {
+        if !self.admin(p) {
             return self.fail(format!("{} is {} on {provider}. Only an administrator can change what it is used for.", m.id, m.status()));
         }
         let mut items: Vec<String> = Vec::new();
         if lemonade::is_collection(m) {
-            return self.lem_collection_actions(cx, provider, m);
+            return self.lem_collection_actions(p, provider, m);
         }
         if !m.downloaded {
             items.push(format!("Pull (download {})…", m.size_text()));
@@ -187,37 +187,37 @@ impl SettingsApp {
     }
 
     /// "this computer" / "the local network" / "the internet", with the host: where a provider's answers, pictures and voice come from.
-    fn lem_where(cx: &AppCx, provider: &str) -> String {
-        let place = Self::lem_base(cx, provider).map(|b| cx.agent.helpers_b4().locality_label(&b)).unwrap_or("");
-        format!("{provider} ({}, {place})", Self::lem_host(cx, provider))
+    fn lem_where(p: &dyn LemonadePort, provider: &str) -> String {
+        let place = Self::lem_base(p, provider).map(|b| p.agent().helpers_b4().locality_label(&b)).unwrap_or("");
+        format!("{provider} ({}, {place})", Self::lem_host(p, provider))
     }
 
     /// A collection: its parts with their state, then Use all parts, Install missing parts and Undo.
-    fn lem_collection_actions(&mut self, cx: &AppCx, provider: &str, m: &Model) {
-        let Ok(r) = Self::svc(cx).collection_review(provider, &m.id) else { return self.fail(format!("{} is no longer listed on {provider}.", m.id)) };
+    fn lem_collection_actions(&mut self, p: &dyn LemonadePort, provider: &str, m: &Model) {
+        let Ok(r) = p.lemonade().collection_review(provider, &m.id) else { return self.fail(format!("{} is no longer listed on {provider}.", m.id)) };
         let mut items: Vec<String> = Vec::new();
         if r.plan.parts.is_empty() {
             items.push(format!("  parts: listed once it is downloaded ({})", m.size_text()));
         }
-        items.extend(r.plan.parts.iter().map(|p| format!("  {} · {}", p.title(), p.state())));
+        items.extend(r.plan.parts.iter().map(|pv| format!("  {} · {}", pv.title(), pv.state())));
         items.push(USE_ALL.into());
         if r.needs_install {
             items.push(format!("{INSTALL_PARTS} ({})…", r.plan.missing_gb().map_or_else(|| m.size_text(), |g| format!("{g:.1} GB"))));
         }
-        if Self::svc(cx).parts_undo_available().is_some_and(|(p, c)| p == provider && c == m.id) {
+        if p.lemonade().parts_undo_available().is_some_and(|(pv, c)| pv == provider && c == m.id) {
             items.push(UNDO_ALL.into());
         }
         let title = format!("{} (Omni collection, {})", m.id, m.status());
         self.modal = Some(Modal::Pick(PickKind::Lemonade(LemPick::Action(provider.to_string(), m.id.clone())), Picker::new(&title, items)));
     }
 
-    fn lem_collection_pick(&mut self, cx: &AppCx, provider: &str, collection: &str, item: &str) {
-        let place = Self::lem_where(cx, provider);
-        let Ok(r) = Self::svc(cx).collection_review(provider, collection) else { return self.fail(format!("{collection} is no longer listed on {provider}.")) };
+    fn lem_collection_pick(&mut self, p: &dyn LemonadePort, provider: &str, collection: &str, item: &str) {
+        let place = Self::lem_where(p, provider);
+        let Ok(r) = p.lemonade().collection_review(provider, collection) else { return self.fail(format!("{collection} is no longer listed on {provider}.")) };
         if item == UNDO_ALL {
-            let Some(store) = cx.b5().story_store(&cx.session.policy, &cx.session.user, cx.data_dir()) else { return self.fail(STORE_NOT_SERVED.to_string()) };
-            cx.audit.record(&cx.session.user, "settings.lemonade.use_all_parts_undo", &format!("{provider}/{collection}"));
-            return match Self::svc(cx).undo_all_parts(&store) {
+            let Some(store) = p.story_store() else { return self.fail(STORE_NOT_SERVED.to_string()) };
+            p.audit("settings.lemonade.use_all_parts_undo", &format!("{provider}/{collection}"));
+            return match p.lemonade().undo_all_parts(&store) {
                 Ok(m) => self.ok(m),
                 Err(e) => self.fail(e),
             };
@@ -237,98 +237,98 @@ impl SettingsApp {
             if !lacking.is_empty() {
                 return self.fail(format!("{collection} has no part for {}, so it cannot be used for all four. Nothing was changed.", lacking.join(", ")));
             }
-            let text = format!("Use all parts of {collection} (Omni collection) on {place}: {}. Chat, pictures, what the microphone hears and what is read aloud then go to {}. Everything is set together or nothing is, and Undo puts the old choices back. Use it?", r.plan.parts_text(), Self::lem_where(cx, provider));
+            let text = format!("Use all parts of {collection} (Omni collection) on {place}: {}. Chat, pictures, what the microphone hears and what is read aloud then go to {}. Everything is set together or nothing is, and Undo puts the old choices back. Use it?", r.plan.parts_text(), Self::lem_where(p, provider));
             self.modal = Some(Modal::Confirm(ConfirmKind::Lemonade(LemAct::UseAll(provider.to_string(), collection.to_string())), text));
         }
         // a line of the parts list: information only
     }
 
-    fn lem_model(cx: &AppCx, provider: &str, model: &str) -> Option<Model> {
-        Self::svc(cx).lemonade_cached(provider).into_iter().find(|m| m.id == model)
+    fn lem_model(p: &dyn LemonadePort, provider: &str, model: &str) -> Option<Model> {
+        p.lemonade().lemonade_cached(provider).into_iter().find(|m| m.id == model)
     }
 
-    fn lem_base(cx: &AppCx, provider: &str) -> Option<String> {
-        Self::providers(cx).into_iter().find(|p| p.id == provider).and_then(|p| p.base().ok())
+    fn lem_base(p: &dyn LemonadePort, provider: &str) -> Option<String> {
+        p.settings_get().providers.into_iter().find(|pv| pv.id == provider).and_then(|pv| pv.base().ok())
     }
 
     /// A server on another machine gets text or sound only after a yes on a card that says where it is (once per server).
-    fn lem_needs_yes(cx: &AppCx, provider: &str) -> Option<(String, &'static str)> {
-        let base = Self::lem_base(cx, provider)?;
-        (!Self::svc(cx).speech_server_allowed(&base)).then(|| (iyakki_sec::url_host(&base).unwrap_or_default(), cx.agent.helpers_b4().locality_label(&base)))
+    fn lem_needs_yes(p: &dyn LemonadePort, provider: &str) -> Option<(String, &'static str)> {
+        let base = Self::lem_base(p, provider)?;
+        (!p.lemonade().speech_server_allowed(&base)).then(|| (iyakki_sec::url_host(&base).unwrap_or_default(), p.agent().helpers_b4().locality_label(&base)))
     }
 
-    fn lem_host(cx: &AppCx, provider: &str) -> String {
-        Self::providers(cx).into_iter().find(|p| p.id == provider).and_then(|p| p.base().ok()).and_then(|b| iyakki_sec::url_host(&b)).unwrap_or_default()
+    fn lem_host(p: &dyn LemonadePort, provider: &str) -> String {
+        p.settings_get().providers.into_iter().find(|pv| pv.id == provider).and_then(|pv| pv.base().ok()).and_then(|b| iyakki_sec::url_host(&b)).unwrap_or_default()
     }
 
-    pub(super) fn lem_pick(&mut self, cx: &AppCx, p: LemPick, item: &str) {
-        match p {
+    pub(super) fn lem_pick(&mut self, p: &dyn LemonadePort, pv: LemPick, item: &str) {
+        match pv {
             LemPick::Model(provider) => {
                 let id = item.split(" · ").nth(1).unwrap_or("");
-                if let Some(m) = Self::lem_model(cx, &provider, id) {
-                    self.lem_actions_for(cx, &provider, &m);
+                if let Some(m) = Self::lem_model(p, &provider, id) {
+                    self.lem_actions_for(p, &provider, &m);
                 }
             }
-            LemPick::Voice(provider, model) if Self::lem_needs_yes(cx, &provider).is_some() => {
-                let (host, place) = Self::lem_needs_yes(cx, &provider).unwrap_or_default();
+            LemPick::Voice(provider, model) if Self::lem_needs_yes(p, &provider).is_some() => {
+                let (host, place) = Self::lem_needs_yes(p, &provider).unwrap_or_default();
                 let text = format!("{provider} ({host}) is {place}. Reading aloud with it sends the text being read (TALES stories, chat replies) to that machine, and its sound comes back from there. Send text to {host} from now on?");
                 self.modal = Some(Modal::Confirm(ConfirmKind::Lemonade(LemAct::RemoteVoice(provider, model, item.to_string())), text));
             }
-            LemPick::Voice(provider, model) => match Self::svc(cx).use_lemonade_voice(&provider, &model, Some(item)) {
+            LemPick::Voice(provider, model) => match p.lemonade().use_lemonade_voice(&provider, &model, Some(item)) {
                 Ok(m) => {
-                    cx.audit.record(&cx.session.user, "settings.voice", &format!("tts lemonade {provider}/{model} {item}"));
+                    p.audit("settings.voice", &format!("tts lemonade {provider}/{model} {item}"));
                     self.ok(format!("{m} TALES and chat replies are read with it."));
                 }
                 Err(e) => self.fail(e),
             },
             LemPick::Action(provider, model) => {
-                let Some(m) = Self::lem_model(cx, &provider, &model) else { return self.fail(format!("{model} is no longer listed on {provider}.")) };
+                let Some(m) = Self::lem_model(p, &provider, &model) else { return self.fail(format!("{model} is no longer listed on {provider}.")) };
                 if lemonade::is_collection(&m) {
-                    return self.lem_collection_pick(cx, &provider, &model, item);
+                    return self.lem_collection_pick(p, &provider, &model, item);
                 }
-                let host = Self::lem_host(cx, &provider);
+                let host = Self::lem_host(p, &provider);
                 let r: Result<String, String> = match item {
                     USE_CHAT => {
-                        let set = cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| {
+                        let set = p.settings_update(&mut |s| {
                             s.chat = Some(ModelChoice { provider: provider.clone(), model: model.clone() });
                             if let Some(pr) = s.providers.iter_mut().find(|x| x.id == provider) {
                                 pr.default_model = Some(model.clone());
                             }
                         });
                         set.map(|_| {
-                            cx.audit.record(&cx.session.user, "settings.chat_model", &format!("{provider}/{model}"));
+                            p.audit("settings.chat_model", &format!("{provider}/{model}"));
                             format!("chat model: {provider} · {model}.")
                         })
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| e.message())
                     }
                     USE_EMBED => {
-                        let set = cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).set_embedding(Some(ModelChoice { provider: provider.clone(), model: model.clone() }));
+                        let set = p.settings_update(&mut |s| s.embedding = Some(ModelChoice { provider: provider.clone(), model: model.clone() }));
                         set.map(|_| {
-                            cx.audit.record(&cx.session.user, "settings.embedding_model", &format!("{provider}/{model}"));
-                            let extra = if Self::svc(cx).reindex_stale_in_background() { " Existing documents are being re-embedded in the background." } else { "" };
+                            p.audit("settings.embedding_model", &format!("{provider}/{model}"));
+                            let extra = if p.lemonade().reindex_stale_in_background() { " Existing documents are being re-embedded in the background." } else { "" };
                             format!("embedding model: {provider} · {model}.{extra}")
                         })
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| e.message())
                     }
-                    USE_PICTURES => match cx.b5().story_store(&cx.session.policy, &cx.session.user, cx.data_dir()) {
+                    USE_PICTURES => match p.story_store() {
                         None => Err(STORE_NOT_SERVED.to_string()),
                         Some(store) => {
                             let mut prefs = store.load_prefs();
                             prefs.picture_model = Some(ModelChoice { provider: provider.clone(), model: model.clone() });
                             store.save_prefs(&prefs).map(|_| {
-                                cx.audit.record(&cx.session.user, "story.picture_model", &format!("{provider} {model}"));
+                                p.audit("story.picture_model", &format!("{provider} {model}"));
                                 format!("TALES pictures are drawn with {model} on {provider} (your choice; Lemonade loads it on the first picture, which can take a while).")
                             })
                         }
                     },
-                    USE_STT if Self::lem_needs_yes(cx, &provider).is_some() => {
-                        let (host, place) = Self::lem_needs_yes(cx, &provider).unwrap_or_default();
+                    USE_STT if Self::lem_needs_yes(p, &provider).is_some() => {
+                        let (host, place) = Self::lem_needs_yes(p, &provider).unwrap_or_default();
                         let text = format!("{provider} ({host}) is {place}. Speech-to-text with it sends what the microphone hears, and speech made for reading aloud (to time the lit word), to that machine. Send sound to {host} from now on?");
                         self.modal = Some(Modal::Confirm(ConfirmKind::Lemonade(LemAct::RemoteStt(provider, model)), text));
                         return;
                     }
-                    USE_STT => Self::svc(cx).use_lemonade_stt(&provider, &model).map(|m| {
-                        cx.audit.record(&cx.session.user, "settings.voice", &format!("stt lemonade {provider}/{model}"));
+                    USE_STT => p.lemonade().use_lemonade_stt(&provider, &model).map(|m| {
+                        p.audit("settings.voice", &format!("stt lemonade {provider}/{model}"));
                         m
                     }),
                     USE_VOICE => {
@@ -342,8 +342,8 @@ impl SettingsApp {
                         return;
                     }
                     UNLOAD => {
-                        let svc = Self::svc(cx).clone();
-                        cx.audit.record(&cx.session.user, "settings.lemonade.unload", &format!("{provider}/{model}"));
+                        let svc = p.lemonade();
+                        p.audit("settings.lemonade.unload", &format!("{provider}/{model}"));
                         self.start(&format!("unloading {model}"), move || JobOut::Msg(svc.lemonade_load(&provider, &model, false)));
                         return;
                     }
@@ -362,43 +362,43 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn lem_confirm(&mut self, cx: &AppCx, act: LemAct) {
-        if !self.admin(cx) {
+    pub(super) fn lem_confirm(&mut self, p: &dyn LemonadePort, act: LemAct) {
+        if !self.admin(p) {
             return;
         }
         match act {
             LemAct::Pull(provider, model) => {
-                cx.audit.record(&cx.session.user, "settings.lemonade.pull", &format!("{provider}/{model}"));
-                match Self::svc(cx).pull_model_for(&cx.session.user, &provider, &model) {
+                p.audit("settings.lemonade.pull", &format!("{provider}/{model}"));
+                match p.lemonade().pull_model_for(&p.user(), &provider, &model) {
                     Ok(()) => self.ok(format!("Downloading {model} into {provider}; the progress shows below.")),
                     Err(e) => self.fail(e),
                 }
             }
             LemAct::Load(provider, model) => {
-                cx.audit.record(&cx.session.user, "settings.lemonade.load", &format!("{provider}/{model}"));
-                let svc = Self::svc(cx).clone();
+                p.audit("settings.lemonade.load", &format!("{provider}/{model}"));
+                let svc = p.lemonade();
                 self.start(&format!("loading {model} (a large model takes a while)"), move || JobOut::Msg(svc.lemonade_load(&provider, &model, true)));
             }
             LemAct::InstallParts(provider, collection) => {
-                cx.audit.record(&cx.session.user, "settings.lemonade.pull", &format!("{provider}/{collection}"));
-                match Self::svc(cx).install_missing_parts(&provider, &collection) {
+                p.audit("settings.lemonade.pull", &format!("{provider}/{collection}"));
+                match p.lemonade().install_missing_parts(&provider, &collection) {
                     Ok(ids) => self.ok(format!("Downloading {} into {provider}; the progress shows below. Press Use all parts again when it is done.", ids.join(", "))),
                     Err(e) => self.fail(e),
                 }
             }
             LemAct::UseAll(provider, collection) => {
-                let Some(base) = Self::lem_base(cx, &provider) else { return };
+                let Some(base) = Self::lem_base(p, &provider) else { return };
                 // the card said where this runs: its yes also allows speech to go to a server on another machine
-                let r = if Self::svc(cx).speech_server_allowed(&base) {
+                let r = if p.lemonade().speech_server_allowed(&base) {
                     Ok(())
                 } else {
-                    cx.audit.record(&cx.session.user, "settings.voice.remote_ok", &cx.agent.helpers_b4().speech_server_of(&base));
-                    Self::svc(cx).allow_speech_server(&base)
+                    p.audit("settings.voice.remote_ok", &p.agent().helpers_b4().speech_server_of(&base));
+                    p.lemonade().allow_speech_server(&base)
                 };
-                let Some(store) = cx.b5().story_store(&cx.session.policy, &cx.session.user, cx.data_dir()) else { return self.fail(STORE_NOT_SERVED.to_string()) };
-                match r.and_then(|_| Self::svc(cx).use_all_parts(&provider, &collection, &store)) {
+                let Some(store) = p.story_store() else { return self.fail(STORE_NOT_SERVED.to_string()) };
+                match r.and_then(|_| p.lemonade().use_all_parts(&provider, &collection, &store)) {
                     Ok(m) => {
-                        cx.audit.record(&cx.session.user, "settings.lemonade.use_all_parts", &format!("{provider}/{collection}"));
+                        p.audit("settings.lemonade.use_all_parts", &format!("{provider}/{collection}"));
                         self.ok(m)
                     }
                     Err(e) => self.fail(e),
@@ -406,15 +406,15 @@ impl SettingsApp {
             }
             LemAct::RemoteVoice(..) | LemAct::RemoteStt(..) => {
                 let (provider, model, voice) = match act {
-                    LemAct::RemoteVoice(p, m, v) => (p, m, Some(v)),
-                    LemAct::RemoteStt(p, m) => (p, m, None),
+                    LemAct::RemoteVoice(pv, m, v) => (pv, m, Some(v)),
+                    LemAct::RemoteStt(pv, m) => (pv, m, None),
                     _ => return,
                 };
-                let Some(base) = Self::lem_base(cx, &provider) else { return };
-                cx.audit.record(&cx.session.user, "settings.voice.remote_ok", &cx.agent.helpers_b4().speech_server_of(&base));
-                let r = Self::svc(cx).allow_speech_server(&base).and_then(|_| match voice.as_deref() {
-                    Some(v) => Self::svc(cx).use_lemonade_voice(&provider, &model, Some(v)).map(|m| format!("{m} TALES and chat replies are read with it.")),
-                    None => Self::svc(cx).use_lemonade_stt(&provider, &model),
+                let Some(base) = Self::lem_base(p, &provider) else { return };
+                p.audit("settings.voice.remote_ok", &p.agent().helpers_b4().speech_server_of(&base));
+                let r = p.lemonade().allow_speech_server(&base).and_then(|_| match voice.as_deref() {
+                    Some(v) => p.lemonade().use_lemonade_voice(&provider, &model, Some(v)).map(|m| format!("{m} TALES and chat replies are read with it.")),
+                    None => p.lemonade().use_lemonade_stt(&provider, &model),
                 });
                 match r {
                     Ok(m) => self.ok(m),
@@ -501,8 +501,8 @@ impl SettingsApp {
     /// The models of a Lemonade provider: Installed first (every downloaded or loaded model of any type, its type on the chip),
     /// then by type only what is not downloaded yet (a "pull" chip), then Video (none) and downloads. The part below the heading
     /// scrolls (wheel, PageUp/PageDown, arrows) so every section can be reached.
-    pub(super) fn render_lemonade(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx, p: &ProviderCfg) {
-        let list = Self::svc(cx).lemonade_cached(&p.id);
+    pub(super) fn render_lemonade(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn LemonadePort, pv: &ProviderCfg) {
+        let list = p.lemonade().lemonade_cached(&pv.id);
         let line_h = 28.0 * s;
         self.lem_rect = a;
         self.lem_s = s;
@@ -510,8 +510,8 @@ impl SettingsApp {
             self.lem_max = 0.0;
             return;
         }
-        let host = p.base().ok().and_then(|b| iyakki_sec::url_host(&b)).unwrap_or_default();
-        let place = p.base().map(|b| cx.agent.helpers_b4().locality_label(&b)).unwrap_or("");
+        let host = pv.base().ok().and_then(|b| iyakki_sec::url_host(&b)).unwrap_or_default();
+        let place = pv.base().map(|b| p.agent().helpers_b4().locality_label(&b)).unwrap_or("");
         let q = self.lem_query.value.trim().to_lowercase();
         let shown = |m: &Model| q.is_empty() || Self::lem_matches(m, &q);
         let n_installed = list.iter().filter(|m| m.downloaded || m.loaded).count();
@@ -522,7 +522,7 @@ impl SettingsApp {
         } else {
             let counts = if q.is_empty() { format!("{n_installed} installed · {} available", list.len() - n_installed) } else { format!("{n_shown} of {} shown · {n_installed} installed", list.len()) };
             let hint = if self.lem_max > 0.0 { " · wheel or PageUp/PageDown scrolls" } else { "" };
-            let on = cx.agent.lemonade_compute().lemonade_compute(cx.data_dir()).word().to_uppercase();
+            let on = p.agent().lemonade_compute().lemonade_compute(&p.data_dir()).word().to_uppercase();
             format!("{counts} · Lemonade on {host} ({place}) · runs on the {on} (G switches) · click a model to use it{hint}")
         };
         self.lem_texts = vec![head.clone()];
@@ -560,7 +560,7 @@ impl SettingsApp {
         }
         self.lem_texts.extend(sections.iter().filter_map(|x| x.note).map(str::to_string));
         let top = view.y - self.lem_scroll;
-        let pulls: Vec<_> = Self::svc(cx).pull_status().into_iter().filter(|x| x.provider == p.id).collect();
+        let pulls: Vec<_> = p.lemonade().pull_status().into_iter().filter(|x| x.provider == pv.id).collect();
         let end = g.clipped(view, |g| {
             let mut y = top;
             let mut pulls_done = false;

@@ -4,6 +4,7 @@
 
 use crate::safeclamp::SafeClamp;
 use super::*;
+use super::super::settings_device_port::DeveloperPort;
 use iyakki_shared::devmode::scopes::Scope;
 use iyakki_agent_api::DevModeApi;
 use iyakki_shared::devmode_types as dm;
@@ -55,17 +56,17 @@ fn hours_text(h: u32) -> String {
 }
 
 impl SettingsApp {
-    fn devmode(cx: &AppCx) -> Arc<dyn DevModeApi> {
-        crate::agent().host_probe().devmode(cx.data_dir())
+    fn devmode(p: &dyn DeveloperPort) -> Arc<dyn DevModeApi> {
+        p.devmode()
     }
 
-    pub(super) fn devmode_keys(cx: &AppCx) -> Vec<dm::DevKey> {
-        Self::devmode(cx).keys()
+    pub(super) fn devmode_keys(p: &dyn DeveloperPort) -> Vec<dm::DevKey> {
+        Self::devmode(p).keys()
     }
 
     /// Events of the relay fingerprint box that must not reach the rest of Settings. True when consumed.
-    pub(super) fn relay_pin_event(&mut self, ev: &Event, cx: &AppCx) -> bool {
-        if self.devel.usb_open || !self.admin(cx) {
+    pub(super) fn relay_pin_event(&mut self, ev: &Event, p: &dyn DeveloperPort) -> bool {
+        if self.devel.usb_open || !self.admin(p) {
             return false;
         }
         match ev {
@@ -88,11 +89,11 @@ impl SettingsApp {
                     Key::Esc => self.devel.pin_focus = false,
                     Key::Enter => {
                         self.devel.pin_focus = false;
-                        let (p, user) = (&cx.session.policy, cx.session.user.clone());
+                        let (pol, user) = (p.policy(), p.user());
                         let text = self.devel.pin.value.clone();
-                        match Self::devmode(cx).set_relay_pin(p, &user, &text) {
+                        match Self::devmode(p).set_relay_pin(&pol, &user, &text) {
                             Ok(()) => {
-                                cx.audit.record(&user, "settings.developer", if text.trim().is_empty() { "relay certificate fingerprint removed" } else { "relay certificate fingerprint set" });
+                                p.audit("settings.developer", if text.trim().is_empty() { "relay certificate fingerprint removed" } else { "relay certificate fingerprint set" });
                                 self.ok(if text.trim().is_empty() { "The relay's certificate fingerprint is removed: an https relay is not used." } else { "The relay's certificate fingerprint is kept. An https relay is only used for that certificate." });
                             }
                             Err(e) => self.fail(e),
@@ -108,17 +109,17 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn handle_developer(&mut self, k: &Key, cx: &AppCx) {
-        if !self.admin(cx) {
+    pub(super) fn handle_developer(&mut self, k: &Key, p: &dyn DeveloperPort) {
+        if !self.admin(p) {
             return;
         }
         if self.devel.usb_open {
-            self.handle_usb(k, cx);
+            self.handle_usb(k, p);
             return;
         }
-        let d = Self::devmode(cx);
-        let p = &cx.session.policy;
-        let user = cx.session.user.clone();
+        let d = Self::devmode(p);
+        let pol = p.policy();
+        let user = p.user();
         if !matches!(k, Key::Char('x') | Key::Delete) {
             self.devel.remove_armed = None;
         }
@@ -127,8 +128,8 @@ impl SettingsApp {
         }
         match k {
             Key::Char('u') => self.devel.usb_open = true,
-            Key::Up => self.move_sel(-1, Self::devmode_keys(cx).len()),
-            Key::Down => self.move_sel(1, Self::devmode_keys(cx).len()),
+            Key::Up => self.move_sel(-1, Self::devmode_keys(p).len()),
+            Key::Down => self.move_sel(1, Self::devmode_keys(p).len()),
             Key::PageUp => self.dev_wheel(3),
             Key::PageDown => self.dev_wheel(-3),
             // copy the pairing code to type on the other computer
@@ -139,9 +140,9 @@ impl SettingsApp {
                 }
                 _ => self.fail("No pairing code is showing: press p first.".to_string()),
             },
-            Key::Char('e') | Key::Enter if !d.is_on() => match d.enable(p, &user, HOURS[self.devel.hours]) {
+            Key::Char('e') | Key::Enter if !d.is_on() => match d.enable(&pol, &user, HOURS[self.devel.hours]) {
                 Ok(_) => {
-                    cx.audit.record(&user, "devmode.on", &hours_text(HOURS[self.devel.hours]));
+                    p.audit("devmode.on", &hours_text(HOURS[self.devel.hours]));
                     self.ok(format!("Developer mode is on (port {}). It switches off {}. Pair a computer with p.", d.state().port(), hours_text(HOURS[self.devel.hours])));
                 }
                 Err(e) => self.fail(e),
@@ -150,9 +151,9 @@ impl SettingsApp {
                 self.devel.off_armed = Some('e');
                 self.ok("Switching developer mode off ends the restart grants and trusted-computer switches too. Press e again to switch it off; any other key cancels.");
             }
-            Key::Char('e') => match d.disable(p, &user) {
+            Key::Char('e') => match d.disable(&pol, &user) {
                 Ok(()) => {
-                    cx.audit.record(&user, "devmode.off", "switched off in Settings");
+                    p.audit("devmode.off", "switched off in Settings");
                     self.ok("Developer mode is off: the port is closed and every request is refused.");
                 }
                 Err(e) => self.fail(e),
@@ -162,7 +163,7 @@ impl SettingsApp {
                 let h = HOURS[self.devel.hours];
                 if d.is_on() {
                     // apply to the running session at once
-                    match d.enable(p, &user, h) {
+                    match d.enable(&pol, &user, h) {
                         Ok(_) => self.ok(format!("Switches off {} from now.", hours_text(h))),
                         Err(e) => self.fail(e),
                     }
@@ -170,9 +171,9 @@ impl SettingsApp {
                     self.ok(format!("When switched on it will switch off {}.", hours_text(h)));
                 }
             }
-            Key::Char('p') => match d.start_pairing(p, &user) {
+            Key::Char('p') => match d.start_pairing(&pol, &user) {
                 Ok(_) => {
-                    cx.audit.record(&user, "devmode.pair.open", "pairing code shown");
+                    p.audit("devmode.pair.open", "pairing code shown");
                     self.ok("Type the code on the computer: iyakki dev pair <address> (good for 5 minutes).");
                 }
                 Err(e) => self.fail(e),
@@ -181,17 +182,17 @@ impl SettingsApp {
             Key::Char('f') => {
                 let hint_src = self.dev_fw_hint(d.as_ref()).and_then(|h| h.split(" from ").nth(1).map(|x| x.trim_end_matches(": Allow").to_string()));
                 if d.pairing().is_some() {
-                    match d.allow_pairing_through_firewall(p, &user) {
+                    match d.allow_pairing_through_firewall(&pol, &user) {
                         Ok(_) => {
-                            cx.audit.record(&user, "devmode.firewall.request", "pairing (one time)");
+                            p.audit("devmode.firewall.request", "pairing (one time)");
                             self.ok("The firewall lets the local network reach the developer port for ten minutes, or until a computer has paired. The pairing code and the fingerprint are still what protects it.");
                         }
                         Err(e) => self.fail(e),
                     }
                 } else if let Some(src) = hint_src {
-                    match d.allow_peer(p, &user, &src) {
+                    match d.allow_peer(&pol, &user, &src) {
                         Ok(()) => {
-                            cx.audit.record(&user, "devmode.firewall.request", &format!("{src} while developer mode is on"));
+                            p.audit("devmode.firewall.request", &format!("{src} while developer mode is on"));
                             self.ok(format!("The firewall lets {src} reach the developer port while developer mode is on."));
                         }
                         Err(e) => self.fail(e),
@@ -202,7 +203,7 @@ impl SettingsApp {
             }
             Key::Char('n') => {
                 let now_on = !d.network_wide();
-                match d.set_network_wide(p, &user, now_on) {
+                match d.set_network_wide(&pol, &user, now_on) {
                     Ok(()) => self.ok(if now_on { "The firewall now lets the whole network of each paired computer reach the developer port (only paired keys can act)." } else { "The firewall lets only the address of each paired computer in." }),
                     Err(e) => self.fail(e),
                 }
@@ -213,7 +214,7 @@ impl SettingsApp {
             }
             // "Remove this computer": the first press asks (the page says what goes), the second one removes
             Key::Char('x') | Key::Delete => {
-                let rows = Self::devmode_keys(cx);
+                let rows = Self::devmode_keys(p);
                 let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
                 if let Some(k) = rows.get(sel) {
                     if self.devel.remove_armed.as_deref() != Some(k.name.as_str()) {
@@ -222,9 +223,9 @@ impl SettingsApp {
                         return;
                     }
                     self.devel.remove_armed = None;
-                    match d.remove_pairing(p, &user, &k.name) {
+                    match d.remove_pairing(&pol, &user, &k.name) {
                         Ok(said) => {
-                            cx.audit.record(&user, "devmode.revoke", &k.name);
+                            p.audit("devmode.revoke", &k.name);
                             self.ok(said);
                         }
                         Err(e) => self.fail(e),
@@ -233,21 +234,21 @@ impl SettingsApp {
             }
             Key::Char('l') => self.devel.log = !self.devel.log,
             // push the automatic switch-off 4 h further (the timer of "h" starts it again from now)
-            Key::Char('t') => match d.extend(p, &user, EXTEND_HOURS) {
+            Key::Char('t') => match d.extend(&pol, &user, EXTEND_HOURS) {
                 Ok(st) => {
-                    cx.audit.record(&user, "devmode.extend", &format!("{EXTEND_HOURS} h"));
+                    p.audit("devmode.extend", &format!("{EXTEND_HOURS} h"));
                     self.ok(format!("Developer mode now switches off at {}.", dm::stamp(st.until)));
                 }
                 Err(e) => self.fail(e),
             },
             // every diagnostic scope for the selected computer, in one go: look, files, screen, cluster, shell (still approved here)
             Key::Char('G') => {
-                let rows = Self::devmode_keys(cx);
+                let rows = Self::devmode_keys(p);
                 let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
                 if let Some(row) = rows.get(sel) {
-                    match d.grant_diagnostic(p, &user, &row.name) {
+                    match d.grant_diagnostic(&pol, &user, &row.name) {
                         Ok(nk) => {
-                            cx.audit.record(&user, "devmode.scope.grant", &format!("{} diagnostic scopes", nk.name));
+                            p.audit("devmode.scope.grant", &format!("{} diagnostic scopes", nk.name));
                             self.ok(format!("{} may now help diagnose: {}. A shell still needs your approval each time; updates and power stay off.", nk.name, nk.scope_text()));
                         }
                         Err(e) => self.fail(e),
@@ -260,7 +261,7 @@ impl SettingsApp {
             // the web service's api:* scopes of the selected computer: i chooses the family, m cycles nothing -> reading only -> all
             Key::Char('i') => self.devel.api = (self.devel.api + 1) % api_families().len(),
             Key::Char('m') => {
-                let rows = Self::devmode_keys(cx);
+                let rows = Self::devmode_keys(p);
                 let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
                 let Some(row) = rows.get(sel) else {
                     self.fail("Pair a computer first.".to_string());
@@ -274,12 +275,12 @@ impl SettingsApp {
                     _ => None,
                 };
                 let r = match &next {
-                    Some(sc) => d.set_api_scope(p, &user, &row.name, sc, true),
-                    None => d.set_api_scope(p, &user, &row.name, fam, false),
+                    Some(sc) => d.set_api_scope(&pol, &user, &row.name, sc, true),
+                    None => d.set_api_scope(&pol, &user, &row.name, fam, false),
                 };
                 match r {
                     Ok(now) => {
-                        cx.audit.record(&user, "devmode.api.set", &format!("{} {}", row.name, next.as_deref().unwrap_or(fam)));
+                        p.audit("devmode.api.set", &format!("{} {}", row.name, next.as_deref().unwrap_or(fam)));
                         self.ok(format!("{} may now call in the web service: {}.", row.name, if now.is_empty() { "nothing".to_string() } else { now.join(", ") }));
                     }
                     Err(e) => self.fail(e),
@@ -290,18 +291,18 @@ impl SettingsApp {
                 if matches!(k, Key::Char('g')) {
                     // the computer that is about to pair
                     let on = !d.pairing().is_some_and(|p| p.scopes.iter().any(|x| x == sc.id()));
-                    match d.set_pairing_scope(p, &user, sc, on) {
+                    match d.set_pairing_scope(&pol, &user, sc, on) {
                         Ok(l) => self.ok(format!("The computer that pairs will get: {}.", l.join(", "))),
                         Err(e) => self.fail(e),
                     }
                 } else {
-                    let rows = Self::devmode_keys(cx);
+                    let rows = Self::devmode_keys(p);
                     let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
                     if let Some(row) = rows.get(sel) {
                         let on = !row.has(sc);
-                        match d.set_scope(p, &user, &row.name, sc, on) {
+                        match d.set_scope(&pol, &user, &row.name, sc, on) {
                             Ok(nk) => {
-                                cx.audit.record(&user, if on { "devmode.scope.grant" } else { "devmode.scope.revoke" }, &format!("{} {}", nk.name, sc.id()));
+                                p.audit(if on { "devmode.scope.grant" } else { "devmode.scope.revoke" }, &format!("{} {}", nk.name, sc.id()));
                                 self.ok(format!("{} now holds: {}.", nk.name, nk.scope_text()));
                             }
                             Err(e) => self.fail(e),
@@ -315,20 +316,20 @@ impl SettingsApp {
                     return;
                 };
                 let r = match k {
-                    Key::Char('a') => d.shell_approve(p, &user, &req.computer, 10).map(|g| format!("{} may run commands for 10 minutes{}. The top bar shows it.", g.computer, if g.as_root { " as root" } else { "" })),
+                    Key::Char('a') => d.shell_approve(&pol, &user, &req.computer, 10).map(|g| format!("{} may run commands for 10 minutes{}. The top bar shows it.", g.computer, if g.as_root { " as root" } else { "" })),
                     Key::Char(c @ ('4' | '8' | '1')) => {
                         let hours = match c { '4' => 4, '8' => 8, _ => 12 };
-                        d.shell_approve(p, &user, &req.computer, hours * 60).map(|g| format!("{} may run commands for {hours} hours{}. The top bar shows it.", g.computer, if g.as_root { " as root" } else { "" }))
+                        d.shell_approve(&pol, &user, &req.computer, hours * 60).map(|g| format!("{} may run commands for {hours} hours{}. The top bar shows it.", g.computer, if g.as_root { " as root" } else { "" }))
                     }
-                    Key::Char('o') => d.shell_approve(p, &user, &req.computer, 0).map(|g| format!("{} may run commands for one session.", g.computer)),
+                    Key::Char('o') => d.shell_approve(&pol, &user, &req.computer, 0).map(|g| format!("{} may run commands for one session.", g.computer)),
                     // approve this one and stop asking for a while: a plain shell only (never as root, power or patching)
                     Key::Char('y') if req.as_root => Err("A request to run as root is always asked each time: press a or o.".to_string()),
-                    Key::Char('y') => d.shell_approve(p, &user, &req.computer, 10).and_then(|g| d.shell_auto_on(p, &user, &req.computer, iyakki_shared::devmode::grants::AUTO_DEFAULT_HOURS).map(|_| format!("{} may run commands; its next requests are approved by themselves for {} hours (never as root). w stops it.", g.computer, iyakki_shared::devmode::grants::AUTO_DEFAULT_HOURS))),
-                    _ => d.shell_deny(p, &user, &req.computer).map(|_| format!("{} was refused.", req.computer)),
+                    Key::Char('y') => d.shell_approve(&pol, &user, &req.computer, 10).and_then(|g| d.shell_auto_on(&pol, &user, &req.computer, iyakki_shared::devmode::grants::AUTO_DEFAULT_HOURS).map(|_| format!("{} may run commands; its next requests are approved by themselves for {} hours (never as root). w stops it.", g.computer, iyakki_shared::devmode::grants::AUTO_DEFAULT_HOURS))),
+                    _ => d.shell_deny(&pol, &user, &req.computer).map(|_| format!("{} was refused.", req.computer)),
                 };
                 match r {
                     Ok(m) => {
-                        cx.audit.record(&user, "devmode.shell", &m);
+                        p.audit("devmode.shell", &m);
                         self.ok(m)
                     }
                     Err(e) => self.fail(e),
@@ -337,7 +338,7 @@ impl SettingsApp {
             // the box "Allow restarts from this computer without asking" for the selected computer: lasts as long as the developer
             // connection (no time of its own), restart and switch-off only
             Key::Char('r') => {
-                let rows = Self::devmode_keys(cx);
+                let rows = Self::devmode_keys(p);
                 let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
                 let Some(row) = rows.get(sel) else {
                     self.fail("Pair a computer first.".to_string());
@@ -350,17 +351,17 @@ impl SettingsApp {
                         return;
                     }
                     self.devel.off_armed = None;
-                    match d.restart_grant_off(p, &user, &row.name) {
+                    match d.restart_grant_off(&pol, &user, &row.name) {
                         Ok(()) => {
-                            cx.audit.record(&user, "devmode.restart.grant_off", &row.name);
+                            p.audit("devmode.restart.grant_off", &row.name);
                             self.ok(format!("{} must ask for approval to restart this device again.", row.name));
                         }
                         Err(e) => self.fail(e),
                     }
                 } else {
-                    match d.restart_grant_on(p, &user, &row.name) {
+                    match d.restart_grant_on(&pol, &user, &row.name) {
                         Ok(v) => {
-                            cx.audit.record(&user, "devmode.restart.grant_on", &row.name);
+                            p.audit("devmode.restart.grant_on", &row.name);
                             self.ok(format!("{} may restart or switch off this device without asking until {}. Nothing else.", row.name, if v.until > 0 { dm::stamp(v.until) } else { "developer mode is switched off".to_string() }));
                         }
                         Err(e) => self.fail(e),
@@ -369,7 +370,7 @@ impl SettingsApp {
             }
             // "Keep until I switch it off" under the restart box: the grant, and developer mode with it, stay until switched off by hand
             Key::Char('b') => {
-                let rows = Self::devmode_keys(cx);
+                let rows = Self::devmode_keys(p);
                 let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
                 let Some(row) = rows.get(sel) else {
                     self.fail("Pair a computer first.".to_string());
@@ -377,17 +378,17 @@ impl SettingsApp {
                 };
                 let kept = d.restart_grant_list().into_iter().any(|v| v.computer == row.name && v.persist);
                 if kept {
-                    match d.restart_grant_on(p, &user, &row.name) {
+                    match d.restart_grant_on(&pol, &user, &row.name) {
                         Ok(v) => {
-                            cx.audit.record(&user, "devmode.restart.grant_on", &row.name);
+                            p.audit("devmode.restart.grant_on", &row.name);
                             self.ok(format!("{} is no longer kept: it may restart this device without asking until {}.", row.name, dm::stamp(v.until)));
                         }
                         Err(e) => self.fail(e),
                     }
                 } else {
-                    match d.restart_grant_persist(p, &user, &row.name) {
+                    match d.restart_grant_persist(&pol, &user, &row.name) {
                         Ok(_) => {
-                            cx.audit.record(&user, "devmode.restart.grant_persist", &row.name);
+                            p.audit("devmode.restart.grant_persist", &row.name);
                             self.ok(format!("Restarts allowed until you switch it off: {} may restart or switch off this device without asking, and developer mode stays on until you switch it off. Nothing else.", row.name));
                         }
                         Err(e) => self.fail(e),
@@ -398,7 +399,7 @@ impl SettingsApp {
             // person's tap on this page (a hard ask); switching OFF needs a second press so a double tap cannot undo it by accident.
             Key::Char(c @ ('Q' | 'J' | 'Z' | 'B')) => {
                 use dm::trusted::{TrustFor, TrustLevel};
-                let rows = Self::devmode_keys(cx);
+                let rows = Self::devmode_keys(p);
                 let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
                 let Some(row) = rows.get(sel) else {
                     self.fail("Pair a computer first.".to_string());
@@ -414,9 +415,9 @@ impl SettingsApp {
                         return;
                     }
                     self.devel.off_armed = None;
-                    match d.trusted_off(p, &user, &row.name) {
+                    match d.trusted_off(&pol, &user, &row.name) {
                         Ok(()) => {
-                            cx.audit.record(&user, "devmode.trusted.off", &row.name);
+                            p.audit("devmode.trusted.off", &row.name);
                             self.ok(format!("{} must ask for approval again.", row.name));
                         }
                         Err(e) => self.fail(e),
@@ -428,9 +429,9 @@ impl SettingsApp {
                     'Z' => TrustFor::Hours(12),
                     _ => TrustFor::Kept,
                 };
-                match d.trusted_on(p, &user, &row.name, level, how) {
+                match d.trusted_on(&pol, &user, &row.name, level, how) {
                     Ok(v) => {
-                        cx.audit.record(&user, "devmode.trusted.on", &row.name);
+                        p.audit("devmode.trusted.on", &row.name);
                         self.ok(format!("{} {} {}. Every use is logged; the top bar shows it. {}", row.name, if level == TrustLevel::Patches { "may patch this device without asking" } else { "is a trusted dev computer: its approvals are answered yes by themselves" }, if v.kept() { "until you switch it off (developer mode stays on until then)".to_string() } else { format!("until {}", dm::stamp(v.until)) }, if level == TrustLevel::Patches { "Nothing else." } else { "Passwords, the vault and root are never covered." }));
                     }
                     Err(e) => self.fail(e),
@@ -444,22 +445,22 @@ impl SettingsApp {
                 }
                 let mut m = String::new();
                 for a in &trusted {
-                    if let Err(e) = d.shell_auto_off(p, &user, &a.computer) {
+                    if let Err(e) = d.shell_auto_off(&pol, &user, &a.computer) {
                         self.fail(e);
                         return;
                     }
                     m = format!("{}{}{}", m, if m.is_empty() { "" } else { ", " }, a.computer);
                 }
-                cx.audit.record(&user, "devmode.shell.auto_off", &m);
+                p.audit("devmode.shell.auto_off", &m);
                 self.ok(format!("{m} must ask for approval again."));
             }
             Key::Char('W') => {
                 // the experimental WASM tile switch (off by default; the chat tool wasm_tiles_set does the same)
-                let on = !cx.storeapi().wasm_tiles_enabled();
-                let r = cx.settings().lock().map_err(|_| "the settings are busy".to_string()).and_then(|mut st| st.update(|x| x.wasm_tiles = on).map_err(|e| e.to_string()));
+                let on = !p.wasm_tiles_enabled();
+                let r = p.settings_update(&mut |x| x.wasm_tiles = on).map_err(|e| e.message());
                 match r {
                     Ok(_) => {
-                        cx.audit.record(&user, "settings.wasm_tiles", if on { "on" } else { "off" });
+                        p.audit("settings.wasm_tiles", if on { "on" } else { "off" });
                         self.ok(if on { "WASM tiles (experimental) are on: tile apps with a .wasm module run in the sandboxed tile host." } else { "WASM tiles are off." });
                     }
                     Err(e) => self.fail(e),
@@ -469,9 +470,9 @@ impl SettingsApp {
             // core_contract_scope_set do the same): K switches the channel, j chooses a contract scope, z grants or takes it back
             Key::Char('K') => {
                 let on = !d.core_enabled();
-                match d.set_core_enabled(p, &user, on) {
+                match d.set_core_enabled(&pol, &user, on) {
                     Ok(()) => {
-                        cx.audit.record(&user, "settings.developer", &format!("core contract {}", if on { "on" } else { "off" }));
+                        p.audit("settings.developer", &format!("core contract {}", if on { "on" } else { "off" }));
                         self.ok(if on { "The core contract channel is on. A computer holds no contract scope until you grant one below." } else { "The core contract channel is off." });
                     }
                     Err(e) => self.fail(e),
@@ -485,9 +486,9 @@ impl SettingsApp {
                     self.fail("Give the relay's address first (ask the assistant: relay_switch with an address), then switch it on.".to_string());
                     return;
                 }
-                match d.set_relay_enabled(p, &user, on) {
+                match d.set_relay_enabled(&pol, &user, on) {
                     Ok(()) => {
-                        cx.audit.record(&user, "settings.developer", &format!("relay {}", if on { "on" } else { "off" }));
+                        p.audit("settings.developer", &format!("relay {}", if on { "on" } else { "off" }));
                         self.ok(if on { "Connections through the relay are on. A computer's first contact waits for your yes on this machine." } else { "Connections through the relay are off." });
                     }
                     Err(e) => self.fail(e),
@@ -504,10 +505,10 @@ impl SettingsApp {
             // the socket of a UI program outside the process (off by default; the chat tools ui_socket_status and ui_socket_set do the
             // same; the scopes and the account stay as they are): U switches it, through the core handle
             Key::Char('U') => {
-                let on = !cx.core.ui_socket().enabled();
-                match cx.core.ui_socket().set_enabled(on) {
+                let on = !p.ui_socket_enabled();
+                match p.set_ui_socket(on) {
                     Ok(_) => {
-                        cx.audit.record(&user, "settings.developer", &format!("ui socket {}", if on { "on" } else { "off" }));
+                        p.audit("settings.developer", &format!("ui socket {}", if on { "on" } else { "off" }));
                         self.ok(if on { "The UI socket is on: a UI program on this machine can use it with the scopes and account set by chat (ui_socket_set)." } else { "The UI socket is off." });
                     }
                     Err(e) => self.fail(e),
@@ -517,10 +518,10 @@ impl SettingsApp {
             // chat tools session_resume_status and session_resume_set do the same): R switches it. It takes effect only while developer
             // mode is on, and the vaults stay locked.
             Key::Char('R') => {
-                let on = !cx.core.session_resume().switch_on();
-                match cx.core.session_resume().set_switch(on) {
+                let on = !p.resume_switch_on();
+                match p.set_resume_switch(on) {
                     Ok(()) => {
-                        cx.audit.record(&user, "settings.developer", &format!("resume after restart {}", if on { "on" } else { "off" }));
+                        p.audit("settings.developer", &format!("resume after restart {}", if on { "on" } else { "off" }));
                         self.ok(if on { "Resume after a restart is on: while developer mode is on, a restart of the desktop puts the person back without the password (the vault stays locked)." } else { "Resume after a restart is off." });
                     }
                     Err(e) => self.fail(e),
@@ -528,7 +529,7 @@ impl SettingsApp {
             }
             Key::Char('j') => self.devel.core = (self.devel.core + 1) % core_scopes().len(),
             Key::Char('z') => {
-                let rows = Self::devmode_keys(cx);
+                let rows = Self::devmode_keys(p);
                 let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
                 let Some(row) = rows.get(sel) else {
                     self.fail("Pair a computer first.".to_string());
@@ -536,9 +537,9 @@ impl SettingsApp {
                 };
                 let sc = core_scopes()[self.devel.core % core_scopes().len()];
                 let on = !d.core_scopes(&row.name).iter().any(|x| x == sc);
-                match d.set_core_scope(p, &user, &row.name, sc, on) {
+                match d.set_core_scope(&pol, &user, &row.name, sc, on) {
                     Ok(now) => {
-                        cx.audit.record(&user, "settings.developer", &format!("core scope {sc} {} for {}", if on { "granted" } else { "taken back" }, row.name));
+                        p.audit("settings.developer", &format!("core scope {sc} {} for {}", if on { "granted" } else { "taken back" }, row.name));
                         self.ok(format!("{} may now use in the core contract: {}.", row.name, if now.is_empty() { "nothing".to_string() } else { now.join(", ") }));
                     }
                     Err(e) => self.fail(e),
@@ -546,12 +547,12 @@ impl SettingsApp {
             }
             Key::Char('k') => {
                 // end the selected computer's shell access and disconnect all its sessions
-                let rows = Self::devmode_keys(cx);
+                let rows = Self::devmode_keys(p);
                 let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
                 if let Some(row) = rows.get(sel) {
-                    let _ = d.shell_end(p, &user, &row.name);
-                    let n = Self::devmode(cx).end_sessions_of(&row.name);
-                    cx.audit.record(&user, "devmode.disconnect", &row.name);
+                    let _ = d.shell_end(&pol, &user, &row.name);
+                    let n = Self::devmode(p).end_sessions_of(&row.name);
+                    p.audit("devmode.disconnect", &row.name);
                     self.ok(format!("{} is disconnected ({n} session(s) ended, shell access ended).", row.name));
                 }
             }
@@ -560,7 +561,7 @@ impl SettingsApp {
     }
 
     /// A click or tap on a line of a list: put the cursor on `row` (a scope) and press the key the line stands for.
-    pub(super) fn dev_sub(&mut self, row: u8, k: &Key, cx: &AppCx) {
+    pub(super) fn dev_sub(&mut self, row: u8, k: &Key, p: &dyn DeveloperPort) {
         if self.devel.usb_open {
             return;
         }
@@ -572,7 +573,7 @@ impl SettingsApp {
         } else {
             self.devel.scope = row as usize % Scope::ALL.len();
         }
-        self.handle_developer(k, cx);
+        self.handle_developer(k, p);
     }
 
     /// The mouse wheel (positive = up): scrolls the page, or the list of checks on the USB-C page.
@@ -646,9 +647,9 @@ impl SettingsApp {
         v
     }
 
-    pub(super) fn render_developer(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+    pub(super) fn render_developer(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn DeveloperPort) {
         if self.devel.usb_open {
-            self.render_usb(g, a, s, cx);
+            self.render_usb(g, a, s, p);
             return;
         }
         // the page is taller than the window when a code, hints and a request show: it scrolls (wheel, finger, Page keys) and
@@ -656,13 +657,13 @@ impl SettingsApp {
         self.devel.scroll = self.devel.scroll.clamp_safe(0.0, self.devel.max);
         let top = a.y - self.devel.scroll;
         let shifted = R::new(a.x, top, a.w, a.h + self.devel.scroll);
-        let end = g.clipped(a, |g| self.render_developer_body(g, shifted, s, cx));
+        let end = g.clipped(a, |g| self.render_developer_body(g, shifted, s, p));
         self.devel.max = (end - top + 12.0 * s - a.h).max(0.0);
     }
 
     /// The whole page from `a.y` down; returns where it ends.
-    fn render_developer_body(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) -> f32 {
-        let d = Self::devmode(cx);
+    fn render_developer_body(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn DeveloperPort) -> f32 {
+        let d = Self::devmode(p);
         let on = d.is_on();
         self.devel.on = on;
         self.devel.pairing_shown = on && d.pairing().is_some();
@@ -686,12 +687,12 @@ impl SettingsApp {
         // the switch-off time: tap the line to go to the next choice (h)
         tap_line(g, a, &mut y, s, 13.0, MUTED, Face::Sans, &format!("Port {} (TLS) · next switch-on switches off {} · tap to change (h)", st.port(), hours_text(HOURS[self.devel.hours])), Some(Event::Key(Key::Char('h'))));
         y += 6.0 * s;
-        if let Some(p) = d.pairing().filter(|_| on) {
+        if let Some(pairing) = d.pairing().filter(|_| on) {
             y += controls::section_title(g, a.x, y, s, "Pair a computer (tap the code to copy it)");
-            g.text(a.x, y, 30.0 * s, ACCENT, &p.code, Face::Mono);
+            g.text(a.x, y, 30.0 * s, ACCENT, &pairing.code, Face::Mono);
             g.hit(R::new(a.x, y - 2.0 * s, a.w, 44.0 * s), Event::Key(Key::Char('C')), "Copy the pairing code");
             y += 46.0 * s;
-            let fp = Self::devmode(cx).cert_fingerprint().unwrap_or_else(|| "(the certificate is being made: look again in a moment)".into());
+            let fp = Self::devmode(p).cert_fingerprint().unwrap_or_else(|| "(the certificate is being made: look again in a moment)".into());
             let half = fp.len().div_ceil(2).min(48);
             for part in [&fp[..half.min(fp.len())], &fp[half.min(fp.len())..]] {
                 if !part.is_empty() {
@@ -699,9 +700,9 @@ impl SettingsApp {
                     y += 18.0 * s;
                 }
             }
-            let addrs: Vec<String> = cx.os.net().ipv4_addresses().unwrap_or_default().into_iter().filter(|(_, ip)| !ip.starts_with("127.")).map(|(_, ip)| format!("{ip}:{}", st.port())).collect();
-            let line = format!("On the computer: iyakki dev pair {} — then type this code. The fingerprint above must match what it prints. The computer will act as {} ({} left).", addrs.first().cloned().unwrap_or_else(|| format!("<this device's address>:{}", st.port())), p.account, {
-                let left = (p.expires - d.now()).max(0);
+            let addrs: Vec<String> = p.ipv4_addresses().into_iter().filter(|(_, ip)| !ip.starts_with("127.")).map(|(_, ip)| format!("{ip}:{}", st.port())).collect();
+            let line = format!("On the computer: iyakki dev pair {} — then type this code. The fingerprint above must match what it prints. The computer will act as {} ({} left).", addrs.first().cloned().unwrap_or_else(|| format!("<this device's address>:{}", st.port())), pairing.account, {
+                let left = (pairing.expires - d.now()).max(0);
                 format!("{}:{:02}", left / 60, left % 60)
             });
             for w in g.wrap(13.0 * s, &line, Face::Sans, a.w) {
@@ -711,7 +712,7 @@ impl SettingsApp {
             g.text(a.x, y, 13.0 * s, rgb(255, 196, 94), "What the new computer will be allowed (tap a line, or s then g):", Face::Sans);
             y += 22.0 * s;
             for (i, sc) in Scope::ALL.into_iter().enumerate() {
-                let held = p.scopes.iter().any(|x| x == sc.id());
+                let held = pairing.scopes.iter().any(|x| x == sc.id());
                 let cursor = if i == self.devel.scope % Scope::ALL.len() { "▶" } else { " " };
                 let col = if held && sc.dangerous() { ERR } else if held { rgb(255, 196, 94) } else { DIM };
                 let t = g.fit(13.0 * s, &format!("{cursor} [{}] {:<16} {}", if held { "x" } else { " " }, sc.id(), sc.describe()), Face::Mono, a.w);
@@ -757,7 +758,7 @@ impl SettingsApp {
                 }
                 y += 6.0 * s;
             }
-            let sessions = Self::devmode(cx).sessions();
+            let sessions = Self::devmode(p).sessions();
             if !sessions.is_empty() {
                 y += controls::section_title(g, a.x, y, s, "Open sessions (Disconnect ends the selected computer's)");
                 let now = d.now();
@@ -784,7 +785,7 @@ impl SettingsApp {
             }
             return y;
         }
-        let wasm_on = cx.storeapi().wasm_tiles_enabled();
+        let wasm_on = p.wasm_tiles_enabled();
         tap_line(g, a, &mut y, s, 13.0, if wasm_on { rgb(255, 196, 94) } else { MUTED }, Face::Sans, &format!("WASM tiles (experimental): {} · tap here or press W to turn {}", if wasm_on { "on" } else { "off (default)" }, if wasm_on { "off" } else { "on" }), Some(Event::Key(Key::Char('W'))));
         let core_on = d.core_enabled();
         tap_line(g, a, &mut y, s, 13.0, if core_on { rgb(255, 196, 94) } else { MUTED }, Face::Sans, &format!("Core contract channel: {} · tap here or press K to turn {}. A computer holds no contract scope until you grant one below.", if core_on { "on" } else { "off (default)" }, if core_on { "off" } else { "on" }), Some(Event::Key(Key::Char('K'))));
@@ -797,12 +798,12 @@ impl SettingsApp {
             self.devel.pin.render(g, r, true, s, (self.ticks / 4) % 2 == 0, Face::Mono, PIN_ID);
             y += 38.0 * s;
         }
-        let ui_on = cx.core.ui_socket().enabled();
+        let ui_on = p.ui_socket_enabled();
         tap_line(g, a, &mut y, s, 13.0, if ui_on { rgb(255, 196, 94) } else { MUTED }, Face::Sans, &format!("UI socket (a UI program on this machine): {} · tap here or press U to turn {}. A unix socket, no network port.", if ui_on { "on" } else { "off (default)" }, if ui_on { "off" } else { "on" }), Some(Event::Key(Key::Char('U'))));
-        let rs_on = cx.core.session_resume().switch_on();
+        let rs_on = p.resume_switch_on();
         tap_line(g, a, &mut y, s, 13.0, if rs_on { rgb(255, 196, 94) } else { MUTED }, Face::Sans, &format!("Resume after a restart (developer machines): {} · tap here or press R to turn {}. While developer mode is on, a restarted desktop puts the person back without the password; the vault stays locked.", if rs_on { "on" } else { "off (default)" }, if rs_on { "off" } else { "on" }), Some(Event::Key(Key::Char('R'))));
         y += controls::section_title(g, a.x, y, s, "Paired computers (tap one to choose it)");
-        let rows = Self::devmode_keys(cx);
+        let rows = Self::devmode_keys(p);
         if rows.is_empty() {
             let (t, k) = if on { ("None yet. Tap here or press p to show a pairing code.", 'p') } else { ("None. Tap here to switch developer mode on (e), then pair a computer (p).", 'e') };
             tap_line(g, a, &mut y, s, 14.0, DIM, Face::Sans, t, Some(Event::Key(Key::Char(k))));

@@ -521,7 +521,15 @@ fn reset_when_silent(dev: &CamDevice) -> Option<String> {
 }
 
 impl Opener for V4l2Opener {
+    /// The camera of this machine, cut by the end-of-session hook `camera-device` at sign-out, lock and suspend even when the app that holds
+    /// it is alive (D-SESSION-END).
     fn open(&self, dev: &CamDevice, want: Option<Mode>) -> Result<Opened, String> {
+        self.open_device(dev, want).map(|o| super::guarded(o, &super::CAMERA_STOPS))
+    }
+}
+
+impl V4l2Opener {
+    fn open_device(&self, dev: &CamDevice, want: Option<Mode>) -> Result<Opened, String> {
         let fd = Fd::open(&dev.path)?;
         let mut modes = Vec::new();
         for f in formats(&fd) {

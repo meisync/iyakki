@@ -1,0 +1,25 @@
+[package]
+name = "iyakki-tile-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The GIT tile (hosts, repositories, clones on this computer; read-only browsing, clone, fetch, pull and push after a review). Rule
+# (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit` and on the leaf crates named in tests/data/tile_crate_deps.allow
+# (`iyakki-git-model`: the hosts, connections, browser and job data, `iyakki-k8s-model`: the retry timer, the program runner trait and the age text),
+# never on the agent, the agent API or the shared crate. Its tests run against a fake `GitPort`; the shell adapter is
+# `crates/iyakki-apps/src/apps/git_tile.rs`, the real port `git_port.rs`.
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-git-model = { workspace = true }
+iyakki-k8s-model = { workspace = true }
+serde_json = "1"
+tiny-skia = "0.11"
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }
+
+[features]
+# test seams the shell's own tests use; never on in a product build
+testing = []

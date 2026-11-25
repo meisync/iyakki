@@ -106,6 +106,7 @@ fn the_page_is_for_administrators_under_network() {
 
 #[test]
 fn import_from_the_clipboard_keeps_the_keys_in_the_vault_and_off_the_screen_and_the_history() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     let mut r = rig("vpn-clip");
     let said = import_clip(&mut r, "Office");
     assert!(said.contains("Imported") && said.contains("disabled") && said.contains("removed from the clipboard history"), "{said}");
@@ -232,6 +233,7 @@ fn mode_and_filters_are_validated_and_saved() {
 
 #[test]
 fn the_page_draws_inside_the_window_at_the_four_sizes() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     let mut r = rig("vpn-draw");
     for (w, h) in [(1280u32, 800u32), (1920, 1080), (1024, 600), (640, 360)] {
         let g = draw(&mut r, w, h);

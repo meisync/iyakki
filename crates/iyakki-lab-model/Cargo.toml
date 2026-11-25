@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-lab-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The LAB's data and rules (models and where they run, requests and their log lines, speech and video frames), with no agent and no shell. iyakki_shared::lab re-exports every item under the old path (alpha.9 P5)."
+
+[dependencies]
+iyakki-provider-kind = { workspace = true }
+iyakki-speechtime = { workspace = true }
+iyakki-serde-static = { workspace = true }
+iyakki-frames = { workspace = true }
+iyakki-clock = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

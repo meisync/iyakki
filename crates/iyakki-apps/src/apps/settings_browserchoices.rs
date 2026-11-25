@@ -7,6 +7,7 @@
 //! Every change is audited without site names.
 
 use super::*;
+use super::browser_port::BrowserSettingsPort;
 use iyakki_shared::profilepolicy::{MAX_SITES};
 use iyakki_shared::profilepolicy::{clean_site, Policy};
 
@@ -41,23 +42,23 @@ pub fn parse_sites(text: &str) -> Result<Vec<String>, String> {
 }
 
 impl SettingsApp {
-    pub(super) fn render_browser_choices(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, cx: &AppCx) -> f32 {
-        let p = Policy::load(cx.data_dir(), &cx.session.user);
-        let on = cx.agent.profile_store().status_of(&cx.services, &cx.session.user) != iyakki_shared::profilestore::Status::Off;
+    pub(super) fn render_browser_choices(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, p: &dyn BrowserSettingsPort) -> f32 {
+        let pol = Policy::load(p.data_root(), p.acting_user());
+        let on = p.profile_status() != iyakki_shared::profilestore::Status::Off;
         let mut y = y0 + controls::section_title(g, a.x, y0, s, "What is kept of protected browser data");
         let note = if on { "" } else { " (acts once Protect browser data is on)" };
         let gap = 8.0 * s;
         // the write-back interval: one row with its button
         let bw = g.text_width(15.0 * s, "Change (Z)", Face::Bold) + 15.0 * s * 1.7;
-        let iv = if p.checkpoint_minutes == 0 { "off".to_string() } else { format!("every {} minutes while it changes", p.checkpoint_minutes) };
+        let iv = if pol.checkpoint_minutes == 0 { "off".to_string() } else { format!("every {} minutes while it changes", pol.checkpoint_minutes) };
         controls::info_row(g, R::new(a.x, y, a.w - bw - 10.0 * s, 52.0 * s), s, &format!("Write back: {iv}{note}"), "The open copy is sealed again at this interval, so a crash loses little.");
         g.button(a.x + a.w - bw, y + 6.0 * s, 15.0 * s, "Change (Z)", ACCENT, Event::Key(Key::Char('Z')));
         y += 52.0 * s + gap;
-        for (title, help, val, key) in [("Seal when the screen locks", "The decrypted copy is removed from memory when you lock the screen and comes back when you unlock.", p.lock_seal, 'L'), ("Leave cookies out at sign-out", "Cookies are not written into the sealed file when you sign out (the sites ask you to sign in again).", p.clear_cookies_on_exit, 'Y')] {
+        for (title, help, val, key) in [("Seal when the screen locks", "The decrypted copy is removed from memory when you lock the screen and comes back when you unlock.", pol.lock_seal, 'L'), ("Leave cookies out at sign-out", "Cookies are not written into the sealed file when you sign out (the sites ask you to sign in again).", pol.clear_cookies_on_exit, 'Y')] {
             controls::switch_row(g, R::new(a.x, y, a.w, 56.0 * s), s, title, help, val, true, Event::Key(Key::Char(key)), ACCENT);
             y += 56.0 * s + gap;
         }
-        for (title, list, key) in [("Never keep the data of these sites", &p.never_persist, 'B'), ("Leave the data of these sites out at sign-out", &p.clear_sites_on_exit, 'D')] {
+        for (title, list, key) in [("Never keep the data of these sites", &pol.never_persist, 'B'), ("Leave the data of these sites out at sign-out", &pol.clear_sites_on_exit, 'D')] {
             let label = format!("Edit ({key})");
             let bw = g.text_width(15.0 * s, &label, Face::Bold) + 15.0 * s * 1.7;
             controls::info_row(g, R::new(a.x, y, a.w - bw - 10.0 * s, 52.0 * s), s, title, &list_text(list));
@@ -68,36 +69,36 @@ impl SettingsApp {
     }
 
     /// Z, L, Y, B and D of the Browser tab.
-    pub(super) fn handle_browser_choices(&mut self, k: &Key, cx: &AppCx) -> bool {
-        let user = &cx.session.user;
-        let dir = cx.data_dir();
-        let mut p = Policy::load(dir, user);
+    pub(super) fn handle_browser_choices(&mut self, k: &Key, p: &dyn BrowserSettingsPort) -> bool {
+        let user = p.acting_user();
+        let dir = p.data_root();
+        let mut pol = Policy::load(dir, user);
         let what = match k {
             Key::Char('Z') => {
-                p.checkpoint_minutes = next_interval(p.checkpoint_minutes);
-                if p.checkpoint_minutes == 0 { "Write back: off.".to_string() } else { format!("Write back every {} minutes.", p.checkpoint_minutes) }
+                pol.checkpoint_minutes = next_interval(pol.checkpoint_minutes);
+                if pol.checkpoint_minutes == 0 { "Write back: off.".to_string() } else { format!("Write back every {} minutes.", pol.checkpoint_minutes) }
             }
             Key::Char('L') => {
-                p.lock_seal = !p.lock_seal;
-                format!("Seal at the lock screen: {}.", if p.lock_seal { "on" } else { "off" })
+                pol.lock_seal = !pol.lock_seal;
+                format!("Seal at the lock screen: {}.", if pol.lock_seal { "on" } else { "off" })
             }
             Key::Char('Y') => {
-                p.clear_cookies_on_exit = !p.clear_cookies_on_exit;
-                format!("Cookies left out at sign-out: {}.", if p.clear_cookies_on_exit { "yes" } else { "no" })
+                pol.clear_cookies_on_exit = !pol.clear_cookies_on_exit;
+                format!("Cookies left out at sign-out: {}.", if pol.clear_cookies_on_exit { "yes" } else { "no" })
             }
             Key::Char('B') => {
-                self.open_form(FormKind::BrowserSites(false), Form::new("Sites never kept").text("Sites", &p.never_persist.join(", "), "example.com, shop.example.org (empty: none)"));
+                self.open_form(FormKind::BrowserSites(false), Form::new("Sites never kept").text("Sites", &pol.never_persist.join(", "), "example.com, shop.example.org (empty: none)"));
                 return true;
             }
             Key::Char('D') => {
-                self.open_form(FormKind::BrowserSites(true), Form::new("Sites left out at sign-out").text("Sites", &p.clear_sites_on_exit.join(", "), "example.com, shop.example.org (empty: none)"));
+                self.open_form(FormKind::BrowserSites(true), Form::new("Sites left out at sign-out").text("Sites", &pol.clear_sites_on_exit.join(", "), "example.com, shop.example.org (empty: none)"));
                 return true;
             }
             _ => return false,
         };
-        match p.save(dir, user) {
+        match pol.save(dir, user) {
             Ok(()) => {
-                cx.audit.record(user, "settings.browser.protection", "choices changed");
+                p.audit("settings.browser.protection", "choices changed");
                 self.ok(what);
             }
             Err(e) => self.fail(e),
@@ -105,13 +106,13 @@ impl SettingsApp {
         true
     }
 
-    pub(super) fn browser_sites_submit(&mut self, cx: &AppCx, clear_on_exit: bool, form: &Form) -> Result<String, String> {
+    pub(super) fn browser_sites_submit(&mut self, p: &dyn BrowserSettingsPort, clear_on_exit: bool, form: &Form) -> Result<String, String> {
         let list = parse_sites(&form.value(0))?;
-        let (user, dir) = (&cx.session.user, cx.data_dir());
-        let mut p = Policy::load(dir, user);
-        if clear_on_exit { p.clear_sites_on_exit = list.clone() } else { p.never_persist = list.clone() }
-        p.save(dir, user)?;
-        cx.audit.record(user, "settings.browser.protection", "site list changed");
+        let (user, dir) = (p.acting_user(), p.data_root());
+        let mut pol = Policy::load(dir, user);
+        if clear_on_exit { pol.clear_sites_on_exit = list.clone() } else { pol.never_persist = list.clone() }
+        pol.save(dir, user)?;
+        p.audit("settings.browser.protection", "site list changed");
         Ok(if list.is_empty() { "The list is empty.".to_string() } else { format!("{} site(s) in the list.", list.len()) })
     }
 }

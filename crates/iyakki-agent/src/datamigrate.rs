@@ -88,9 +88,7 @@ fn read_json(path: &Path) -> Result<Value, String> {
 }
 
 fn write_json(path: &Path, v: &Value) -> Result<(), String> {
-    let tmp = path.with_extension("migrating");
-    std::fs::write(&tmp, serde_json::to_string_pretty(v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    iyakki_schema::write_atomic(path, serde_json::to_string_pretty(v).map_err(|e| e.to_string())?.as_bytes(), 0o600)
 }
 
 /// Run the steps in `data`, one after the other; the first that fails ends it (the caller puts the snapshot back). Returns a plain line.

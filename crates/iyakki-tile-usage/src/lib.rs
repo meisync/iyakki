@@ -17,19 +17,7 @@ pub struct UsageApp {
     series: Option<(Range, bool, i64, Series)>,
 }
 
-/// `950`, `12.3k`, `4.5M`.
-pub fn fmt_tokens(n: u64) -> String {
-    if n < 1000 {
-        n.to_string()
-    } else if n < 1_000_000 {
-        let k = n as f64 / 1000.0;
-        if k < 10.0 { format!("{k:.1}k") } else { format!("{:.0}k", k) }
-    } else if n < 1_000_000_000 {
-        format!("{:.1}M", n as f64 / 1e6)
-    } else {
-        format!("{:.1}B", n as f64 / 1e9)
-    }
-}
+pub use iyakki_uikit::tilekit::fmt_tokens;
 
 /// A round number at or above `v`: 1, 2, 5 times a power of ten.
 fn nice_max(v: u64) -> u64 {

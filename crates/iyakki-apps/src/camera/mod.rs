@@ -148,6 +148,60 @@ pub trait Capture: Send {
     fn set_control(&mut self, id: u32, value: i32) -> Result<(), String>;
 }
 
+/// The cameras of this machine that are streaming now (what the end-of-session hook `camera-device` cuts).
+pub static CAMERA_STOPS: iyakki_shared::sessionend::StopSet = iyakki_shared::sessionend::StopSet::new();
+
+/// A [`Capture`] the end of a session can close: when its [`StopSet`](iyakki_shared::sessionend::StopSet) is cut, the device is dropped
+/// (which stops the stream and closes it) and every later call says why. If a call is waiting for a frame at that moment, the device is
+/// dropped when that call returns.
+struct Guarded {
+    inner: std::sync::Arc<std::sync::Mutex<Option<Box<dyn Capture>>>>,
+    mode: Mode,
+    ended: iyakki_shared::sessionend::StopGuard,
+}
+
+const ENDED: &str = "The camera was switched off because the session ended, the screen locked or the computer went to sleep.";
+
+impl Capture for Guarded {
+    fn mode(&self) -> Mode {
+        self.mode
+    }
+    fn next(&mut self, timeout_ms: u32) -> Result<Option<RawFrame>, String> {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if self.ended.stopped() {
+            g.take();
+        }
+        let Some(cap) = g.as_mut() else { return Err(ENDED.into()) };
+        let r = cap.next(timeout_ms);
+        if self.ended.stopped() {
+            g.take();
+            return Err(ENDED.into());
+        }
+        r
+    }
+    fn set_control(&mut self, id: u32, value: i32) -> Result<(), String> {
+        match self.inner.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            Some(c) => c.set_control(id, value),
+            None => Err(ENDED.into()),
+        }
+    }
+}
+
+/// Put an opened camera into `set`, so that cutting the set closes it.
+pub fn guarded(o: Opened, set: &iyakki_shared::sessionend::StopSet) -> Opened {
+    let mode = o.cap.mode();
+    let inner = std::sync::Arc::new(std::sync::Mutex::new(Some(o.cap)));
+    let i2 = inner.clone();
+    // a call that waits for a frame holds the lock: it drops the device itself when it returns (it sees the flag)
+    let ended = set.enter(move || {
+        if let Ok(mut g) = i2.try_lock() {
+            g.take();
+        }
+    });
+    let cap = Box::new(Guarded { inner, mode, ended });
+    Opened { cap, modes: o.modes, controls: o.controls }
+}
+
 /// A camera opened and streaming, with what it offers.
 pub struct Opened {
     pub cap: Box<dyn Capture>,
@@ -286,5 +340,23 @@ mod tests {
         let c = Control { id: 1, name: "C".into(), min: 0, max: 10, step: 5, default: 5, value: 5 };
         assert_eq!((c.stepped(true), c.stepped(false)), (10, 0));
         assert_eq!(Mode { pix: Pix::Mjpeg, width: 1280, height: 720 }.label(), "1280×720 MJPEG");
+    }
+
+    #[test]
+    fn a_camera_in_a_stop_set_streams_until_the_set_is_cut_and_then_says_why() {
+        let set = iyakki_shared::sessionend::StopSet::new();
+        let dev = fake::device("video0", "Test camera");
+        let opened = fake::FakeOpener::default().open(&dev, None).unwrap();
+        let mode = opened.cap.mode();
+        let mut o = guarded(opened, &set);
+        assert_eq!(o.cap.mode(), mode);
+        assert!(o.cap.next(5).unwrap().is_some(), "streams before the end");
+        assert_eq!(set.live(), 1);
+        assert_eq!(set.stop_all(), 1);
+        let e = o.cap.next(5).err().unwrap();
+        assert!(e.contains("session ended"), "{e}");
+        assert!(o.cap.set_control(1, 0).is_err());
+        drop(o);
+        assert_eq!(set.live(), 0, "an ended camera leaves the set");
     }
 }

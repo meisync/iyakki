@@ -1271,20 +1271,86 @@ pub fn sleep() {
 
 #[cfg(target_os = "linux")]
 pub fn sleep() {
-    let Some(state) = sleep_state_at(Path::new(SLEEP_STATES)) else {
+    sleep_with(Path::new(SLEEP_STATES), &mut RealSleep);
+}
+
+/// The steps around the write that puts the machine to sleep; the real ones act on the machine, a test records the order.
+pub(crate) trait SleepSteps {
+    fn end_sessions(&mut self);
+    fn quiet(&mut self);
+    fn save_clock_floor(&mut self);
+    fn sync(&mut self);
+    /// Write the state; blocks while the machine sleeps and returns after it wakes.
+    fn enter(&mut self, path: &Path, state: &str) -> std::io::Result<()>;
+    fn clock_back(&mut self);
+    fn restore(&mut self);
+}
+
+#[cfg(target_os = "linux")]
+struct RealSleep;
+
+#[cfg(target_os = "linux")]
+impl SleepSteps for RealSleep {
+    fn end_sessions(&mut self) {
+        end_sessions_for_suspend();
+    }
+    fn quiet(&mut self) {
+        quiet_sound();
+    }
+    fn save_clock_floor(&mut self) {
+        clock_floor_save();
+    }
+    fn sync(&mut self) {
+        // SAFETY: sync takes no arguments.
+        unsafe { libc::sync() };
+    }
+    fn enter(&mut self, path: &Path, state: &str) -> std::io::Result<()> {
+        std::fs::write(path, state)
+    }
+    fn clock_back(&mut self) {
+        clock_floor_early();
+    }
+    fn restore(&mut self) {
+        restore_sound();
+    }
+}
+
+/// The whole sleep: sessions end, speakers go quiet, the clock floor is saved, disks sync, the state is written, and after the wake the
+/// clock floor and the person's volume come back. Nothing happens when the kernel offers no sleep state.
+#[cfg(target_os = "linux")]
+pub(crate) fn sleep_with(states: &Path, s: &mut dyn SleepSteps) {
+    let Some(state) = sleep_state_at(states) else {
         log::warn!("sleep: the kernel offers no sleep state");
         return;
     };
-    quiet_sound();
-    clock_floor_save();
-    // SAFETY: sync takes no arguments.
-    unsafe { libc::sync() };
-    // the write blocks while the machine sleeps and returns after it wakes
-    if let Err(e) = std::fs::write(SLEEP_STATES, state) {
+    s.end_sessions();
+    s.quiet();
+    s.save_clock_floor();
+    s.sync();
+    if let Err(e) = s.enter(states, state) {
         log::warn!("sleep: writing {state} failed: {e}");
     }
     // the wall clock may have jumped while asleep: take the saved floor again
-    clock_floor_early();
+    s.clock_back();
+    // the speakers were silenced before sleeping: the person's volume comes back
+    s.restore();
+}
+
+/// Capture and sound stop before the machine sleeps: the microphone, the camera and the screen capture are closed and playback is cut (the
+/// end-of-session registry, `Why::Suspend`, D-SESSION-END).
+#[cfg(target_os = "linux")]
+fn end_sessions_for_suspend() {
+    #[cfg(feature = "headless")]
+    for n in iyakki_agent::sessionend_hooks::end_for_suspend(&|a, d| log::info!("{a} {d}")) {
+        log::info!("sleep: {n} stopped before suspend");
+    }
+}
+
+/// Set the person's volume again after a sleep (see `iyakki_agent::quiet::restore_after_resume`).
+#[cfg(target_os = "linux")]
+fn restore_sound() {
+    #[cfg(feature = "shell")]
+    iyakki_agent::quiet::restore_after_resume();
 }
 
 #[cfg(test)]
@@ -1354,9 +1420,78 @@ mod tests {
     }
 
     #[test]
+    fn sleep_quiets_the_speakers_before_and_puts_the_volume_back_after_the_machine_wakes() {
+        let boot = include_str!("boot.rs");
+        let body = boot.split("pub(crate) fn sleep_with(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        let ends = body.find("s.end_sessions()").expect("capture and sound end before the machine sleeps");
+        let quiet = body.find("s.quiet()").unwrap();
+        assert!(ends < quiet, "the sessions end first, then the speakers are silenced");
+        let write = body.find("s.enter(").unwrap();
+        let back = body.find("s.restore()").expect("the volume is set again after waking");
+        assert!(quiet < write && write < back, "quiet, sleep, restore");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Default)]
+    struct Rec {
+        log: Vec<String>,
+        fail_write: bool,
+    }
+    #[cfg(target_os = "linux")]
+    impl super::SleepSteps for Rec {
+        fn end_sessions(&mut self) {
+            self.log.push("end".into());
+        }
+        fn quiet(&mut self) {
+            self.log.push("quiet".into());
+        }
+        fn save_clock_floor(&mut self) {
+            self.log.push("floor".into());
+        }
+        fn sync(&mut self) {
+            self.log.push("sync".into());
+        }
+        fn enter(&mut self, _p: &std::path::Path, state: &str) -> std::io::Result<()> {
+            self.log.push(format!("enter {state}"));
+            if self.fail_write { Err(std::io::Error::other("busy")) } else { Ok(()) }
+        }
+        fn clock_back(&mut self) {
+            self.log.push("clock".into());
+        }
+        fn restore(&mut self) {
+            self.log.push("restore".into());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_sleep_runs_the_steps_in_order_with_the_chosen_state_and_the_volume_comes_back_even_when_the_write_fails() {
+        let d = std::env::temp_dir().join(format!("iyakki-sleep-steps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let states = d.join("state");
+        std::fs::write(&states, "freeze mem disk\n").unwrap();
+        let mut r = Rec::default();
+        super::sleep_with(&states, &mut r);
+        assert_eq!(r.log, ["end", "quiet", "floor", "sync", "enter freeze", "clock", "restore"]);
+        // the write fails (the kernel refused): the person still gets the sound and the clock floor back
+        std::fs::write(&states, "mem\n").unwrap();
+        let mut r = Rec { fail_write: true, ..Default::default() };
+        super::sleep_with(&states, &mut r);
+        assert_eq!(r.log, ["end", "quiet", "floor", "sync", "enter mem", "clock", "restore"]);
+        // no usable state (hibernate only, or no file): nothing is silenced and nothing is stopped
+        std::fs::write(&states, "disk\n").unwrap();
+        let mut r = Rec::default();
+        super::sleep_with(&states, &mut r);
+        super::sleep_with(&d.join("missing"), &mut r);
+        assert!(r.log.is_empty(), "{:?}", r.log);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn sleep_does_not_mark_the_session_clean() {
         let boot = include_str!("boot.rs");
-        let body = boot.split("pub fn sleep() {").nth(2).unwrap().split("\n}\n").next().unwrap();
+        let body = boot.split("pub(crate) fn sleep_with(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(!body.contains("finish_clean"), "sleep resumes; it must not end the session");
     }
 

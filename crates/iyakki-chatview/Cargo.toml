@@ -1,0 +1,22 @@
+[package]
+name = "iyakki-chatview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The chat transcript view (turns, tool timeline, Markdown, pictures, selection, links) and the decoded-picture cache, for the CHAT and TALES tiles and anything else that shows a conversation. UI layer: the toolkit, the plain chat types and the picture decoder only; no agent, no files, no policy."
+
+[features]
+# Picture fixtures for the tiles' own tests.
+testing = []
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-chat-model = { workspace = true }
+iyakki-web = { workspace = true }
+iyakki-wordtime = { workspace = true }
+iyakki-extagentx = { workspace = true }
+serde_json = "1"
+tiny-skia = "0.11"
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

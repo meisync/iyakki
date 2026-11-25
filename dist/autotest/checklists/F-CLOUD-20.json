@@ -1,0 +1,22 @@
+{
+ "schema": 1,
+ "row": "F-CLOUD-20",
+ "feature_sha": "fd837b602679a946",
+ "title": "the Cloud access page of Settings is drawn for an administrator (read ",
+ "clauses": [
+  {
+   "id": "cloud-look",
+   "text": "the Cloud access page of Settings is drawn for an administrator (read only; skipped when the page is not offered)",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Cloud access as an administrator, add a test person, change the role and remove the person.",
+     "expect": "Each change asks first, shows the result and the page says the keys are to be rotated.",
+     "runner_did": "Checked the page text first (when run through the runner)"
+    }
+   ]
+  }
+ ]
+}

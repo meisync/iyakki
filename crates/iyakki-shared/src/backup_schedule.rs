@@ -135,7 +135,8 @@ impl Schedule {
 
     /// The first moment a run is wanted: `hour` o'clock, `every_days` days after the day of the last run (never run: today's hour).
     pub fn next_slot(&self, zone: &Zone, now: i64) -> i64 {
-        let from = if self.last_run > 0 { self.last_run } else { now - self.every_days as i64 * 86_400 };
+        // a last run in the future was written under a wrong clock: it counts as never run, or backups would wait for the clock to catch up
+        let from = if self.last_run > 0 && self.last_run <= now { self.last_run } else { now - self.every_days as i64 * 86_400 };
         let l = zone.local(from);
         let day = zone.local_to_unix(l.year, l.month, l.day, 12, 0, 0) + self.every_days as i64 * 86_400;
         let t = zone.local(day);

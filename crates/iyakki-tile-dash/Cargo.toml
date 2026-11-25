@@ -1,0 +1,23 @@
+[package]
+name = "iyakki-tile-dash"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The DASH tile (dashboards with graphs and tables over pluggable data sources). Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on
+# `iyakki-uikit` and on the pure leaf crates named in tests/data/tile_crate_deps.allow (`iyakki-dash`: the dashboard engine, `iyakki-querybox`: the query box), never on the agent or the shared crate. Its tests run against fakes; the shell adapter is
+# `crates/iyakki-apps/src/apps/dash.rs`.
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-dash = { workspace = true }
+iyakki-querybox = { path = "../iyakki-querybox" }
+serde_json = "1"
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }
+iyakki-dash = { workspace = true, features = ["testing"] }
+
+[features]
+# test seams (the `*_for_test` methods) that the shell's own tests use; never on in a product build
+testing = []

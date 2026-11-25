@@ -1,0 +1,26 @@
+{
+ "schema": 1,
+ "row": "F-DISP-13",
+ "feature_sha": "59889105167f27c3",
+ "title": "a display with a wrong mode list is read again and the right size is drawn",
+ "clauses": [
+  {
+   "id": "reread",
+   "text": "a display whose mode list is wrong is read again by itself, and Settings, Display shows the size the shell is driving in Screen in use",
+   "machines": [
+    "mac-mini-2018",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Plug in a 4K monitor on the HDMI port of the Mac mini, then wait about 15 seconds.",
+     "expect": "The picture is drawn at the best size the monitor offers, not at a blurred 1080p fallback."
+    },
+    {
+     "do": "Open Settings, Display and read the Screen in use row. Then open Settings, Displays and press l (Look again).",
+     "expect": "Screen in use shows the size the picture is drawn at, and Look again keeps that size."
+    }
+   ]
+  }
+ ]
+}

@@ -1376,6 +1376,7 @@ crate::uicore | pub fn SessionResume:::remember_apps(&self, _apps: &[String])
 crate::uicore | pub fn SessionResume:::remember_items(&self, _items: &[(String, String)])
 crate::uicore | pub fn SessionResume:::set_switch(&self, on: bool) -> Result<(), String>
 crate::uicore | pub fn SessionResume:::switch_on(&self) -> bool
+crate::uicore | pub fn SessionResume:::take_unexpected_end(&self) -> bool
 crate::uicore | pub fn SessionResume:::who(&self) -> Option<String>
 crate::uicore | pub trait SessionResume: Send + Sync
 crate | pub use uicore::{AppStatus, AppStatuses, Core, Mixer, MixerStats, SoundKind, StatusKind, WaitingCall}
@@ -2065,14 +2066,6 @@ crate::uicore | pub fn Core:::terminal(&self) -> &dyn crate::terminal::Terminal
 crate::cameras | pub fn Cameras:::indicator_names(&self) -> Vec<String>
 crate::uicore | [cfg(feature = "native")] pub fn Core:::file_scope(&self) -> &dyn FileScope
 crate | pub use uicore::{HostFacts, NoHostFacts}
-crate::sysinfo | Memory.available: u64
-crate::sysinfo | Memory.swap_free: u64
-crate::sysinfo | Memory.swap_total: u64
-crate::sysinfo | Memory.total: u64
-crate::sysinfo | pub fn Memory::used(&self) -> u64
-crate::sysinfo | pub fn human_bytes(b: u64) -> String
-crate::sysinfo | pub fn human_duration(secs: u64) -> String
-crate::sysinfo | pub struct Memory
 crate::uicore | impl HostFacts for NoHostFacts
 crate::uicore | pub fn Core:::host(&self) -> &dyn HostFacts
 crate::uicore | pub fn HostFacts:::cmdline(&self) -> String
@@ -2109,51 +2102,6 @@ crate::files | pub fn check_name(name: &str) -> Result<(), String>
 crate::files | pub fn describe(c: &FileChange) -> String
 crate::files | pub struct ChangeAsk
 crate::files | pub struct ChangeBook
-crate::sysinfo | CpuTimes.busy: u64
-crate::sysinfo | CpuTimes.total: u64
-crate::sysinfo | DiskCounters.disk: String
-crate::sysinfo | DiskCounters.read: u64
-crate::sysinfo | DiskCounters.written: u64
-crate::sysinfo | DiskUse.read_bytes: u64
-crate::sysinfo | DiskUse.write_bytes: u64
-crate::sysinfo | NetCounters.iface: String
-crate::sysinfo | NetCounters.rx: u64
-crate::sysinfo | NetCounters.tx: u64
-crate::sysinfo | NetUse.bytes: Option<(u64, u64)>
-crate::sysinfo | NetUse.connections: u32
-crate::sysinfo | NetUse.listening: u32
-crate::sysinfo | NetUse.udp: u32
-crate::sysinfo | Proc.cgroup: String
-crate::sysinfo | Proc.cmd: String
-crate::sysinfo | Proc.name: String
-crate::sysinfo | Proc.pid: u32
-crate::sysinfo | Proc.ppid: u32
-crate::sysinfo | Proc.rss: u64
-crate::sysinfo | Proc.start_ticks: u64
-crate::sysinfo | Proc.state: char
-crate::sysinfo | Proc.threads: u32
-crate::sysinfo | Proc.ticks: u64
-crate::sysinfo | Proc.uid: u32
-crate::sysinfo | Proc.user: String
-crate::sysinfo | SysRoots.passwd: PathBuf
-crate::sysinfo | SysRoots.proc: PathBuf
-crate::sysinfo | SysRoots.sys: PathBuf
-crate::sysinfo | pub const TICKS_PER_SEC: u64 = 100
-crate::sysinfo | pub fn DiskUse::is_quiet(&self) -> bool
-crate::sysinfo | pub fn DiskUse::text(&self) -> String
-crate::sysinfo | pub fn NetUse::is_quiet(&self) -> bool
-crate::sysinfo | pub fn NetUse::text(&self) -> String
-crate::sysinfo | pub fn SysRoots::real() -> SysRoots
-crate::sysinfo | pub fn cpu_percent(a: CpuTimes, b: CpuTimes) -> f32
-crate::sysinfo | pub fn proc_cpu(before: &[Proc], after: &[Proc], elapsed_secs: f32) -> HashMap<u32, f32>
-crate::sysinfo | pub fn protected(pid: u32) -> Option<&'static str>
-crate::sysinfo | pub struct CpuTimes
-crate::sysinfo | pub struct DiskCounters
-crate::sysinfo | pub struct DiskUse
-crate::sysinfo | pub struct NetCounters
-crate::sysinfo | pub struct NetUse
-crate::sysinfo | pub struct Proc
-crate::sysinfo | pub struct SysRoots
 crate::uicore | pub fn HostFacts:::cpu_count(&self, _r: &crate::sysinfo::SysRoots) -> usize
 crate::uicore | pub fn HostFacts:::cpu_times(&self, _r: &crate::sysinfo::SysRoots) -> crate::sysinfo::CpuTimes
 crate::uicore | pub fn HostFacts:::disk_counters(&self, _r: &crate::sysinfo::SysRoots) -> Vec<crate::sysinfo::DiskCounters>
@@ -2627,16 +2575,8 @@ crate::soundtypes | derive Outcome: Clone, Debug, Eq, PartialEq
 crate::soundtypes | derive Output: Clone, Debug, Eq, PartialEq
 crate::soundtypes | derive SoundSettings: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
 crate::soundtypes | derive VolumeMode: Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize
-crate::sysinfo | derive CpuTimes: Clone, Copy, Debug, Default, Eq, PartialEq
-crate::sysinfo | derive DiskCounters: Clone, Debug, Eq, PartialEq
-crate::sysinfo | derive DiskUse: Clone, Copy, Debug, Default, Eq, PartialEq
 crate::sysinfo | derive LoadAvg: Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize
 crate::sysinfo | derive MemInfo: Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize
-crate::sysinfo | derive Memory: Clone, Copy, Debug, Default, Eq, PartialEq
-crate::sysinfo | derive NetCounters: Clone, Debug, Eq, PartialEq
-crate::sysinfo | derive NetUse: Clone, Copy, Debug, Default, Eq, PartialEq
-crate::sysinfo | derive Proc: Clone, Debug, Eq, PartialEq
-crate::sysinfo | derive SysRoots: Clone, Debug
 crate::sysinfo | derive Uptime: Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize
 crate::terminal | derive PtyCell: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
 crate::terminal | derive PtyColor: Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize
@@ -2735,151 +2675,6 @@ crate::audioroute | pub trait AudioRoute: Send + Sync
 crate::guarded | impl crate::audioroute::AudioRoute for GuardedAudioRoute
 crate::sysinfo | pub fn Os:::audio_route(&self) -> std::sync::Arc<dyn crate::audioroute::AudioRoute>
 crate | [cfg(feature = "native")] pub mod diskmodel
-crate::diskmodel | Actor.gid: u32
-crate::diskmodel | Actor.home: String
-crate::diskmodel | Actor.role: Role
-crate::diskmodel | Actor.uid: u32
-crate::diskmodel | Actor.user: String
-crate::diskmodel | Disk.holders: Vec<String>
-crate::diskmodel | Disk.model: String
-crate::diskmodel | Disk.name: String
-crate::diskmodel | Disk.parts: Vec<Part>
-crate::diskmodel | Disk.path: String
-crate::diskmodel | Disk.read_only: bool
-crate::diskmodel | Disk.removable: bool
-crate::diskmodel | Disk.sector: u32
-crate::diskmodel | Disk.serial: String
-crate::diskmodel | Disk.size_bytes: u64
-crate::diskmodel | Disk.system: bool
-crate::diskmodel | Disk.system_why: String
-crate::diskmodel | Disk.table: Table
-crate::diskmodel | Disk.table_notes: Vec<String>
-crate::diskmodel | Disk.transport: Transport
-crate::diskmodel | Disk.vendor: String
-crate::diskmodel | Fs::Apfs
-crate::diskmodel | Fs::BitLocker
-crate::diskmodel | Fs::Btrfs
-crate::diskmodel | Fs::Empty
-crate::diskmodel | Fs::Exfat
-crate::diskmodel | Fs::Ext2
-crate::diskmodel | Fs::Ext3
-crate::diskmodel | Fs::Ext4
-crate::diskmodel | Fs::F2fs
-crate::diskmodel | Fs::Fat12
-crate::diskmodel | Fs::Fat16
-crate::diskmodel | Fs::Fat32
-crate::diskmodel | Fs::HfsPlus
-crate::diskmodel | Fs::Iso9660
-crate::diskmodel | Fs::Luks
-crate::diskmodel | Fs::Ntfs
-crate::diskmodel | Fs::Swap
-crate::diskmodel | Fs::Unknown
-crate::diskmodel | Fs::Xfs
-crate::diskmodel | FsSupport.driver: &'static str
-crate::diskmodel | FsSupport.fs: Fs
-crate::diskmodel | FsSupport.kernel: bool
-crate::diskmodel | MountFlags.nodev: bool
-crate::diskmodel | MountFlags.noexec: bool
-crate::diskmodel | MountFlags.nosuid: bool
-crate::diskmodel | MountFlags.rdonly: bool
-crate::diskmodel | MountOpts.allow_exec: bool
-crate::diskmodel | MountOpts.read_only: bool
-crate::diskmodel | MountPlan.data: String
-crate::diskmodel | MountPlan.dev: String
-crate::diskmodel | MountPlan.flags: MountFlags
-crate::diskmodel | MountPlan.forced_ro: Option<String>
-crate::diskmodel | MountPlan.fstype: &'static str
-crate::diskmodel | MountPlan.target: String
-crate::diskmodel | Mounted.notes: Vec<String>
-crate::diskmodel | Mounted.read_only: bool
-crate::diskmodel | Mounted.target: String
-crate::diskmodel | Part.crypt: Option<iyakki_diskcrypt::CryptInfo>
-crate::diskmodel | Part.fs: Fs
-crate::diskmodel | Part.label: String
-crate::diskmodel | Part.mounted_ro: bool
-crate::diskmodel | Part.mountpoints: Vec<String>
-crate::diskmodel | Part.name: String
-crate::diskmodel | Part.number: u32
-crate::diskmodel | Part.path: String
-crate::diskmodel | Part.size_bytes: u64
-crate::diskmodel | Part.space: Option<(u64, u64)>
-crate::diskmodel | Part.start_bytes: u64
-crate::diskmodel | Part.swap_in_use: bool
-crate::diskmodel | Part.system: bool
-crate::diskmodel | Part.type_name: String
-crate::diskmodel | Part.unlocked: bool
-crate::diskmodel | Part.uuid: String
-crate::diskmodel | Snapshot.disks: Vec<Disk>
-crate::diskmodel | Snapshot.support: Vec<FsSupport>
-crate::diskmodel | Table::Gpt
-crate::diskmodel | Table::Mbr
-crate::diskmodel | Table::None
-crate::diskmodel | Transport::Mmc
-crate::diskmodel | Transport::Nvme
-crate::diskmodel | Transport::Other
-crate::diskmodel | Transport::Sata
-crate::diskmodel | Transport::Usb
-crate::diskmodel | Transport::Virtual
-crate::diskmodel | derive Actor: Clone, Debug
-crate::diskmodel | derive Disk: Clone, Debug, Eq, PartialEq
-crate::diskmodel | derive Fs: Clone, Copy, Debug, Eq, Hash, PartialEq
-crate::diskmodel | derive FsSupport: Clone, Debug, Eq, PartialEq
-crate::diskmodel | derive MountFlags: Clone, Copy, Debug, Default, Eq, PartialEq
-crate::diskmodel | derive MountOpts: Clone, Copy, Debug, Default, Eq, PartialEq
-crate::diskmodel | derive MountPlan: Clone, Debug, Eq, PartialEq
-crate::diskmodel | derive Mounted: Clone, Debug, Eq, PartialEq
-crate::diskmodel | derive Part: Clone, Debug, Eq, PartialEq
-crate::diskmodel | derive Snapshot: Clone, Debug, Default
-crate::diskmodel | derive Table: Clone, Copy, Debug, Eq, PartialEq
-crate::diskmodel | derive Transport: Clone, Copy, Debug, Eq, PartialEq
-crate::diskmodel | impl DiskEngine for NoDiskEngine
-crate::diskmodel | pub enum Fs
-crate::diskmodel | pub enum Table
-crate::diskmodel | pub enum Transport
-crate::diskmodel | pub fn Actor::new(user: &str, role: Role) -> Actor
-crate::diskmodel | pub fn Disk::audit_id(&self) -> String
-crate::diskmodel | pub fn Disk::identity(&self) -> String
-crate::diskmodel | pub fn Disk::mounted(&self) -> bool
-crate::diskmodel | pub fn Disk::part(&self, name: &str) -> Option<&Part>
-crate::diskmodel | pub fn Disk::removable_media(&self) -> bool
-crate::diskmodel | pub fn Disk::serial_tail(&self) -> String
-crate::diskmodel | pub fn Disk::title(&self) -> String
-crate::diskmodel | pub fn DiskEngine:::at_sign_out(&self, who: &Actor, audit: AuditFn) -> Option<String>
-crate::diskmodel | pub fn DiskEngine:::eject(&self, who: &Actor, disk: &str, audit: AuditFn) -> Result<String, String>
-crate::diskmodel | pub fn DiskEngine:::fingerprint(&self) -> u64
-crate::diskmodel | pub fn DiskEngine:::forget(&self)
-crate::diskmodel | pub fn DiskEngine:::mount(&self, who: &Actor, part: &str, opts: &MountOpts, audit: AuditFn) -> Result<Mounted, String>
-crate::diskmodel | pub fn DiskEngine:::mounted_in(&self, home: &str) -> Vec<(String, String)>
-crate::diskmodel | pub fn DiskEngine:::plan_mount(&self, snap: &Snapshot, who: &Actor, part: &str, opts: &MountOpts) -> Result<MountPlan, String>
-crate::diskmodel | pub fn DiskEngine:::scan(&self) -> Snapshot
-crate::diskmodel | pub fn DiskEngine:::unmount(&self, who: &Actor, part: &str, audit: AuditFn) -> Result<String, String>
-crate::diskmodel | pub fn DiskEngine:::users_of(&self, mountpoint: &str) -> Vec<(u32, String)>
-crate::diskmodel | pub fn Fs::driver(self) -> Option<&'static str>
-crate::diskmodel | pub fn Fs::name(self) -> &'static str
-crate::diskmodel | pub fn Fs::never_mountable(self) -> Option<&'static str>
-crate::diskmodel | pub fn Fs::owner_options(self) -> bool
-crate::diskmodel | pub fn Fs::read_only_always(self) -> bool
-crate::diskmodel | pub fn Part::mounted(&self) -> bool
-crate::diskmodel | pub fn Part::title(&self) -> String
-crate::diskmodel | pub fn Part::used_bytes(&self) -> Option<u64>
-crate::diskmodel | pub fn Snapshot::disk(&self, name: &str) -> Option<&Disk>
-crate::diskmodel | pub fn Snapshot::kernel_has(&self, driver: &str) -> bool
-crate::diskmodel | pub fn Snapshot::part(&self, name: &str) -> Option<(&Disk, &Part)>
-crate::diskmodel | pub fn Table::name(self) -> &'static str
-crate::diskmodel | pub fn Transport::name(self) -> &'static str
-crate::diskmodel | pub fn may_use(who: &Actor, d: &Disk) -> Result<(), String>
-crate::diskmodel | pub struct Actor
-crate::diskmodel | pub struct Disk
-crate::diskmodel | pub struct FsSupport
-crate::diskmodel | pub struct MountFlags
-crate::diskmodel | pub struct MountOpts
-crate::diskmodel | pub struct MountPlan
-crate::diskmodel | pub struct Mounted
-crate::diskmodel | pub struct NoDiskEngine
-crate::diskmodel | pub struct Part
-crate::diskmodel | pub struct Snapshot
-crate::diskmodel | pub trait DiskEngine: Send + Sync
-crate::diskmodel | pub type AuditFn<'a> = &'a dyn Fn(&str, &str)
 crate::guarded | impl crate::diskmodel::DiskEngine for GuardedDiskEngine
 crate::guarded | pub const DISK_MOUNT: &str = "system.disk.mount"
 crate::sysinfo | [cfg(feature = "native")] pub fn Os:::disk_engine(&self) -> std::sync::Arc<dyn crate::diskmodel::DiskEngine>
@@ -2934,83 +2729,6 @@ crate::contract::flows | [serde(other)] FlowEvent::Unknown
 crate::contract::flows | [serde(other)] RunState::Unknown
 crate::contract::settings | [serde(other)] SettingKind::Unknown
 crate::contract::stream | [serde(other)] StreamKind::Unknown
-crate::diskmodel | Confirm.second: bool
-crate::diskmodel | Confirm.typed: String
-crate::diskmodel | Expect::Fs { part: String, fs: Fs }
-crate::diskmodel | Expect::Gone { part: String }
-crate::diskmodel | Expect::Size { part: String, bytes: u64 }
-crate::diskmodel | FormatFs::Exfat
-crate::diskmodel | FormatFs::Ext4
-crate::diskmodel | FormatFs::Fat32
-crate::diskmodel | FormatFs::Ntfs
-crate::diskmodel | PartOp::Add { size_bytes: Option<u64>, fs: Option<FormatFs>, label: String }
-crate::diskmodel | PartOp::Delete { number: u32 }
-crate::diskmodel | PartOp::Format { number: u32, fs: FormatFs, label: String }
-crate::diskmodel | PartOp::NewTable(Table)
-crate::diskmodel | PartOp::Rename { number: u32, label: String }
-crate::diskmodel | PartOp::Reread
-crate::diskmodel | PartOp::Resize { number: u32, size_bytes: u64 }
-crate::diskmodel | Plan.after: Vec<String>
-crate::diskmodel | Plan.audit: String
-crate::diskmodel | Plan.disk: String
-crate::diskmodel | Plan.expect: Vec<Expect>
-crate::diskmodel | Plan.identity: String
-crate::diskmodel | Plan.lost: Vec<String>
-crate::diskmodel | Plan.op: PartOp
-crate::diskmodel | Plan.steps: Vec<Step>
-crate::diskmodel | Plan.warnings: Vec<String>
-crate::diskmodel | Step::MinSize { tool: Tool, args: Vec<String>, block: u64, need: u64, what: String }
-crate::diskmodel | Step::Mke2fs { dev: String, label: String, uuid: String, what: String }
-crate::diskmodel | Step::Reread { dev: String }
-crate::diskmodel | Step::Sync
-crate::diskmodel | Step::Tool { tool: Tool, args: Vec<String>, what: String }
-crate::diskmodel | Step::WaitNode { dev: String }
-crate::diskmodel | Step::Write { dev: String, offset: u64, data: Vec<u8>, what: String }
-crate::diskmodel | Step::Zero { dev: String, offset: u64, len: u64, what: String }
-crate::diskmodel | Tool::E2fsck
-crate::diskmodel | Tool::MkfsExfat
-crate::diskmodel | Tool::Mkntfs
-crate::diskmodel | Tool::Ntfsresize
-crate::diskmodel | Tool::Resize2fs
-crate::diskmodel | derive Confirm: Clone, Debug, Default
-crate::diskmodel | derive Expect: Clone, Debug, Eq, PartialEq
-crate::diskmodel | derive FormatFs: Clone, Copy, Debug, Eq, PartialEq
-crate::diskmodel | derive PartOp: Clone, Debug, Eq, PartialEq
-crate::diskmodel | derive Plan: Clone, Debug
-crate::diskmodel | derive Step: Clone, Debug, Eq, PartialEq
-crate::diskmodel | derive Tool: Clone, Copy, Debug, Eq, PartialEq
-crate::diskmodel | pub enum Expect
-crate::diskmodel | pub enum FormatFs
-crate::diskmodel | pub enum PartOp
-crate::diskmodel | pub enum Step
-crate::diskmodel | pub enum Tool
-crate::diskmodel | pub fn DiskEngine:::allow_writing(&self, who: &Actor, part: &str, audit: AuditFn) -> Result<Mounted, String>
-crate::diskmodel | pub fn DiskEngine:::apply_partition(&self, who: &Actor, disk: &str, op: &PartOp, confirm: &Confirm, audit: AuditFn) -> Result<String, String>
-crate::diskmodel | pub fn DiskEngine:::lock(&self, who: &Actor, part: &str, audit: AuditFn) -> Result<String, String>
-crate::diskmodel | pub fn DiskEngine:::plan_partition(&self, who: &Actor, disk: &str, op: &PartOp) -> Result<Plan, String>
-crate::diskmodel | pub fn DiskEngine:::plan_unlock(&self, snap: &Snapshot, who: &Actor, part: &str) -> Result<iyakki_diskcrypt::CryptKind, String>
-crate::diskmodel | pub fn DiskEngine:::refusal(&self, who: &Actor, d: &Disk) -> Option<String>
-crate::diskmodel | pub fn DiskEngine:::unlock(&self, who: &Actor, part: &str, secret: &iyakki_diskcrypt::Secret, audit: AuditFn) -> Result<Mounted, String>
-crate::diskmodel | pub fn DiskEngine:::use_programs(&self, bin_dir: &str)
-crate::diskmodel | pub fn FormatFs::name(self) -> &'static str
-crate::diskmodel | pub fn FormatFs::tool(self) -> Option<Tool>
-crate::diskmodel | pub fn FormatFs::unsupported(self) -> Option<&'static str>
-crate::diskmodel | pub fn PartOp::destructive(&self) -> bool
-crate::diskmodel | pub fn PartOp::name(&self) -> &'static str
-crate::diskmodel | pub fn Plan::headline(&self) -> String
-crate::diskmodel | pub fn Plan::render(&self) -> String
-crate::diskmodel | pub fn Plan::writes_anything(&self) -> bool
-crate::diskmodel | pub fn Step::text(&self) -> String
-crate::diskmodel | pub fn Tool::missing_words(self, doing: &str) -> String
-crate::diskmodel | pub fn Tool::package(self) -> (&'static str, &'static str)
-crate::diskmodel | pub fn Tool::prog(self) -> &'static str
-crate::diskmodel | pub fn accepted_names(d: &Disk, op: &PartOp) -> Vec<String>
-crate::diskmodel | pub fn check_confirmation(d: &Disk, c: &Confirm) -> Result<(), String>
-crate::diskmodel | pub fn check_confirmation_for(d: &Disk, op: &PartOp, c: &Confirm) -> Result<(), String>
-crate::diskmodel | pub fn op_partition(op: &PartOp) -> Option<u32>
-crate::diskmodel | pub fn partition_refusal(who: &Actor, d: &Disk) -> Option<String>
-crate::diskmodel | pub struct Confirm
-crate::diskmodel | pub struct Plan
 crate::guarded | pub const DISK_PARTITION: &str = "system.disk.partition"
 crate::guarded | pub const DISK_UNLOCK: &str = "system.disk.unlock"
 crate::soundtypes | derive Master: Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize
@@ -3043,13 +2761,6 @@ crate::btaudio | pub struct NoBtAudio
 crate::btaudio | pub trait BtAudio: Send + Sync
 crate::btaudio | pub use iyakki_devctl::a2dp::{AudioDeviceView, AudioState, AudioView}
 crate::btaudio | pub use iyakki_devctl::a2dp_send::SendView
-crate::diskmodel | FormatRequest::Format { part: String, fs: FormatFs, label: String }
-crate::diskmodel | FormatRequest::Resize { part: String, bytes: u64 }
-crate::diskmodel | derive FormatRequest: Clone, Debug, Eq, PartialEq
-crate::diskmodel | pub enum FormatRequest
-crate::diskmodel | pub fn DiskEngine:::take_format_request(&self, dir: &std::path::Path, user: &str) -> Option<FormatRequest>
-crate::diskmodel | pub fn FormatRequest::part(&self) -> &str
-crate::diskmodel | pub fn request_op(snap: &Snapshot, req: &FormatRequest) -> Result<(String, PartOp), String>
 crate::guarded | impl crate::btaudio::BtAudio for GuardedBtAudio
 crate::guarded | impl crate::screenfacts::ScreenFacts for GuardedScreenFacts
 crate::guarded | impl crate::soundctl::OutputState for GuardedOutputState
@@ -3113,6 +2824,101 @@ crate::sysinfo | pub fn Os:::output_state(&self) -> std::sync::Arc<dyn crate::so
 crate::sysinfo | pub fn Os:::screen_facts(&self) -> std::sync::Arc<dyn crate::screenfacts::ScreenFacts>
 crate::sysinfo | pub fn Os:::startup_disk(&self) -> std::sync::Arc<dyn crate::startupdisk::StartupDisk>
 crate::soundtypes | derive Cue: Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize
+crate::audioroute | pub fn AudioRoute:::is_machine(&self) -> bool
+crate::soundctl | pub fn SoundControl:::card_starting_via(&self, _route: &dyn crate::audioroute::AudioRoute) -> Option<u32>
+crate::soundctl | pub fn SoundControl:::outputs_via(&self, _route: &dyn crate::audioroute::AudioRoute) -> Vec<Output>
+crate::uicore | pub fn Core:::audio_route(&self) -> std::sync::Arc<dyn crate::audioroute::AudioRoute>
+crate::uicore | pub fn Core:::audio_route_at(&self, _proc_root: &std::path::Path, _sys_root: &std::path::Path) -> std::sync::Arc<dyn crate::audioroute::AudioRoute>
+crate::audioroute | pub fn AudioRoute:::process_name(&self, _pid: u32) -> Option<String>
+crate::audioroute | pub fn AudioRoute:::process_parent(&self, _pid: u32) -> Option<u32>
+crate | [cfg(feature = "native")] pub mod device_types
+crate::device_types | pub use iyakki_devctl as devctl
+crate::device_types | pub use iyakki_drivers as driver_packs
+crate::device_types | pub use iyakki_hwinfo as hwinfo
+crate::device_types | pub use iyakki_netscan as netscan
+crate::device_types | pub use iyakki_storage as storage
+crate::device_types | pub use iyakki_usb as usb
+crate::device_types | pub use iyakki_zram as zram
+crate::drivers | pub fn Drivers:::pack_files(&self, id: &str) -> Option<(usize, usize)>
+crate::drivers | pub fn Drivers:::remove_pack(&self, id: &str) -> Result<String, String>
+crate::drivers | pub use iyakki_drivers::{appfw, apply, facetime, ihex, known, macboard, modpack, pack, run, t2hold, Availability, Delivery, Fs, Pack, Roots, Status}
+crate::installer | impl DiskTools for NoDiskTools
+crate::installer | pub fn DiskTools:::bios_plan(&self, args: &[String]) -> Result<(String, String), String>
+crate::installer | pub fn DiskTools:::bios_write(&self, args: &[String], confirm: &str) -> Result<String, String>
+crate::installer | pub fn DiskTools:::extract_boot_pack(&self, image: &std::path::Path, dir: &std::path::Path) -> Result<Vec<BootFile>, String>
+crate::installer | pub fn DiskTools:::locate(&self, disk: &str, part: u32) -> Result<Located, String>
+crate::installer | pub struct NoDiskTools
+crate::installer | pub trait DiskTools: Send + Sync
+crate::installer | pub use iyakki_usb::bootpack::Extracted as BootFile
+crate::installer | pub use iyakki_usb::resize::{FsTool, HostTools, Located, ShrinkPlan}
+crate::startupdisk | pub fn StartupDisk:::firmware_present(&self) -> bool
+crate::startupdisk | pub fn StartupDisk:::own_entry_first(&self, _administrator: bool) -> Result<Option<String>, String>
+crate::diskmodel | pub use iyakki_disks_model::*
+crate | [cfg(feature = "native")] pub mod portforward
+crate::guarded | impl crate::portforward::PortForwards for GuardedPortForwards
+crate::guarded | pub const K8S_PORTFORWARD: &str = "k8s.portforward"
+crate::portforward | Info.cluster: String
+crate::portforward | Info.id: u32
+crate::portforward | Info.local: u16
+crate::portforward | Info.namespace: String
+crate::portforward | Info.remote: u16
+crate::portforward | Info.target: String
+crate::portforward | Request.context: String
+crate::portforward | Request.kind: Target
+crate::portforward | Request.kubeconfig: String
+crate::portforward | Request.local: Option<u16>
+crate::portforward | Request.name: String
+crate::portforward | Request.namespace: String
+crate::portforward | Request.remote: u16
+crate::portforward | Target::Deployment
+crate::portforward | Target::Pod
+crate::portforward | Target::Service
+crate::portforward | derive Info: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::portforward | derive Request: Clone, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::portforward | derive Target: Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize
+crate::portforward | impl Drop for Forwards
+crate::portforward | impl PortForwards for Forwards
+crate::portforward | impl PortForwards for NoPortForwards
+crate::portforward | pub const MAX_FORWARDS: usize = 8
+crate::portforward | pub const READY_SECS: u64 = 10
+crate::portforward | pub enum Target
+crate::portforward | pub fn Forwards::with_spawn(spawn: Spawn, ready: Duration) -> Forwards
+crate::portforward | pub fn Info::line(&self) -> String
+crate::portforward | pub fn PortForwards:::list(&self) -> Vec<Info>
+crate::portforward | pub fn PortForwards:::start(&self, req: &Request) -> Result<Info, String>
+crate::portforward | pub fn PortForwards:::stop(&self, id: u32) -> bool
+crate::portforward | pub fn PortForwards:::stop_all(&self) -> usize
+crate::portforward | pub fn Proc:::alive(&mut self) -> bool
+crate::portforward | pub fn Proc:::kill(&mut self)
+crate::portforward | pub fn Target::parse(s: &str) -> Option<Target>
+crate::portforward | pub fn Target::prefix(self) -> &'static str
+crate::portforward | pub fn base_flags(kubeconfig: &str, context: &str) -> Result<Vec<String>, String>
+crate::portforward | pub fn command(namespace: &str, kind: Target, name: &str, remote: u16, local: Option<u16>) -> Result<Vec<String>, String>
+crate::portforward | pub fn forwarding_port(line: &str) -> Option<u16>
+crate::portforward | pub fn scripted_spawn(lines: Vec<&'static str>) -> (Spawn, std::sync::Arc<Mutex<Vec<Vec<String>>>>, std::sync::Arc<Mutex<Vec<std::sync::Arc<std::sync::atomic::AtomicBool>>>>)
+crate::portforward | pub struct Forwards
+crate::portforward | pub struct Info
+crate::portforward | pub struct NoPortForwards
+crate::portforward | pub struct Request
+crate::portforward | pub trait PortForwards: Send + Sync
+crate::portforward | pub trait Proc: Send
+crate::portforward | pub type Spawn = Box<dyn Fn(&[String]) -> Result<(Box<dyn Proc>, Receiver<String>), String> + Send + Sync>
+crate::sysinfo | [cfg(feature = "native")] pub fn Os:::port_forwards(&self) -> std::sync::Arc<dyn crate::portforward::PortForwards>
+crate::terminal | PtyExec.container: String
+crate::terminal | PtyExec.context: String
+crate::terminal | PtyExec.kubeconfig: String
+crate::terminal | PtyExec.namespace: String
+crate::terminal | PtyExec.pod: String
+crate::terminal | PtyExec.shell: String
+crate::terminal | derive PtyExec: Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize
+crate::terminal | pub const EXEC_SHELLS: &[&str] = &["sh", "bash", "ash", "zsh"]
+crate::terminal | pub fn PtyExec::argv(&self) -> Result<Vec<String>, String>
+crate::terminal | pub fn PtyExec::check(&self) -> Result<(), String>
+crate::terminal | pub fn PtyExec::question(&self) -> String
+crate::terminal | pub fn Terminal:::pty_open_exec(&self, _user: &str, _app: &str, _cols: usize, _rows: usize, _exec: &PtyExec) -> Result<PtyOpen, String>
+crate::terminal | pub struct PtyExec
+
+crate::sysinfo | pub use iyakki_sysinfo_model::{cpu_percent, human_bytes, human_duration, proc_cpu, protected, CpuTimes, DiskCounters, DiskUse, Memory, NetCounters, NetUse, Proc, SysRoots, TICKS_PER_SEC}
 removed	crate::appcaps | [serde(deny_unknown_fields)] pub struct CapabilityRequest	F-1: deny_unknown_fields dropped from CapabilityRequest (unknown fields kept in extra); added extra, unknown_request_fields, Default
 removed	crate | [cfg(feature = "native")] pub use host::HostApi	the re-export line was widened to also export WasmTask (pub use host::{HostApi, WasmTask}); HostApi is still exported at the same path, so nothing a client used is gone
 removed	crate::client | ServerMsg::HelloOk { v: u32, caps: Vec<String>, challenge: String, tile: u32, max_message: usize }	F-CORE-19: HelloOk gains an optional deprecations list (serde default, skipped when empty, so recorded transcripts still read and older readers ignore it); Hello and Negotiated gain deprecations and update; a variant field added is a shape change of the struct variant only
@@ -3185,35 +2991,296 @@ removed	crate::contract::hello | pub const CONTRACT_VERSION: ContractVersion = C
 removed	crate | pub use terminal::{NoTerminal, TermApproval, TermOpen, TermReply, Terminal}	F-SDK-103 and F-SDK-202: the Terminal facet gains the whole-session calls (default methods), contract 0.3 adds the appevents domain
 removed	crate::soundtypes | derive Master: Clone, Copy, Debug, Eq, PartialEq	serde::Serialize and serde::Deserialize derived on Master (additive; F-SPLIT-03: the master mute answer crosses the UI socket); Clone, Copy, Debug, Eq, PartialEq are all still there
 removed	crate::soundtypes | derive Cue: Clone, Copy, Debug, Eq, Hash, PartialEq	Cue gains Serialize and Deserialize (additive: the cue crosses the UI socket in the sound preview call, F-SPLIT-03)
-crate::audioroute | pub fn AudioRoute:::is_machine(&self) -> bool
-crate::soundctl | pub fn SoundControl:::card_starting_via(&self, _route: &dyn crate::audioroute::AudioRoute) -> Option<u32>
-crate::soundctl | pub fn SoundControl:::outputs_via(&self, _route: &dyn crate::audioroute::AudioRoute) -> Vec<Output>
-crate::uicore | pub fn Core:::audio_route(&self) -> std::sync::Arc<dyn crate::audioroute::AudioRoute>
-crate::uicore | pub fn Core:::audio_route_at(&self, _proc_root: &std::path::Path, _sys_root: &std::path::Path) -> std::sync::Arc<dyn crate::audioroute::AudioRoute>
-crate::audioroute | pub fn AudioRoute:::process_name(&self, _pid: u32) -> Option<String>
-crate::audioroute | pub fn AudioRoute:::process_parent(&self, _pid: u32) -> Option<u32>
-crate | [cfg(feature = "native")] pub mod device_types
-crate::device_types | pub use iyakki_devctl as devctl
-crate::device_types | pub use iyakki_drivers as driver_packs
-crate::device_types | pub use iyakki_hwinfo as hwinfo
-crate::device_types | pub use iyakki_netscan as netscan
-crate::device_types | pub use iyakki_storage as storage
-crate::device_types | pub use iyakki_usb as usb
-crate::device_types | pub use iyakki_zram as zram
 removed	crate | pub use soundctl::{CuePlayer, NoCues, NoSound, SoundControl, SoundState}	the re-export gained NoOutputState and OutputState (the sound output state seam moved from the agent); nothing a client used is gone
 removed	crate::appcaps | pub const BUILTIN_TABLE: &[(&str, &[&str])] = &[("settings", &["bluetooth.use", "system.radio.set", "system.brightness.set", "system.volume.set", "system.memory.set", "sy...	settings gains system.link.set and system.startup.set in the built-in table (additions to lists, the old items stay)
 removed	crate::drivers | pub use iyakki_drivers::{apply, facetime, known, Availability, Delivery, Roots, Status}	F-ARCH-07 (D-ARCH-07-TYPES): the re-export line was widened (appfw, ihex, macboard, modpack, pack, run, t2hold, Fs, Pack added); every name it exported before is exported at the same path
-crate::drivers | pub fn Drivers:::pack_files(&self, id: &str) -> Option<(usize, usize)>
-crate::drivers | pub fn Drivers:::remove_pack(&self, id: &str) -> Result<String, String>
-crate::drivers | pub use iyakki_drivers::{appfw, apply, facetime, ihex, known, macboard, modpack, pack, run, t2hold, Availability, Delivery, Fs, Pack, Roots, Status}
-crate::installer | impl DiskTools for NoDiskTools
-crate::installer | pub fn DiskTools:::bios_plan(&self, args: &[String]) -> Result<(String, String), String>
-crate::installer | pub fn DiskTools:::bios_write(&self, args: &[String], confirm: &str) -> Result<String, String>
-crate::installer | pub fn DiskTools:::extract_boot_pack(&self, image: &std::path::Path, dir: &std::path::Path) -> Result<Vec<BootFile>, String>
-crate::installer | pub fn DiskTools:::locate(&self, disk: &str, part: u32) -> Result<Located, String>
-crate::installer | pub struct NoDiskTools
-crate::installer | pub trait DiskTools: Send + Sync
-crate::installer | pub use iyakki_usb::bootpack::Extracted as BootFile
-crate::installer | pub use iyakki_usb::resize::{FsTool, HostTools, Located, ShrinkPlan}
-crate::startupdisk | pub fn StartupDisk:::firmware_present(&self) -> bool
-crate::startupdisk | pub fn StartupDisk:::own_entry_first(&self, _administrator: bool) -> Result<Option<String>, String>
+removed	crate::diskmodel | Actor.gid: u32	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Actor.home: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Actor.role: Role	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Actor.uid: u32	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Actor.user: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.holders: Vec<String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.model: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.name: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.parts: Vec<Part>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.path: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.read_only: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.removable: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.sector: u32	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.serial: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.size_bytes: u64	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.system: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.system_why: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.table: Table	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.table_notes: Vec<String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.transport: Transport	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Disk.vendor: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Apfs	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::BitLocker	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Btrfs	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Empty	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Exfat	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Ext2	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Ext3	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Ext4	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::F2fs	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Fat12	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Fat16	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Fat32	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::HfsPlus	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Iso9660	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Luks	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Ntfs	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Swap	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Unknown	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Fs::Xfs	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | FsSupport.driver: &'static str	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | FsSupport.fs: Fs	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | FsSupport.kernel: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | MountFlags.nodev: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | MountFlags.noexec: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | MountFlags.nosuid: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | MountFlags.rdonly: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | MountOpts.allow_exec: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | MountOpts.read_only: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | MountPlan.data: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | MountPlan.dev: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | MountPlan.flags: MountFlags	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | MountPlan.forced_ro: Option<String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | MountPlan.fstype: &'static str	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | MountPlan.target: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Mounted.notes: Vec<String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Mounted.read_only: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Mounted.target: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.crypt: Option<iyakki_diskcrypt::CryptInfo>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.fs: Fs	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.label: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.mounted_ro: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.mountpoints: Vec<String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.name: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.number: u32	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.path: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.size_bytes: u64	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.space: Option<(u64, u64)>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.start_bytes: u64	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.swap_in_use: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.system: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.type_name: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.unlocked: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Part.uuid: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Snapshot.disks: Vec<Disk>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Snapshot.support: Vec<FsSupport>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Table::Gpt	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Table::Mbr	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Table::None	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Transport::Mmc	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Transport::Nvme	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Transport::Other	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Transport::Sata	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Transport::Usb	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Transport::Virtual	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive Actor: Clone, Debug	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive Disk: Clone, Debug, Eq, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive Fs: Clone, Copy, Debug, Eq, Hash, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive FsSupport: Clone, Debug, Eq, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive MountFlags: Clone, Copy, Debug, Default, Eq, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive MountOpts: Clone, Copy, Debug, Default, Eq, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive MountPlan: Clone, Debug, Eq, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive Mounted: Clone, Debug, Eq, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive Part: Clone, Debug, Eq, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive Snapshot: Clone, Debug, Default	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive Table: Clone, Copy, Debug, Eq, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive Transport: Clone, Copy, Debug, Eq, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | impl DiskEngine for NoDiskEngine	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub enum Fs	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub enum Table	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub enum Transport	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Actor::new(user: &str, role: Role) -> Actor	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Disk::audit_id(&self) -> String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Disk::identity(&self) -> String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Disk::mounted(&self) -> bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Disk::part(&self, name: &str) -> Option<&Part>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Disk::removable_media(&self) -> bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Disk::serial_tail(&self) -> String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Disk::title(&self) -> String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::at_sign_out(&self, who: &Actor, audit: AuditFn) -> Option<String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::eject(&self, who: &Actor, disk: &str, audit: AuditFn) -> Result<String, String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::fingerprint(&self) -> u64	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::forget(&self)	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::mount(&self, who: &Actor, part: &str, opts: &MountOpts, audit: AuditFn) -> Result<Mounted, String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::mounted_in(&self, home: &str) -> Vec<(String, String)>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::plan_mount(&self, snap: &Snapshot, who: &Actor, part: &str, opts: &MountOpts) -> Result<MountPlan, String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::scan(&self) -> Snapshot	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::unmount(&self, who: &Actor, part: &str, audit: AuditFn) -> Result<String, String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::users_of(&self, mountpoint: &str) -> Vec<(u32, String)>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Fs::driver(self) -> Option<&'static str>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Fs::name(self) -> &'static str	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Fs::never_mountable(self) -> Option<&'static str>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Fs::owner_options(self) -> bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Fs::read_only_always(self) -> bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Part::mounted(&self) -> bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Part::title(&self) -> String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Part::used_bytes(&self) -> Option<u64>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Snapshot::disk(&self, name: &str) -> Option<&Disk>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Snapshot::kernel_has(&self, driver: &str) -> bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Snapshot::part(&self, name: &str) -> Option<(&Disk, &Part)>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Table::name(self) -> &'static str	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Transport::name(self) -> &'static str	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn may_use(who: &Actor, d: &Disk) -> Result<(), String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub struct Actor	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub struct Disk	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub struct FsSupport	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub struct MountFlags	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub struct MountOpts	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub struct MountPlan	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub struct Mounted	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub struct NoDiskEngine	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub struct Part	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub struct Snapshot	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub trait DiskEngine: Send + Sync	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub type AuditFn<'a> = &'a dyn Fn(&str, &str)	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Confirm.second: bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Confirm.typed: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Expect::Fs { part: String, fs: Fs }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Expect::Gone { part: String }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Expect::Size { part: String, bytes: u64 }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | FormatFs::Exfat	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | FormatFs::Ext4	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | FormatFs::Fat32	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | FormatFs::Ntfs	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | PartOp::Add { size_bytes: Option<u64>, fs: Option<FormatFs>, label: String }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | PartOp::Delete { number: u32 }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | PartOp::Format { number: u32, fs: FormatFs, label: String }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | PartOp::NewTable(Table)	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | PartOp::Rename { number: u32, label: String }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | PartOp::Reread	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | PartOp::Resize { number: u32, size_bytes: u64 }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Plan.after: Vec<String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Plan.audit: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Plan.disk: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Plan.expect: Vec<Expect>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Plan.identity: String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Plan.lost: Vec<String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Plan.op: PartOp	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Plan.steps: Vec<Step>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Plan.warnings: Vec<String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Step::MinSize { tool: Tool, args: Vec<String>, block: u64, need: u64, what: String }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Step::Mke2fs { dev: String, label: String, uuid: String, what: String }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Step::Reread { dev: String }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Step::Sync	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Step::Tool { tool: Tool, args: Vec<String>, what: String }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Step::WaitNode { dev: String }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Step::Write { dev: String, offset: u64, data: Vec<u8>, what: String }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Step::Zero { dev: String, offset: u64, len: u64, what: String }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Tool::E2fsck	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Tool::MkfsExfat	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Tool::Mkntfs	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Tool::Ntfsresize	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | Tool::Resize2fs	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive Confirm: Clone, Debug, Default	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive Expect: Clone, Debug, Eq, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive FormatFs: Clone, Copy, Debug, Eq, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive PartOp: Clone, Debug, Eq, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive Plan: Clone, Debug	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive Step: Clone, Debug, Eq, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive Tool: Clone, Copy, Debug, Eq, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub enum Expect	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub enum FormatFs	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub enum PartOp	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub enum Step	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub enum Tool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::allow_writing(&self, who: &Actor, part: &str, audit: AuditFn) -> Result<Mounted, String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::apply_partition(&self, who: &Actor, disk: &str, op: &PartOp, confirm: &Confirm, audit: AuditFn) -> Result<String, String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::lock(&self, who: &Actor, part: &str, audit: AuditFn) -> Result<String, String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::plan_partition(&self, who: &Actor, disk: &str, op: &PartOp) -> Result<Plan, String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::plan_unlock(&self, snap: &Snapshot, who: &Actor, part: &str) -> Result<iyakki_diskcrypt::CryptKind, String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::refusal(&self, who: &Actor, d: &Disk) -> Option<String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::unlock(&self, who: &Actor, part: &str, secret: &iyakki_diskcrypt::Secret, audit: AuditFn) -> Result<Mounted, String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::use_programs(&self, bin_dir: &str)	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn FormatFs::name(self) -> &'static str	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn FormatFs::tool(self) -> Option<Tool>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn FormatFs::unsupported(self) -> Option<&'static str>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn PartOp::destructive(&self) -> bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn PartOp::name(&self) -> &'static str	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Plan::headline(&self) -> String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Plan::render(&self) -> String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Plan::writes_anything(&self) -> bool	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Step::text(&self) -> String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Tool::missing_words(self, doing: &str) -> String	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Tool::package(self) -> (&'static str, &'static str)	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn Tool::prog(self) -> &'static str	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn accepted_names(d: &Disk, op: &PartOp) -> Vec<String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn check_confirmation(d: &Disk, c: &Confirm) -> Result<(), String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn check_confirmation_for(d: &Disk, op: &PartOp, c: &Confirm) -> Result<(), String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn op_partition(op: &PartOp) -> Option<u32>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn partition_refusal(who: &Actor, d: &Disk) -> Option<String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub struct Confirm	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub struct Plan	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | FormatRequest::Format { part: String, fs: FormatFs, label: String }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | FormatRequest::Resize { part: String, bytes: u64 }	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | derive FormatRequest: Clone, Debug, Eq, PartialEq	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub enum FormatRequest	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn DiskEngine:::take_format_request(&self, dir: &std::path::Path, user: &str) -> Option<FormatRequest>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn FormatRequest::part(&self) -> &str	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::diskmodel | pub fn request_op(snap: &Snapshot, req: &FormatRequest) -> Result<(String, PartOp), String>	alpha.8 E2: the diskmodel items moved unchanged to the pure leaf crate iyakki-disks-model; iyakki_core_api::diskmodel re-exports them all (pub use iyakki_disks_model::*), so every path and shape stays the same (D-S2-01 option a)
+removed	crate::sysinfo | Memory.available: u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | Memory.swap_free: u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | Memory.swap_total: u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | Memory.total: u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub fn Memory::used(&self) -> u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub fn human_bytes(b: u64) -> String	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub fn human_duration(secs: u64) -> String	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub struct Memory	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | CpuTimes.busy: u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | CpuTimes.total: u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | DiskCounters.disk: String	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | DiskCounters.read: u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | DiskCounters.written: u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | DiskUse.read_bytes: u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | DiskUse.write_bytes: u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | NetCounters.iface: String	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | NetCounters.rx: u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | NetCounters.tx: u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | NetUse.bytes: Option<(u64, u64)>	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | NetUse.connections: u32	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | NetUse.listening: u32	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | NetUse.udp: u32	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | Proc.cgroup: String	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | Proc.cmd: String	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | Proc.name: String	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | Proc.pid: u32	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | Proc.ppid: u32	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | Proc.rss: u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | Proc.start_ticks: u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | Proc.state: char	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | Proc.threads: u32	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | Proc.ticks: u64	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | Proc.uid: u32	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | Proc.user: String	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | SysRoots.passwd: PathBuf	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | SysRoots.proc: PathBuf	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | SysRoots.sys: PathBuf	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub const TICKS_PER_SEC: u64 = 100	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub fn DiskUse::is_quiet(&self) -> bool	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub fn DiskUse::text(&self) -> String	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub fn NetUse::is_quiet(&self) -> bool	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub fn NetUse::text(&self) -> String	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub fn SysRoots::real() -> SysRoots	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub fn cpu_percent(a: CpuTimes, b: CpuTimes) -> f32	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub fn proc_cpu(before: &[Proc], after: &[Proc], elapsed_secs: f32) -> HashMap<u32, f32>	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub fn protected(pid: u32) -> Option<&'static str>	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub struct CpuTimes	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub struct DiskCounters	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub struct DiskUse	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub struct NetCounters	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub struct NetUse	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub struct Proc	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | pub struct SysRoots	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | derive CpuTimes: Clone, Copy, Debug, Default, Eq, PartialEq	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | derive DiskCounters: Clone, Debug, Eq, PartialEq	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | derive DiskUse: Clone, Copy, Debug, Default, Eq, PartialEq	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | derive Memory: Clone, Copy, Debug, Default, Eq, PartialEq	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | derive NetCounters: Clone, Debug, Eq, PartialEq	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | derive NetUse: Clone, Copy, Debug, Default, Eq, PartialEq	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | derive Proc: Clone, Debug, Eq, PartialEq	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)
+removed	crate::sysinfo | derive SysRoots: Clone, Debug	alpha.9 P6: the figures of the System page (Memory, SysRoots, CpuTimes, NetCounters, DiskCounters, Proc, NetUse, DiskUse and the functions over them) moved unchanged to the pure leaf crate iyakki-sysinfo-model; iyakki_core_api::sysinfo re-exports them all with the same paths and shapes (D-S2-01 option a)

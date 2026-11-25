@@ -163,7 +163,7 @@ class Vm:
         if not re.search(r"create the administrator", t, re.I):
             self.fails.append("%s: the first-start screen never appeared" % self.tag); return False
         print("ok: [%s] the shell drew its first screen on the virtual display: 'Welcome - create the administrator account'" % self.tag)
-        self.typ("admin"); self.cmd("sendkey tab", 0.3); self.typ(SCRATCH_PASSWORD); self.cmd("sendkey tab", 0.3); self.typ(SCRATCH_PASSWORD); self.cmd("sendkey ret", 0.5)
+        self.typ("admin"); self.cmd("sendkey tab", 2.5); self.typ(SCRATCH_PASSWORD); self.cmd("sendkey tab", 2.5); self.typ(SCRATCH_PASSWORD); self.cmd("sendkey ret", 0.5)
         t = self.wait_for(r"CHAT", 60, "home")
         if not re.search(r"CHAT", t):
             self.fails.append("%s: the home screen did not appear after creating the account" % self.tag); return False

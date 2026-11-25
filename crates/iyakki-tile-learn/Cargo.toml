@@ -1,0 +1,17 @@
+[package]
+name = "iyakki-tile-learn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The LEARN tile (study plans, quizzes and lessons). Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit` and on the pure
+# model crate named in tests/data/tile_crate_deps.allow (`iyakki-study-model`), never on the agent or the shared crate; its tests run against a fake
+# `LearnPort`. The shell adapter is `crates/iyakki-apps/src/apps/learn.rs`, the real port `learn_port.rs`.
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-study-model = { workspace = true }
+tiny-skia = "0.11"
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

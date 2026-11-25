@@ -4,6 +4,7 @@
 //! browser data. Every change is audited without paths or keys.
 
 use super::*;
+use super::browser_port::BrowserSettingsPort;
 use iyakki_shared::profilestore::{Status};
 
 const WARN_ON: &str = "Protect your browser data? Cookies, sign-ins and site storage are encrypted with a key kept in your vault, which your login password opens, and are decrypted only in memory while you are signed in. Close the browser first. If you forget your password the protected data cannot be recovered: you can only reset it, and you will be signed out of every site. Files that were plain on the drive are overwritten with zeros and removed, which a flash drive may not honour.";
@@ -11,8 +12,8 @@ const WARN_OFF: &str = "Stop protecting your browser data? Cookies and sign-ins 
 const WARN_RESET: &str = "Delete all browser data (cookies, sign-ins, site storage)? You will be signed out of every site. This cannot be undone.";
 
 impl SettingsApp {
-    pub(super) fn render_browser_protect(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, cx: &AppCx) -> f32 {
-        let st = cx.agent.profile_store().status_of(&cx.services, &cx.session.user);
+    pub(super) fn render_browser_protect(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, p: &dyn BrowserSettingsPort) -> f32 {
+        let st = p.profile_status();
         let on = st != Status::Off;
         let help = format!("Encrypts cookies and site data with a key in your vault, opened by your login password; open only while you are signed in. Now: {}. Forgotten password: the data cannot be recovered, only reset.", st.text());
         let rh = 86.0 * s;
@@ -27,10 +28,10 @@ impl SettingsApp {
     }
 
     /// P and X of the Browser tab.
-    pub(super) fn handle_browser_protect(&mut self, k: &Key, cx: &AppCx) -> bool {
+    pub(super) fn handle_browser_protect(&mut self, k: &Key, p: &dyn BrowserSettingsPort) -> bool {
         match k {
             Key::Char('P') => {
-                let (kind, text) = match cx.agent.profile_store().status_of(&cx.services, &cx.session.user) {
+                let (kind, text) = match p.profile_status() {
                     Status::Off | Status::NeedsFinish => (ConfirmKind::BrowserProtect, WARN_ON),
                     Status::Sealed | Status::Open => (ConfirmKind::BrowserUnprotect, WARN_OFF),
                 };
@@ -46,20 +47,19 @@ impl SettingsApp {
     }
 
     /// The answer y to one of the three cards.
-    pub(super) fn bp_confirm(&mut self, cx: &AppCx, kind: &ConfirmKind) {
-        let user = &cx.session.user;
-        let (audit, r) = match kind {
-            ConfirmKind::BrowserProtect => ("Browser data protection: on", cx.agent.profile_store().protect_for(&cx.services, user)),
-            ConfirmKind::BrowserUnprotect => ("Browser data protection: off", cx.agent.profile_store().unprotect_for(&cx.services, user)),
-            _ => ("Browser data reset", Ok(cx.agent.profile_store().reset_for(&cx.services, user))),
+    pub(super) fn bp_confirm(&mut self, p: &dyn BrowserSettingsPort, kind: &ConfirmKind) {
+                let (audit, r) = match kind {
+            ConfirmKind::BrowserProtect => ("Browser data protection: on", p.profile_protect()),
+            ConfirmKind::BrowserUnprotect => ("Browser data protection: off", p.profile_unprotect()),
+            _ => ("Browser data reset", Ok(p.profile_reset())),
         };
         match r {
             Ok(m) => {
-                cx.audit.record(user, "settings.browser", audit);
+                p.audit("settings.browser", audit);
                 self.ok(m);
             }
             Err(e) => {
-                cx.audit.record(user, "settings.browser", &format!("{audit} failed"));
+                p.audit("settings.browser", &format!("{audit} failed"));
                 self.fail(e);
             }
         }

@@ -1,0 +1,16 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha b67970625ba3448e; honest subset only: everything not checked is under not-covered.
+row: F-UPD-06
+targets: qemu
+profile: ram
+feature-sha: b67970625ba3448e
+doc: Settings, System update: installed line, Channel cycle, How often, Check for updates, Roll back with nothing kept
+clause: 1 Settings > System update shows the installed and running version, Check for updates, How often and Roll back with nothing kept to roll back to
+not-covered: the version kept before it and the packs found (nothing to find in a scratch guest)
+not-covered: the preview in plain words
+not-covered: Install and Roll back each asking first (y/n) with a real pack
+not-covered: Choose folder with Browse and Look again
+not-covered: a warning that an update is being written
+not-covered: the instruction to restart
+not-covered: an Overview line for an unfinished update or a fall-back
+not-covered: layout checked at four sizes (one size only)
+session-check: system_update_page

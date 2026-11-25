@@ -51,7 +51,7 @@ pub type StreamTransport = Arc<dyn Fn(Duration) -> Arc<dyn Streamer> + Send + Sy
 
 /// HTTP/HTTPS streaming through `ureq` (rustls): no redirects, any status returned.
 pub fn real_streamer() -> StreamTransport {
-    Arc::new(|t| Arc::new(iyakki_proxy::https::UreqStreamer::with_response_timeout(t)))
+    Arc::new(iyakki_proxy::https::chat_streamer)
 }
 
 /// A reader that ends with an error after the whole call has taken too long, and with end-of-stream after `left` bytes.

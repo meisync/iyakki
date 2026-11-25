@@ -173,6 +173,7 @@ fn hostile_svg_in_a_message_is_held_by_the_caps() {
 
 #[test]
 fn copy_svg_puts_the_exact_source_on_the_clipboard() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     let (cx, _d) = cx_with_backend("svgpic6", iyakki_shared::chat::Unconfigured);
     let mut app = chat_with(&fence("svg", HELLO_SVG));
     let g = shot(&mut app, &cx, 1100);
@@ -252,6 +253,7 @@ fn save_svg_asks_for_a_name_writes_inside_the_scope_with_unique_names_and_is_aud
 
 #[test]
 fn an_image_sent_as_a_data_address_is_drawn_and_the_long_text_is_folded() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     let (cx, _d) = cx_with_backend("datapic1", iyakki_shared::chat::Unconfigured);
     let png = png(160, 100, [0, 200, 0]);
     let url = format!("data:image/png;base64,{}", b64(&png));

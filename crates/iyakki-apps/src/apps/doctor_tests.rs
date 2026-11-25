@@ -117,7 +117,7 @@ impl Fx {
     fn settle(&mut self) {
         let __wall = std::time::Instant::now();
         while __wall.elapsed() < std::time::Duration::from_secs(30) {
-            if !self.app.checking {
+            if !self.app.tile.checking {
                 return;
             }
             self.app.wants_redraw();
@@ -137,7 +137,7 @@ impl Fx {
         self.key(Key::Char(c));
     }
     fn ids(&self) -> Vec<&'static str> {
-        self.app.found.iter().map(|f| f.id).collect()
+        self.app.tile.found.iter().map(|f| f.id).collect()
     }
     fn has_hit(&self, e: &Event) -> bool {
         self.g.hits.iter().any(|h| &h.ev == e)
@@ -185,7 +185,7 @@ fn the_tile_lists_what_is_wrong_worst_first_each_with_its_fix_button() {
     let t = f.text();
     assert!(t.contains("5 things to look at") && t.contains("The dev cluster is stopped"), "{t}");
     assert!(f.has_hit(&Event::Tab(T_RECHECK)) && f.has_hit(&Event::Tab(T_SHARE)));
-    assert_eq!(f.app.rounds, 1, "one check when the tile opened");
+    assert_eq!(f.app.tile.rounds, 1, "one check when the tile opened");
 }
 
 #[test]
@@ -200,7 +200,7 @@ fn administrators_see_the_technical_detail_and_other_people_do_not() {
 #[test]
 fn a_healthy_machine_shows_one_calm_line() {
     let f = fixture_with("calm", Role::Admin, healthy(), SlowOut::default(), 1280, 720, 1.0);
-    assert!(f.app.found.is_empty());
+    assert!(f.app.tile.found.is_empty());
     let t = f.text();
     assert!(t.contains("Everything checked is fine."), "{t}");
     assert!(!f.g.hits.iter().any(|h| h.label == "finding"));
@@ -210,18 +210,18 @@ fn a_healthy_machine_shows_one_calm_line() {
 #[test]
 fn up_down_and_clicks_choose_a_finding_and_esc_leaves() {
     let mut f = fixture("keys");
-    assert_eq!(f.app.sel, 0);
+    assert_eq!(f.app.tile.sel, 0);
     f.key(Key::Down);
     f.key(Key::Down);
-    assert_eq!(f.app.sel, 2);
+    assert_eq!(f.app.tile.sel, 2);
     f.key(Key::Up);
-    assert_eq!(f.app.sel, 1);
+    assert_eq!(f.app.tile.sel, 1);
     for _ in 0..10 {
         f.key(Key::Down);
     }
-    assert_eq!(f.app.sel, 4, "stops at the last");
+    assert_eq!(f.app.tile.sel, 4, "stops at the last");
     f.ev(Event::Row(3));
-    assert_eq!(f.app.sel, 3);
+    assert_eq!(f.app.tile.sel, 3);
     assert!(matches!(f.key(Key::Esc), Flow::Back));
 }
 
@@ -238,7 +238,7 @@ fn a_fix_opens_the_settings_page_and_is_audited_and_nothing_else_happens() {
     f.ev(Event::Tab(T_FIX));
     assert_eq!(f.app.take_request(), Some(("settings".into(), "tab:devcluster".into())));
     // the vault: the page where the person types the password, never DOCTOR itself
-    let v = f.app.found.iter().position(|x| x.id == "vault-locked").unwrap();
+    let v = f.app.tile.found.iter().position(|x| x.id == "vault-locked").unwrap();
     f.ev(Event::Tab(T_FIX + v));
     assert_eq!(f.app.take_request(), Some(("settings".into(), "tab:vault".into())));
     // a finding without a fix does nothing
@@ -254,16 +254,16 @@ fn the_developer_mode_fix_extends_the_switch_off_time_for_administrators_only() 
     let d = iyakki_agent::devmode::DevMode::open(f.cx.data_dir());
     d.enable(&f.cx.session.policy, "root", 1).unwrap();
     let before = d.state().until;
-    let i = f.app.found.iter().position(|x| x.id == "dev-mode-ending").unwrap();
+    let i = f.app.tile.found.iter().position(|x| x.id == "dev-mode-ending").unwrap();
     f.ev(Event::Tab(T_FIX + i));
     let after = d.state().until;
     assert_eq!(after - before, 4 * 3600, "four hours more");
     assert!(f.audit().contains("devmode.extend"), "{}", f.audit());
-    assert!(f.app.msg.as_ref().is_some_and(|m| m.1 && m.0.contains("switches off at")), "{:?}", f.app.msg);
-    assert!(f.app.rounds >= 2, "it checks again after a fix");
+    assert!(f.app.tile.msg.as_ref().is_some_and(|m| m.1 && m.0.contains("switches off at")), "{:?}", f.app.tile.msg);
+    assert!(f.app.tile.rounds >= 2, "it checks again after a fix");
     // an ordinary account is sent to the page instead
     let mut u = fixture_with("extend-user", Role::User, sick(), SlowOut::default(), 1280, 720, 1.0);
-    let i = u.app.found.iter().position(|x| x.id == "dev-mode-ending").unwrap();
+    let i = u.app.tile.found.iter().position(|x| x.id == "dev-mode-ending").unwrap();
     u.ev(Event::Tab(T_FIX + i));
     assert_eq!(u.app.take_request(), Some(("settings".into(), "tab:developer".into())));
 }
@@ -272,13 +272,13 @@ fn the_developer_mode_fix_extends_the_switch_off_time_for_administrators_only() 
 fn the_slow_checks_arrive_later_and_add_their_findings() {
     let slow = SlowOut { models_unreachable: vec!["lemonade".into()], exposure: Some("NodePort 30300 gitea-http".into()), ..SlowOut::default() };
     let mut f = fixture_with("slow", Role::Admin, healthy(), slow, 1280, 720, 1.0);
-    assert!(!f.app.checking, "settled");
+    assert!(!f.app.tile.checking, "settled");
     assert_eq!(f.ids(), ["exposure", "model-unreachable"]);
     assert!(f.text().contains("NodePort 30300"), "the audit line's detail, for the administrator");
     // checking again repeats it
     f.chr('r');
     f.settle();
-    assert_eq!(f.app.rounds, 2);
+    assert_eq!(f.app.tile.rounds, 2);
     assert_eq!(f.ids().len(), 2);
 }
 
@@ -296,19 +296,19 @@ fn a_slow_check_that_is_still_going_says_so_and_the_screen_does_not_wait() {
     let mut g = Gfx::new(1280, 720);
     g.clear(rgb(8, 10, 22));
     app.render(&mut g, R::new(0.0, 0.0, 1280.0, 720.0), 1.0, &cx, 3);
-    assert!(app.checking && !app.found.is_empty(), "the cheap findings are on screen already");
+    assert!(app.tile.checking && !app.tile.found.is_empty(), "the cheap findings are on screen already");
     assert!(g.text_log.iter().any(|t| t.2.starts_with("still checking")));
     assert!(app.wants_redraw(), "it keeps asking for frames while it waits");
     tx.send(()).unwrap();
     let __wall = std::time::Instant::now();
     while __wall.elapsed() < std::time::Duration::from_secs(30) {
-        if !app.checking {
+        if !app.tile.checking {
             break;
         }
         app.wants_redraw();
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    assert!(!app.checking && app.found.iter().any(|f| f.id == "model-unreachable"));
+    assert!(!app.tile.checking && app.tile.found.iter().any(|f| f.id == "model-unreachable"));
 }
 
 #[test]
@@ -319,17 +319,17 @@ fn it_draws_inside_its_area_at_every_size_and_state() {
         f.key(Key::Down);
         f.key(Key::End);
         assert_hits_sane(&f, &format!("{w}x{h} selected"));
-        f.app.fail("Something failed with a rather long explanation that has to be cut to the width of the screen somewhere.");
+        f.app.tile.fail("Something failed with a rather long explanation that has to be cut to the width of the screen somewhere.");
         f.draw();
         assert_hits_sane(&f, &format!("{w}x{h} message"));
         f.chr('s');
-        assert!(f.app.preview.is_some(), "{w}x{h}");
+        assert!(f.app.tile.preview.is_some(), "{w}x{h}");
         assert_hits_sane(&f, &format!("{w}x{h} preview"));
         f.key(Key::Down);
         f.key(Key::Char('2'));
         assert_hits_sane(&f, &format!("{w}x{h} preview scrolled"));
         f.key(Key::Esc);
-        assert!(f.app.preview.is_none());
+        assert!(f.app.tile.preview.is_none());
         let calm = fixture_with("size-calm", Role::Admin, healthy(), SlowOut::default(), w, h, s);
         assert_hits_sane(&calm, &format!("{w}x{h} calm"));
     }
@@ -351,13 +351,13 @@ fn it_draws_inside_a_pane_that_does_not_start_at_the_corner() {
 fn many_findings_scroll_and_the_chosen_one_stays_in_view() {
     let many = Facts { failed_services: (0..30).map(|i| FailedService { id: format!("svc{i}"), name: format!("Service {i}"), reason: format!("reason {i}"), open: Some("tab:shares") }).collect(), ..healthy() };
     let mut f = fixture_with("many", Role::Admin, many, SlowOut::default(), 800, 480, 1.0);
-    assert!(f.app.list.scrolls());
-    assert_eq!(f.app.found.len(), 30);
+    assert!(f.app.tile.list.scrolls());
+    assert_eq!(f.app.tile.found.len(), 30);
     for _ in 0..25 {
         f.key(Key::Down);
     }
-    assert_eq!(f.app.sel, 25);
-    assert!(f.app.list.offset > 0.0, "scrolled down to follow the choice");
+    assert_eq!(f.app.tile.sel, 25);
+    assert!(f.app.tile.list.offset > 0.0, "scrolled down to follow the choice");
     let shown: Vec<&str> = f.g.hits.iter().filter(|h| h.label == "finding").map(|_| "x").collect();
     assert!(shown.len() < 30 && !shown.is_empty());
     assert!(f.has_hit(&Event::Tab(T_FIX + 25)), "the chosen finding's button is on screen");
@@ -369,7 +369,7 @@ fn many_findings_scroll_and_the_chosen_one_stays_in_view() {
 fn the_preview_shows_exactly_what_the_file_will_hold_and_no_secret() {
     let mut f = fixture("preview");
     f.chr('s');
-    let p = f.app.preview.as_ref().expect("preview is open");
+    let p = f.app.tile.preview.as_ref().expect("preview is open");
     for bad in [SECRET, "hunter2", "abc123", "192.0.2.7"] {
         assert!(!p.text.contains(bad), "{bad:?} must not reach the preview:\n{}", p.text);
     }
@@ -382,7 +382,7 @@ fn the_preview_shows_exactly_what_the_file_will_hold_and_no_secret() {
     assert!(f.app.hint().contains("save"), "{}", f.app.hint());
     // closing it writes nothing
     f.key(Key::Esc);
-    assert!(f.app.preview.is_none());
+    assert!(f.app.tile.preview.is_none());
     assert_eq!(std::fs::read_dir(&f.home).unwrap().count(), 0, "nothing was saved");
 }
 
@@ -390,19 +390,19 @@ fn the_preview_shows_exactly_what_the_file_will_hold_and_no_secret() {
 fn saving_writes_the_previewed_text_byte_for_byte_in_the_home_folder_once() {
     let mut f = fixture("save");
     f.chr('s');
-    let shown = f.app.preview.as_ref().unwrap().text.clone();
+    let shown = f.app.tile.preview.as_ref().unwrap().text.clone();
     f.chr('s');
-    let saved = f.app.preview.as_ref().unwrap().saved.clone().expect("saved");
+    let saved = f.app.tile.preview.as_ref().unwrap().saved.clone().expect("saved");
     assert!(saved.starts_with(&f.home) && saved.file_name().unwrap().to_string_lossy().starts_with("iyakki-diagnostics-"));
     assert_eq!(std::fs::read(&saved).unwrap(), shown.as_bytes());
     assert!(f.audit().contains("doctor.share.saved") && !f.audit().contains(SECRET));
-    assert!(f.app.msg.as_ref().unwrap().0.contains("Saved on my home folder"));
+    assert!(f.app.tile.msg.as_ref().unwrap().0.contains("Saved on my home folder"));
     assert!(f.has_hit(&Event::Tab(T_COPY)) && !f.has_hit(&Event::Tab(T_SAVE)), "the save buttons give way to Copy path");
     // a second press saves nothing more
     f.chr('s');
     assert_eq!(std::fs::read_dir(&f.home).unwrap().flatten().filter(|e| e.path().is_file()).count(), 1);
     f.chr('c');
-    assert!(f.app.msg.as_ref().unwrap().0.contains("copied"));
+    assert!(f.app.tile.msg.as_ref().unwrap().0.contains("copied"));
 }
 
 #[test]
@@ -412,19 +412,19 @@ fn a_usb_stick_opened_by_disks_is_offered_as_a_place() {
     std::fs::create_dir_all(f.home.join("media/BACKUP")).unwrap();
     std::fs::write(f.home.join("media/not-a-folder.txt"), "x").unwrap();
     f.chr('s');
-    let labels: Vec<String> = f.app.preview.as_ref().unwrap().dests.iter().map(|d| d.label.clone()).collect();
+    let labels: Vec<String> = f.app.tile.preview.as_ref().unwrap().dests.iter().map(|d| d.label.clone()).collect();
     assert_eq!(labels, ["my home folder", "BACKUP", "STICK"]);
     assert!(f.text().contains("Save on STICK"));
     // key 3 is the stick
     f.chr('3');
-    let saved = f.app.preview.as_ref().unwrap().saved.clone().unwrap();
+    let saved = f.app.tile.preview.as_ref().unwrap().saved.clone().unwrap();
     assert!(saved.starts_with(f.home.join("media/STICK")), "{saved:?}");
-    assert!(f.app.msg.as_ref().unwrap().0.contains("Saved on STICK"));
+    assert!(f.app.tile.msg.as_ref().unwrap().0.contains("Saved on STICK"));
     // a press on a button of a place that is not there does nothing
     let mut g = fixture("usb2");
     g.chr('s');
     g.chr('9');
-    assert!(g.app.preview.as_ref().unwrap().saved.is_none());
+    assert!(g.app.tile.preview.as_ref().unwrap().saved.is_none());
 }
 
 #[test]
@@ -433,9 +433,9 @@ fn a_folder_that_cannot_be_written_says_so_and_the_preview_stays_open() {
     f.chr('s');
     std::fs::remove_dir_all(&f.home).unwrap();
     f.chr('s');
-    let p = f.app.preview.as_ref().expect("still open");
+    let p = f.app.tile.preview.as_ref().expect("still open");
     assert!(p.saved.is_none());
-    let (m, ok) = f.app.msg.clone().unwrap();
+    let (m, ok) = f.app.tile.msg.clone().unwrap();
     assert!(!ok && m.contains("cannot write"), "{m}");
 }
 
@@ -444,9 +444,9 @@ fn settings_asks_for_the_share_preview_and_the_overview_has_the_button() {
     let mut f = fixture("item");
     // another tile opens DOCTOR with the item
     let mut a = DoctorApp::with_parts(&f.cx, parts(healthy(), SlowOut::default(), f.home.clone()));
-    assert!(a.preview.is_none());
+    assert!(a.tile.preview.is_none());
     App::open_item(&mut a, "share", &f.cx);
-    assert!(a.preview.is_some());
+    assert!(a.tile.preview.is_some());
     // Settings -> Overview
     let cx = cx_with_admin_store("doctor-settings");
     let mut st = super::settings::SettingsApp::new(&cx);
@@ -474,18 +474,18 @@ fn the_real_readers_run_on_this_computer_without_panicking() {
     let mut a = DoctorApp::new(&cx);
     let __wall = std::time::Instant::now();
     while __wall.elapsed() < std::time::Duration::from_secs(30) {
-        if !a.checking {
+        if !a.tile.checking {
             break;
         }
         a.wants_redraw();
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert!(!a.checking, "the slow reads finish");
+    assert!(!a.tile.checking, "the slow reads finish");
     let mut g = Gfx::new(1280, 720);
     g.clear(rgb(8, 10, 22));
     a.render(&mut g, R::new(0.0, 0.0, 1280.0, 720.0), 1.0, &cx, 1);
     a.open_share(&super::doctor_port::CxPort(&cx));
-    let t = a.preview.as_ref().unwrap().text.clone();
+    let t = a.tile.preview.as_ref().unwrap().text.clone();
     assert!(t.starts_with("IYAKKI diagnostics.") && t.contains("=== Version"));
     let home = std::env::var("HOME").unwrap_or_default(); // home-ok: read only
     if home.len() > 1 {
@@ -502,9 +502,9 @@ fn the_harness_drives_the_tile_by_label_and_no_two_controls_collide_at_the_four_
     let app = DoctorApp::with_parts(&cx, parts(sick(), SlowOut::default(), tmp("harness")));
     let mut t = TileHarness::new(app, cx);
     assert!(t.has_button("Check again"), "{:?}", t.texts());
-    let before = t.app.rounds;
+    let before = t.app.tile.rounds;
     t.click_label("Check again");
-    assert_eq!(t.app.rounds, before + 1, "the click ran another round of checks");
+    assert_eq!(t.app.tile.rounds, before + 1, "the click ran another round of checks");
     t.assert_no_overlap_at_standard_sizes();
 }
 
@@ -562,9 +562,9 @@ fn real_parts() -> Parts {
 fn fake_port_the_tile_asks_the_port_for_its_facts_and_lists_the_findings() {
     let port = FakePort::new("fp-list", true, sick());
     let app = DoctorApp::with_port(&port, real_parts());
-    assert!(app.found.iter().any(|f| f.id == "dev-mode-ending"));
-    assert!(app.admin);
-    assert!(app.rounds >= 1);
+    assert!(app.tile.found.iter().any(|f| f.id == "dev-mode-ending"));
+    assert!(app.tile.admin);
+    assert!(app.tile.rounds >= 1);
     assert!(port.audit.borrow().is_empty(), "reading is silent");
 }
 
@@ -572,20 +572,20 @@ fn fake_port_the_tile_asks_the_port_for_its_facts_and_lists_the_findings() {
 fn fake_port_a_fix_is_audited_and_the_extension_asks_the_port_for_four_hours_for_administrators() {
     let port = FakePort::new("fp-extend", true, sick());
     let mut app = DoctorApp::with_port(&port, real_parts());
-    let i = app.found.iter().position(|x| x.id == "dev-mode-ending").unwrap();
+    let i = app.tile.found.iter().position(|x| x.id == "dev-mode-ending").unwrap();
     app.do_fix(i, &port);
     assert_eq!(port.extend.borrow().as_slice(), [4]);
     let a = port.audit_text();
     assert!(a.contains("doctor.fix dev-mode-ending") && a.contains("devmode.extend 4 h (from DOCTOR)"), "{a}");
-    assert!(app.msg.as_ref().is_some_and(|m| m.1 && m.0.contains("switches off at")), "{:?}", app.msg);
-    assert!(app.rounds >= 2, "it checks again after the fix");
+    assert!(app.tile.msg.as_ref().is_some_and(|m| m.1 && m.0.contains("switches off at")), "{:?}", app.tile.msg);
+    assert!(app.tile.rounds >= 2, "it checks again after the fix");
 }
 
 #[test]
 fn fake_port_an_ordinary_account_is_sent_to_the_page_and_the_port_is_not_asked_to_extend() {
     let port = FakePort::new("fp-user", false, sick());
     let mut app = DoctorApp::with_port(&port, real_parts());
-    let i = app.found.iter().position(|x| x.id == "dev-mode-ending").unwrap();
+    let i = app.tile.found.iter().position(|x| x.id == "dev-mode-ending").unwrap();
     app.do_fix(i, &port);
     assert!(port.extend.borrow().is_empty());
     assert_eq!(app.take_request(), Some(("settings".into(), "tab:developer".into())));
@@ -597,9 +597,9 @@ fn fake_port_a_refused_extension_says_why_and_audits_only_the_fix() {
     let mut port = FakePort::new("fp-refused", true, sick());
     port.extend_answer = Err("developer mode is not on".into());
     let mut app = DoctorApp::with_port(&port, real_parts());
-    let i = app.found.iter().position(|x| x.id == "dev-mode-ending").unwrap();
+    let i = app.tile.found.iter().position(|x| x.id == "dev-mode-ending").unwrap();
     app.do_fix(i, &port);
-    assert_eq!(app.msg, Some(("developer mode is not on".to_string(), false)));
+    assert_eq!(app.tile.msg, Some(("developer mode is not on".to_string(), false)));
     assert!(!port.audit_text().contains("devmode.extend"));
 }
 
@@ -608,13 +608,54 @@ fn fake_port_sharing_previews_audits_and_saves_into_the_ports_home_folder_once()
     let port = FakePort::new("fp-share", true, sick());
     let mut app = DoctorApp::with_port(&port, real_parts());
     app.open_share(&port);
-    assert!(app.preview.is_some());
-    assert_eq!(app.preview.as_ref().unwrap().dests[0].dir, port.home);
+    assert!(app.tile.preview.is_some());
+    assert_eq!(app.tile.preview.as_ref().unwrap().dests[0].dir, port.home);
     app.save_to(0, &port);
     app.save_to(0, &port);
     let a = port.audit_text();
     assert!(a.contains("doctor.share.preview"), "{a}");
     assert_eq!(a.matches("doctor.share.saved").count(), 1, "{a}");
-    let saved = app.preview.as_ref().unwrap().saved.clone().unwrap();
+    let saved = app.tile.preview.as_ref().unwrap().saved.clone().unwrap();
     assert!(saved.starts_with(&port.home) && saved.exists());
+}
+
+// ---- the mirror of the tile crate: the plain Finding keeps every word of the shared one -------------------------------------------------
+
+#[test]
+fn the_plain_findings_of_the_tile_api_mirror_the_shared_ones_word_for_word() {
+    use super::doctor_port::{to_finding, to_severity};
+    use iyakki_shared::doctor::{Action, Severity};
+    use iyakki_tile_api::doctor as api;
+    let many = Facts { failed_services: vec![FailedService { id: "service".into(), name: "Web service".into(), reason: "x".into(), open: Some("tab:shares") }], ..sick() };
+    let found = iyakki_shared::doctor::diagnose(&many);
+    assert!(found.len() >= 5);
+    let mut fixes = 0;
+    let mut extends = 0;
+    for f in &found {
+        let m = to_finding(f);
+        assert_eq!((m.id, &m.text, &m.detail), (f.id, &f.text, &f.detail));
+        assert_eq!(m.severity, to_severity(f.severity));
+        match (&f.fix, &m.fix) {
+            (None, None) => {}
+            (Some(a), Some(b)) => {
+                fixes += 1;
+                assert_eq!(a.label, b.label);
+                match (&a.action, b.action) {
+                    (Action::Settings(x), api::FixAction::Settings(y)) => assert_eq!(*x, y),
+                    (Action::ExtendDeveloperMode, api::FixAction::ExtendDeveloperMode) => extends += 1,
+                    other => panic!("the action changed in the mirror: {other:?}"),
+                }
+            }
+            other => panic!("the fix changed in the mirror: {other:?}"),
+        }
+    }
+    assert!(fixes >= 4 && extends == 1);
+    // the order of severities is the sort order of the shared type
+    for (a, b) in [(Severity::Problem, Severity::Warning), (Severity::Warning, Severity::Note)] {
+        assert!(a < b && to_severity(a) < to_severity(b));
+    }
+    // the tile's own list is the diagnosis, in the same order
+    let port = FakePort::new("mirror", true, many.clone());
+    let app = DoctorApp::with_port(&port, real_parts());
+    assert_eq!(app.tile.found, found.iter().map(to_finding).collect::<Vec<_>>());
 }

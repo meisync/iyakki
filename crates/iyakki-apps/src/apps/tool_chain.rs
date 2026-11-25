@@ -156,7 +156,7 @@ pub fn account_chain(cx: &AppCx, tools_arc: Arc<dyn Tools>, scope: &ChainScope) 
         // system components, shared builds, PDF files and the PDF-output switch, WASM tiles, object storage, model providers, Ollama, document
         // retrieval, quick install removal, where Lemonade runs, this computer, dictation wording and My IYAKKI (what is free and what asks is in each tool)
         let tools_arc: Arc<dyn Tools> = {
-            let downloads = super::browser::BrowserApp::downloads_dir(&cx).unwrap_or_else(|_| cx.data_dir().join("downloads"));
+            let downloads = super::browser::BrowserApp::downloads_dir(cx).unwrap_or_else(|_| cx.data_dir().join("downloads"));
             cx.b4().wrap_system_tools(tools_arc, &env, iyakki_agent_api::PdfParts { ext: scope.ext.clone(), web: cx.web.clone(), downloads }, cx.chat.clone())
         };
         // messaging (once an account exists), browser Web Push and passkeys: every send, save or use asks on a card, every time

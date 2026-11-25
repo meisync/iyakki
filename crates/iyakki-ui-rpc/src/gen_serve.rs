@@ -646,22 +646,6 @@ mod g_facets_b4 { use super::*;
             other => Err(format!("SshTunnels has no call {other}")),
         }
     }
-    pub(crate) fn serve_MineWorker(t: &Arc<dyn MineWorker>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
-        match method {
-            "send" => {
-                let (x0, ): (iyakki_shared::voiceassist_ports::Cmd, ) = de(a)?;
-                ser(&t.send(x0))
-            }
-            "status" => {
-                ser(&t.status())
-            }
-            "wake" => {
-                let (x0, ): (String, ) = de(a)?;
-                ser(&t.wake(&x0))
-            }
-            other => Err(format!("MineWorker has no call {other}")),
-        }
-    }
     pub(crate) fn serve_ProjectKit(t: &Arc<dyn ProjectKit>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "cluster_line" => {
@@ -1058,19 +1042,6 @@ mod g_facets_b6 { use super::*;
             other => Err(format!("GeminiLive has no call {other}")),
         }
     }
-    pub(crate) fn serve_SpeechKit(t: &Arc<dyn SpeechKit>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
-        match method {
-            "revise_target" => {
-                let (x0, ): (iyakki_shared::revise::Context, ) = de(a)?;
-                ser(&t.revise_target(&x0))
-            }
-            "revise" => {
-                let (x0, x1, x2, ): (String, iyakki_shared::revise::Kind, iyakki_shared::revise::Context, ) = de(a)?;
-                ser(&t.revise(&x0, &x1, &x2))
-            }
-            other => Err(format!("SpeechKit has no call {other}")),
-        }
-    }
     pub(crate) fn serve_RouterPanel(t: &Arc<dyn RouterPanel>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "config" => {
@@ -1249,51 +1220,10 @@ mod g_facets_dev { use super::*;
 mod g_facets_g { use super::*;
     use iyakki_agent_api::facets_g::*;
     use std::sync::Arc;
-    use iyakki_shared::hostengines::{Env, Report};
-    use iyakki_shared::hostvoice::HostVoice;
     use iyakki_shared::providers::TestReport;
     use iyakki_shared::storyillus::Cand;
     use iyakki_shared::vault::VaultError;
-    use iyakki_shared::voice::SpeechEngine;
-    use iyakki_shared::voicehelper::HelperState;
     pub(crate) trait Dummy {}
-    pub(crate) fn serve_HostTtsApi(t: &Arc<dyn HostTtsApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
-        match method {
-            "is_enabled" => {
-                ser(&t.is_enabled())
-            }
-            "set_opener" => {
-                let (x0, ): (Option<Vec<String>>, ) = de(a)?;
-                ser(&t.set_opener(x0))
-            }
-            "ensure" => {
-                ser(&t.ensure())
-            }
-            "recheck" => {
-                ser(&t.recheck())
-            }
-            "report" => {
-                ser(&t.report())
-            }
-            "scanning" => {
-                ser(&t.scanning())
-            }
-            "scan_now" => {
-                ser(&t.scan_now())
-            }
-            "helper_state" => {
-                ser(&t.helper_state())
-            }
-            "helper_stop" => {
-                ser(&t.helper_stop())
-            }
-            "auto_engine" => {
-                let (x0, ): (Option<String>, ) = de(a)?;
-                ser(&t.auto_engine(x0.as_deref()))
-            }
-            other => Err(format!("HostTtsApi has no call {other}")),
-        }
-    }
     pub(crate) fn serve_AiRead(t: &Arc<dyn AiRead>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
         match method {
             "host_tts" => {
@@ -1634,33 +1564,6 @@ mod g_facets_s6b { use super::*;
                 ser(&t.start_for_login(&x0, &x1))
             }
             other => Err(format!("FlowsFacet has no call {other}")),
-        }
-    }
-    pub(crate) fn serve_VoiceDeskFacet(t: &Arc<dyn VoiceDeskFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
-        match method {
-            "read_voices" => {
-                ser(&t.read_voices())
-            }
-            "stt_engine" => {
-                ser(&t.stt_engine())
-            }
-            "where_text" => {
-                let (x0, x1, ): (iyakki_shared::voice::SpeechEngine, String, ) = de(a)?;
-                ser(&t.where_text(&x0, &x1))
-            }
-            "consent_text" => {
-                let (x0, x1, ): (iyakki_shared::voice::SpeechEngine, bool, ) = de(a)?;
-                ser(&t.consent_text(&x0, x1))
-            }
-            "transcribe" => {
-                let (x0, x1, ): (iyakki_shared::voice::SpeechEngine, Vec<i16>, ) = de(a)?;
-                ser(&t.transcribe(&x0, &x1))
-            }
-            "pieces" => {
-                let (x0, ): (String, ) = de(a)?;
-                ser(&t.pieces(&x0))
-            }
-            other => Err(format!("VoiceDeskFacet has no call {other}")),
         }
     }
     pub(crate) fn serve_ExtAgentFacet(t: &Arc<dyn ExtAgentFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
@@ -3991,6 +3894,114 @@ mod g_study_calendar { use super::*;
         }
     }
 }
+mod g_iyakki_voice_model_facets { use super::*;
+    use iyakki_voice_model::facets::*;
+    use std::sync::Arc;
+    use iyakki_story_model::{Chunk, Playing, Sink, Synth};
+    pub(crate) trait Dummy {}
+    pub(crate) fn serve_SpeechKit(t: &Arc<dyn SpeechKit>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "revise_target" => {
+                let (x0, ): (iyakki_voice_model::revise::Context, ) = de(a)?;
+                ser(&t.revise_target(&x0))
+            }
+            "revise" => {
+                let (x0, x1, x2, ): (String, iyakki_voice_model::revise::Kind, iyakki_voice_model::revise::Context, ) = de(a)?;
+                ser(&t.revise(&x0, &x1, &x2))
+            }
+            other => Err(format!("SpeechKit has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_MineWorker(t: &Arc<dyn MineWorker>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "send" => {
+                let (x0, ): (iyakki_voice_model::voiceassist_ports::Cmd, ) = de(a)?;
+                ser(&t.send(x0))
+            }
+            "status" => {
+                ser(&t.status())
+            }
+            "wake" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.wake(&x0))
+            }
+            other => Err(format!("MineWorker has no call {other}")),
+        }
+    }
+    pub(crate) fn serve_VoiceDeskFacet(t: &Arc<dyn VoiceDeskFacet>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "read_voices" => {
+                ser(&t.read_voices())
+            }
+            "stt_engine" => {
+                ser(&t.stt_engine())
+            }
+            "where_text" => {
+                let (x0, x1, ): (iyakki_voice_model::voice::SpeechEngine, String, ) = de(a)?;
+                ser(&t.where_text(&x0, &x1))
+            }
+            "consent_text" => {
+                let (x0, x1, ): (iyakki_voice_model::voice::SpeechEngine, bool, ) = de(a)?;
+                ser(&t.consent_text(&x0, x1))
+            }
+            "transcribe" => {
+                let (x0, x1, ): (iyakki_voice_model::voice::SpeechEngine, Vec<i16>, ) = de(a)?;
+                ser(&t.transcribe(&x0, &x1))
+            }
+            "pieces" => {
+                let (x0, ): (String, ) = de(a)?;
+                ser(&t.pieces(&x0))
+            }
+            other => Err(format!("VoiceDeskFacet has no call {other}")),
+        }
+    }
+}
+mod g_iyakki_voice_model_hosttts { use super::*;
+    use iyakki_voice_model::hosttts::*;
+    use std::sync::Arc;
+    use iyakki_voice_model::hostengines::{Env, Report};
+    use iyakki_voice_model::hostvoice::HostVoice;
+    use iyakki_voice_model::voice::SpeechEngine;
+    use iyakki_voice_model::voicehelper::HelperState;
+    pub(crate) trait Dummy {}
+    pub(crate) fn serve_HostTtsApi(t: &Arc<dyn HostTtsApi>, reg: &crate::Registry<'_>, method: &str, a: Value) -> Result<Value, String> {
+        match method {
+            "is_enabled" => {
+                ser(&t.is_enabled())
+            }
+            "set_opener" => {
+                let (x0, ): (Option<Vec<String>>, ) = de(a)?;
+                ser(&t.set_opener(x0))
+            }
+            "ensure" => {
+                ser(&t.ensure())
+            }
+            "recheck" => {
+                ser(&t.recheck())
+            }
+            "report" => {
+                ser(&t.report())
+            }
+            "scanning" => {
+                ser(&t.scanning())
+            }
+            "scan_now" => {
+                ser(&t.scan_now())
+            }
+            "helper_state" => {
+                ser(&t.helper_state())
+            }
+            "helper_stop" => {
+                ser(&t.helper_stop())
+            }
+            "auto_engine" => {
+                let (x0, ): (Option<String>, ) = de(a)?;
+                ser(&t.auto_engine(x0.as_deref()))
+            }
+            other => Err(format!("HostTtsApi has no call {other}")),
+        }
+    }
+}
 /// The kinds of object the core hands out: one per generated trait.
 #[derive(Clone)]
 pub enum Obj {
@@ -4019,7 +4030,6 @@ pub enum Obj {
     ServicesFacetB4(Arc<dyn iyakki_agent_api::facets_b4::ServicesFacetB4>),
     AgentFacetsB4(Arc<dyn iyakki_agent_api::facets_b4::AgentFacetsB4>),
     SshTunnels(Arc<dyn iyakki_agent_api::facets_b4::SshTunnels>),
-    MineWorker(Arc<dyn iyakki_agent_api::facets_b4::MineWorker>),
     ProjectKit(Arc<dyn iyakki_agent_api::facets_b4::ProjectKit>),
     ServicesFacetB5(Arc<dyn iyakki_agent_api::facets_b5::ServicesFacetB5>),
     DownloadQueueApi(Arc<dyn iyakki_agent_api::facets_b5::DownloadQueueApi>),
@@ -4031,7 +4041,6 @@ pub enum Obj {
     SandboxCluster(Arc<dyn iyakki_agent_api::facets_b5::SandboxCluster>),
     CliApi(Arc<dyn iyakki_agent_api::facets_b5::CliApi>),
     GeminiLive(Arc<dyn iyakki_agent_api::facets_b6::GeminiLive>),
-    SpeechKit(Arc<dyn iyakki_agent_api::facets_b6::SpeechKit>),
     RouterPanel(Arc<dyn iyakki_agent_api::facets_b6::RouterPanel>),
     GitKit(Arc<dyn iyakki_agent_api::facets_b6::GitKit>),
     ContractLocal(Arc<dyn iyakki_agent_api::facets_b6::ContractLocal>),
@@ -4041,14 +4050,12 @@ pub enum Obj {
     AgentFacetsB7(Arc<dyn iyakki_agent_api::facets_b7::AgentFacetsB7>),
     AgentFacetsB8(Arc<dyn iyakki_agent_api::facets_b8::AgentFacetsB8>),
     DevDeployFacet(Arc<dyn iyakki_agent_api::facets_dev::DevDeployFacet>),
-    HostTtsApi(Arc<dyn iyakki_agent_api::facets_g::HostTtsApi>),
     AiRead(Arc<dyn iyakki_agent_api::facets_g::AiRead>),
     VaultRead(Arc<dyn iyakki_agent_api::facets_g::VaultRead>),
     ComputeBackend(Arc<dyn iyakki_agent_api::facets_h::ComputeBackend>),
     PlatformApi(Arc<dyn iyakki_agent_api::facets_platform::PlatformApi>),
     FlowChatEnv(Arc<dyn iyakki_agent_api::facets_s6b::FlowChatEnv>),
     FlowsFacet(Arc<dyn iyakki_agent_api::facets_s6b::FlowsFacet>),
-    VoiceDeskFacet(Arc<dyn iyakki_agent_api::facets_s6b::VoiceDeskFacet>),
     ExtAgentFacet(Arc<dyn iyakki_agent_api::facets_s6b::ExtAgentFacet>),
     DomainsMgr(Arc<dyn iyakki_agent_api::facets_s6b::DomainsMgr>),
     AgentFacetsS6B(Arc<dyn iyakki_agent_api::facets_s6b::AgentFacetsS6B>),
@@ -4098,6 +4105,10 @@ pub enum Obj {
     StoreCatalog(Arc<dyn iyakki_agent_api::store::StoreCatalog>),
     StoreApi(Arc<dyn iyakki_agent_api::store_api::StoreApi>),
     StudyCalendarApi(Arc<dyn iyakki_agent_api::study_calendar::StudyCalendarApi>),
+    SpeechKit(Arc<dyn iyakki_voice_model::facets::SpeechKit>),
+    MineWorker(Arc<dyn iyakki_voice_model::facets::MineWorker>),
+    VoiceDeskFacet(Arc<dyn iyakki_voice_model::facets::VoiceDeskFacet>),
+    HostTtsApi(Arc<dyn iyakki_voice_model::hosttts::HostTtsApi>),
     /// The whole `ServicesHandle` of the core (gen_services.py): its plain methods and the handles it hands out.
     ServicesHandle(Arc<crate::ServicesRoot>),
     /// A hand-written object (served.rs, D-SPLIT-03-SERVED): the traits that are not in iyakki-agent-api or cannot be generated.
@@ -4131,7 +4142,6 @@ impl Obj {
             Obj::ServicesFacetB4(_) => "ServicesFacetB4",
             Obj::AgentFacetsB4(_) => "AgentFacetsB4",
             Obj::SshTunnels(_) => "SshTunnels",
-            Obj::MineWorker(_) => "MineWorker",
             Obj::ProjectKit(_) => "ProjectKit",
             Obj::ServicesFacetB5(_) => "ServicesFacetB5",
             Obj::DownloadQueueApi(_) => "DownloadQueueApi",
@@ -4143,7 +4153,6 @@ impl Obj {
             Obj::SandboxCluster(_) => "SandboxCluster",
             Obj::CliApi(_) => "CliApi",
             Obj::GeminiLive(_) => "GeminiLive",
-            Obj::SpeechKit(_) => "SpeechKit",
             Obj::RouterPanel(_) => "RouterPanel",
             Obj::GitKit(_) => "GitKit",
             Obj::ContractLocal(_) => "ContractLocal",
@@ -4153,14 +4162,12 @@ impl Obj {
             Obj::AgentFacetsB7(_) => "AgentFacetsB7",
             Obj::AgentFacetsB8(_) => "AgentFacetsB8",
             Obj::DevDeployFacet(_) => "DevDeployFacet",
-            Obj::HostTtsApi(_) => "HostTtsApi",
             Obj::AiRead(_) => "AiRead",
             Obj::VaultRead(_) => "VaultRead",
             Obj::ComputeBackend(_) => "ComputeBackend",
             Obj::PlatformApi(_) => "PlatformApi",
             Obj::FlowChatEnv(_) => "FlowChatEnv",
             Obj::FlowsFacet(_) => "FlowsFacet",
-            Obj::VoiceDeskFacet(_) => "VoiceDeskFacet",
             Obj::ExtAgentFacet(_) => "ExtAgentFacet",
             Obj::DomainsMgr(_) => "DomainsMgr",
             Obj::AgentFacetsS6B(_) => "AgentFacetsS6B",
@@ -4210,6 +4217,10 @@ impl Obj {
             Obj::StoreCatalog(_) => "StoreCatalog",
             Obj::StoreApi(_) => "StoreApi",
             Obj::StudyCalendarApi(_) => "StudyCalendarApi",
+            Obj::SpeechKit(_) => "SpeechKit",
+            Obj::MineWorker(_) => "MineWorker",
+            Obj::VoiceDeskFacet(_) => "VoiceDeskFacet",
+            Obj::HostTtsApi(_) => "HostTtsApi",
             Obj::ServicesHandle(_) => "ServicesHandle",
             Obj::Served(s) => s.iface(),
         }
@@ -4241,7 +4252,6 @@ impl Obj {
             Obj::ServicesFacetB4(t) => g_facets_b4::serve_ServicesFacetB4(t, reg, method, a),
             Obj::AgentFacetsB4(t) => g_facets_b4::serve_AgentFacetsB4(t, reg, method, a),
             Obj::SshTunnels(t) => g_facets_b4::serve_SshTunnels(t, reg, method, a),
-            Obj::MineWorker(t) => g_facets_b4::serve_MineWorker(t, reg, method, a),
             Obj::ProjectKit(t) => g_facets_b4::serve_ProjectKit(t, reg, method, a),
             Obj::ServicesFacetB5(t) => g_facets_b5::serve_ServicesFacetB5(t, reg, method, a),
             Obj::DownloadQueueApi(t) => g_facets_b5::serve_DownloadQueueApi(t, reg, method, a),
@@ -4253,7 +4263,6 @@ impl Obj {
             Obj::SandboxCluster(t) => g_facets_b5::serve_SandboxCluster(t, reg, method, a),
             Obj::CliApi(t) => g_facets_b5::serve_CliApi(t, reg, method, a),
             Obj::GeminiLive(t) => g_facets_b6::serve_GeminiLive(t, reg, method, a),
-            Obj::SpeechKit(t) => g_facets_b6::serve_SpeechKit(t, reg, method, a),
             Obj::RouterPanel(t) => g_facets_b6::serve_RouterPanel(t, reg, method, a),
             Obj::GitKit(t) => g_facets_b6::serve_GitKit(t, reg, method, a),
             Obj::ContractLocal(t) => g_facets_b6::serve_ContractLocal(t, reg, method, a),
@@ -4263,14 +4272,12 @@ impl Obj {
             Obj::AgentFacetsB7(t) => g_facets_b7::serve_AgentFacetsB7(t, reg, method, a),
             Obj::AgentFacetsB8(t) => g_facets_b8::serve_AgentFacetsB8(t, reg, method, a),
             Obj::DevDeployFacet(t) => g_facets_dev::serve_DevDeployFacet(t, reg, method, a),
-            Obj::HostTtsApi(t) => g_facets_g::serve_HostTtsApi(t, reg, method, a),
             Obj::AiRead(t) => g_facets_g::serve_AiRead(t, reg, method, a),
             Obj::VaultRead(t) => g_facets_g::serve_VaultRead(t, reg, method, a),
             Obj::ComputeBackend(t) => g_facets_h::serve_ComputeBackend(t, reg, method, a),
             Obj::PlatformApi(t) => g_facets_platform::serve_PlatformApi(t, reg, method, a),
             Obj::FlowChatEnv(t) => g_facets_s6b::serve_FlowChatEnv(t, reg, method, a),
             Obj::FlowsFacet(t) => g_facets_s6b::serve_FlowsFacet(t, reg, method, a),
-            Obj::VoiceDeskFacet(t) => g_facets_s6b::serve_VoiceDeskFacet(t, reg, method, a),
             Obj::ExtAgentFacet(t) => g_facets_s6b::serve_ExtAgentFacet(t, reg, method, a),
             Obj::DomainsMgr(t) => g_facets_s6b::serve_DomainsMgr(t, reg, method, a),
             Obj::AgentFacetsS6B(t) => g_facets_s6b::serve_AgentFacetsS6B(t, reg, method, a),
@@ -4320,6 +4327,10 @@ impl Obj {
             Obj::StoreCatalog(t) => g_store::serve_StoreCatalog(t, reg, method, a),
             Obj::StoreApi(t) => g_store_api::serve_StoreApi(t, reg, method, a),
             Obj::StudyCalendarApi(t) => g_study_calendar::serve_StudyCalendarApi(t, reg, method, a),
+            Obj::SpeechKit(t) => g_iyakki_voice_model_facets::serve_SpeechKit(t, reg, method, a),
+            Obj::MineWorker(t) => g_iyakki_voice_model_facets::serve_MineWorker(t, reg, method, a),
+            Obj::VoiceDeskFacet(t) => g_iyakki_voice_model_facets::serve_VoiceDeskFacet(t, reg, method, a),
+            Obj::HostTtsApi(t) => g_iyakki_voice_model_hosttts::serve_HostTtsApi(t, reg, method, a),
             Obj::ServicesHandle(t) => crate::gen_services::serve_services(t, reg, method, a),
             Obj::Served(s) => s.serve(reg, method, a),
         }

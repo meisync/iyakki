@@ -7,7 +7,6 @@ use serde_json::{json, Value};
 use iyakki_agent::study_tools;
 
 use super::learn::*;
-use super::learn_lesson::*;
 use super::tests::cx_with_admin_store;
 use super::{App, AppCx, Flow};
 use crate::gfx::{rgb, Gfx};
@@ -404,7 +403,7 @@ fn an_empty_tile_and_a_tile_with_everything_in_the_first_frame_do_not_panic_at_t
     f.key(Key::Enter);
     f.chr(' ');
     f.chr('c');
-    assert!(matches!(f.app.items().first(), Some(super::learn_ui::Item::Text(t, _)) if t.starts_with("No study plans yet")), "an empty plan list says how to make one");
+    assert!(matches!(f.app.items().first(), Some(iyakki_tile_learn::draw::Item::Text(t, _)) if t.starts_with("No study plans yet")), "an empty plan list says how to make one");
     assert!(f.app.help().len() >= 4 && !f.app.hint().is_empty());
 }
 
@@ -567,7 +566,7 @@ fn the_lesson_is_written_once_saved_with_its_pictures_and_reopened_without_the_m
         assert_eq!(p.how, "drawn by the assistant");
         assert!(f.cx.study().lesson_image(USER, &id, 1, &p.file).unwrap().starts_with(b"<svg"), "{}", p.file);
     }
-    assert!(f.app.pic_cache.rasterised >= 2, "both pictures were drawn on the page");
+    assert!(f.app.pics.lock().unwrap().rasterised >= 2, "both pictures were drawn on the page");
     // leave and come back, and start a brand new tile: nothing is asked of the model, and the lesson is there in the first frame
     f.key(Key::Esc);
     assert_eq!(f.app.page(), "plan");
@@ -580,7 +579,7 @@ fn the_lesson_is_written_once_saved_with_its_pictures_and_reopened_without_the_m
     assert_eq!(g.page(), "lesson");
     let mut gfx = Gfx::new(800, 480);
     g.render(&mut gfx, f.area, 1.0, &f.cx, 1);
-    assert!(g.pic_cache.rasterised >= 2);
+    assert!(g.pics.lock().unwrap().rasterised >= 2);
     assert_eq!(t.calls.load(Ordering::SeqCst), calls, "a saved lesson needs no model, also offline");
     // with the model gone altogether the saved lesson still opens
     *t.fail.lock().unwrap() = Some("offline".into());
@@ -790,9 +789,9 @@ fn reading_aloud_uses_the_tales_reader_and_says_plainly_when_no_voice_is_set_up(
     f.chr('r');
     f.draw();
     let (msg, ok) = f.app.msg.clone().expect("a message");
-    assert!(!ok && !msg.is_empty() && !f.app.reading(), "{msg}");
+    assert!(!ok && !msg.is_empty() && !f.app.reading(&f.cx), "{msg}");
     let played = Arc::new(AtomicUsize::new(0));
-    f.app.test_voice = Some((Arc::new(Beep), Arc::new(Mute(played.clone()))));
+    *f.app.voice.test_voice.lock().unwrap() = Some((Arc::new(Beep), Arc::new(Mute(played.clone()))));
     f.ev(Event::Tab(T_L_READ));
     let __wall = std::time::Instant::now();
     while __wall.elapsed() < std::time::Duration::from_secs(30) {

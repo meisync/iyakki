@@ -1,0 +1,12 @@
+[package]
+name = "iyakki-serde-static"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reading a &static str from the wire: each distinct word interned once (the UI socket, cluster kinds, scope names). iyakki_shared::serde_static re-exports it."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

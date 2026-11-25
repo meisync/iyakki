@@ -48,7 +48,7 @@ fn build_sh_builds_the_program_without_the_shell_and_refuses_what_a_headless_ima
     assert!(b.contains("--no-default-features --features headless") && b.contains("CARGO_TARGET_DIR=\"$ROOT/target/headless\""));
     assert!(b.contains("IYAKKI_BIN=\"$ROOT/target/headless/$RUST_TARGET/$PROFILE/iyakki\""));
     // the variant is one of the words the script takes
-    assert!(b.lines().next().is_some() && b.contains("headless]"), "the usage line names the variant");
+    assert!(b.lines().take(3).any(|l| l.contains("headless")), "the usage line names the variant");
 }
 
 #[test]

@@ -1,10 +1,10 @@
 //! The Drivers chip of the STORE tile: "Drivers for this machine" (found from the DMI product name and the PCI and USB
 //! ids), the state of each, and a button per item: Install (from the catalog, from a USB stick or folder, or by extracting
 //! the camera firmware from a file the person supplies), Remove, Why. It only draws and reports what was asked
-//! (`Out`); the store tile does the installing through the normal review (`iyakki_agent::store::drivers`, docs/MAC-HARDWARE.md).
+//! (`Out`); the store tile does the installing through the normal review (the pack side, docs/MAC-HARDWARE.md).
 
 use crate::safeclamp::SafeClamp;
-use iyakki_core_api::drivers::{known, Availability, Delivery, Drivers, Status};
+use iyakki_tile_store::drivers::{Availability, Delivery, DriversView, KnownInfo, Status};
 
 use super::ScrollLog;
 use crate::fx;
@@ -40,7 +40,11 @@ pub struct DriverRow {
     pub title: String,
     pub summary: String,
     pub availability: Option<Availability>,
+    /// The words of the availability (the drivers catalogue's own label).
+    pub availability_word: String,
     pub status: Option<Status>,
+    /// The words of the status (the drivers catalogue's own label).
+    pub status_word: String,
     pub detail: String,
     pub installed: bool,
     pub off: bool,
@@ -95,24 +99,27 @@ fn availability_color(a: Availability) -> [u8; 4] {
 
 impl Pane {
     /// Read the machine and the installed packs again.
-    pub fn refresh(&mut self, d: &dyn Drivers) {
+    pub fn refresh(&mut self, d: &dyn DriversView) {
         let m = d.machine();
         self.machine = if m.product.is_empty() { "this machine (no DMI information)".into() } else { format!("{} {}", m.vendor, m.product).trim().to_string() };
         let installed = d.installed();
+        let notice = d.facetime_notice();
         let mut rows: Vec<DriverRow> = Vec::new();
         for r in d.rows() {
             let rec = installed.iter().find(|i| i.id == r.known.id);
             rows.push(DriverRow {
-                id: r.known.id.into(),
-                title: r.known.title.into(),
-                summary: r.known.summary.into(),
+                id: r.known.id.clone(),
+                title: r.known.title.clone(),
+                summary: r.known.summary.clone(),
                 availability: Some(r.known.availability),
+                availability_word: r.known.availability_word.clone(),
                 status: Some(r.status),
+                status_word: r.status_word.clone(),
                 detail: r.detail.clone(),
                 installed: rec.is_some(),
                 off: rec.is_some_and(|i| d.is_disabled(&i.id)),
                 delivery: r.known.delivery,
-                why: why_lines(Some(r.known), &r.devices, rec.map(|i| i.cmdline.clone()).unwrap_or_default()),
+                why: why_lines(Some(&r.known), &notice, &r.devices, rec.map(|i| i.cmdline.clone()).unwrap_or_default()),
             });
         }
         // packs that are installed but no entry applies here (another catalog's pack, or a pack for another machine)
@@ -123,7 +130,9 @@ impl Pane {
                 title: rec.id.clone(),
                 summary: rec.why.chars().take(140).collect(),
                 availability: None,
+                availability_word: String::new(),
                 status: None,
+                status_word: String::new(),
                 detail: format!("installed from {}", rec.source),
                 installed: true,
                 off: d.is_disabled(&rec.id),
@@ -146,7 +155,7 @@ impl Pane {
         self.text.clear();
         self.text.push(r.title.clone(), TEXT);
         if let Some(a) = r.availability {
-            self.text.push(format!("{} · {}", a.label(), r.status.map_or(String::new(), |s| s.label().to_string())), availability_color(a));
+            self.text.push(format!("{} · {}", r.availability_word, r.status_word), availability_color(a));
         }
         self.text.push("", TEXT);
         for l in &r.why {
@@ -251,7 +260,7 @@ impl Pane {
         g.text(tx, r.y + 7.0 * s, 16.0 * s, TEXT, &title, Face::Bold);
         let mut bx = tx + tw + 10.0 * s;
         if let Some(st) = row.status {
-            let l = st.label();
+            let l = row.status_word.as_str();
             if bx + g.text_width(12.0 * s, l, Face::Bold) + 17.0 * s < tx + room {
                 bx += fx::chip(g, bx, r.y + 6.0 * s, s, l, status_color(st), false) + 6.0 * s;
             }
@@ -263,7 +272,7 @@ impl Pane {
             }
         }
         let sub = match row.availability {
-            Some(a) => format!("{} · {}", a.label(), if row.summary.is_empty() { &row.detail } else { &row.summary }),
+            Some(_) => format!("{} · {}", row.availability_word, if row.summary.is_empty() { &row.detail } else { &row.summary }),
             None => row.summary.clone(),
         };
         let line = g.fit(12.0 * s, &sub, Face::Sans, room);
@@ -322,7 +331,7 @@ impl Pane {
     }
 }
 
-fn why_lines(k: Option<&known::Known>, devices: &[String], cmdline: Vec<String>) -> Vec<String> {
+fn why_lines(k: Option<&KnownInfo>, notice: &str, devices: &[String], cmdline: Vec<String>) -> Vec<String> {
     let mut v = Vec::new();
     if let Some(k) = k {
         v.push("WHAT IT IS".to_string());
@@ -341,7 +350,7 @@ fn why_lines(k: Option<&known::Known>, devices: &[String], cmdline: Vec<String>)
         if k.delivery == Delivery::Extract {
             v.push(String::new());
             v.push("APPLE'S LICENCE".into());
-            v.push(iyakki_core_api::drivers::facetime::NOTICE.to_string());
+            v.push(notice.to_string());
         }
         if !devices.is_empty() {
             v.push(String::new());
@@ -350,7 +359,7 @@ fn why_lines(k: Option<&known::Known>, devices: &[String], cmdline: Vec<String>)
         }
         v.push(String::new());
         v.push("STATUS".into());
-        v.push(format!("Standard image: {}.", k.availability.label()));
+        v.push(format!("Standard image: {}.", k.availability_word));
     }
     if !cmdline.is_empty() {
         v.push(String::new());
@@ -360,154 +369,6 @@ fn why_lines(k: Option<&known::Known>, devices: &[String], cmdline: Vec<String>)
     v
 }
 
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use iyakki_agent::store::drivers::Drivers;
-    use iyakki_core_api::device_types::driver_packs::Roots;
-
-    fn fake(tag: &str, product: &str, extra: &[(&str, &str)]) -> Drivers {
-        let root = std::env::temp_dir().join(format!("iyakki-pane-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let mut files = vec![("sys/class/dmi/id/sys_vendor", "Apple Inc.\n"), ("sys/class/dmi/id/product_name", product), ("proc/sys/kernel/osrelease", "6.12.112\n"), ("proc/modules", "btusb 1 0 - Live 0x0\ni915 1 0 - Live 0x0\n")];
-        files.extend_from_slice(extra);
-        for (rel, c) in files {
-            let p = root.join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, c).unwrap();
-        }
-        Drivers::for_data(&root.join("data")).with_roots(Roots { sys: root.join("sys"), proc: root.join("proc") })
-    }
-
-    fn mini(tag: &str) -> Drivers {
-        fake(tag, "Macmini7,1\n", &[("sys/bus/pci/devices/0000:00:02.0/vendor", "0x8086\n"), ("sys/bus/pci/devices/0000:00:02.0/device", "0x0a26\n"), ("sys/bus/pci/devices/0000:03:00.0/vendor", "0x14e4\n"), ("sys/bus/pci/devices/0000:03:00.0/device", "0x43a0\n"), ("sys/bus/usb/devices/1-4/idVendor", "05ac\n"), ("sys/bus/usb/devices/1-4/idProduct", "8289\n"), ("sys/bus/usb/devices/1-4/product", "Bluetooth USB Host Controller\n")])
-    }
-
-    fn draw(p: &mut Pane, w: u32, h: u32) -> Gfx {
-        let s = crate::ui::scale_for(w, h);
-        let mut g = Gfx::new(w, h);
-        g.clear(rgb(9, 11, 20));
-        let hh = 46.0 * s;
-        p.render(&mut g, R::new(0.0, hh, w as f32, h as f32 - hh), s);
-        g
-    }
-
-    const SIZES: [(u32, u32); 4] = [(1280, 720), (1920, 1080), (1024, 600), (800, 480)];
-
-    #[test]
-    fn the_mac_mini_lists_what_applies_with_the_right_buttons_and_nothing_else() {
-        let mut p = Pane::default();
-        p.refresh(&mini("list"));
-        let ids: Vec<&str> = p.rows.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, ["mac-gpu-intel", "mac-wifi-bcm4360", "mac-bt-broadcom", "mac-fan-sensors", "mac-audio-cirrus", "mac-keyboard-options"], "no camera, no T2: {ids:?}");
-        assert!(p.machine.contains("Macmini7,1"));
-        let row = |id: &str| p.rows.iter().find(|r| r.id == id).unwrap().clone();
-        assert!(!row("mac-gpu-intel").can_install() && !row("mac-fan-sensors").can_install(), "information entries have no install button");
-        let wifi = row("mac-wifi-bcm4360");
-        assert!(wifi.can_install() && wifi.install_label() == "From USB…", "the Wi-Fi card takes the signed pack from a USB stick");
-        assert_eq!((wifi.availability, wifi.delivery, wifi.status), (Some(Availability::LocalBuild), Delivery::Folder, Some(Status::NoDriver)));
-        let why = wifi.why.join("\n");
-        for need in ["HOW", "OPTION A", "build-wl-pack.sh --accept-broadcom-licence", "OPTION B", "MT7612U", "AR9271", "OPTION C", "Ethernet", "NON-FREE", "does not ship it", "tainted"] {
-            assert!(why.contains(need), "Why page has {need:?}:\n{why}");
-        }
-        assert_eq!(row("mac-bt-broadcom").install_label(), "From USB…");
-        assert_eq!(row("mac-keyboard-options").install_label(), "Install");
-        assert_eq!(row("mac-bt-broadcom").status, Some(Status::FirmwareMissing));
-        assert!(row("mac-bt-broadcom").why.iter().any(|l| l.contains("hcd")), "{:?}", row("mac-bt-broadcom").why);
-    }
-
-    #[test]
-    fn a_generic_pc_gets_the_empty_state_and_a_macbook_gets_the_camera_with_the_apple_notice_under_why() {
-        let mut p = Pane::default();
-        let pc = {
-            let d = fake("pc", "OptiPlex\n", &[]);
-            // not an Apple vendor: nothing applies
-            let root = d.roots.sys.parent().unwrap().to_path_buf();
-            std::fs::write(root.join("sys/class/dmi/id/sys_vendor"), "Dell Inc.\n").unwrap();
-            d
-        };
-        p.refresh(&pc);
-        assert!(p.rows.is_empty());
-        for (w, h) in SIZES {
-            let g = draw(&mut p, w, h);
-            assert!(g.hits.iter().all(|x| x.rect.x + x.rect.w <= w as f32 + 1.0));
-        }
-        let mbp = fake("mbp", "MacBookPro11,1\n", &[("sys/bus/pci/devices/0000:02:00.0/vendor", "0x14e4\n"), ("sys/bus/pci/devices/0000:02:00.0/device", "0x1570\n")]);
-        p.refresh(&mbp);
-        let cam = p.rows.iter().position(|r| r.id == "mac-facetimehd").expect("camera listed");
-        assert_eq!(p.rows[cam].install_label(), "From file…");
-        p.handle(&Event::Tab(BASE + cam * 4 + ACT_WHY));
-        assert_eq!(p.why, Some(cam));
-        assert!(p.rows[cam].why.iter().any(|l| l.contains("Apple's licence")) || p.rows[cam].why.iter().any(|l| l.contains("Apple's software")));
-    }
-
-    #[test]
-    fn buttons_and_keys_report_what_was_asked_and_why_opens_and_closes() {
-        let mut p = Pane::default();
-        p.refresh(&mini("keys"));
-        let at = |p: &Pane, id: &str| p.rows.iter().position(|r| r.id == id).unwrap();
-        let bt = at(&p, "mac-bt-broadcom");
-        assert_eq!(p.handle(&Event::Tab(BASE + bt * 4 + ACT_INSTALL)), Some(Out::InstallFolder("mac-bt-broadcom".into())));
-        let kb = at(&p, "mac-keyboard-options");
-        assert_eq!(p.handle(&Event::Tab(BASE + kb * 4 + ACT_INSTALL)), Some(Out::InstallBuiltin("mac-keyboard-options".into())));
-        let wifi = at(&p, "mac-wifi-bcm4360");
-        assert_eq!(p.handle(&Event::Tab(BASE + wifi * 4 + ACT_INSTALL)), Some(Out::InstallFolder("mac-wifi-bcm4360".into())));
-        let gpu = at(&p, "mac-gpu-intel");
-        assert!(matches!(p.handle(&Event::Tab(BASE + gpu * 4 + ACT_INSTALL)), Some(Out::Say(m, false)) if m.contains("cannot be installed")));
-        assert!(matches!(p.handle(&Event::Tab(BASE + bt * 4 + ACT_REMOVE)), Some(Out::Say(m, false)) if m.contains("not installed")));
-        // keyboard: select, Why, Esc
-        p.sel = 0;
-        p.handle(&Event::Key(Key::Down));
-        assert_eq!(p.sel, 1);
-        p.handle(&Event::Key(Key::Enter));
-        assert_eq!(p.why, Some(1));
-        assert!(p.wants_escape());
-        p.handle(&Event::Key(Key::Esc));
-        assert!(p.why.is_none() && !p.wants_escape());
-        p.sel = bt;
-        assert_eq!(p.handle(&Event::Key(Key::Char('i'))), Some(Out::InstallFolder("mac-bt-broadcom".into())));
-    }
-
-    #[test]
-    fn rows_why_page_and_buttons_stay_inside_the_screen_and_never_overlap_at_four_sizes() {
-        let mut p = Pane::default();
-        p.refresh(&mini("geo"));
-        for (w, h) in SIZES {
-            let g = draw(&mut p, w, h);
-            for hit in &g.hits {
-                let r = hit.rect;
-                assert!(r.x >= -1.0 && r.y >= -1.0 && r.x + r.w <= w as f32 + 1.0 && r.y + r.h <= h as f32 + 1.0, "{} sticks out {r:?} at {w}x{h}", hit.label);
-            }
-            let rs: Vec<R> = g.hits.iter().filter(|h| matches!(h.ev, Event::Tab(n) if n >= BASE)).map(|h| h.rect).collect();
-            assert!(!rs.is_empty(), "buttons at {w}x{h}");
-            for (i, a) in rs.iter().enumerate() {
-                for b in &rs[i + 1..] {
-                    let apart = a.y + a.h <= b.y + 0.5 || b.y + b.h <= a.y + 0.5 || a.x + a.w <= b.x + 0.5 || b.x + b.w <= a.x + 0.5;
-                    assert!(apart, "buttons overlap at {w}x{h}: {a:?} {b:?}");
-                }
-            }
-            // the Why page
-            let bt = p.rows.iter().position(|r| r.id == "mac-bt-broadcom").unwrap();
-            p.open_why(bt);
-            let g = draw(&mut p, w, h);
-            assert!(g.hits.iter().any(|h| matches!(h.ev, Event::Tab(WHY_BACK))), "Back at {w}x{h}");
-            assert!(g.hits.iter().any(|h| matches!(h.ev, Event::Tab(WHY_INSTALL))), "Install on the Why page at {w}x{h}");
-            for hit in &g.hits {
-                let r = hit.rect;
-                assert!(r.x + r.w <= w as f32 + 1.0 && r.y + r.h <= h as f32 + 1.0, "{} sticks out on the Why page at {w}x{h}", hit.label);
-            }
-            p.why = None;
-            // the Wi-Fi guide is the longest page: it scrolls inside its panel, nothing sticks out
-            let wifi = p.rows.iter().position(|r| r.id == "mac-wifi-bcm4360").unwrap();
-            p.open_why(wifi);
-            let g = draw(&mut p, w, h);
-            assert!(g.hits.iter().any(|h| matches!(h.ev, Event::Tab(WHY_INSTALL))), "From USB on the Wi-Fi page at {w}x{h}");
-            for hit in &g.hits {
-                let r = hit.rect;
-                assert!(r.x >= -1.0 && r.y >= -1.0 && r.x + r.w <= w as f32 + 1.0 && r.y + r.h <= h as f32 + 1.0, "{} sticks out on the Wi-Fi page at {w}x{h}", hit.label);
-            }
-            p.why = None;
-        }
-    }
-}
+#[path = "store_drivers_tests.rs"]
+mod tests;

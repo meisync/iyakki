@@ -104,3 +104,137 @@ impl Negotiated {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compat::UpdateSide;
+    use crate::contract::error::RateLimit;
+    use crate::identity::Capabilities;
+
+    fn dom(name: &str, since_minor: u16, calls: &[&str]) -> DomainSupport {
+        DomainSupport { domain: name.into(), since_minor, calls: calls.iter().map(|c| c.to_string()).collect(), events: vec![] }
+    }
+
+    /// A machine at `major.minor` that still serves minors from `oldest`. It has `settings` (since minor 0) and `flows` (since minor 2).
+    fn machine(major: u16, minor: u16, oldest: u16) -> Hello {
+        Hello {
+            contract: ContractVersion { major, minor },
+            oldest_minor: oldest,
+            machine: "test-machine".into(),
+            build: "test-build".into(),
+            domains: vec![dom("settings", 0, &["get", "set"]), dom("flows", 2, &["start"])],
+            capabilities: Capabilities::none(),
+            rate_limit: RateLimit { calls: 10, per_ms: 1000 },
+            deprecations: vec![],
+        }
+    }
+
+    fn client(major: u16, minor: u16, wants: &[&str]) -> ClientHello {
+        ClientHello { contract: ContractVersion { major, minor }, wants: wants.iter().map(|w| w.to_string()).collect() }
+    }
+
+    #[test]
+    fn a_client_on_the_same_minor_agrees_on_it_and_every_wanted_domain_is_usable() {
+        let (m, c) = (machine(0, 3, 1), client(0, 3, &["settings", "flows"]));
+        let n = negotiate(&m, &c);
+        assert_eq!(n.version, Some(ContractVersion { major: 0, minor: 3 }));
+        assert_eq!(n.usable, ["settings", "flows"]);
+        assert!(n.missing.is_empty());
+        assert_eq!(n.update, None);
+        assert_eq!(n.say(&m, &c), None, "nothing to say when all is well");
+    }
+
+    #[test]
+    fn an_older_client_that_the_machine_still_serves_gets_the_lower_minor() {
+        let (m, c) = (machine(0, 3, 1), client(0, 2, &["settings", "flows"]));
+        let n = negotiate(&m, &c);
+        assert_eq!(n.version, Some(ContractVersion { major: 0, minor: 2 }));
+        assert_eq!(n.usable, ["settings", "flows"], "flows arrived in minor 2, which the agreed minor includes");
+        assert_eq!(n.update, None);
+    }
+
+    #[test]
+    fn a_client_at_exactly_the_oldest_served_minor_is_still_served() {
+        let n = negotiate(&machine(0, 3, 2), &client(0, 2, &[]));
+        assert_eq!(n.version, Some(ContractVersion { major: 0, minor: 2 }));
+        assert_eq!(n.update, None);
+    }
+
+    #[test]
+    fn a_client_one_below_the_oldest_served_minor_gets_no_calls_and_the_client_must_update() {
+        let (m, c) = (machine(0, 3, 2), client(0, 1, &["settings"]));
+        let n = negotiate(&m, &c);
+        assert_eq!(n.version, None);
+        assert!(n.usable.is_empty());
+        assert_eq!(n.missing, ["settings"]);
+        assert_eq!(n.update, Some(UpdateSide::Client));
+        assert_eq!(n.say(&m, &c).as_deref(), Some("this machine speaks contract 0.3 (from 0.2); the client speaks 0.1: update the client"));
+    }
+
+    #[test]
+    fn an_older_major_version_gets_no_calls_and_the_client_updates() {
+        let n = negotiate(&machine(1, 0, 0), &client(0, 9, &[]));
+        assert_eq!(n.version, None);
+        assert_eq!(n.update, Some(UpdateSide::Client));
+    }
+
+    #[test]
+    fn a_newer_major_version_on_the_client_means_the_machine_must_update() {
+        let n = negotiate(&machine(0, 3, 0), &client(1, 0, &[]));
+        assert_eq!(n.version, None);
+        assert_eq!(n.update, Some(UpdateSide::Machine));
+    }
+
+    #[test]
+    fn a_domain_added_in_a_later_minor_is_missing_even_though_the_machine_has_it() {
+        let (m, c) = (machine(0, 3, 1), client(0, 1, &["flows"]));
+        let n = negotiate(&m, &c);
+        assert_eq!(n.version, Some(ContractVersion { major: 0, minor: 1 }));
+        assert!(n.usable.is_empty());
+        assert_eq!(n.missing, ["flows"]);
+        assert_eq!(n.update, None, "the client is not newer than the machine, so the client simply hides the screen");
+    }
+
+    #[test]
+    fn a_domain_the_machine_does_not_have_is_missing_and_its_screen_is_hidden_not_failed() {
+        let (m, c) = (machine(0, 3, 1), client(0, 3, &["camera", "flows"]));
+        let n = negotiate(&m, &c);
+        assert_eq!(n.usable, ["flows"]);
+        assert_eq!(n.missing, ["camera"]);
+        assert_eq!(n.update, None);
+    }
+
+    #[test]
+    fn a_newer_client_that_wants_a_domain_the_machine_lacks_means_the_machine_must_update() {
+        let (m, c) = (machine(0, 3, 1), client(0, 4, &["future"]));
+        let n = negotiate(&m, &c);
+        assert_eq!(n.version, Some(ContractVersion { major: 0, minor: 3 }), "the agreed minor is the lower of the two");
+        assert_eq!(n.missing, ["future"]);
+        assert_eq!(n.update, Some(UpdateSide::Machine));
+        assert_eq!(n.say(&m, &c).as_deref(), Some("this machine speaks contract 0.3; the client speaks 0.4: update this machine to use future"));
+    }
+
+    #[test]
+    fn usable_domains_keep_the_order_the_client_asked_for() {
+        let n = negotiate(&machine(0, 3, 0), &client(0, 3, &["flows", "settings"]));
+        assert_eq!(n.usable, ["flows", "settings"]);
+    }
+
+    #[test]
+    fn a_machine_says_which_domains_it_supports_by_domain_and_call_name() {
+        let m = machine(0, 3, 0);
+        assert!(m.supports("settings", "get"));
+        assert!(!m.supports("settings", "delete"), "an unknown call is not supported");
+        assert!(!m.supports("camera", "get"), "an unknown domain is not supported");
+        assert!(!m.supports("flows", "get"), "a call must belong to that domain");
+    }
+
+    #[test]
+    fn a_machine_says_whether_it_has_a_domain_by_exact_name() {
+        let m = machine(0, 3, 0);
+        assert!(m.has_domain("flows"));
+        assert!(!m.has_domain("Flows"), "names are case sensitive");
+        assert!(!m.has_domain("flow"));
+    }
+}

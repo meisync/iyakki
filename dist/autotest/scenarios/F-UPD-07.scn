@@ -1,0 +1,19 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 63ec8e14112bfddf; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-UPD-07
+targets: qemu
+profile: ram
+feature-sha: 63ec8e14112bfddf
+doc: Settings, System update offers Roll back (read only)
+clause: 1 Settings, System update offers Roll back and says what it keeps
+not-covered: the check after a start that decides a roll back
+not-covered: the fall-back entry in the boot menu
+not-covered: a roll back with a kept version (nothing is kept in a scratch guest)
+key s
+wait app=Settings
+skip-unless-button System update
+click-sidebar System update
+wait app=Settings page="System update"
+shot page
+expect-not-blank
+expect-text Roll back
+expect-page System update

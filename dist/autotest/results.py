@@ -2,6 +2,7 @@
 
 Pure code, standard library only. The runner writes these, the evidence enforcer (evidence.py) and the checklist read them.
 """
+import fcntl
 import hashlib
 import json
 import os
@@ -10,7 +11,7 @@ import time
 
 STATUSES = ("PASS", "FAIL", "SKIP", "BLOCKED", "NOT-APPLICABLE", "NEEDS-HUMAN", "NEW-GOLDEN")
 TARGETS = ("qemu", "browser", "real")
-ROW_RE = re.compile(r"^F-[A-Z0-9]+-\d+$")
+ROW_RE = re.compile(r"^F-[A-Z0-9]+-\d+[a-z]?$")
 FIELDS = ("row", "level", "scenario", "commit", "image", "image_commit_source", "run_id", "target", "device", "status", "rung_claim", "evidence", "covered",
           "not_covered", "clauses_attested", "needs_human", "ran_at", "flaky", "reason")
 
@@ -96,3 +97,18 @@ def load_results(root):
             except (OSError, ValueError):
                 skipped.append(p)
     return out, skipped
+
+
+def gate_lock_held(path=None):
+    """True while the release gate holds its lock (it takes an flock on this file for the whole run). The file stays on disk after a run, so its existence says nothing: only a
+    lock that cannot be taken says the gate is running (Q1, 2026-11-21: the two update scripts refused every run on the existing, unlocked file)."""
+    path = path or os.environ.get("IYAKKI_GREEN_LOCK") or os.path.join(os.path.expanduser("~"), "iyakki-work", ".release-green.lock")
+    if not os.path.exists(path):
+        return False
+    with open(path, "a") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    return False

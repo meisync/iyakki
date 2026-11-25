@@ -76,14 +76,31 @@ pub(super) fn bundle_inputs(cx: &AppCx, found: &[doctor::Finding]) -> iyakki_sha
 
 /// The bundled manual-test checklists (`*.chk`, sorted by name) as (file name, text). A folder that is not there is an empty list.
 pub(super) fn manual_files(dir: &Path) -> Vec<(String, String)> {
-    let mut names: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".chk")).collect();
+    manual_files_ext(dir, ".chk")
+}
+
+/// The files of `dir` that end in `ext`, sorted by name, as (file name, text).
+pub(super) fn manual_files_ext(dir: &Path, ext: &str) -> Vec<(String, String)> {
+    let mut names: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(ext)).collect();
     names.sort();
     names.into_iter().filter_map(|n| std::fs::read_to_string(dir.join(&n)).ok().map(|t| (n, t))).collect()
 }
 
-/// Who answers the checklists and on which machine: the signed-in person, the machine's own name and the image's commit.
+/// An example screenshot: a plain relative path inside `dir` (no `..`, no link out of it), a regular file of at most 4 MB.
+pub(super) fn manual_shot(dir: &Path, rel: &str) -> Option<Vec<u8>> {
+    if !iyakki_shared::manualtest::rel_ok(rel) {
+        return None;
+    }
+    let root = std::fs::canonicalize(dir).ok()?;
+    let full = std::fs::canonicalize(root.join(rel)).ok()?;
+    if !full.starts_with(&root) || !std::fs::metadata(&full).ok()?.is_file() || std::fs::metadata(&full).ok()?.len() > 4 << 20 {
+        return None;
+    }
+    std::fs::read(full).ok()
+}
+
+/// Who answers the checklists and on which machine: the signed-in person, an empty machine (the tab reads the person's own pick from the home folder; the hardware is never turned into a name here) and the image's commit.
 pub(super) fn manual_who(cx: &AppCx) -> iyakki_shared::manualtest::Who {
     let rel = iyakki_shared::relinfo::ReleaseInfo::load(Path::new(iyakki_shared::relinfo::RELEASE_FILE));
-    let machine = std::fs::read_to_string("/etc/hostname").map(|h| h.trim().to_string()).ok().filter(|h| !h.is_empty()).unwrap_or_else(|| "this-computer".into());
-    iyakki_shared::manualtest::Who { who: cx.session.user.clone(), admin: cx.session.policy.manage_settings, machine, image_commit: rel.map(|r| r.git_describe).unwrap_or_default() }
+    iyakki_shared::manualtest::Who { who: cx.session.user.clone(), admin: cx.session.policy.manage_settings, machine: String::new(), image_commit: rel.map(|r| r.git_describe).unwrap_or_default() }
 }

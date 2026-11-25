@@ -1,0 +1,34 @@
+{
+ "schema": 1,
+ "row": "F-PDF-15",
+ "feature_sha": "7c8c913ff1bc2165",
+ "title": "PDF writer: shaped scripts and right-to-left",
+ "clauses": [
+  {
+   "id": "indic-thai-shaped",
+   "text": "Devanagari, Tamil and Thai text in a PDF is drawn correctly: conjuncts, vowel signs and tone marks sit in the right places.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant to make a PDF (pdf_create) with one short Hindi paragraph in Devanagari, one short Tamil paragraph and one short Thai paragraph. Open it in a PDF viewer.",
+     "expect": "Devanagari conjuncts are joined as written, Tamil vowel signs sit around their letters and Thai tone marks are above the right letters. No boxes or question marks in the body text."
+    }
+   ]
+  },
+  {
+   "id": "hebrew-arabic-order",
+   "text": "Hebrew and Arabic lines in a PDF read right to left in the right order.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant to make a PDF with one Arabic line and one Hebrew line. Open it in a PDF viewer.",
+     "expect": "Each line reads from right to left in the right order, with the letters joined and no boxes."
+    }
+   ]
+  }
+ ]
+}

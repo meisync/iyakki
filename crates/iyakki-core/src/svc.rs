@@ -173,7 +173,7 @@ impl ServiceEnv {
         services.clis.export_path();
         services.clis.set_detect_present(true);
         services.set_streamer(Arc::new(UreqStreamer::default()));
-        services.set_chat_streamer(Arc::new(UreqStreamer::with_response_timeout(Duration::from_secs(600))));
+        services.set_chat_streamer(iyakki_proxy::https::chat_streamer(Duration::from_secs(600)));
         if let Ok(st) = services.settings.lock() {
             iyakki_agent::clock::set_chosen_zone(&st.get().time.zone);
         }

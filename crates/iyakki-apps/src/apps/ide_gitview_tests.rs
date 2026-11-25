@@ -9,7 +9,7 @@ use crate::apps::git_tile::GitApp;
 use crate::apps::git_tile::Rig;
 use iyakki_agent::gitjobs::Tools;
 use crate::apps::ide_gitview::{GitTabView, Sub, GIT, NOT_A_REPO, NO_CHANGES};
-use iyakki_shared::gitconn::{FakeGitHttp, Kind};
+use iyakki_git_model::gitconn::{FakeGitHttp, Kind};
 use iyakki_shared::k8sretry::FakeTimer;
 use iyakki_shared::wsexec::FakeRunner;
 use serde_json::json;
@@ -300,8 +300,8 @@ fn host() -> Arc<FakeGitHttp> {
     h
 }
 
-fn connect(w: &World, v: &mut GitTabView, name: &str, url: &str) -> iyakki_shared::gitconn::Connection {
-    let c = v.app.conns(&w.cx).add(iyakki_shared::gitconn::Connection { name: name.into(), kind: Kind::Gitea, url: url.into(), account: "octo".into(), ..Default::default() }, Some(TOK)).unwrap();
+fn connect(w: &World, v: &mut GitTabView, name: &str, url: &str) -> iyakki_git_model::gitconn::Connection {
+    let c = v.app.conns(&w.cx).add(iyakki_git_model::gitconn::Connection { name: name.into(), kind: Kind::Gitea, url: url.into(), account: "octo".into(), ..Default::default() }, Some(TOK)).unwrap();
     v.app.refresh_entries(&w.cx);
     c
 }

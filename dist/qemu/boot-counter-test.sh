@@ -20,6 +20,13 @@ STICK="$OUT/images/iyakki-install-x86_64.img"
 IMG="$WORK/stick.img"; cp --sparse=always "$STICK" "$IMG"
 OFF=$(sfdisk -d "$IMG" | sed -n 's/^[^ ]*1 *: *start= *\([0-9]*\),.*/\1/p' | head -1); [ -n "$OFF" ] || fail "no boot partition on the stick image"
 V="$IMG@@$((OFF * 512))"
+# GRUB_CORE=FILE: a BIOS GRUB core (grub.img from `dist/buildroot/grub-refresh.sh DONOR OUTDIR`) is written into the copy where genimage puts it (sector 1) before the run. A stick whose own GRUB
+# was made before `loadenv` was in the module lists (any image repacked from a donor older than 2026-11-14) fails at start 1 with "can't find command `load_env'"; Q6.
+if [ -n "${GRUB_CORE:-}" ]; then
+  [ -f "$GRUB_CORE" ] || fail "no $GRUB_CORE"
+  dd if="$GRUB_CORE" of="$IMG" bs=512 seek=1 conv=notrunc 2>/dev/null || fail "cannot write the GRUB core"
+  echo "note: the stick copy now starts the BIOS GRUB core $GRUB_CORE"
+fi
 # GRUB can only run load_env and save_env when its `loadenv` module is in the image (the boot partition carries no module folder). Run as built, this test shows whether the
 # BUILT image's GRUB (BIOS, from the boot sector) has it. GRUB_FROM_DEFCONFIG=1 instead makes a UEFI GRUB with the HOST's grub-mkimage and the module list that
 # dist/buildroot/configs/iyakki_x86_64_defconfig asks for (BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI), puts it on the stick copy as EFI/BOOT/BOOTX64.EFI and boots it in OVMF: this checks
@@ -73,7 +80,7 @@ start() { # label expected-entry(normal|previous) expected-counter-after firmwar
     previous) echo "$line" | grep -aq "iyakki.entry=previous" || fail "$1: the normal entry started, the previous-version entry was expected" ;;
   esac
   got=$(trial)
-  [ "$got" = "$3" ] || fail "$1: the counter in grubenv is '$got', expected '$3'"
+  [ "$got" = "$3" ] || fail "$1: the counter in grubenv is '$got', expected '$3' (a counter that never steps means GRUB did not run the guard: its core has no loadenv module, \"can't find command \`load_env'\"; see GRUB_CORE in the header)"
   echo "ok: $1: GRUB started the $2 entry in ${t} s and the counter is $got (firmware $4)"
 }
 run_all() { # firmware

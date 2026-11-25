@@ -4,6 +4,7 @@
 //! kind of setting whether it stays per computer or is shared by all, copy another computer's settings here, reset this computer's
 //! settings, or forget another computer. The three changes that replace settings ask first.
 
+use super::system_port::ComputerPort;
 use super::*;
 use iyakki_shared::hwprofile::Category;
 
@@ -57,8 +58,8 @@ fn date(t: i64) -> String {
 }
 
 impl SettingsApp {
-    fn comp_get(cx: &AppCx) -> Option<iyakki_agent_api::ComputerPage> {
-        cx.b3().computer_page()
+    fn comp_get(p: &dyn ComputerPort) -> Option<iyakki_agent_api::ComputerPage> {
+        p.computer_page()
     }
 
     pub(super) fn computer_buttons(&self) -> Vec<Btn> {
@@ -70,9 +71,9 @@ impl SettingsApp {
         c.others()
     }
 
-    pub(super) fn handle_computer(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_computer(&mut self, k: &Key, p: &dyn ComputerPort) {
         let Key::Char(ch) = k else { return };
-        if !"sdkmgpcrfebnvw".contains(*ch) || !self.admin(cx) {
+        if !"sdkmgpcrfebnvw".contains(*ch) || !self.admin(p) {
             return;
         }
         // the startup disk keys work without a per-computer profile folder
@@ -82,7 +83,7 @@ impl SettingsApp {
             'n' => Some((CompAct::StartNext, "Start IYAKKI at the next restart only? The firmware's one-time next boot is set to IYAKKI; the boot order does not change.")),
             'v' => Some((CompAct::StartRevert, "Put the earlier boot order back and cancel a pending one-time start? IYAKKI's entry stays in the boot menu.")),
             'w' => {
-                let on = !Self::svc(cx).startup_reboot_into_iyakki();
+                let on = !p.reboot_into_iyakki();
                 Some((CompAct::RebootInto(on), if on { "Switch on \"Restart into IYAKKI\"? A restart asked through `iyakki dev reboot` then sets the firmware's one-time next boot to IYAKKI first, so a dual-boot computer does not start the other system." } else { "Switch off \"Restart into IYAKKI\"? A restart through `iyakki dev reboot` is left to the firmware's own order." }))
             }
             _ => None,
@@ -91,12 +92,12 @@ impl SettingsApp {
             self.modal = Some(Modal::Confirm(ConfirmKind::Computer(act), text.to_string()));
             return;
         }
-        let Some(c) = Self::comp_get(cx) else { return self.fail("This install keeps no per-computer settings here.") };
+        let Some(c) = Self::comp_get(p) else { return self.fail("This install keeps no per-computer settings here.") };
         if let Some((cat, _)) = KEYS.iter().find(|(_, key)| key == ch) {
             let shared = c.shared.contains(cat);
-            match cx.b3().computer_set_sharing(*cat, !shared) {
+            match p.computer_set_sharing(*cat, !shared) {
                 Ok(m) => {
-                    cx.audit.record(&cx.session.user, "settings.computer.sharing", &format!("{}={}", cat.key(), !shared));
+                    p.audit("settings.computer.sharing", &format!("{}={}", cat.key(), !shared));
                     self.ok(m)
                 }
                 Err(e) => self.fail(e),
@@ -119,8 +120,8 @@ impl SettingsApp {
     }
 
     /// A computer was picked from the list: ask before copying from it or forgetting it.
-    pub(super) fn computer_pick(&mut self, cx: &AppCx, kind: CompPick, item: &str) {
-        let Some(c) = Self::comp_get(cx) else { return };
+    pub(super) fn computer_pick(&mut self, p: &dyn ComputerPort, kind: CompPick, item: &str) {
+        let Some(c) = Self::comp_get(p) else { return };
         let Some(id) = item.rsplit_once(" (").map(|(_, r)| r.trim_end_matches(')').to_string()) else { return };
         let Some((_, p_label)) = Self::comp_others(&c).into_iter().find(|(pid, _)| *pid == id) else { return };
         let (act, text) = match kind {
@@ -130,23 +131,21 @@ impl SettingsApp {
         self.modal = Some(Modal::Confirm(ConfirmKind::Computer(act), text));
     }
 
-    pub(super) fn computer_confirm(&mut self, cx: &AppCx, act: CompAct) {
-        if !self.admin(cx) {
+    pub(super) fn computer_confirm(&mut self, p: &dyn ComputerPort, act: CompAct) {
+        if !self.admin(p) {
             return;
         }
-        let svc = Self::svc(cx);
-        // the firmware is the core's: the handle checks the administrator again and the capability behind `cx.os`
-        let sd = cx.os.startup_disk();
-        let apply = |a: iyakki_core_api::startupdisk::StartupAction| sd.apply(a, true);
+        // the firmware is the core's: the handle checks the administrator again and the capability behind the core
+        let apply = |a: iyakki_core_api::startupdisk::StartupAction| p.startup_apply(a);
         let r = match &act {
-            CompAct::Copy(id) => cx.b3().computer_copy_from(id),
-            CompAct::Reset => cx.b3().computer_reset(),
-            CompAct::Forget(id) => cx.b3().computer_forget(id),
+            CompAct::Copy(id) => p.computer_copy_from(id),
+            CompAct::Reset => p.computer_reset(),
+            CompAct::Forget(id) => p.computer_forget(id),
             CompAct::StartRegister => apply(iyakki_core_api::startupdisk::StartupAction::Register),
             CompAct::StartFirst => apply(iyakki_core_api::startupdisk::StartupAction::First),
             CompAct::StartNext => apply(iyakki_core_api::startupdisk::StartupAction::Next),
             CompAct::StartRevert => apply(iyakki_core_api::startupdisk::StartupAction::Revert),
-            CompAct::RebootInto(on) => svc.set_startup_reboot_into_iyakki(*on).map(|()| if *on { "Restarts through `iyakki dev reboot` now start IYAKKI once.".to_string() } else { "Restarts through `iyakki dev reboot` are left to the firmware's own order.".to_string() }),
+            CompAct::RebootInto(on) => p.set_reboot_into_iyakki(*on).map(|()| if *on { "Restarts through `iyakki dev reboot` now start IYAKKI once.".to_string() } else { "Restarts through `iyakki dev reboot` are left to the firmware's own order.".to_string() }),
         };
         let what = match &act {
             CompAct::StartRegister => "startup disk: register".to_string(),
@@ -158,15 +157,15 @@ impl SettingsApp {
             CompAct::Reset => "reset".to_string(),
             CompAct::Forget(id) => format!("forget {id}"),
         };
-        cx.audit.record(&cx.session.user, "settings.computer", &what);
+        p.audit("settings.computer", &what);
         match r {
             Ok(m) => self.ok(m),
             Err(e) => self.fail(e),
         }
     }
 
-    pub(super) fn render_computer(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let Some(c) = Self::comp_get(cx) else {
+    pub(super) fn render_computer(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn ComputerPort) {
+        let Some(c) = Self::comp_get(p) else {
             let mut y = a.y + heading(g, a, a.y, s, "This computer");
             for l in g.wrap(15.0 * s, "No per-computer settings are kept here (a cloud instance, or the profile folder could not be opened).", Face::Sans, a.w) {
                 g.text(a.x, y, 15.0 * s, MUTED, &l, Face::Sans);
@@ -174,7 +173,7 @@ impl SettingsApp {
             }
             return;
         };
-        let admin = cx.session.policy.manage_settings;
+        let admin = p.is_admin();
         let limit = a.y + a.h;
         let mut y = a.y + heading(g, a, a.y, s, "This computer");
         let me = c.me_seen;
@@ -225,7 +224,7 @@ impl SettingsApp {
         line(g, &mut y, DIM, 12.5, Face::Sans, "On: this kind of setting is remembered separately for each computer. Off: one value for all of them. Models, voice engines, the store, the firewall, the time zone and accounts always go with you.");
         y += 6.0 * s;
         // the startup disk: what the firmware starts, and the keys that change it (each asks first)
-        let sd_line = cx.os.startup_disk().status_line(Self::svc(cx).startup_reboot_into_iyakki());
+        let sd_line = p.startup_status_line();
         line(g, &mut y, TEXT, 14.0, Face::Bold, "Startup disk");
         line(g, &mut y, MUTED, 13.0, Face::Sans, &sd_line);
         if admin {

@@ -1,0 +1,55 @@
+{
+ "schema": 1,
+ "row": "F-KBD-17",
+ "feature_sha": "8021c7388798763c",
+ "title": "on-screen keyboard for touch screens",
+ "clauses": [
+  {
+   "id": "osk-opens",
+   "text": "the keyboard opens when a text field gets the focus from a finger, not from a mouse, and closes for a physical key",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "On a touch screen, tap a text field with a finger.",
+     "expect": "The keyboard appears at the bottom edge and the field is still visible above it."
+    },
+    {
+     "do": "Click a text field with the mouse, then press a key on the physical keyboard.",
+     "expect": "The mouse click opens nothing, and the physical key closes the keyboard if it was open."
+    }
+   ]
+  },
+  {
+   "id": "osk-keys",
+   "text": "letters, Shift, digits, symbols, space, Enter, backspace and caret keys work and repeat when held",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Type a word with a letter, Shift for one capital, a digit, and a symbol from the second layer. Hold backspace.",
+     "expect": "The letters, capital, digit and symbol are typed, and backspace repeats while held."
+    },
+    {
+     "do": "Tap Shift twice, then type a letter.",
+     "expect": "The letter is typed as a capital until Shift is tapped off, caps lock being the double tap."
+    }
+   ]
+  },
+  {
+   "id": "osk-browser",
+   "text": "a text or password box in a web page of the Browser tile opens the keyboard for a finger",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "In the Browser tile, open a page with a text box and tap the box with a finger, then tap a password box.",
+     "expect": "The keyboard opens for the text box; the password box is typed as a secret field, and a tap elsewhere in the page closes the keyboard."
+    }
+   ]
+  }
+ ]
+}

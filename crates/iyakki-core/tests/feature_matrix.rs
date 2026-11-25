@@ -189,9 +189,9 @@ fn check_matrix(text: &str, root: &Path) -> Vec<String> {
             continue;
         }
         let (id, name, phase, status, pri, prog, manual, tests, notes) = (cells[0], cells[1], cells[2], cells[3], cells[4], cells[5], cells[6], cells[7], cells[8]);
-        let id_ok = id.strip_prefix("F-").and_then(|r| r.rsplit_once('-')).is_some_and(|(area, num)| !area.is_empty() && area.starts_with(|c: char| c.is_ascii_uppercase()) && area.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) && (2..=3).contains(&num.len()) && num.chars().all(|c| c.is_ascii_digit()));
+        let id_ok = id.strip_prefix("F-").and_then(|r| r.rsplit_once('-')).is_some_and(|(area, num)| !area.is_empty() && area.starts_with(|c: char| c.is_ascii_uppercase()) && area.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) && { let digits = num.strip_suffix(|c: char| c.is_ascii_lowercase()).unwrap_or(num); (2..=3).contains(&digits.len()) && digits.chars().all(|c| c.is_ascii_digit()) });
         if !id_ok {
-            problems.push(format!("{at}: bad ID `{id}` (want F-AREA-nn or F-AREA-nnn)"));
+            problems.push(format!("{at}: bad ID `{id}` (want F-AREA-nn, F-AREA-nnn or a sub-row with one lowercase letter after the number, F-AREA-nnna)"));
         }
         if !seen.insert(id.to_string()) {
             problems.push(format!("{at}: duplicate ID {id}"));

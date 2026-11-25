@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-23",
+  "feature_sha": "1d220089c4254655",
+  "title": "Autopilot context and token budget",
+  "clauses": [
+    {
+      "id": "long-run",
+      "text": "A long Autopilot run keeps a small context and checkpoints at its budget",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Start Autopilot on a goal of about 16 steps and watch the step notes.",
+          "expect": "The tokens per step stay about flat. If the budget ends, a checkpoint is written and Resume continues."
+        }
+      ]
+    }
+  ]
+}

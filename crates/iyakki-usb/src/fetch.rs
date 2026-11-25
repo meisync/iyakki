@@ -40,7 +40,7 @@ pub fn url_allowed(url: &str) -> Result<(), String> {
     Err("the address must start with https://".into())
 }
 
-fn open_following(open: Opener, url: &str) -> Result<Head, String> {
+pub(crate) fn open_following(open: Opener, url: &str) -> Result<Head, String> {
     let mut url = url.to_string();
     for _ in 0..6 {
         url_allowed(&url)?;

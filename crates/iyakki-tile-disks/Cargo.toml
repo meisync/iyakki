@@ -1,0 +1,17 @@
+[package]
+name = "iyakki-tile-disks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The DISKS tile (F-DISKS-01..08): drives, mount, eject, unlock and the partition manager. Rule
+# (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit` and on the pure model crate named in
+# tests/data/tile_crate_deps.allow (`iyakki-disks-model`), never on the agent, the core API or the shared crate. The shell hands it a
+# `DisksPort` (the engine as `dyn DiskEngine`, who is signed in, the audit line, the assistant's waiting requests).
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-disks-model = { workspace = true }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

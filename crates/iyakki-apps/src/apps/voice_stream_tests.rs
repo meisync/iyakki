@@ -4,7 +4,7 @@ use iyakki_agent::facets_h::RealServices as _;
 
 use super::*;
 use crate::apps::tests::cx_with_admin_store;
-use crate::apps::voice_mine::T_MINE_STREAM_NO;
+use iyakki_tile_voice::voice_mine::T_MINE_STREAM_NO;
 use iyakki_agent::cloudstream::Verdict;
 
 fn tile(tag: &str, stream: bool) -> (AppCx, VoiceApp) {
@@ -14,7 +14,7 @@ fn tile(tag: &str, stream: bool) -> (AppCx, VoiceApp) {
         s.voice.my_cloud_stream = stream;
     }).unwrap();
     let mut v = VoiceApp::new(&cx);
-    v.mine_tick(&cx);
+    v.mine_tick(&CxPort(&cx));
     (cx, v)
 }
 
@@ -29,28 +29,28 @@ fn with_the_switch_on_a_card_asks_and_only_a_tap_or_a_key_answers_it() {
     let (cx, mut v) = tile("vs-on", true);
     assert!(matches!(cx.services.real().cloud_stream_verdict(), Verdict::Card(_)));
     // a key that is not the answer changes nothing
-    assert!(v.mine_key(&Key::Char('x'), &cx).is_none());
+    assert!(v.mine_key(&Key::Char('x'), &CxPort(&cx)).is_none());
     assert!(matches!(cx.services.real().cloud_stream_verdict(), Verdict::Card(_)));
     // the key
-    assert!(v.mine_key(&Key::Char('y'), &cx).is_some());
+    assert!(v.mine_key(&Key::Char('y'), &CxPort(&cx)).is_some());
     assert_eq!(cx.services.real().cloud_stream_verdict(), Verdict::Allowed);
     // the card does not come back within the session, and muting stops the stream at once
-    v.mine_tick(&cx);
+    v.mine_tick(&CxPort(&cx));
     assert_eq!(cx.services.real().cloud_stream_verdict(), Verdict::Allowed);
     cx.settings().lock().unwrap().update(|s| s.voice.my_muted = true).unwrap();
-    v.mine_tick(&cx);
+    v.mine_tick(&CxPort(&cx));
     assert_eq!(cx.services.real().cloud_stream_verdict(), Verdict::Muted);
     cx.settings().lock().unwrap().update(|s| s.voice.my_muted = false).unwrap();
-    v.mine_tick(&cx);
+    v.mine_tick(&CxPort(&cx));
     assert_eq!(cx.services.real().cloud_stream_verdict(), Verdict::Allowed);
     // off and on again asks again
     cx.settings().lock().unwrap().update(|s| s.voice.my_cloud_stream = false).unwrap();
-    v.mine_tick(&cx);
+    v.mine_tick(&CxPort(&cx));
     assert_eq!(cx.services.real().cloud_stream_verdict(), Verdict::Off);
     cx.settings().lock().unwrap().update(|s| s.voice.my_cloud_stream = true).unwrap();
-    v.mine_tick(&cx);
+    v.mine_tick(&CxPort(&cx));
     assert!(matches!(cx.services.real().cloud_stream_verdict(), Verdict::Card(_)));
     // the tap on "Do not allow" refuses it for the session
-    v.mine_click(T_MINE_STREAM_NO, &cx);
+    v.mine_click(T_MINE_STREAM_NO, &CxPort(&cx));
     assert_eq!(cx.services.real().cloud_stream_verdict(), Verdict::Denied);
 }

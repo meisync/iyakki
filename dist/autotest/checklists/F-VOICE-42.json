@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-42",
+  "feature_sha": "2119e44eb9abac7d",
+  "title": "spoken approvals",
+  "clauses": [
+    {
+      "id": "spoken-yes",
+      "text": "A spoken yes approves an ordinary ask but never a hard ask",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "Turn on spoken approvals (Settings, Voice, key A). Ask the assistant for an ordinary action that asks first, then answer by speaking yes. Then ask for a delete and answer by speaking yes.",
+          "expect": "The ordinary ask is approved by your spoken yes. The delete still needs a button press."
+        }
+      ]
+    }
+  ]
+}

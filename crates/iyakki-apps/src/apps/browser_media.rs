@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use iyakki_webview::proto::media_kind::{CAMERA, DEVICE_LIST, MICROPHONE, SCREEN};
 
-use super::AppCx;
+use super::chat_port::UserData;
 use crate::gfx::{Face, Gfx};
 use crate::ui::{Event, Key, MUTED, R, TEXT};
 
@@ -352,28 +352,28 @@ impl MediaPerms {
     }
 }
 
-fn path(cx: &AppCx) -> PathBuf {
-    cx.data_dir().join(format!("browser-media-{}.json", super::browser_config::who(cx)))
+fn path(cx: &dyn UserData) -> PathBuf {
+    cx.data_root().join(format!("browser-media-{}.json", super::browser_config::who(cx)))
 }
 
 /// Where this person's device choices are kept (`iyakki_shared::browserdev::DevicePrefs`): the default camera and the hidden devices.
-pub fn devprefs_path(cx: &AppCx) -> PathBuf {
-    cx.data_dir().join(format!("browser-devices-{}.json", super::browser_config::who(cx)))
+pub fn devprefs_path(cx: &dyn UserData) -> PathBuf {
+    cx.data_root().join(format!("browser-devices-{}.json", super::browser_config::who(cx)))
 }
 
 /// This person's remembered choices (nothing remembered when the file is missing or damaged).
-pub fn load(cx: &AppCx) -> MediaPerms {
+pub fn load(cx: &dyn UserData) -> MediaPerms {
     super::browser_config::read_checked("browser media choices", &path(cx)).map(|t| MediaPerms::from_json(&t)).unwrap_or_default()
 }
 
-pub fn save(cx: &AppCx, m: &MediaPerms) {
+pub fn save(cx: &dyn UserData, m: &MediaPerms) {
     super::browser_config::write_checked("browser media choices", &path(cx), &m.to_json().to_string());
 }
 
 /// The audit line: host, kind and what happened. Never a picture, a sound or a device name.
-pub fn audit(cx: &AppCx, action: &str, origin: &str, kinds: u8, outcome: &str) {
+pub fn audit(cx: &dyn UserData, action: &str, origin: &str, kinds: u8, outcome: &str) {
     let host = secure_host(origin).or_else(|| iyakki_sec::url_host(origin)).unwrap_or_default();
-    cx.audit.record(&cx.session.user, action, &format!("{host} {} {outcome}", kinds_words(kinds)));
+    cx.record_audit(action, &format!("{host} {} {outcome}", kinds_words(kinds)));
 }
 
 

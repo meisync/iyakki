@@ -238,6 +238,8 @@ pub fn synced() -> bool {
 pub fn spawn_sync_thread(settings: impl Fn() -> (bool, String) + Send + 'static) {
     let _ = std::thread::Builder::new().name("iyakki-ntp".into()).spawn(move || {
         let mut attempt = 0u32;
+        let ev = crate::routeevents::global();
+        let mut seen = ev.count();
         loop {
             let (enabled, custom) = settings();
             if enabled {
@@ -245,7 +247,7 @@ pub fn spawn_sync_thread(settings: impl Fn() -> (bool, String) + Send + 'static)
                 log::info!("clock: {}", st.message);
                 // no answer yet (the network may still be coming up): try again soon, with a growing wait, rather than in four hours
                 if st.last_sync == 0 || st.message.starts_with("Could not") {
-                    std::thread::sleep(retry_delay(attempt));
+                    wait_for_next_round(ev, &mut seen, retry_delay(attempt), &mut attempt);
                     attempt = attempt.saturating_add(1);
                     continue;
                 }
@@ -254,9 +256,19 @@ pub fn spawn_sync_thread(settings: impl Fn() -> (bool, String) + Send + 'static)
                 }
                 attempt = 0;
             }
-            std::thread::sleep(RESYNC_EVERY);
+            wait_for_next_round(ev, &mut seen, RESYNC_EVERY, &mut attempt);
         }
     });
+}
+
+/// Wait `d` before the next round, or less when the way out of the computer returned meanwhile (F-LIFE-19, audit P-10): the clock is set
+/// soon after the network is back, not in four hours. A return starts the retry steps over (`attempt` becomes 0). True when it returned.
+pub(crate) fn wait_for_next_round(ev: &crate::routeevents::RouteEvents, seen: &mut u64, d: Duration, attempt: &mut u32) -> bool {
+    let returned = ev.sleep_unless_returned(seen, d);
+    if returned {
+        *attempt = 0;
+    }
+    returned
 }
 
 #[cfg(test)]
@@ -378,5 +390,20 @@ mod tests {
         assert!(!valid_server("") && !valid_server("a b") && !valid_server("x;rm") && !valid_server("a/b"));
         assert_eq!(servers_for("").len(), 2);
         assert_eq!(servers_for("ntp.example.org"), vec!["ntp.example.org".to_string()]);
+    }
+
+    #[test]
+    fn a_network_that_returns_ends_the_wait_for_the_next_sync_and_starts_the_retry_steps_over() {
+        let ev = crate::routeevents::RouteEvents::new();
+        let mut seen = ev.count();
+        let mut attempt = 3;
+        // nothing came back: the wait ends with its timeout and the retry count stays
+        assert!(!wait_for_next_round(&ev, &mut seen, Duration::ZERO, &mut attempt));
+        assert_eq!(attempt, 3);
+        // the link returned before the wait began: it ends at once, even for a four hour wait
+        ev.announce_return();
+        assert!(wait_for_next_round(&ev, &mut seen, RESYNC_EVERY, &mut attempt));
+        assert_eq!(attempt, 0, "the first retry delay applies again");
+        assert_eq!(retry_delay(attempt), Duration::from_secs(5));
     }
 }

@@ -1,0 +1,60 @@
+{
+ "schema": 1,
+ "row": "F-BOOTARM-03",
+ "feature_sha": "611b4590b29e3976",
+ "title": "KV260 first boot with the IYAKKI boot loader",
+ "clauses": [
+  {
+   "id": "uboot-efi",
+   "text": "the board's U-Boot finds no extlinux.conf and starts EFI/BOOT/BOOTAA64.EFI",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Write iyakki-kv260-loader.img with kv260-write-sd.sh, connect the serial console (115200 8N1) and power on.",
+     "expect": "U-Boot prints that it found efi/boot/bootaa64.efi (not extlinux.conf) and starts it."
+    }
+   ]
+  },
+  {
+   "id": "loader",
+   "text": "the loader reads boot.cfg and starts the kernel",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Read the serial text after the U-Boot lines.",
+     "expect": "Lines boot: loader started, config: /boot.cfg read, state: tree=current tries_left=8, start: iyakki kernel=/Image, then Linux version."
+    }
+   ]
+  },
+  {
+   "id": "system",
+   "text": "the system comes up as on the baseline card",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Check Ethernet, the DisplayPort shell and a USB keyboard as in the baseline guide.",
+     "expect": "Each works as on the baseline card."
+    }
+   ]
+  },
+  {
+   "id": "counter",
+   "text": "the boot-tries counter and the system's confirmation",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Restart three times and read the tries_left lines.",
+     "expect": "Either tries_left is refilled after each good start (the confirmation works through U-Boot) or it falls by one each time (it does not: report it)."
+    }
+   ]
+  }
+ ]
+}

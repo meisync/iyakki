@@ -1,0 +1,36 @@
+{
+ "schema": 1,
+ "row": "F-UPD-30",
+ "feature_sha": "62ad5434b98573ea",
+ "title": "power cut in the middle of a system update",
+ "clauses": [
+  {
+   "id": "power-cut",
+   "text": "a power cut at each step of a system update leaves a machine that starts again by itself, on the saved version when the new one cannot run, and says which",
+   "machines": [
+    "mac-mini-2014",
+    "mac-mini-2018",
+    "lenovo",
+    "hp"
+   ],
+   "steps": [
+    {
+     "do": "Settings, System update: install a pack of the next version, but pull the power while the files are copied to the device (the progress shows the copy). Power on again.",
+     "expect": "The old version starts as before. System update shows the pack again; Install works a second time."
+    },
+    {
+     "do": "Install again. When the card says the files are being written to the boot partition, pull the power. Power on and wait (the machine may restart once by itself).",
+     "expect": "The machine reaches the sign-in screen without anybody choosing a boot entry. System update says the update did not finish, or that the saved version started."
+    },
+    {
+     "do": "Install again to the end and restart. When the screen goes dark in the new version's first start (before the first picture), pull the power. Power on twice.",
+     "expect": "At the latest the second start runs the saved version by itself; System update says the new version fell back."
+    },
+    {
+     "do": "Install again to the end, restart and let the first picture show, then pull the power at once. Power on.",
+     "expect": "The new version or the saved one starts (never a boot loader prompt); the person's files and settings are intact; System update names the version that runs."
+    }
+   ]
+  }
+ ]
+}

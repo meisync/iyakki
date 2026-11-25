@@ -1,0 +1,59 @@
+{
+ "schema": 1,
+ "row": "F-SND-14",
+ "feature_sha": "7044f53e2ac5e8a4",
+ "title": "TALES reading in one long player, no gaps between sentences (manual until automated)",
+ "clauses": [
+  {
+   "id": "sentences-join",
+   "text": "A TALES reading plays its sentences one after another with no cut or gap between them.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Open TALES, choose a story and have it read aloud for at least two minutes. Listen to where one sentence ends and the next begins.",
+     "expect": "Each sentence follows the last without a cut-off word, a click or an audible gap. A short quiet lead-in at the very start is normal."
+    }
+   ]
+  },
+  {
+   "id": "reading-end",
+   "text": "The reading ends cleanly: the last sentence finishes and nothing repeats or restarts.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Let the reading run to its end.",
+     "expect": "The last sentence finishes, then the sound stops. No sentence repeats."
+    }
+   ]
+  },
+  {
+   "id": "breaks-note",
+   "text": "If the reading breaks up inside a sentence under load, the person says where (this part is not known yet).",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Start a reading and, while it plays, run another heavy task (for example a large file copy).",
+     "expect": "Either the reading stays smooth, or each break is noted with the sentence where it happened."
+    }
+   ]
+  }
+ ]
+}

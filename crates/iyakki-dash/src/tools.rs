@@ -130,6 +130,34 @@ impl People for AnyPeople {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
+impl Env {
+    /// An environment for the tests of a screen (the DASH tile's tests run it without the shell): an administrator named `user`, every file under
+    /// `dir`, the scripted upstream `up` answering every source, a vault of `secrets` (name, value), no cluster, the fixed clock `now_ms`, and an audit
+    /// sink whose lines (`kind detail`) are returned.
+    pub fn for_test(user: &str, dir: &Path, up: &Arc<crate::connector::fake::FakeUp>, secrets: &[(&str, &str)], now_ms: i64) -> (Env, Arc<std::sync::Mutex<Vec<String>>>) {
+        let audit: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(vec![]));
+        let (a, names): (Arc<std::sync::Mutex<Vec<String>>>, Vec<String>) = (audit.clone(), secrets.iter().map(|s| s.0.to_string()).collect());
+        let mut deps = crate::connector::fake::deps(up, &[], Arc::new(iyakki_shared::wsexec::FakeRunner::new(&[])));
+        deps.path_ok = Arc::new(|_| true);
+        deps.work_dir = dir.to_path_buf();
+        let env = Env {
+            user: user.into(),
+            policy: iyakki_sec::policy::Role::Admin.template(),
+            data_dir: dir.to_path_buf(),
+            home: dir.join("home"),
+            deps,
+            now_ms: Arc::new(move || now_ms),
+            vault_names: Arc::new(move || names.clone()),
+            vault_set: Arc::new(|_, _| Ok(())),
+            audit: Arc::new(move |k, d| a.lock().unwrap().push(format!("{k} {d}"))),
+            cache: FetchCache::new(),
+            people: Arc::new(AnyPeople),
+        };
+        (env, audit)
+    }
+}
+
 impl Env {
     pub fn from_host<H: DashHost>(host: &Arc<H>, user: &str, policy: &Policy) -> Env {
         let h: Arc<dyn DashHost> = host.clone();

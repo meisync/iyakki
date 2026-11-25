@@ -2,7 +2,7 @@
 //! microphone, one microphone for recorder and dictation, and the picture at four sizes.
 
 use super::*;
-use crate::apps::voice_rec::*;
+use iyakki_tile_voice::voice_rec::*;
 
 fn folder(tag: &str) -> std::path::PathBuf {
     temp_dir(&format!("{tag}-recs")).join("Recordings")
@@ -213,7 +213,7 @@ fn the_recorder_and_dictation_never_hold_the_microphone_together_and_leaving_sav
     assert!(!a.is_recording_to_file() && status(&a).contains("Dictation is using the microphone"), "{}", status(&a));
     assert_eq!(b.recs.started.lock().unwrap().len(), 1, "no second way to open the device");
     key(&mut a, &b.cx, Key::F(3));
-    a.stop_record(&b.cx, false);
+    a.stop_record(&CxPort(&b.cx), false);
     // the recorder first
     key(&mut a, &b.cx, Key::F(4));
     click(&mut a, &b.cx, T_RR_REC);
@@ -223,11 +223,11 @@ fn the_recorder_and_dictation_never_hold_the_microphone_together_and_leaving_sav
     assert_eq!(a.recordings().len(), 1, "and keeps it");
     click(&mut a, &b.cx, T_REC);
     assert!(a.is_recording());
-    a.stop_record(&b.cx, false);
+    a.stop_record(&CxPort(&b.cx), false);
     // the recorder blocks dictation
     key(&mut a, &b.cx, Key::F(4));
     click(&mut a, &b.cx, T_RR_REC);
-    a.start_record(&b.cx);
+    a.start_record(&CxPort(&b.cx));
     assert!(!a.is_recording() && status(&a).contains("recorder is using the microphone"));
     // closing the app ends the recording
     let r = recs(vec![usb()], "x");
@@ -286,7 +286,7 @@ fn record_mode_draws_in_every_state_at_four_sizes_and_every_control_is_on_screen
         for i in 0..12 {
             iyakki_agent::recordings::save(&dir, &format!("A rather long recording name number {i} for the narrow screens"), &speech(), 16_000).unwrap();
         }
-        a.rec_refresh(&b.cx);
+        a.rec_refresh(&CxPort(&b.cx));
         let g = draw(&mut a, &b.cx, w, h);
         inside(&g, w, h, "list");
         for l in ["Play", "Rename", "Delete", "recording"] {

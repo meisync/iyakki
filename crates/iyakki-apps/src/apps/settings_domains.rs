@@ -14,6 +14,7 @@ use iyakki_agent_api::DomainsMgr;
 use iyakki_shared::domains as dom;
 
 use super::*;
+use crate::apps::settings::network_port::NetworkSettingsPort;
 
 type FoundResult = Result<Vec<Found>, String>;
 
@@ -40,16 +41,15 @@ pub(super) enum DomForm {
 }
 
 impl SettingsApp {
-    pub(super) fn dom_mgr(&self, cx: &AppCx) -> Arc<dyn DomainsMgr> {
+    pub(super) fn dom_mgr(&self, p: &dyn NetworkSettingsPort) -> Arc<dyn DomainsMgr> {
         if let Some(m) = &self.dom.mgr {
             return m.clone();
         }
-        let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-        cx.services.domains_facet(&cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d)))
+        p.domains()
     }
 
-    pub(super) fn dom_len(&self, cx: &AppCx) -> usize {
-        self.dom_mgr(cx).routes().len()
+    pub(super) fn dom_len(&self, p: &dyn NetworkSettingsPort) -> usize {
+        self.dom_mgr(p).routes().len()
     }
 
     pub(super) fn dom_buttons(&self) -> Vec<Btn> {
@@ -57,12 +57,12 @@ impl SettingsApp {
     }
 
     /// Looks for the cluster's services in the background (kubectl can be slow), and keeps the listener's checks going while the page is open.
-    pub(super) fn dom_tick(&mut self, cx: &AppCx) {
+    pub(super) fn dom_tick(&mut self, p: &dyn NetworkSettingsPort) {
         if self.tab() != Tab::Domains {
             return;
         }
         if !self.dom.asked {
-            self.dom_look(cx);
+            self.dom_look(p);
         }
         if let Some(rx) = &self.dom.finding {
             if let Ok(r) = rx.try_recv() {
@@ -71,40 +71,40 @@ impl SettingsApp {
             }
         }
         if self.ticks % 40 == 0 {
-            for line in self.dom_mgr(cx).tick() {
+            for line in self.dom_mgr(p).tick() {
                 self.ok(line);
             }
         }
     }
 
-    fn dom_look(&mut self, cx: &AppCx) {
+    fn dom_look(&mut self, p: &dyn NetworkSettingsPort) {
         self.dom.asked = true;
         let (tx, rx) = channel();
-        let m = self.dom_mgr(cx);
+        let m = self.dom_mgr(p);
         std::thread::spawn(move || {
             let _ = tx.send(m.discover());
         });
         self.dom.finding = Some(rx);
     }
 
-    fn dom_row(&self, cx: &AppCx) -> Option<Route> {
-        let rows = self.dom_mgr(cx).routes();
+    fn dom_row(&self, p: &dyn NetworkSettingsPort) -> Option<Route> {
+        let rows = self.dom_mgr(p).routes();
         let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
         rows.into_iter().nth(sel)
     }
 
-    pub(super) fn handle_dom(&mut self, k: &Key, cx: &AppCx) {
-        let mgr = self.dom_mgr(cx);
+    pub(super) fn handle_dom(&mut self, k: &Key, p: &dyn NetworkSettingsPort) {
+        let mgr = self.dom_mgr(p);
         let len = mgr.routes().len();
         match k {
             Key::Up => self.move_sel(-1, len),
             Key::Down => self.move_sel(1, len),
-            Key::Char('a') => self.dom_open_route(cx, None),
-            Key::Char('e') => match self.dom_row(cx) {
-                Some(r) => self.dom_open_route(cx, Some(r)),
+            Key::Char('a') => self.dom_open_route(p, None),
+            Key::Char('e') => match self.dom_row(p) {
+                Some(r) => self.dom_open_route(p, Some(r)),
                 None => self.fail("Choose a route first (Up/Down)."),
             },
-            Key::Char('d') | Key::Delete => match self.dom_row(cx) {
+            Key::Char('d') | Key::Delete => match self.dom_row(p) {
                 Some(r) => self.modal = Some(Modal::Confirm(ConfirmKind::DomainDelete(r.host.clone(), r.path_prefix.clone()), format!("Remove the route {}{}? The listener stops serving the name at once. Certificates stay in your vault.", r.host, r.path_prefix))),
                 None => self.fail("Choose a route first (Up/Down)."),
             },
@@ -138,7 +138,7 @@ impl SettingsApp {
                         .choice("Until", &["No end time", "1 hour", "8 hours", "24 hours"], 0),
                 );
             }
-            Key::Char('t') => match self.dom_row(cx) {
+            Key::Char('t') => match self.dom_row(p) {
                 Some(r) => match mgr.make_trial_cert(&r.host) {
                     Ok(name) => {
                         let mut msg = format!("A self-signed trial certificate \"{name}\" for {} is in your vault. Browsers do not trust it and show a warning.", r.host);
@@ -161,12 +161,12 @@ impl SettingsApp {
                 FormKind::Domains(DomForm::Import),
                 Form::new("Import a certificate you have")
                     .text("Name in the vault", "", "for example: my-store (lower case letters, digits, -)")
-                    .text("Host it is for", self.dom_row(cx).map(|r| r.host).unwrap_or_default().as_str(), "store.example.org")
+                    .text("Host it is for", self.dom_row(p).map(|r| r.host).unwrap_or_default().as_str(), "store.example.org")
                     .path("Certificate file (PEM chain)", "", "/path/to/fullchain.pem", crate::filepicker::PathKind::File, &["pem", "crt", "cer"])
                     .path("Private key file (PEM)", "", "/path/to/privkey.pem", crate::filepicker::PathKind::File, &["pem", "key"]),
             ),
             Key::Char('r') => {
-                self.dom_look(cx);
+                self.dom_look(p);
                 self.ok("Looking at the cluster again.");
             }
             _ => {}
@@ -175,8 +175,8 @@ impl SettingsApp {
 
     // ------------------------------------------------------------------------------------------------ the route form
 
-    fn dom_open_route(&mut self, cx: &AppCx, edit: Option<Route>) {
-        let mgr = self.dom_mgr(cx);
+    fn dom_open_route(&mut self, p: &dyn NetworkSettingsPort, edit: Option<Route>) {
+        let mgr = self.dom_mgr(p);
         let mut sends: Vec<(String, Target, Option<Scheme>, Option<String>)> = vec![("A port on this device (type it below)".into(), Target::Local { port: 0 }, None, None)];
         for Own { label, target, scheme, .. } in mgr.own() {
             sends.push((label, target, Some(scheme), None));
@@ -226,8 +226,8 @@ impl SettingsApp {
         self.open_form(FormKind::Domains(DomForm::Route(edit.map(|r| (r.host, r.path_prefix)))), f);
     }
 
-    pub(super) fn dom_submit(&mut self, cx: &AppCx, kind: &DomForm, form: &mut Form) -> Result<String, String> {
-        let mgr = self.dom_mgr(cx);
+    pub(super) fn dom_submit(&mut self, p: &dyn NetworkSettingsPort, kind: &DomForm, form: &mut Form) -> Result<String, String> {
+        let mgr = self.dom_mgr(p);
         match kind {
             DomForm::Listener => {
                 let port = |i: usize, what: &str| form.value(i).trim().parse::<u16>().map_err(|_| format!("The {what} port is a number from 1 to 65535"));
@@ -288,11 +288,11 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn dom_delete(&mut self, cx: &AppCx, host: &str, path: &str) {
-        match self.dom_mgr(cx).remove_route(host, path) {
+    pub(super) fn dom_delete(&mut self, p: &dyn NetworkSettingsPort, host: &str, path: &str) {
+        match self.dom_mgr(p).remove_route(host, path) {
             Ok(r) => {
                 self.ok(format!("Removed {}{}.", r.host, r.path_prefix));
-                let len = self.dom_len(cx);
+                let len = self.dom_len(p);
                 self.sel[self.tab] = self.sel[self.tab].min(len.saturating_sub(1));
             }
             Err(e) => self.fail(e),
@@ -301,8 +301,8 @@ impl SettingsApp {
 
     // ------------------------------------------------------------------------------------------------ drawing
 
-    pub(super) fn render_dom(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let mgr = self.dom_mgr(cx);
+    pub(super) fn render_dom(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn NetworkSettingsPort) {
+        let mgr = self.dom_mgr(p);
         let rows = mgr.routes();
         let st = mgr.status();
         let mut y = a.y;

@@ -5,6 +5,7 @@
 //! `iyakki_shared::webaccess`. Off by default; every change is audited (`settings.web_access`).
 
 use super::*;
+use crate::apps::settings::network_port::NetworkSettingsPort;
 use iyakki_shared::webaccess as wa;
 
 // the SFTP server's switches, keys and card (F-FILE-06)
@@ -49,23 +50,21 @@ impl SettingsApp {
 
 
     /// Is there an administrator who can sign in with a password?
-    fn remote_has_admin(cx: &AppCx) -> bool {
-        let st = cx.store.lock().unwrap_or_else(|e| e.into_inner());
-        wa::has_admin_password(st.list().iter().map(|u| (u.role == iyakki_sec::policy::Role::Admin, !u.hash.is_empty())))
+    fn remote_has_admin(p: &dyn NetworkSettingsPort) -> bool {
+        p.has_admin_password()
     }
 
-    pub(super) fn remote_set(&mut self, cx: &AppCx, on: bool) {
-        let svc = Self::svc(cx);
-        let port = svc.web_access_port();
-        if on && !Self::remote_has_admin(cx) {
+    pub(super) fn remote_set(&mut self, p: &dyn NetworkSettingsPort, on: bool) {
+        let port = p.web_access_port();
+        if on && !Self::remote_has_admin(p) {
             self.fail("Not switched on: this machine has no administrator account with a password, so nobody could sign in safely. Make one in Settings, Account first.");
             return;
         }
-        match svc.set_web_access(on) {
+        match p.set_web_access(on) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.web_access", &format!("{} (port {port}, HTTPS)", if on { "on" } else { "off" }));
+                p.audit("settings.web_access", &format!("{} (port {port}, HTTPS)", if on { "on" } else { "off" }));
                 if on {
-                    let first = wa::urls(&iyakki_shared::devname::label(cx.data_dir()), &Self::remote_ips(), port).into_iter().next().unwrap_or_default();
+                    let first = wa::urls(&iyakki_shared::devname::label(p.data_root()), &Self::remote_ips(), port).into_iter().next().unwrap_or_default();
                     self.ok(format!("Serving this desktop to browsers: open {first}. {} Press e again to stop.", wa::EXPOSES));
                 } else {
                     self.ok("No longer serving this desktop to browsers: the port is closed within a few seconds and open sessions end.");
@@ -79,8 +78,8 @@ impl SettingsApp {
         wa::local_ips()
     }
 
-    pub(super) fn handle_remote(&mut self, k: &Key, cx: &AppCx) {
-        if self.connect_key(k, cx) || self.sftp_key(k, cx) || self.machine_key(k, cx) {
+    pub(super) fn handle_remote(&mut self, k: &Key, p: &dyn NetworkSettingsPort) {
+        if self.connect_key(k, p) || self.sftp_key(k, p) || self.machine_key(k, p) {
             return;
         }
         match k {
@@ -91,14 +90,14 @@ impl SettingsApp {
             Key::Home => self.remote.scroll = 0.0,
             Key::End => self.remote.scroll = self.remote.max,
             Key::Char('e') | Key::Enter => {
-                if self.admin(cx) {
-                    let on = !Self::svc(cx).web_access_on();
-                    self.remote_set(cx, on);
+                if self.admin(p) {
+                    let on = !p.web_access_on();
+                    self.remote_set(p, on);
                 }
             }
             Key::Char('p') => {
-                if self.admin(cx) {
-                    let cur = Self::svc(cx).web_access_port();
+                if self.admin(p) {
+                    let cur = p.web_access_port();
                     self.open_form(FormKind::Remote(RemoteForm::Port), Form::new("Port for browsers (HTTPS)").text("Port", &cur.to_string(), "8443 (the default); 1024 to 65535"));
                 }
             }
@@ -110,22 +109,20 @@ impl SettingsApp {
         self.remote.scroll = (self.remote.scroll + px).clamp_safe(0.0, self.remote.max);
     }
 
-    pub(super) fn remote_submit(&mut self, cx: &AppCx, _k: &RemoteForm, form: &mut Form) -> Result<String, String> {
-        let svc = Self::svc(cx);
+    pub(super) fn remote_submit(&mut self, p: &dyn NetworkSettingsPort, _k: &RemoteForm, form: &mut Form) -> Result<String, String> {
         let port = wa::parse_port(&form.value(0))?;
-        svc.set_web_access_port(port)?;
-        cx.audit.record(&cx.session.user, "settings.web_access.port", &wa::effective_port(port).to_string());
-        Ok(format!("The port for browsers is {}.{}", wa::effective_port(port), if svc.web_access_on() { " It follows within a few seconds (the listener is opened again)." } else { " It is used when you switch the service on." }))
+        p.set_web_access_port(port)?;
+        p.audit("settings.web_access.port", &wa::effective_port(port).to_string());
+        Ok(format!("The port for browsers is {}.{}", wa::effective_port(port), if p.web_access_on() { " It follows within a few seconds (the listener is opened again)." } else { " It is used when you switch the service on." }))
     }
 
-    pub(super) fn render_remote(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let svc = Self::svc(cx);
-        let on = svc.web_access_on();
+    pub(super) fn render_remote(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn NetworkSettingsPort) {
+        let on = p.web_access_on();
         self.remote.on = on;
-        let port = svc.web_access_port();
-        let st = wa::read_status(cx.data_dir());
+        let port = p.web_access_port();
+        let st = wa::read_status(p.data_root());
         let listening = st.listening;
-        let has_admin = Self::remote_has_admin(cx);
+        let has_admin = Self::remote_has_admin(p);
         let (word, col) = if listening {
             (st.line(on), rgb(255, 196, 94))
         } else if !st.error.is_empty() {
@@ -146,12 +143,12 @@ impl SettingsApp {
         if on || listening {
             lines.push(("Open one of these in the browser of the other computer".into(), 14.0, TEXT, Face::Bold));
             let shown = if st.port != 0 { st.port } else { port };
-            for u in wa::urls(&iyakki_shared::devname::label(cx.data_dir()), &Self::remote_ips(), shown) {
+            for u in wa::urls(&iyakki_shared::devname::label(p.data_root()), &Self::remote_ips(), shown) {
                 lines.push((u, 13.0, ACCENT, Face::Mono));
             }
             lines.push(("The name ends in .local and works on most computers and phones on the same network; if yours cannot find it, use an address.".into(), 12.0, DIM, Face::Sans));
             lines.push(("Certificate fingerprint (SHA-256). The browser warns once, because the certificate is made by this machine; compare this with what it shows before you continue.".into(), 13.0, MUTED, Face::Sans));
-            match cx.agent.devmode().cert_fingerprint(cx.data_dir()) {
+            match p.agent().devmode().cert_fingerprint(p.data_root()) {
                 Some(fp) => {
                     let parts: Vec<&str> = fp.split(':').collect();
                     for chunk in parts.chunks(8) {
@@ -161,13 +158,13 @@ impl SettingsApp {
                 None => lines.push(("(the certificate is being made: look again in a moment)".into(), 13.0, DIM, Face::Sans)),
             }
         }
-        self.sftp_lines(cx, &mut lines);
-        self.machine_lines(cx, &mut lines);
-        let qr_at = self.connect_lines(cx, &mut lines);
+        self.sftp_lines(p, &mut lines);
+        self.machine_lines(p, &mut lines);
+        let qr_at = self.connect_lines(p, &mut lines);
         lines.push(("What this exposes".into(), 14.0, TEXT, Face::Bold));
         lines.push((wa::EXPOSES.into(), 13.0, rgb(255, 196, 94), Face::Sans));
         lines.push(("Turn it off when you are done. The firewall port is opened for the local networks only while it is on, and closed when it is off.".into(), 12.0, DIM, Face::Sans));
-        if !self.admin_now(cx) {
+        if !self.admin_now(p) {
             lines.push(("Only administrators can change this.".into(), 13.0, MUTED, Face::Sans));
         }
         let mut y = a.y - self.remote.scroll;
@@ -195,7 +192,7 @@ impl SettingsApp {
         self.remote.scroll = self.remote.scroll.clamp_safe(0.0, self.remote.max);
     }
 
-    fn admin_now(&self, cx: &AppCx) -> bool {
-        cx.session.policy.manage_settings
+    fn admin_now(&self, p: &dyn NetworkSettingsPort) -> bool {
+        p.is_admin()
     }
 }

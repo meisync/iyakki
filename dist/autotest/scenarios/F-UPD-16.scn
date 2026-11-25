@@ -1,0 +1,11 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 8616871b57eacb4b; honest subset only: everything not checked is under not-covered.
+row: F-UPD-16
+targets: qemu
+profile: ram
+feature-sha: 8616871b57eacb4b
+doc: components-installed.json on the booted image agrees with the running kernel, program and release file
+clause: 1 the installed-components record on the booted image holds facts that agree with the running kernel release, the release file, the program version and the program's hash
+not-covered: written only after a verified apply (needs an update to be applied)
+not-covered: corrected at boot when it was stale (the 30-second boot hook is not made to fire on a stale file)
+not-covered: `components_status` and `store component plan` text
+session-check: components_record

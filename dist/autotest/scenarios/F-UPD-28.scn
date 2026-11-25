@@ -1,0 +1,11 @@
+# autotest alpha.9 (2026-11-21), lane U1. Written against the Feature text with sha ca4acfe58223ff47; honest subset only.
+row: F-UPD-28
+targets: qemu
+profile: ram
+feature-sha: ca4acfe58223ff47
+doc: fault injection of a system update on a copy of the install stick, started by the real GRUB
+clause: 1 the REAL update engine leaves the boot partition in the state a power cut leaves, and the real GRUB starts the machine three times: the entry it chooses each time is the expected one and the kernel starts every time
+not-covered: a power cut on real hardware (checklist F-UPD-30)
+not-covered: the data volume roots and pointers (unit tests)
+not-covered: a signed update over the network
+host-script: dist/qemu/update-faults-test.py

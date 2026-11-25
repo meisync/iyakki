@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-TCFG-11",
+ "feature_sha": "c13f233bd637174c",
+ "title": "team API key is write-only",
+ "clauses": [
+  {
+   "id": "write-only",
+   "text": "a team administrator adds an integration entry, and the key is never shown again after saving",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "As a team administrator, add an integration entry with a name and a key, save, then open the entry again.",
+     "expect": "The key field shows [set] and the key itself is not shown anywhere on the page."
+    }
+   ]
+  }
+ ]
+}

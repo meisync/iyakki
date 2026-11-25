@@ -1,0 +1,10 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 400fd2fb7413f5c4; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-WEBDEV-05
+targets: browser
+feature-sha: 400fd2fb7413f5c4
+doc: Client page Devices panel: only what the machine can serve is offered, camera and microphone off (browser harness)
+clause: 1 the client page offers the person's own camera and microphone only when the machine can serve them and shows the sound, clipboard and camera rows of the Devices panel
+not-covered: the real-click rule (isTrusted) and the non-secure-page refusal
+not-covered: the policy default deny and the audit lines by kind
+not-covered: a real device, which needs a person
+suite: run_pages.py --only client

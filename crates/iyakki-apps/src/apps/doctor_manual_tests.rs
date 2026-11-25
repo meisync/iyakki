@@ -26,6 +26,9 @@ struct Port {
     audit: RefCell<Vec<String>>,
     /// Refuse every write (the person said no to the core's question, or the disk is full).
     refuse: bool,
+    /// The runner's checklists (JSON) and the example screenshots by (source, path).
+    checklists: Vec<(String, String)>,
+    shots: Vec<(mt::Source, String, Vec<u8>)>,
 }
 
 impl Port {
@@ -37,6 +40,8 @@ impl Port {
             store: MemStore::default(),
             audit: Default::default(),
             refuse: false,
+            checklists: Vec::new(),
+            shots: Vec::new(),
         }
     }
     fn audit_text(&self) -> String {
@@ -68,6 +73,12 @@ impl DoctorPort for Port {
     }
     fn manual_files(&self) -> Vec<(String, String)> {
         self.files.clone()
+    }
+    fn manual_checklists(&self) -> Vec<(String, String)> {
+        self.checklists.clone()
+    }
+    fn manual_shot(&self, source: mt::Source, rel: &str) -> Option<Vec<u8>> {
+        self.shots.iter().find(|(s, p, _)| *s == source && p == rel).map(|(_, _, b)| b.clone())
     }
     fn manual_who(&self) -> Who {
         self.who.clone()
@@ -244,18 +255,18 @@ fn keys_one_two_three_record_and_move_to_the_next_step_and_write_the_human_evide
     f.chr('1');
     assert_eq!(f.tab.step, 1);
     assert_eq!(f.state_of("SND-01"), State::InProgress);
-    assert_eq!(f.files(), ["manual-tests/human/F-SND-01.tone.json"], "a clause with its row writes for that row only");
+    assert_eq!(f.files(), ["manual-tests/human/F-SND-01.tone.iyakki-aaa111.json"], "a clause with its row writes for that row only");
     f.chr('2');
     assert_eq!(f.state_of("SND-01"), State::Fail);
     let mut names = f.files();
     names.sort();
-    assert_eq!(names, ["manual-tests/human/F-SND-01.stop.json", "manual-tests/human/F-SND-01.tone.json", "manual-tests/human/F-SND-02.stop.json"], "a bare clause writes for every row of the scenario");
+    assert_eq!(names, ["manual-tests/human/F-SND-01.stop.iyakki-aaa111.json", "manual-tests/human/F-SND-01.tone.iyakki-aaa111.json", "manual-tests/human/F-SND-02.stop.iyakki-aaa111.json"], "a bare clause writes for every row of the scenario");
     // the evidence says who, when, where and which image
     let ev = mt::load_evidence(&f.port.store);
     let tone = ev.iter().find(|e| e.clause == "tone").unwrap();
-    assert_eq!((tone.who.as_str(), tone.by.as_str(), tone.machine.as_str(), tone.result.as_str(), tone.row.as_str()), ("ana", "owner", "iyakki-aaa111", "pass", "F-SND-01"));
-    assert_eq!((tone.image_commit.as_str(), tone.date.as_str(), tone.scenario.as_str()), ("v0.1.0-alpha.7-12-gabc1234", "2027-01-15T08:00:00", "SND-01"));
-    assert_eq!(ev.iter().find(|e| e.clause == "stop").unwrap().result, "fail");
+    assert_eq!((tone.by.as_str(), tone.machine.as_str(), tone.verdict.as_str(), tone.row.as_str()), ("admin", "iyakki-aaa111", "pass", "F-SND-01"));
+    assert_eq!((tone.image_commit.as_str(), tone.date.as_str()), ("abc1234", "2027-01-15T08:00:00"));
+    assert_eq!(ev.iter().find(|e| e.clause == "stop").unwrap().verdict, "fail");
     // the last step: Cannot test, and the state says so only when nothing failed
     f.chr('3');
     assert_eq!(f.state_of("SND-01"), State::Fail);
@@ -409,7 +420,7 @@ fn export_writes_one_file_and_import_merges_it_on_another_machine() {
     b.chr('i');
     let m = b.tab.msg.clone().unwrap();
     assert!(m.1 && m.0.contains("2 new"), "{m:?}");
-    assert!(b.files().contains(&"manual-tests/human/iyakki-aaa111/F-BOOT-06.tap.json".to_string()));
+    assert!(b.files().contains(&"manual-tests/human/iyakki-aaa111/F-BOOT-06.tap.iyakki-aaa111.json".to_string()));
     // the other machine's answers are not b's own: b still shows it as not started
     let i = b.tab.scenarios.iter().position(|s| s.id == "TCH-01").unwrap();
     assert_eq!(b.tab.state(i), State::NotStarted);
@@ -539,11 +550,106 @@ fn every_clause_of_every_bundled_step_makes_a_file_name_the_runner_reads() {
     for sc in &all {
         for i in 0..sc.steps.len() {
             for (row, clause) in sc.targets(i) {
-                let n = mt::file_name(&row, &clause);
-                assert!(n.ends_with(".json") && !n.contains('/') && n.starts_with("F-"), "{n}");
+                let n = mt::file_name(&row, &clause, "mac-mini-2018");
+                assert!(n.ends_with(".mac-mini-2018.json") && !n.contains('/') && n.starts_with("F-"), "{n}");
             }
         }
     }
+}
+
+const RUNNER: &str = r#"{"schema":1,"row":"F-RUN-1","feature_sha":"0123456789abcdef","title":"the chime plays",
+  "clauses":[{"id":"ears-1","text":"a chime is heard","machines":["any"],"steps":[{"do":"Open Sound and press Play chime","expect":"one chime","runner_did":"booted the image","screenshot":"shots/chime.png"},{"do":"Press Stop","expect":"silence"}]}]}"#;
+
+fn runner_fx(png: bool) -> Fx {
+    let mut p = Port::new("lenovo", "LENOVO ThinkPad");
+    p.checklists = vec![("F-RUN-1.json".into(), RUNNER.into()), ("bad.json".into(), "{".into())];
+    if png {
+        p.shots.push((mt::Source::Runner, "shots/chime.png".into(), super::chatpic::fixtures::png(40, 20, [200, 30, 30])));
+    }
+    Fx::new(p, 1280, 720, 1.0)
+}
+
+#[test]
+fn both_sources_are_in_the_navigation_and_the_runner_one_writes_the_runners_file() {
+    let mut f = runner_fx(false);
+    let ids: Vec<&str> = f.tab.scenarios.iter().map(|s| s.id.as_str()).collect();
+    assert!(ids.contains(&"F-RUN-1") && ids.contains(&"SND-01") && ids.contains(&"TCH-01"), "{ids:?}");
+    assert_eq!(f.tab.problems.len(), 1, "the bad JSON file is named, the rest loads");
+    let i = f.tab.scenarios.iter().position(|s| s.id == "F-RUN-1").unwrap();
+    assert_eq!(f.tab.scenarios[i].source, mt::Source::Runner);
+    assert!(f.has_hit(&Event::Tab(T_NAV + i)), "the runner checklist is a row of the left navigation");
+    f.ev(Event::Tab(T_NAV + i));
+    // the first step is guidance, the last one answers the clause
+    f.chr('1');
+    assert!(f.files().is_empty(), "a guidance step writes nothing");
+    f.chr('1');
+    assert_eq!(f.files(), ["manual-tests/human/F-RUN-1.ears-1.lenovo.json"]);
+    let text = f.port.store.read(&f.files()[0]).unwrap().unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!((v["schema"].as_u64(), v["by"].as_str(), v["verdict"].as_str(), v["image_commit"].as_str(), v["machine"].as_str()), (Some(1), Some("admin"), Some("pass"), Some("abc1234"), Some("lenovo")));
+    assert_eq!(v.as_object().unwrap().len(), 8, "exactly the runner's fields, no note when none was typed: {text}");
+    assert_eq!(f.state_of("F-RUN-1"), State::Pass);
+    // after a restart the answer is read back
+    let again = ManualTab::open(&f.port, now());
+    let j = again.scenarios.iter().position(|s| s.id == "F-RUN-1").unwrap();
+    assert_eq!(again.state(j), State::Pass);
+}
+
+#[test]
+fn an_answer_without_a_known_image_commit_is_refused_in_words() {
+    let mut p = Port::new("lenovo", "LENOVO ThinkPad");
+    p.checklists = vec![("F-RUN-1.json".into(), RUNNER.into())];
+    p.who.image_commit = "v0.1.0-alpha.7".into();
+    let mut f = Fx::new(p, 1280, 720, 1.0);
+    let i = f.tab.scenarios.iter().position(|s| s.id == "F-RUN-1").unwrap();
+    f.ev(Event::Tab(T_NAV + i));
+    f.chr('4');
+    f.chr('1');
+    assert!(f.files().is_empty());
+    let m = f.tab.msg.clone().unwrap();
+    assert!(!m.1 && m.0.contains("image commit"), "{m:?}");
+}
+
+#[test]
+fn the_runners_example_screenshot_is_drawn_in_the_canvas_when_it_is_there() {
+    let mut with = runner_fx(true);
+    let i = with.tab.scenarios.iter().position(|s| s.id == "F-RUN-1").unwrap();
+    with.ev(Event::Tab(T_NAV + i));
+    assert_eq!(with.tab.shots.get(&(i, 0)).map(|b| b.is_some()), Some(true), "fetched once through the port");
+    assert_eq!(with.tab.pics.rasterised, 1);
+    let mut without = runner_fx(false);
+    without.ev(Event::Tab(T_NAV + i));
+    assert_eq!(without.tab.shots.get(&(i, 0)).map(|b| b.is_some()), Some(false), "a file that is not there is remembered as not there");
+    assert_eq!(without.tab.pics.rasterised, 0);
+    // the picture really lands on the canvas: its colour is on screen with it and absent without it
+    let count = |f: &Fx| f.g.rgba().chunks_exact(4).filter(|p| p[0] == 200 && p[1] == 30 && p[2] == 30).count();
+    assert!(count(&with) > 300, "{}", count(&with));
+    assert_eq!(count(&without), 0);
+    // a path that leaves the folder is never asked of the real port
+    assert!(super::doctor_facts::manual_shot(std::path::Path::new("."), "../x.png").is_none());
+    assert!(super::doctor_facts::manual_shot(std::path::Path::new("/nonexistent-dir-for-test"), "a.png").is_none());
+    // drawing again does not decode again
+    with.draw();
+    assert_eq!(with.tab.pics.rasterised, 1);
+}
+
+#[test]
+fn the_shot_reader_keeps_inside_its_folder_and_reads_a_png() {
+    let root = std::env::temp_dir().join(format!("iyakki-manual-shot-{}", std::process::id())); // flaky-ok: private folder named by the process id
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("shots")).unwrap();
+    let png = super::chatpic::fixtures::png(4, 4, [1, 2, 3]);
+    std::fs::write(root.join("shots/a.png"), &png).unwrap();
+    assert_eq!(super::doctor_facts::manual_shot(&root, "shots/a.png"), Some(png));
+    assert!(super::doctor_facts::manual_shot(&root, "shots/none.png").is_none());
+    assert!(super::doctor_facts::manual_shot(&root, "../a.png").is_none());
+    assert!(super::doctor_facts::manual_shot(&root, "/etc/hostname").is_none());
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("/etc/hostname", root.join("shots/link.png")).unwrap();
+        assert!(super::doctor_facts::manual_shot(&root, "shots/link.png").is_none(), "a link out of the folder is not followed");
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -552,20 +658,20 @@ fn the_tab_is_reached_from_the_findings_and_esc_comes_back() {
     let port = Port::new("iyakki-aaa111", "Apple Mac mini (2018)");
     let parts = Parts { gather: Arc::new(|_| Facts::default()), slow: Arc::new(|_| Default::default()), inputs: Arc::new(|_, _| unreachable!()), home: Arc::new(|_| PathBuf::new()), now: now() };
     let mut app = DoctorApp::with_port(&port, parts);
-    assert!(!app.tab_manual && app.manual.is_none());
+    assert!(!app.tile.tab_manual && app.manual.is_none());
     app.open_item_inner("manual", &port);
-    assert!(app.tab_manual && app.manual.as_ref().unwrap().scenarios.len() == 3);
+    assert!(app.tile.tab_manual && app.manual.as_ref().unwrap().scenarios.len() == 3);
     assert!(port.audit_text().contains("doctor.manual.open"));
-    let _ = app.handle_manual(&Event::Key(Key::Char('1')), &port);
+    app.handle_manual(&Event::Key(Key::Char('1')), &port);
     assert!(!port.store.names().is_empty(), "a key in the tab answers");
-    let _ = app.handle_manual(&Event::Key(Key::Esc), &port);
+    app.handle_manual(&Event::Key(Key::Esc), &port);
     // Esc at the top of the list (wide screen) leaves
-    assert!(!app.tab_manual);
-    let _ = app.handle_manual(&Event::Tab(T_TAB_MANUAL), &port);
+    assert!(!app.tile.tab_manual);
+    app.handle_manual(&Event::Tab(T_TAB_MANUAL), &port);
     app.open_manual(&port);
-    assert!(app.tab_manual);
-    let _ = app.handle_manual(&Event::Tab(T_TAB_FINDINGS), &port);
-    assert!(!app.tab_manual);
+    assert!(app.tile.tab_manual);
+    app.handle_manual(&Event::Tab(T_TAB_FINDINGS), &port);
+    assert!(!app.tile.tab_manual);
 }
 
 /// Pictures of the tab at the four standard sizes, for the team's video and the release notes. Run on purpose:
@@ -587,5 +693,119 @@ fn screenshots_of_the_manual_tab() {
         f.draw();
         f.g.save_png(&dir.join(format!("manual-tests-tab-{w}x{h}.png"))).unwrap();
         eprintln!("saved {}", dir.join(format!("manual-tests-tab-{w}x{h}.png")).display());
+    }
+}
+
+// ---- the person picks which computer this is (never guessed) ----
+
+/// A computer on which nothing was picked yet: the real port gives an empty machine and the hardware text is never turned into a name.
+fn unpicked() -> Fx {
+    let mut p = Port::new("", "Apple Mac mini (2018)");
+    p.who.machine = String::new();
+    Fx::new(p, 1280, 720, 1.0)
+}
+
+#[test]
+fn until_the_person_picks_the_list_of_computers_is_shown_and_no_answer_is_written() {
+    let mut f = unpicked();
+    assert!(f.tab.picking, "the list shows by itself");
+    for i in 0..mt::PICK_KINDS.len() {
+        assert!(f.has_hit(&Event::Tab(T_KIND + i)), "computer {i} has a row to click");
+    }
+    assert!(!f.has_hit(&Event::Tab(T_NAV)), "the scenarios wait behind the list");
+    // the key that would answer is taken as a choice of the list, not as an answer
+    let s = f.tab.scenarios.iter().position(|s| s.id == "SND-01").unwrap();
+    f.tab.sel = s;
+    assert!(!f.tab.record_step(s, 0, Verdict::Pass, &f.port), "no answer without a computer");
+    assert!(f.files().is_empty());
+    assert!(f.tab.msg.as_ref().is_some_and(|m| !m.1 && m.0 == mt::PICK_FIRST));
+    // the hardware text said Mac mini 2018 and still nothing was chosen for the person
+    assert_eq!(f.tab.who.machine, "");
+    assert_eq!(f.key(Key::Esc), Out::Leave, "Esc with nothing picked leaves the tab");
+}
+
+#[test]
+fn a_digit_or_a_click_picks_the_computer_it_is_kept_and_it_names_the_evidence_files() {
+    let mut f = unpicked();
+    f.chr('4');
+    assert!(!f.tab.picking);
+    assert_eq!(f.tab.who.machine, "lenovo");
+    assert_eq!(f.files(), [mt::MACHINE_FILE]);
+    assert!(f.port.audit_text().contains("manual.machine lenovo"));
+    let s = f.tab.scenarios.iter().position(|s| s.id == "TCH-01").unwrap();
+    f.ev(Event::Tab(T_NAV + s));
+    f.chr('1');
+    assert!(f.files().contains(&"manual-tests/human/F-BOOT-06.tap.lenovo.json".to_string()), "{:?}", f.files());
+    // a click on the sixth row, from the list opened again with k
+    f.chr('k');
+    assert!(f.tab.picking && f.tab.pick_sel == 3, "the list opens on the current computer");
+    f.ev(Event::Tab(T_KIND + 5));
+    assert_eq!(f.tab.who.machine, "t7-ssd");
+    f.chr('2');
+    assert!(f.files().iter().any(|n| n == "manual-tests/human/F-BOOT-06.drag.t7-ssd.json"), "{:?}", f.files());
+}
+
+#[test]
+fn the_pick_is_read_back_when_the_tab_opens_again_and_the_list_does_not_show() {
+    let f = unpicked();
+    let mut f = f;
+    f.chr('3');
+    let kept = f.port.store.read(mt::MACHINE_FILE).unwrap().unwrap();
+    let mut p = Port::new("", "x");
+    p.who.machine = String::new();
+    p.store.put(mt::MACHINE_FILE, &kept);
+    let g = Fx::new(p, 1280, 720, 1.0);
+    assert!(!g.tab.picking);
+    assert_eq!(g.tab.who.machine, "macbook-pro");
+    // a file edited by hand to something that is not on the list is no pick
+    let mut p = Port::new("", "x");
+    p.who.machine = String::new();
+    p.store.put(mt::MACHINE_FILE, r#"{"schema":1,"kind":"toaster"}"#);
+    assert!(Fx::new(p, 1280, 720, 1.0).tab.picking);
+}
+
+#[test]
+fn a_refused_save_keeps_the_list_open_and_says_so() {
+    let mut f = unpicked();
+    f.port.refuse = true;
+    f.chr('5');
+    assert!(f.tab.picking && f.tab.who.machine.is_empty());
+    assert!(f.tab.msg.as_ref().is_some_and(|m| !m.1 && m.0.contains("could not be saved")));
+    assert!(f.files().is_empty());
+}
+
+#[test]
+fn up_down_enter_and_esc_work_in_the_list_and_out_of_range_digits_do_nothing() {
+    let mut f = unpicked();
+    f.chr('9');
+    f.chr('0');
+    assert!(f.tab.picking && f.files().is_empty());
+    f.key(Key::Down);
+    f.key(Key::Down);
+    f.key(Key::Up);
+    assert_eq!(f.tab.pick_sel, 1);
+    f.key(Key::Enter);
+    assert_eq!(f.tab.who.machine, "mac-mini-2018");
+    f.chr('k');
+    assert_eq!(f.key(Key::Esc), Out::Stay, "Esc closes the list when a computer is picked");
+    assert!(!f.tab.picking);
+    assert_eq!(f.tab.who.machine, "mac-mini-2018", "and changes nothing");
+}
+
+#[test]
+fn the_list_fits_at_every_size_and_its_rows_are_big_enough_to_touch() {
+    for (w, h, s) in SIZES {
+        let mut p = Port::new("", "x");
+        p.who.machine = String::new();
+        let f = Fx::new(p, w, h, s);
+        assert_hits_sane(&f, &format!("{w}x{h} list of computers"));
+        let rows = (0..mt::PICK_KINDS.len()).filter(|i| f.has_hit(&Event::Tab(T_KIND + i))).count();
+        // a short screen may cut the list, but never draws a row outside the area; at 720 high and above all seven are there
+        if h >= 720 {
+            assert_eq!(rows, mt::PICK_KINDS.len(), "{w}x{h}");
+        }
+        for hit in f.g.hits.iter().filter(|x| matches!(x.ev, Event::Tab(t) if (T_KIND..T_KIND + 7).contains(&t))) {
+            assert!(hit.rect.h >= 34.0 * s - 1.0, "{w}x{h}: a row is {} high", hit.rect.h);
+        }
     }
 }

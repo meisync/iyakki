@@ -154,12 +154,69 @@ pub fn install_signal_handlers() -> std::io::Result<Arc<AtomicBool>> {
     Ok(flag)
 }
 
-/// As PID 1 we must reap orphaned children or they pile up as zombies.
+/// Children a supervisor waits for itself (`helpers::supervise`): the reaper of PID 1 leaves them alone, so the supervisor sees how its program ended (the
+/// exit status of the UI program, 5 when it lost the core, was an audit line of "gone (No child process)" before 2026-11-24).
+static SUPERVISED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+/// A supervisor started this child and will wait for it: `reap_children` skips it until [`release_supervised`].
+pub fn keep_supervised(pid: u32) {
+    SUPERVISED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(pid);
+}
+
+/// The supervisor has its answer (or stopped caring): the pid is an ordinary child again.
+pub fn release_supervised(pid: u32) {
+    SUPERVISED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|p| *p != pid);
+}
+
+fn is_supervised(pid: u32) -> bool {
+    SUPERVISED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&pid)
+}
+
+/// As PID 1 we must reap orphaned children or they pile up as zombies. A child a supervisor waits for is not reaped here: each ended child is peeked at
+/// with `WNOWAIT` first. When the one waitid names is a supervised one (its supervisor looks every 10 ms), the ended children of this process are found
+/// in `/proc` and the ones nobody waits for are reaped, so a supervised zombie never holds an orphan back.
 pub fn reap_children() {
-    // SAFETY: waitpid with WNOHANG on any child is always safe to call.
-    unsafe {
-        while libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) > 0 {}
+    loop {
+        // SAFETY: waitid with WNOHANG | WNOWAIT only looks at an ended child and writes into the zeroed siginfo we give it.
+        let pid = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            if libc::waitid(libc::P_ALL, 0, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) != 0 {
+                return;
+            }
+            info.si_pid() as u32
+        };
+        if pid == 0 {
+            return;
+        }
+        if is_supervised(pid) {
+            for orphan in ended_children_in_proc(std::process::id()).into_iter().filter(|p| !is_supervised(*p)) {
+                reap_one(orphan);
+            }
+            return;
+        }
+        reap_one(pid);
     }
+}
+
+fn reap_one(pid: u32) {
+    // SAFETY: waitpid with WNOHANG on one ended child of ours.
+    unsafe {
+        libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG);
+    }
+}
+
+/// The pids of the zombie children of `parent` (`/proc/<pid>/stat`: "pid (comm) state ppid ...", the name may hold spaces and brackets, so the fields are read after the LAST bracket).
+fn ended_children_in_proc(parent: u32) -> Vec<u32> {
+    let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
+    dir.flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
+            let Some((_, rest)) = stat.rsplit_once(')') else { return false };
+            let mut f = rest.split_whitespace();
+            f.next() == Some("Z") && f.next().and_then(|p| p.parse::<u32>().ok()) == Some(parent)
+        })
+        .collect()
 }
 
 /// What an agent task is allowed to do.

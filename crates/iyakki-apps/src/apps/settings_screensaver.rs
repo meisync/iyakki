@@ -6,9 +6,9 @@
 //! second, so a change acts at once. The idle clock, the logo and the panel are `saver.rs`, `shell_saver.rs` and `panel.rs`.
 
 use super::*;
+use super::super::settings_device_port::ScreenSaverPort;
 use iyakki_shared::lockscreen::{self, LockConfig};
 use iyakki_shared::screensaver::{self as ss, First, SaverConfig, Style};
-use iyakki_sec::policy::Role;
 
 /// The cards, in order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,25 +49,25 @@ impl SettingsApp {
         if admin { &ADMIN_ROWS } else { &PERSON_ROWS }
     }
 
-    pub(super) fn ss_len(cx: &AppCx) -> usize {
-        Self::ss_rows(cx.session.policy.manage_settings).len()
+    pub(super) fn ss_len(p: &dyn ScreenSaverPort) -> usize {
+        Self::ss_rows(p.is_admin()).len()
     }
 
-    fn ss_guest(cx: &AppCx) -> bool {
-        cx.session.role == Role::Guest
+    fn ss_guest(p: &dyn ScreenSaverPort) -> bool {
+        p.is_guest()
     }
 
     /// This person's choices (the standard ones for a guest).
-    pub(super) fn ss_person(cx: &AppCx) -> SaverConfig {
-        if Self::ss_guest(cx) { SaverConfig::default() } else { SaverConfig::load(cx.data_dir(), &cx.session.user) }
+    pub(super) fn ss_person(p: &dyn ScreenSaverPort) -> SaverConfig {
+        if Self::ss_guest(p) { SaverConfig::default() } else { SaverConfig::load(&p.data_dir(), &p.user()) }
     }
 
-    pub(super) fn ss_signin(cx: &AppCx) -> SaverConfig {
-        cx.settings().lock().map(|s| s.get().screensaver_signin.0.clone().normalized()).unwrap_or_else(|_| SaverConfig::signin_default())
+    pub(super) fn ss_signin(p: &dyn ScreenSaverPort) -> SaverConfig {
+        p.settings_get().screensaver_signin.0.clone().normalized()
     }
 
-    fn ss_cfg_for(row: SsRow, cx: &AppCx) -> SaverConfig {
-        if matches!(row, SsRow::SiFirst | SsRow::SiAfter | SsRow::SiThen) { Self::ss_signin(cx) } else { Self::ss_person(cx) }
+    fn ss_cfg_for(row: SsRow, p: &dyn ScreenSaverPort) -> SaverConfig {
+        if matches!(row, SsRow::SiFirst | SsRow::SiAfter | SsRow::SiThen) { Self::ss_signin(p) } else { Self::ss_person(p) }
     }
 
     /// The buttons of a card: their labels and which one is the current choice.
@@ -87,18 +87,18 @@ impl SettingsApp {
     }
 
     /// The buttons of a card, with the choice that is saved for the cards that keep it elsewhere (the lock screen's).
-    pub(super) fn ss_chips_cx(row: SsRow, c: &SaverConfig, cx: &AppCx) -> (Vec<String>, Option<usize>) {
+    pub(super) fn ss_chips_cx(row: SsRow, c: &SaverConfig, p: &dyn ScreenSaverPort) -> (Vec<String>, Option<usize>) {
         let (labels, chosen) = Self::ss_chips(row, c);
         if row == SsRow::AutoLock {
-            let m = Self::lock_person(cx).auto_min;
+            let m = Self::lock_person(p).auto_min;
             return (labels, lockscreen::AUTO_CHOICES.iter().position(|x| *x == m));
         }
         (labels, chosen)
     }
 
     /// This person's automatic lock choice (a guest has none: no password).
-    fn lock_person(cx: &AppCx) -> LockConfig {
-        if Self::ss_guest(cx) { LockConfig::default() } else { LockConfig::load(cx.data_dir(), &cx.session.user) }
+    fn lock_person(p: &dyn ScreenSaverPort) -> LockConfig {
+        if Self::ss_guest(p) { LockConfig::default() } else { LockConfig::load(&p.data_dir(), &p.user()) }
     }
 
     fn ss_text(row: SsRow) -> (&'static str, &'static str) {
@@ -119,20 +119,20 @@ impl SettingsApp {
     }
 
     /// Whether the buttons of a card work for this person.
-    fn ss_enabled(row: SsRow, c: &SaverConfig, cx: &AppCx) -> bool {
+    fn ss_enabled(row: SsRow, c: &SaverConfig, p: &dyn ScreenSaverPort) -> bool {
         match row {
             SsRow::Preview => true,
-            SsRow::AutoLock | SsRow::LockNow => !Self::ss_guest(cx),
-            SsRow::SiFirst | SsRow::SiAfter | SsRow::SiThen => cx.session.policy.manage_settings && (row != SsRow::SiThen || c.first == First::Saver),
-            SsRow::Then => !Self::ss_guest(cx) && c.first == First::Saver,
-            _ => !Self::ss_guest(cx),
+            SsRow::AutoLock | SsRow::LockNow => !Self::ss_guest(p),
+            SsRow::SiFirst | SsRow::SiAfter | SsRow::SiThen => p.is_admin() && (row != SsRow::SiThen || c.first == First::Saver),
+            SsRow::Then => !Self::ss_guest(p) && c.first == First::Saver,
+            _ => !Self::ss_guest(p),
         }
     }
 
     /// Put every card in place for the room `a`: cards that do not fit are left out (the selected one always comes into view),
     /// and buttons that would fall outside `a` are not placed.
-    pub(super) fn ss_layout(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) -> Vec<SsBox> {
-        let rows = Self::ss_rows(cx.session.policy.manage_settings);
+    pub(super) fn ss_layout(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn ScreenSaverPort) -> Vec<SsBox> {
+        let rows = Self::ss_rows(p.is_admin());
         let sel = self.sel().min(rows.len().saturating_sub(1));
         let (pad, chip_h, gap) = (12.0 * s, 30.0 * s, 8.0 * s);
         let inner_w = (a.w - 36.0 * s).max(40.0 * s);
@@ -141,8 +141,8 @@ impl SettingsApp {
         let mut heights = Vec::new();
         let mut chip_w: Vec<Vec<f32>> = Vec::new();
         for &row in rows {
-            let c = Self::ss_cfg_for(row, cx);
-            let (labels, _) = Self::ss_chips_cx(row, &c, cx);
+            let c = Self::ss_cfg_for(row, p);
+            let (labels, _) = Self::ss_chips_cx(row, &c, p);
             let ws: Vec<f32> = labels.iter().map(|l| g.text_width(size, l, Face::Bold) + 22.0 * s).collect();
             let (mut lines, mut x) = (1usize, 0.0f32);
             for w in &ws {
@@ -188,9 +188,9 @@ impl SettingsApp {
         out
     }
 
-    pub(super) fn render_screensaver(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let guest = Self::ss_guest(cx);
-        let rows = Self::ss_rows(cx.session.policy.manage_settings);
+    pub(super) fn render_screensaver(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn ScreenSaverPort) {
+        let guest = Self::ss_guest(p);
+        let rows = Self::ss_rows(p.is_admin());
         let mut top = a.y;
         if guest {
             let t = g.fit(13.0 * s, "Guests use the standard choices (screen saver after 10 minutes). You can still preview.", Face::Sans, a.w);
@@ -200,10 +200,10 @@ impl SettingsApp {
         let body = R::new(a.x, top, a.w, (a.y + a.h - top).max(0.0));
         let sel = self.sel().min(rows.len().saturating_sub(1));
         let size = 13.0 * s;
-        for b in self.ss_layout(g, body, s, cx) {
+        for b in self.ss_layout(g, body, s, p) {
             let row = rows[b.row];
-            let c = Self::ss_cfg_for(row, cx);
-            let enabled = Self::ss_enabled(row, &c, cx);
+            let c = Self::ss_cfg_for(row, p);
+            let enabled = Self::ss_enabled(row, &c, p);
             let hot = g.hovered(b.card);
             crate::fx::row_at(g, b.card.x, b.card.y, b.card.w, b.card.h, 14.0 * s, false, hot, ACCENT);
             g.hit(b.card, Event::Row(b.row), "card");
@@ -214,7 +214,7 @@ impl SettingsApp {
             for (n, l) in g.wrap(size, help, Face::Sans, text_w).iter().take(2).enumerate() {
                 g.text(b.card.x + 18.0 * s, b.card.y + 12.0 * s + 22.0 * s + n as f32 * 17.0 * s, size, DIM, l, Face::Sans);
             }
-            let (labels, chosen) = Self::ss_chips_cx(row, &c, cx);
+            let (labels, chosen) = Self::ss_chips_cx(row, &c, p);
             for (i, r) in b.chips.iter().map(|(i, r)| (*i, r)) {
                 let on = chosen == Some(i);
                 let over = enabled && g.hovered(*r);
@@ -238,53 +238,53 @@ impl SettingsApp {
         vec![("Next choice", ACCENT, 'n'), ("Previous", TEXT, 'N'), ("Preview", ACCENT, 'p')]
     }
 
-    pub(super) fn handle_screensaver(&mut self, k: &Key, cx: &AppCx) {
-        let len = Self::ss_len(cx);
+    pub(super) fn handle_screensaver(&mut self, k: &Key, p: &dyn ScreenSaverPort) {
+        let len = Self::ss_len(p);
         match k {
             Key::Up => self.move_sel(-1, len),
             Key::Down => self.move_sel(1, len),
             Key::Home => self.sel[self.tab] = 0,
             Key::End => self.sel[self.tab] = len.saturating_sub(1),
-            Key::Enter | Key::Char(' ' | 'n' | '+' | '=') => self.ss_step(self.sel(), 1, cx),
-            Key::Char('N' | '-') => self.ss_step(self.sel(), -1, cx),
-            Key::Char('p') => self.ss_preview(cx),
+            Key::Enter | Key::Char(' ' | 'n' | '+' | '=') => self.ss_step(self.sel(), 1, p),
+            Key::Char('N' | '-') => self.ss_step(self.sel(), -1, p),
+            Key::Char('p') => self.ss_preview(p),
             _ => {}
         }
     }
 
     /// A click on a button of a card.
-    pub(super) fn ss_sub(&mut self, row: usize, c: char, cx: &AppCx) {
-        let rows = Self::ss_rows(cx.session.policy.manage_settings);
+    pub(super) fn ss_sub(&mut self, row: usize, c: char, p: &dyn ScreenSaverPort) {
+        let rows = Self::ss_rows(p.is_admin());
         let Some(&r) = rows.get(row) else { return };
         self.sel[self.tab] = row;
         let idx = (c as u32).saturating_sub('a' as u32) as usize;
-        self.ss_choose(r, idx, cx);
+        self.ss_choose(r, idx, p);
     }
 
     /// The next (or previous) choice of the selected card.
-    fn ss_step(&mut self, row: usize, delta: i32, cx: &AppCx) {
-        let rows = Self::ss_rows(cx.session.policy.manage_settings);
+    fn ss_step(&mut self, row: usize, delta: i32, p: &dyn ScreenSaverPort) {
+        let rows = Self::ss_rows(p.is_admin());
         let Some(&r) = rows.get(row) else { return };
-        let c = Self::ss_cfg_for(r, cx);
-        let (labels, chosen) = Self::ss_chips_cx(r, &c, cx);
+        let c = Self::ss_cfg_for(r, p);
+        let (labels, chosen) = Self::ss_chips_cx(r, &c, p);
         let n = labels.len().max(1) as i32;
         let next = (chosen.map_or(-1, |i| i as i32) + delta).rem_euclid(n) as usize;
-        self.ss_choose(r, next, cx);
+        self.ss_choose(r, next, p);
     }
 
-    fn ss_choose(&mut self, row: SsRow, idx: usize, cx: &AppCx) {
+    pub(super) fn ss_choose(&mut self, row: SsRow, idx: usize, p: &dyn ScreenSaverPort) {
         if row == SsRow::Preview {
-            return self.ss_preview(cx);
+            return self.ss_preview(p);
         }
         if row == SsRow::LockNow {
-            return self.ss_lock_now(cx);
+            return self.ss_lock_now(p);
         }
         if row == SsRow::AutoLock {
-            return self.ss_auto_lock(idx, cx);
+            return self.ss_auto_lock(idx, p);
         }
-        let mut c = Self::ss_cfg_for(row, cx);
-        if !Self::ss_enabled(row, &c, cx) {
-            if Self::ss_guest(cx) {
+        let mut c = Self::ss_cfg_for(row, p);
+        if !Self::ss_enabled(row, &c, p) {
+            if Self::ss_guest(p) {
                 self.ok("Guests use the standard choices.");
             } else if matches!(row, SsRow::Then | SsRow::SiThen) {
                 self.ok("This only applies with the screen saver.");
@@ -324,44 +324,44 @@ impl SettingsApp {
         let c = c.normalized();
         let signin = matches!(row, SsRow::SiFirst | SsRow::SiAfter | SsRow::SiThen);
         let saved = if signin {
-            cx.settings().lock().map_err(|_| "The settings are busy; try again.".to_string()).and_then(|mut st| st.update(|s| s.screensaver_signin = iyakki_shared::settings::SigninSaver(c.clone())).map(|_| ()).map_err(|e| e.to_string()))
+            p.settings_update(&mut |s| s.screensaver_signin = iyakki_shared::settings::SigninSaver(c.clone())).map_err(|e| e.message())
         } else {
-            c.save(cx.data_dir(), &cx.session.user)
+            c.save(&p.data_dir(), &p.user())
         };
         match saved {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, if signin { "settings.screensaver.signin" } else { "settings.screensaver" }, &what);
+                p.audit(if signin { "settings.screensaver.signin" } else { "settings.screensaver" }, &what);
                 self.ok("Saved.");
             }
             Err(e) => self.fail(e),
         }
     }
 
-    fn ss_lock_now(&mut self, cx: &AppCx) {
-        if Self::ss_guest(cx) {
+    fn ss_lock_now(&mut self, p: &dyn ScreenSaverPort) {
+        if Self::ss_guest(p) {
             return self.ok("Guests have no password to lock with.");
         }
-        lockscreen::request(cx.data_dir(), &cx.session.user);
+        lockscreen::request(&p.data_dir(), &p.user());
         self.ok("Locking the screen.");
     }
 
-    fn ss_auto_lock(&mut self, idx: usize, cx: &AppCx) {
-        if Self::ss_guest(cx) {
+    fn ss_auto_lock(&mut self, idx: usize, p: &dyn ScreenSaverPort) {
+        if Self::ss_guest(p) {
             return self.ok("Guests have no password to lock with.");
         }
         let Some(&m) = lockscreen::AUTO_CHOICES.get(idx) else { return };
         let c = LockConfig { auto_min: m };
-        match c.save(cx.data_dir(), &cx.session.user) {
+        match c.save(&p.data_dir(), &p.user()) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.lockscreen", &format!("automatic lock: {}", c.describe()));
+                p.audit("settings.lockscreen", &format!("automatic lock: {}", c.describe()));
                 self.ok("Saved.");
             }
             Err(e) => self.fail(e),
         }
     }
 
-    fn ss_preview(&mut self, cx: &AppCx) {
-        iyakki_shared::screensaver::request(cx.data_dir(), &cx.session.user, iyakki_shared::screensaver::Request::Preview);
+    fn ss_preview(&mut self, p: &dyn ScreenSaverPort) {
+        iyakki_shared::screensaver::request(&p.data_dir(), &p.user(), iyakki_shared::screensaver::Request::Preview);
         self.ok("Showing the screen saver for 5 seconds. Press a key or move the mouse to stop it.");
     }
 }

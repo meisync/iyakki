@@ -32,6 +32,27 @@ iyakki-proxy = { path = "../iyakki-proxy" }
 thiserror.workspace = true
 iyakki-clock = { workspace = true }
 iyakki-board-model = { workspace = true }
+iyakki-k8s-model = { workspace = true }
+iyakki-cluster-model = { workspace = true }
+iyakki-study-model = { workspace = true }
+iyakki-inbox-model = { workspace = true }
+iyakki-story-model = { workspace = true }
+iyakki-chat-model = { workspace = true }
+iyakki-voice-model = { workspace = true }
+iyakki-store-model = { workspace = true }
+iyakki-story-kit = { workspace = true }
+iyakki-sysinfo-model = { workspace = true }
+iyakki-scene = { workspace = true }
+iyakki-piclog = { workspace = true }
+iyakki-hostrules = { workspace = true }
+iyakki-speechtime = { workspace = true }
+iyakki-lab-model = { workspace = true }
+iyakki-serde-static = { workspace = true }
+iyakki-frames = { workspace = true }
+iyakki-provider-kind = { workspace = true }
+iyakki-credguard = { workspace = true }
+iyakki-git-model = { workspace = true }
+iyakki-flows-model = { workspace = true }
 iyakki-storage.workspace = true
 iyakki-core-api = { workspace = true }
 iyakki-link = { workspace = true }
@@ -55,4 +76,5 @@ iyakki-hwinfo = { workspace = true }
 testing = ["iyakki-linuxinit/testing"]
 
 [dev-dependencies]
+iyakki-store-model = { workspace = true, features = ["testing"] }
 iyakki-testkit = { path = "../iyakki-testkit" }

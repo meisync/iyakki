@@ -1,6 +1,7 @@
 //! CHAT: talk to the configured model. Requests run on a worker thread so the UI never freezes.
 
 use crate::safeclamp::SafeClamp;
+use crate::apps::chat_port::CxChat;
 use std::sync::mpsc::{channel, Receiver};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -332,15 +333,15 @@ impl ChatApp {
                 return;
             }
         };
-        let uploads = cx.core.file_scope().home_root(&cx.session.user, cx.data_dir()).join("Uploads");
-        if let Err(e) = cx.core.file_scope().check_write(&cx.session.policy, &cx.session.user, &uploads) {
+        let uploads = CxChat(cx).core().file_scope().home_root(CxChat(cx).user(), CxChat(cx).data_dir()).join("Uploads");
+        if let Err(e) = CxChat(cx).core().file_scope().check_write(CxChat(cx).policy(), CxChat(cx).user(), &uploads) {
             self.info = Some(e);
             return;
         }
         match super::pastepic::save(&uploads, &png) {
             Ok(p) => {
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                cx.audit.record(&cx.session.user, "chat.attach", "1 pasted picture");
+                CxChat(cx).audit("chat.attach", "1 pasted picture");
                 let size = png.len() as u64;
                 self.attachments.push(super::dropattach::Attachment { block: format!("[Attached picture: {name} ({} KB), saved as {}; show it with show_image]", size.div_ceil(1024), p.display()), name: name.clone(), size });
                 self.info = Some(format!("Attached {name}. It goes with your next message."));
@@ -492,9 +493,9 @@ impl ChatApp {
     fn skey(&self, cx: &AppCx) -> String {
         match (&self.project, &self.dash, self.flows.is_some() || self.sticky.is_some()) {
             (Some(p), _, _) => p.key.clone(),
-            (None, Some(_), _) => iyakki_dash::tools::chat_key(&cx.session.user),
-            (None, None, true) => iyakki_flowsx::spec::chat_key_for(&cx.session.user, self.flow_seen.as_deref()),
-            (None, None, false) => cx.session.user.clone(),
+            (None, Some(_), _) => iyakki_dash::tools::chat_key(CxChat(cx).user()),
+            (None, None, true) => iyakki_flowsx::spec::chat_key_for(CxChat(cx).user(), self.flow_seen.as_deref()),
+            (None, None, false) => CxChat(cx).user().to_string(),
         }
     }
 
@@ -535,7 +536,7 @@ impl ChatApp {
         if let Some(sess) = self.session.as_mut() {
             sess.messages = self.older.iter().cloned().chain(self.msgs.iter().filter(|m| m.role != Role::System).cloned()).collect();
             self.nav_dirty = true;
-            let _ = cx.sessions().save(sess);
+            let _ = CxChat(cx).sessions().save(sess);
         }
     }
 
@@ -556,9 +557,9 @@ impl ChatApp {
         if is_pinned(cx, &self.skey(cx)) {
             self.approvals = Approvals::Pinned;
         }
-        if let Some(m) = cx.sessions().list(&self.skey(cx)).into_iter().next() {
+        if let Some(m) = CxChat(cx).sessions().list(&self.skey(cx)).into_iter().next() {
             if now.saturating_sub(m.updated) <= iyakki_shared::sessions::WINDOW_DAYS * 86_400_000 {
-                if let Some(s) = cx.sessions().load(&self.skey(cx), &m.id) {
+                if let Some(s) = CxChat(cx).sessions().load(&self.skey(cx), &m.id) {
                     self.open_session(s);
                 }
             }
@@ -609,7 +610,7 @@ impl ChatApp {
         let all = self.all_messages();
         let Some(sess) = self.session.as_mut() else { return };
         sess.messages = all;
-        if let Err(e) = cx.sessions().save(sess) {
+        if let Err(e) = CxChat(cx).sessions().save(sess) {
             self.error = Some(format!("Could not save this chat: {e}"));
         }
         self.nav_dirty = true;
@@ -648,7 +649,7 @@ impl ChatApp {
             }
         }
         set_pin(cx, &key, self.approvals == Approvals::Pinned);
-        cx.audit.record(&cx.session.user, "agent.approvals", &format!("{}:{}", if self.autopilot { "autopilot" } else { self.approvals.name() }, key));
+        CxChat(cx).audit("agent.approvals", &format!("{}:{}", if self.autopilot { "autopilot" } else { self.approvals.name() }, key));
         self.sync_live(cx);
     }
 
@@ -674,7 +675,7 @@ impl ChatApp {
         }
         let Some(run) = &self.run else { return };
         let id = run.id();
-        cx.audit.record(&cx.session.user, "agent.approvals.live", &format!("approvals mode changed to {} during run {id} by {}", m.label(), cx.session.user));
+        CxChat(cx).audit("agent.approvals.live", &format!("approvals mode changed to {} during run {id} by {}", m.label(), CxChat(cx).user()));
         let what = match m {
             Mode::Autopilot if self.run_is_ap => "Autopilot goes on with the plan".to_string(),
             Mode::Autopilot => "this turn finishes, then Autopilot works through the plan".to_string(),
@@ -710,7 +711,7 @@ impl ChatApp {
             return None;
         }
         let id = self.ext_choice.clone().flatten()?;
-        let cfg = cx.agents_cfg();
+        let cfg = CxChat(cx).agents_cfg();
         let agent = cfg.agent(&id)?;
         let label = agent.label();
         if self.autopilot && agent.mode() != iyakki_extagentx::Mode::Bridged {
@@ -770,7 +771,7 @@ impl ChatApp {
     /// Take one session approval back (the next such call asks again).
     pub fn revoke_approval(&mut self, cx: &AppCx, i: usize) {
         if let Some(g) = self.grants.list().get(i) {
-            cx.audit.record(&cx.session.user, "agent.approvals.revoke", &g.label);
+            CxChat(cx).audit("agent.approvals.revoke", &g.label);
         }
         self.grants.revoke(i);
         if self.grants.is_empty() {
@@ -780,7 +781,7 @@ impl ChatApp {
 
     /// "Reset approvals": forget every session approval.
     pub fn reset_approvals(&mut self, cx: &AppCx) {
-        cx.audit.record(&cx.session.user, "agent.approvals.reset", &format!("{} approvals", self.grants.len()));
+        CxChat(cx).audit("agent.approvals.reset", &format!("{} approvals", self.grants.len()));
         self.grants.clear();
         self.grants_open = false;
     }
@@ -829,7 +830,7 @@ impl ChatApp {
             self.ap_saved = self.ap_state_path().and_then(|p| crate::agent().helpers_b4().autopilot_saved(&p)).filter(|s| matches!(s.status.as_str(), "paused" | "stopped" | "running"));
         }
         self.ap_after_run = self.autopilot && self.run.is_some() && !self.run_is_ap;
-        cx.audit.record(&cx.session.user, "agent.autopilot", if self.autopilot { "on" } else { "off" });
+        CxChat(cx).audit("agent.autopilot", if self.autopilot { "on" } else { "off" });
         self.sync_live(cx);
     }
 
@@ -875,8 +876,8 @@ impl ChatApp {
     fn start_run(&mut self, cx: &AppCx, text: String) {
         // a turn that continues into Autopilot (switched on while it ran) already has its message in the transcript
         let continues = std::mem::take(&mut self.ap_continue);
-        if !cx.session.policy.agent {
-            cx.audit.record(&cx.session.user, "agent.denied", "start");
+        if !CxChat(cx).policy().agent {
+            CxChat(cx).audit("agent.denied", "start");
             self.error = Some("The agent is not enabled for your account.".into());
             self.agent = false;
             return;
@@ -912,8 +913,8 @@ impl ChatApp {
         // the PROJECT STATE of a workspace chat: rebuilt from the disk at the start of every run (and every Autopilot step)
         let mut state_fn: Option<Arc<dyn Fn() -> String + Send + Sync>> = None;
         // every chat has a work folder of its own; the account may read and (if it may write at all) write there
-        let mut policy = cx.session.policy.clone();
-        let workdir = self.session.as_ref().and_then(|s| cx.session_workdir(&cx.session.user, &s.id).ok());
+        let mut policy = CxChat(cx).policy().clone();
+        let workdir = self.session.as_ref().and_then(|s| CxChat(cx).session_workdir(&s.id).ok());
         if let Some(d) = &workdir {
             let p = d.display().to_string();
             if !policy.fs_write.is_empty() {
@@ -931,7 +932,7 @@ impl ChatApp {
             None => AGENT_SYSTEM_PROMPT.to_string(),
         };
         // the assistant preset the person chose in Settings (text from a bundle: style and focus only)
-        system.push_str(&iyakki_shared::bundle_members::preset_note(cx.data_dir(), &cx.session.user));
+        system.push_str(&iyakki_shared::bundle_members::preset_note(CxChat(cx).data_dir(), CxChat(cx).user()));
         // an AI IDE workspace: the account's file scope is narrowed to the workspace folder (what the account may do there stays)
         let project = self.project.clone();
         if let Some(p) = &project {
@@ -944,7 +945,7 @@ impl ChatApp {
             state_fn = Some(parts.state_fn);
         }
         // detached jobs: anything slow goes through job_start (it outlives this chat and shows in the Jobs strip)
-        if cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full {
+        if CxChat(cx).policy().cli == iyakki_sec::policy::CliLevel::Full {
             system.push_str(iyakki_shared::jobtools::PROMPT_RULE);
         }
         system.push_str(iyakki_shared::pendingtools::PROMPT_RULE);
@@ -972,7 +973,7 @@ impl ChatApp {
             }
         }
         // the DATA tab: which table it last showed (file and column names only)
-        if let Some(line) = cx.agent.helpers_b4().data_tab_context(&cx.session.user) {
+        if let Some(line) = cx.agent.helpers_b4().data_tab_context(CxChat(cx).user()) {
             system.push_str("\n\n");
             system.push_str(&line);
         }
@@ -997,7 +998,7 @@ impl ChatApp {
             self.msgs.push(Message::user(text.trim()));
         }
         let ide_policy = policy.clone();
-        let tools: Arc<dyn iyakki_shared::agent::Tools> = cx.services.user_tools(&cx.session.user, policy, cx.host.clone(), cx.mcp_servers.clone(), Some(text.trim()), workdir.as_deref());
+        let tools: Arc<dyn iyakki_shared::agent::Tools> = cx.services.user_tools(CxChat(cx).user(), policy, cx.host.clone(), cx.mcp_servers.clone(), Some(text.trim()), workdir.as_deref());
         let tools_arc: Arc<dyn iyakki_shared::agent::Tools> = match &project {
             Some(p) => super::core_run::wrap_project_tools(cx, tools.clone(), ide_policy, p, kit.as_ref(), platform),
             None => tools,
@@ -1011,7 +1012,7 @@ impl ChatApp {
             None => tools_arc,
         };
         let tools_arc: Arc<dyn iyakki_shared::agent::Tools> = match (&self.tasks, &project) {
-            (Some(m), Some(_)) if cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full => cx.tasks_facet().wrap_task_tools(tools_arc, m, ext.as_deref().unwrap_or("builtin"), ""),
+            (Some(m), Some(_)) if CxChat(cx).policy().cli == iyakki_sec::policy::CliLevel::Full => cx.tasks_facet().wrap_task_tools(tools_arc, m, ext.as_deref().unwrap_or("builtin"), ""),
             _ => tools_arc,
         };
         let tools_arc = super::tool_chain::account_chain(cx, tools_arc, &super::tool_chain::ChainScope { project: project.as_ref().map(|p| (p.name.clone(), p.root.clone())), ext: self.ext_choice.clone().flatten() });
@@ -1024,14 +1025,14 @@ impl ChatApp {
             Some(f) => f(tools_arc),
             None => tools_arc,
         };
-        cx.audit.record(&cx.session.user, "agent.start", &format!("{} chars", text.len()));
+        CxChat(cx).audit("agent.start", &format!("{} chars", text.len()));
         let mut assist = super::core_run::assist_for(cx, super::core_run::AssistScope { flows: flows_link.is_some(), dash: self.dash.is_some(), project: project.is_some() });
         assist.prepare = Some(prepare);
         // the live mode: the chip can change it while this run goes, and the run reads it at every decision
         self.mode_cell.set(self.live_mode());
         self.run_is_ap = false;
         self.ap_after_run = false;
-        let limits = browser_limits(&cx.session.policy, RunLimits { auto: self.approvals.is_auto() || self.autopilot, grants: Some(self.grants.clone()), live: Some(self.mode_cell.clone()), ..RunLimits::for_budget(&cx.session.policy.budget, cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().token_price_cents_per_mtok) });
+        let limits = browser_limits(CxChat(cx).policy(), RunLimits { auto: self.approvals.is_auto() || self.autopilot, grants: Some(self.grants.clone()), live: Some(self.mode_cell.clone()), ..RunLimits::for_budget(&CxChat(cx).policy().budget, CxChat(cx).settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().token_price_cents_per_mtok) });
         if let (Some(id), false) = (ext.clone(), self.autopilot) {
             // an external coding agent answers: it gets the same tools, approvals and policy through the bridge
             let (workspace, prep) = (workdir.clone(), assist.prepare.clone());
@@ -1053,7 +1054,7 @@ impl ChatApp {
                 self.run_is_ap = true;
                 super::core_run::autopilot_run(cx, p, self.session.as_ref().map(|s| s.id.clone()), text.trim(), resume, state_fn.clone().expect("a workspace chat has its project state"), executor, tools_arc, limits, assist).expect("the agent core serves chat runs")
             }
-            _ => cx.b4().chat_run_start(&cx.session.user, text.trim(), cx.chat.clone(), tools_arc, vec![Message::user(text.trim())], limits, Box::new(assist)).expect("the agent core serves chat runs"),
+            _ => cx.b4().chat_run_start(CxChat(cx).user(), text.trim(), cx.chat.clone(), tools_arc, vec![Message::user(text.trim())], limits, Box::new(assist)).expect("the agent core serves chat runs"),
         };
         if let Some(s) = &self.session {
             run = run.in_session(&s.id);
@@ -1067,7 +1068,7 @@ impl ChatApp {
     /// to the core once they can be given by name, and until then the run goes without them.
     fn start_core_run(&mut self, cx: &AppCx, runs: Arc<dyn iyakki_agent_api::ChatRuns>, text: String, continues: bool, ext: Option<String>) {
         let req = iyakki_agent_api::RunRequest {
-            user: cx.session.user.clone(),
+            user: CxChat(cx).user().to_string(),
             prompt: text.trim().to_string(),
             session: self.session.as_ref().map(|s| s.id.clone()).unwrap_or_default(),
             history: self.msgs.clone(),
@@ -1086,7 +1087,7 @@ impl ChatApp {
         self.mode_cell.set(self.live_mode());
         self.run_is_ap = self.autopilot && self.project.is_some();
         self.ap_after_run = false;
-        cx.audit.record(&cx.session.user, "agent.start", &format!("{} chars", text.len()));
+        CxChat(cx).audit("agent.start", &format!("{} chars", text.len()));
         match super::core_run::remote_run(runs, req) {
             Ok(run) => self.run = Some(run),
             Err(e) => self.error = Some(e),
@@ -1096,7 +1097,7 @@ impl ChatApp {
     /// The waker: when work the assistant waited for has ended and no run is going, a synthetic turn starts with the result
     /// (also after a restart: the ledger is on disk). Never while Autopilot runs (it waits by itself) or a question is open.
     fn poll_waker(&mut self, cx: &AppCx) {
-        if !self.agent || !cx.session.policy.agent {
+        if !self.agent || !CxChat(cx).policy().agent {
             self.waker = None;
             self.wait_line = None;
             return;
@@ -1104,11 +1105,11 @@ impl ChatApp {
         let ws = self.project.as_ref().map(|p| p.name.clone()).unwrap_or_default();
         if self.waker.as_ref().is_none_or(|(k, _)| *k != ws) {
             let tasks: Option<iyakki_agent_api::pending::TaskList> = self.tasks.clone();
-            self.waker = cx.pendingapi().pending_waker(&cx.session.user, &ws, tasks).map(|w| (ws.clone(), w));
+            self.waker = cx.pendingapi().pending_waker(CxChat(cx).user(), &ws, tasks).map(|w| (ws.clone(), w));
         }
         self.wait_n = self.wait_n.wrapping_add(1);
         if self.wait_n % 25 == 1 {
-            self.wait_line = cx.pendingapi().pending_strip_line(&cx.session.user, &ws, now_ms());
+            self.wait_line = cx.pendingapi().pending_strip_line(CxChat(cx).user(), &ws, now_ms());
         }
         if self.run.is_some() || self.autopilot || self.ask.is_some() || self.askform_call.is_some() {
             return;
@@ -1119,11 +1120,11 @@ impl ChatApp {
         }
         match w.take() {
             Some(iyakki_shared::pending::Wake::Turn { text, ids }) => {
-                cx.audit.record(&cx.session.user, "pending.wake", &ids.join(","));
+                CxChat(cx).audit("pending.wake", &ids.join(","));
                 self.start_run(cx, text);
             }
             Some(iyakki_shared::pending::Wake::Limit { text }) => {
-                cx.audit.record(&cx.session.user, "pending.timeout", "wake limit");
+                CxChat(cx).audit("pending.timeout", "wake limit");
                 self.note_n += 1;
                 let call = ToolCall { id: format!("wake_{}_{}", now_ms(), self.note_n), name: "assistant_check".into(), args: serde_json::Value::Null };
                 self.msgs.push(Message::assistant_calls("", vec![call.clone()]));
@@ -1138,7 +1139,7 @@ impl ChatApp {
         let ws = self.project.as_ref().map(|p| p.name.clone()).unwrap_or_default();
         self.jobs_ui.set_workspace(&ws);
         self.jobs_ui.set_hurry(self.run.is_some());
-        self.jobs_ui.poll(cx, false);
+        self.jobs_ui.poll(&super::jobs_ui::JobsCx(cx), false);
         for line in self.jobs_ui.take_events() {
             self.note_n += 1;
             let call = ToolCall { id: format!("job_{}_{}", now_ms(), self.note_n), name: "assistant_check".into(), args: serde_json::Value::Null };
@@ -1216,7 +1217,7 @@ impl ChatApp {
                 }
                 RunEvent::Decision { name, approved, by, .. } => {
                     self.approval = None;
-                    cx.audit.record(&cx.session.user, "agent.tool", &format!("{name}:{}:{by}", if approved { "approved" } else { "denied" }));
+                    CxChat(cx).audit("agent.tool", &format!("{name}:{}:{by}", if approved { "approved" } else { "denied" }));
                 }
                 RunEvent::ToolResult { id, name, ok, text } => {
                     self.tool_ok.insert(id.clone(), ok);
@@ -1256,7 +1257,7 @@ impl ChatApp {
             if std::mem::take(&mut self.ap_after_run) && self.autopilot {
                 if answered && self.autopilot_available() {
                     self.ap_continue = true;
-                    cx.audit.record(&cx.session.user, "agent.autopilot", "continues the turn into the plan");
+                    CxChat(cx).audit("agent.autopilot", "continues the turn into the plan");
                     let goal = self.last_q.clone();
                     self.start_run(cx, goal);
                 } else {
@@ -1315,7 +1316,7 @@ impl ChatApp {
     }
 
     fn speak_enabled(&self, cx: &AppCx) -> bool {
-        self.speak_on.unwrap_or_else(|| cx.voice_settings().speak_replies)
+        self.speak_on.unwrap_or_else(|| CxChat(cx).voice_settings().speak_replies)
     }
 
     /// May this person have a reply read aloud, and is there a voice to do it?
@@ -1325,16 +1326,16 @@ impl ChatApp {
     }
 
     fn voice_state(cx: &AppCx) -> (bool, bool, bool) {
-        let v = cx.voice_settings();
+        let v = CxChat(cx).voice_settings();
         // an engine found on this computer reads replies with no setup (Settings → Voice shows it)
         // (the browser voice of this screen reads too, with nothing set up)
-        (cx.session.policy.voice, v.stt.is_some(), cx.services.effective_tts(None).is_some() || HostVoice::current().is_ready())
+        (CxChat(cx).policy().voice, v.stt.is_some(), cx.services.effective_tts(None).is_some() || HostVoice::current().is_ready())
     }
 
     fn start_recording(&mut self, cx: &AppCx) {
         let (allowed, stt, _) = Self::voice_state(cx);
         if !allowed {
-            cx.audit.record(&cx.session.user, "voice.denied", "record");
+            CxChat(cx).audit("voice.denied", "record");
             self.error = Some("Voice is not enabled for your account.".into());
             return;
         }
@@ -1343,13 +1344,13 @@ impl ChatApp {
             return;
         }
         self.stop_speaking(); // don't record the assistant talking
-        match crate::recorders().start(&cx.voice_settings().record_cmd, iyakki_shared::voicedesk::MAX_RECORD_SECS) {
+        match crate::recorders().start(&CxChat(cx).voice_settings().record_cmd, iyakki_shared::voicedesk::MAX_RECORD_SECS) {
             Ok(r) => {
                 self.error = None;
                 self.rec = Some(r);
-                self.rec_pause = { let v = cx.voice_settings(); iyakki_shared::voicedesk::PauseDetector::from_auto(v.auto_stop, v.pause_ms) };
+                self.rec_pause = { let v = CxChat(cx).voice_settings(); iyakki_shared::voicedesk::PauseDetector::from_auto(v.auto_stop, v.pause_ms) };
                 self.rec_ended_on_pause = false;
-                cx.audit.record(&cx.session.user, "voice.record", "");
+                CxChat(cx).audit("voice.record", "");
             }
             Err(e) => self.error = Some(e),
         }
@@ -1396,7 +1397,7 @@ impl ChatApp {
     /// How a reply is spoken: the engine of Settings → Voice (or the one found on this computer, or the browser voice of the
     /// screen) as a maker of sound and a speaker, and a key that changes when the voice does.
     fn reading_plan(cx: &AppCx) -> Option<(Arc<dyn st::Synth>, Arc<dyn st::Sink>, String)> {
-        let v = cx.voice_settings();
+        let v = CxChat(cx).voice_settings();
         let host = HostVoice::current();
         cx.host_tts().ensure();
         let auto = if v.tts.is_none() { cx.host_tts().auto_engine(None) } else { None };
@@ -1437,7 +1438,7 @@ impl ChatApp {
         if chunks.is_empty() {
             return;
         }
-        cx.audit.record(&cx.session.user, "voice.speak", &format!("{} chars", text.len()));
+        CxChat(cx).audit("voice.speak", &format!("{} chars", text.len()));
         self.begin_reading(cx, msg, &spoken, chunks, from, synth, sink, &key);
     }
 
@@ -1445,7 +1446,7 @@ impl ChatApp {
     #[allow(clippy::too_many_arguments)]
     fn begin_reading(&mut self, cx: &AppCx, msg: usize, spoken: &str, chunks: Vec<Chunk>, from: usize, synth: Arc<dyn st::Synth>, sink: Arc<dyn st::Sink>, key: &str) {
         self.stop_speaking();
-        let v = cx.voice_settings();
+        let v = CxChat(cx).voice_settings();
         self.reader.set_words(v.highlight.word());
         self.reader.set_speed(v.speed_pct as f32 / 100.0);
         let words = wordtime::words_of(spoken);
@@ -1479,7 +1480,7 @@ impl ChatApp {
             }
             _ => {}
         }
-        let hl = cx.voice_settings().highlight;
+        let hl = CxChat(cx).voice_settings().highlight;
         if !hl.sentence() {
             self.view.reading = None;
             return;
@@ -1590,7 +1591,7 @@ impl ChatApp {
 
     fn ensure_session(&mut self, cx: &AppCx) {
         if self.session.is_none() {
-            self.session = cx.sessions().create(&self.skey(cx)).ok();
+            self.session = CxChat(cx).sessions().create(&self.skey(cx)).ok();
         }
     }
 
@@ -1603,11 +1604,11 @@ impl ChatApp {
         let Some(sess) = self.session.as_mut() else { return };
         sess.messages = self.older.iter().cloned().chain(self.msgs.iter().filter(|m| m.role != Role::System).cloned()).collect();
         self.nav_dirty = true;
-        if let Err(e) = cx.sessions().save(sess) {
+        if let Err(e) = CxChat(cx).sessions().save(sess) {
             self.error = Some(format!("Could not save this chat: {e}"));
             return;
         }
-        let (store, snap, q, a) = (cx.sessions().clone(), sess.clone(), self.last_q.clone(), answer.to_string());
+        let (store, snap, q, a) = (CxChat(cx).sessions().clone(), sess.clone(), self.last_q.clone(), answer.to_string());
         std::thread::spawn(move || store.remember_turn(&snap, &q, &a));
     }
 
@@ -1642,9 +1643,9 @@ impl ChatApp {
         if self.flows.is_some() || self.project.is_some() || self.dash.is_some() {
             return;
         }
-        let user = cx.session.user.as_str();
-        let found = cx.core.flows_view().last_flow_recorded(user)
-            .then(|| cx.flows_facet().open(user, &cx.session.policy).ok())
+        let user = CxChat(cx).user();
+        let found = CxChat(cx).core().flows_view().last_flow_recorded(user)
+            .then(|| cx.flows_facet().open(user, CxChat(cx).policy()).ok())
             .flatten()
             .and_then(|env| env.last_flow().map(|(id, name)| (env, id, name)));
         let Some((env, id, name)) = found else {
@@ -1674,7 +1675,7 @@ impl ChatApp {
 
     /// The person pressed X on the chip: the flow is no longer context for this chat (and not for the next one).
     pub fn detach_flow(&mut self, cx: &AppCx) {
-        cx.core.flows_view().clear_last_flow(&cx.session.user);
+        CxChat(cx).core().flows_view().clear_last_flow(CxChat(cx).user());
         self.sticky = None;
         self.sticky_chip = None;
         self.sync_flow_thread(cx);
@@ -1694,8 +1695,8 @@ impl ChatApp {
         self.new_chat();
         self.input.set(&draft);
         self.approvals = if is_pinned(cx, &self.skey(cx)) { Approvals::Pinned } else { Approvals::Ask };
-        if let Some(m) = cx.sessions().list(&self.skey(cx)).into_iter().next() {
-            if let Some(s) = cx.sessions().load(&self.skey(cx), &m.id) {
+        if let Some(m) = CxChat(cx).sessions().list(&self.skey(cx)).into_iter().next() {
+            if let Some(s) = CxChat(cx).sessions().load(&self.skey(cx), &m.id) {
                 self.open_session(s);
             }
         }
@@ -1705,7 +1706,7 @@ impl ChatApp {
         if self.run.is_some() || self.pending.is_some() {
             return;
         }
-        self.picker = Some(Picker { items: cx.sessions().list(&self.skey(cx)), sel: 0, confirm_delete: false });
+        self.picker = Some(Picker { items: CxChat(cx).sessions().list(&self.skey(cx)), sel: 0, confirm_delete: false });
     }
 
     fn picker_key(&mut self, ev: &Event, cx: &AppCx) {
@@ -1730,7 +1731,7 @@ impl ChatApp {
                     let id = p.items[p.sel].id.clone();
                     match cx.services.delete_session(&self.skey(cx), &id) {
                         Ok(gone) => {
-                            cx.audit.record(&cx.session.user, "chat.delete", &format!("{id}: {} files, {} runs", gone.files, gone.runs));
+                            CxChat(cx).audit("chat.delete", &format!("{id}: {} files, {} runs", gone.files, gone.runs));
                             self.nav_dirty = true;
                             if self.session.as_ref().is_some_and(|s| s.id == id) {
                                 self.msgs.truncate(1);
@@ -1740,7 +1741,7 @@ impl ChatApp {
                             }
                             let key = self.skey(cx);
                             let Some(p) = self.picker.as_mut() else { return };
-                            p.items = cx.sessions().list(&key);
+                            p.items = CxChat(cx).sessions().list(&key);
                             p.sel = p.sel.min(p.items.len().saturating_sub(1));
                             p.confirm_delete = false;
                         }
@@ -1761,7 +1762,7 @@ impl ChatApp {
     fn load_selected(&mut self, cx: &AppCx) {
         let Some(p) = self.picker.take() else { return };
         let Some(meta) = p.items.get(p.sel) else { return };
-        match cx.sessions().load(&self.skey(cx), &meta.id) {
+        match CxChat(cx).sessions().load(&self.skey(cx), &meta.id) {
             Some(s) => self.open_session(s),
             None => self.error = Some("That chat could not be opened.".into()),
         }
@@ -1790,8 +1791,8 @@ impl ChatApp {
             self.edit_focus = false;
             return;
         }
-        if !cx.session.policy.allows_app(iyakki_sec::policy::App::Edit) {
-            cx.audit.record(&cx.session.user, "app.denied", "edit");
+        if !CxChat(cx).policy().allows_app(iyakki_sec::policy::App::Edit) {
+            CxChat(cx).audit("app.denied", "edit");
             self.error = Some("Your account may not use the editor.".into());
             return;
         }
@@ -1804,7 +1805,7 @@ impl ChatApp {
         let _ = ed.handle(&Event::Key(Key::Ctrl('o')), cx); // start with the open dialog
         self.editor = Some(ed);
         self.edit_focus = true;
-        cx.audit.record(&cx.session.user, "chat.edit_mode", "on");
+        CxChat(cx).audit("chat.edit_mode", "on");
     }
 
     /// While the editor is open, events for it go to it. `Some(flow)` = handled.
@@ -1967,7 +1968,7 @@ impl ChatApp {
         self.ask = None;
         // a credential is never sent to the model: it is offered to the vault, and only a placeholder goes on
         if let Some(found) = credguard::detect(&text) {
-            cx.audit.record(&cx.session.user, "chat.credential.blocked", found.what);
+            CxChat(cx).audit("chat.credential.blocked", found.what);
             let rest = found.redacted.replace(credguard::PLACEHOLDER, "");
             text = found.redacted.clone();
             self.cred = Some(found);
@@ -1992,7 +1993,7 @@ impl ChatApp {
         let (ttx, trx) = channel::<String>();
         let backend: Arc<dyn ChatBackend> = cx.chat.clone();
         let (svc, user, sid, q) = (cx.services.clone(), self.skey(cx), self.session.as_ref().map(|s| s.id.clone()), text.trim().to_string());
-        let opts = ContextOptions { use_docs: self.use_docs, use_skills: cx.session.policy.skills, ..Default::default() };
+        let opts = ContextOptions { use_docs: self.use_docs, use_skills: CxChat(cx).policy().skills, ..Default::default() };
         // in edit mode the open file (as marked data) and the selection go in the system prompt
         let base = match &self.editor {
             Some(ed) => {
@@ -2038,7 +2039,7 @@ impl ChatApp {
         self.live.clear();
         self.thinking.clear();
         self.waiting_since = Some(std::time::Instant::now());
-        cx.audit.record(&cx.session.user, "chat.send", &format!("{} chars", self.msgs.last().map_or(0, |m| m.content.len())));
+        CxChat(cx).audit("chat.send", &format!("{} chars", self.msgs.last().map_or(0, |m| m.content.len())));
     }
 
     fn poll(&mut self, cx: &AppCx) {
@@ -2077,7 +2078,7 @@ impl ChatApp {
                                     // the blocks go to the editor for review; the chat keeps the explanation
                                     shown = if note.is_empty() { "I suggested changes: review them in the editor.".to_string() } else { format!("{note}\n(Suggested changes are shown in the editor for you to accept or reject.)") };
                                     self.edit_focus = true;
-                                    cx.audit.record(&cx.session.user, "edit.propose", "");
+                                    CxChat(cx).audit("edit.propose", "");
                                 }
                                 Ok(None) => {}
                                 Err(e) => self.error = Some(format!("Could not use the assistant's edit: {e}")),
@@ -2116,17 +2117,17 @@ impl ChatApp {
                         // the corrected words are what is inserted (and auto-sent); when nothing could be corrected the words as heard are
                         let text = fixed.as_ref().map_or(raw, |f| f.text.clone());
                         if let Some(f) = &fixed {
-                            cx.audit.record(&cx.session.user, iyakki_shared::dictfix::AUDIT, f.audit_detail());
+                            CxChat(cx).audit(iyakki_shared::dictfix::AUDIT, f.audit_detail());
                             if let Some(why) = &f.kept_because {
                                 self.info = Some(format!("{}{}", why[..1].to_uppercase(), &why[1..]));
                             }
                         }
                         self.input.paste(text.trim_end());
-                        if cx.voice_settings().auto_send && self.pending.is_none() {
+                        if CxChat(cx).voice_settings().auto_send && self.pending.is_none() {
                             self.send(cx);
                         }
                         // Keep listening: a pause ended it and its text is in, so listen again (not after the person's own stop or a failure)
-                        if std::mem::take(&mut self.rec_ended_on_pause) && cx.voice_settings().keep_listening {
+                        if std::mem::take(&mut self.rec_ended_on_pause) && CxChat(cx).voice_settings().keep_listening {
                             self.start_recording(cx);
                         }
                     }
@@ -2161,13 +2162,13 @@ impl App for ChatApp {
         self.host_save.take()
     }
     fn on_drop(&mut self, paths: &[std::path::PathBuf], cx: &AppCx) -> super::DropAction {
-        let home = cx.core.file_scope().home_root(&cx.session.user, cx.data_dir());
+        let home = CxChat(cx).core().file_scope().home_root(CxChat(cx).user(), CxChat(cx).data_dir());
         let (got, notes) = super::dropattach::prepare(paths, &home.join("Uploads"));
         let mut line = if got.is_empty() { String::new() } else { format!("Attached {}: {}. They go with your next message.", got.len(), got.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", ")) };
         if !notes.is_empty() {
             line.push_str(&format!(" Left out: {}.", notes.join("; ")));
         }
-        cx.audit.record(&cx.session.user, "chat.attach", &format!("{} files", got.len()));
+        CxChat(cx).audit("chat.attach", &format!("{} files", got.len()));
         self.attachments.extend(got);
         self.info = Some(line.trim().to_string());
         super::DropAction::Taken
@@ -2268,7 +2269,7 @@ impl App for ChatApp {
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
         self.sync_flow_thread(cx);
         if self.links.user.is_empty() {
-            self.links.user = cx.session.user.clone();
+            self.links.user = CxChat(cx).user().to_string();
         }
         if self.link_card_event(ev) {
             return Flow::Stay;
@@ -2319,7 +2320,7 @@ impl App for ChatApp {
             self.jobs_ui.select_all();
             return Flow::Stay;
         }
-        if self.jobs_ui.handle(ev, cx) {
+        if self.jobs_ui.handle(ev, &super::jobs_ui::JobsCx(cx)) {
             return Flow::Stay;
         }
         if matches!(ev, Event::MouseUp(..)) {
@@ -2400,8 +2401,8 @@ impl Approvals {
 pub const AUTO_LIMITS: &str = "Approvals (Ctrl+Q cycles). Ask first: the assistant asks before anything you have not already approved, and remembers what you approve with \"Allow for this session\". Auto-approve safe: ordinary writes, commands and deploys run without asking (audited as auto-approved) and only risky actions ask. Autopilot: works through the plan to the end within its budgets and still stops for the always-ask list. Always asks, in every mode: secrets and the vault, the screen, browser actions on sites, deleting (k8s_delete, rm, prune, DELETE), anything outside the workspace, outside tools (MCP, packages), store publish, platform deploy/remove, drives. \"Allow for this session\" never covers those, nor a change to a remote cluster, and only covers the same tool in the same scope (same command, cluster, namespace, host or workspace). Production-looking clusters are read-only. Still enforced: the cluster guard, manifest linter, file scope, credential guard.";
 
 fn pin_file(cx: &AppCx) -> std::path::PathBuf {
-    let u: String = cx.session.user.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-    cx.data_dir().join(format!("approval-pins-{}.json", if u.is_empty() { "invalid" } else { &u }))
+    let u: String = CxChat(cx).user().chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+    CxChat(cx).data_dir().join(format!("approval-pins-{}.json", if u.is_empty() { "invalid" } else { &u }))
 }
 
 /// `approval-pins-<user>.json`: what a person kept approved. Schema 0 (alpha.1) was a bare list of keys; schema 1 is
@@ -2478,7 +2479,7 @@ impl Pics for ChatPics<'_> {
             // what the person may read, and the folder of this chat (where the assistant keeps what it makes)
             let in_chat_folder = self.workdir.as_ref().is_some_and(|w| std::fs::canonicalize(p).is_ok_and(|real| real.starts_with(w)));
             if !in_chat_folder {
-                cx.core.file_scope().check_read(&cx.session.policy, &cx.session.user, p).ok()?;
+                CxChat(cx).core().file_scope().check_read(CxChat(cx).policy(), CxChat(cx).user(), p).ok()?;
             }
             std::fs::metadata(p).ok().filter(|m| m.is_file() && m.len() <= 24 << 20)?;
             let bytes = std::fs::read(p).ok()?;
@@ -2527,15 +2528,15 @@ impl ChatApp {
                     }
                 };
                 let name = chatpic::clean_name(&form.value(0), d.ext);
-                let home = self.save_home.clone().unwrap_or_else(|| std::path::PathBuf::from(format!("/home/{}", cx.session.user)));
+                let home = self.save_home.clone().unwrap_or_else(|| std::path::PathBuf::from(format!("/home/{}", CxChat(cx).user())));
                 let dir = match form.choice_idx(1) {
                     0 => home.join("Pictures"),
                     1 => home.join("Documents"),
                     _ => home,
                 };
-                match chatpic::save_file(&cx.session.policy, &cx.session.user, &dir, &name, &d.bytes) {
+                match chatpic::save_file(CxChat(cx).policy(), CxChat(cx).user(), &dir, &name, &d.bytes) {
                     Ok(path) => {
-                        cx.audit.record(&cx.session.user, "chat.picture.save", &path.display().to_string());
+                        CxChat(cx).audit("chat.picture.save", &path.display().to_string());
                         self.info = Some(format!("Saved the picture as {}", path.display()));
                         self.save = None;
                     }
@@ -2560,17 +2561,17 @@ impl ChatApp {
         match form.handle_event(ev) {
             FormEvent::Cancel => {
                 if let Some(id) = request.take() {
-                    let _ = cx.vault().cancel_secret_request(&cx.session.user, &id);
+                    let _ = CxChat(cx).vault().cancel_secret_request(CxChat(cx).user(), &id);
                 }
                 self.secret = None;
             }
             FormEvent::Submit => {
                 let (name, value) = (form.value(0), form.raw(1));
                 let r = match request.as_deref() {
-                    Some(id) => cx.vault().answer_secret_request(&cx.session.user, id, &name, &value),
+                    Some(id) => CxChat(cx).vault().answer_secret_request(CxChat(cx).user(), id, &name, &value),
                     None if !iyakki_shared::vault::valid_secret_name(&name) => Err("a vault name is lowercase letters, digits, . _ - (up to 64), for example svc.nas".to_string()),
                     None if value.is_empty() => Err("type the secret first".to_string()),
-                    None => cx.vault().user_set(&cx.session.user, &name, &value).map(|_| name.clone()).map_err(|e| match e {
+                    None => CxChat(cx).vault().user_set(CxChat(cx).user(), &name, &value).map(|_| name.clone()).map_err(|e| match e {
                         iyakki_shared::vault::VaultError::Locked => "your personal vault is locked (it could not be opened at sign-in)".to_string(),
                         other => other.to_string(),
                     }),
@@ -2578,7 +2579,7 @@ impl ChatApp {
                 match r {
                     Ok(stored) => {
                         // the log says that a secret with this name was stored, never what it is
-                        cx.audit.record(&cx.session.user, "vault.user.set", &stored);
+                        CxChat(cx).audit("vault.user.set", &stored);
                         self.secret = None;
                         self.cred = None;
                         self.error = None;
@@ -2593,7 +2594,7 @@ impl ChatApp {
 
     /// While the assistant waits for the person's answer about their browser, the question opens by itself (and goes when it is answered elsewhere).
     fn offer_consent_request(&mut self, cx: &AppCx) {
-        let user = cx.session.user.as_str();
+        let user = CxChat(cx).user();
         if let Some(d) = &self.consent {
             if cx.browser_consent().get(user, &d.req.id).is_none() {
                 self.consent = None;
@@ -2628,7 +2629,7 @@ impl ChatApp {
         if self.secret.is_some() || self.run.is_none() {
             return;
         }
-        if let Some(r) = cx.secret_requests().pending(&cx.session.user).into_iter().next() {
+        if let Some(r) = CxChat(cx).secret_requests().pending(CxChat(cx).user()).into_iter().next() {
             self.open_secret(Some(r.id), &r.name, None);
         }
     }
@@ -2636,7 +2637,7 @@ impl ChatApp {
     /// Open the model chooser: the models every enabled provider announced (Settings → Models, `t` fetches the list).
     fn open_models(&mut self, cx: &AppCx) {
         let (plain, chat) = {
-            let st = cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let st = CxChat(cx).settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let s = st.get();
             (s.providers.iter().filter(|p| p.enabled).flat_map(|p| p.models.iter().map(move |m| (p.id.clone(), m.clone()))).collect::<Vec<_>>(), s.chat.clone())
         };
@@ -2673,7 +2674,7 @@ impl ChatApp {
         self.choose_model_inner(cx, pick);
         // a model that took (no error came out of it) is the person's latest
         if let (Some((p, m)), true) = (chosen, self.error.is_none()) {
-            crate::uisize::note_recent_model(cx.data_dir(), &cx.session.user, &p, &m);
+            crate::uisize::note_recent_model(CxChat(cx).data_dir(), CxChat(cx).user(), &p, &m);
         }
     }
 
@@ -2682,9 +2683,9 @@ impl ChatApp {
         if self.ext_id(cx).is_some() {
             return;
         }
-        let chat = cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.clone();
+        let chat = CxChat(cx).settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.clone();
         if let Some(c) = chat {
-            crate::uisize::note_recent_model(cx.data_dir(), &cx.session.user, &c.provider, &c.model);
+            crate::uisize::note_recent_model(CxChat(cx).data_dir(), CxChat(cx).user(), &c.provider, &c.model);
         }
     }
 
@@ -2700,14 +2701,14 @@ impl ChatApp {
             Pick::Top => return,
             Pick::Provider(p, m) => (p, m),
         };
-        if !cx.session.policy.manage_settings {
+        if !CxChat(cx).policy().manage_settings {
             self.error = Some("Only an administrator can change the model (Settings → Models).".into());
             return;
         }
-        let r = cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).set_chat(Some(iyakki_shared::settings::ModelChoice { provider: provider.clone(), model: model.clone() }));
+        let r = CxChat(cx).settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).set_chat(Some(iyakki_shared::settings::ModelChoice { provider: provider.clone(), model: model.clone() }));
         match r {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "settings.chat_model", &format!("{provider} {model}"));
+                CxChat(cx).audit("settings.chat_model", &format!("{provider} {model}"));
                 self.choose_builtin(cx);
                 self.error = None;
             }
@@ -2850,8 +2851,8 @@ impl ChatApp {
             },
             Event::Key(Key::Ctrl('g')) if self.editor.is_some() => self.error = Some("Close the editor (Ctrl+E) to use the agent.".into()),
             Event::Key(Key::Ctrl('g')) => {
-                if !cx.session.policy.agent {
-                    cx.audit.record(&cx.session.user, "agent.denied", "toggle");
+                if !CxChat(cx).policy().agent {
+                    CxChat(cx).audit("agent.denied", "toggle");
                     self.error = Some("The agent is not enabled for your account.".into());
                 } else if self.run.is_none() {
                     self.agent = !self.agent;
@@ -2867,7 +2868,7 @@ impl ChatApp {
             Event::Tab(USE_BUILTIN) => {
                 if self.builtin_chip_shown(cx) {
                     self.choose_builtin(cx);
-                    cx.audit.record(&cx.session.user, "chat.agent", "builtin");
+                    CxChat(cx).audit("chat.agent", "builtin");
                 }
             }
             Event::Tab(AP_PAUSE) => {
@@ -3009,7 +3010,7 @@ impl ChatApp {
                 let busy = self.run.is_some() || self.pending.is_some();
                 if let (false, Some(m)) = (busy, self.nav_items.get(*n - 1000)) {
                     if self.session.as_ref().is_none_or(|s| s.id != m.id) {
-                        if let Some(s) = cx.sessions().load(&self.skey(cx), &m.id) {
+                        if let Some(s) = CxChat(cx).sessions().load(&self.skey(cx), &m.id) {
                             self.open_session(s);
                         } else {
                             self.error = Some("That chat could not be opened.".into());
@@ -3035,7 +3036,7 @@ impl ChatApp {
         let navw = (250.0 * s).min(full.w * 0.34);
         let nav_shown = self.nav_open && self.editor.is_none() && full.w - navw >= 480.0 * s;
         if self.nav_dirty {
-            self.nav_items = cx.sessions().list(&self.skey(cx));
+            self.nav_items = CxChat(cx).sessions().list(&self.skey(cx));
             self.nav_dirty = false;
         }
         let nav_rect = R::new(full.x, full.y, navw, full.h);
@@ -3110,7 +3111,7 @@ impl ChatApp {
             _ => None,
         };
         let bctx = chat_view::Ctx { tool_ok: &self.tool_ok, approval, busy, open: &Default::default(), live: &self.live, thinking: &self.thinking, think_secs: self.waiting_since.map_or(0, |t| t.elapsed().as_secs()) };
-        let workdir = self.session.as_ref().and_then(|ss| cx.session_workdir(&cx.session.user, &ss.id).ok());
+        let workdir = self.session.as_ref().and_then(|ss| CxChat(cx).session_workdir(&ss.id).ok());
         chat_view::set_mono_boost(if in_ide { 1.2 } else { 1.0 });
         let total = self.view.prepare(g, &self.msgs, &bctx, log.w, s, &mut ChatPics { images: &mut self.images, pics: &mut self.pics, cx, workdir });
         let max_off = (total - log.h).max(0.0);
@@ -3241,7 +3242,7 @@ impl ChatApp {
         // right-aligned toggles: Agent on/off (or Stop while a run is active), then Read aloud
         let mut rx = area.x + area.w - side;
         if in_ide {
-        } else if self_.run.is_some() || (cx.session.policy.agent && self_.rec.is_none()) {
+        } else if self_.run.is_some() || (CxChat(cx).policy().agent && self_.rec.is_none()) {
             // Stop run and Agent: on/off share one slot as wide as the widest of them, so the chip beside it never moves
             let slot = ["Stop run", "Agent: on", "Agent: off"].iter().map(|l| g.text_width(13.0 * s, l, Face::Bold) + 13.0 * s * 1.7).fold(0.0f32, f32::max);
             let (label, color, key) = match (self_.run.is_some(), self_.agent) {
@@ -3253,7 +3254,7 @@ impl ChatApp {
             if draw { g.button(rx - w, bty, 13.0 * s, label, color, cev(key)); }
             rx -= slot + 8.0 * s;
             // the chip stays enabled while a run goes: the mode is live (see iyakki_shared::livemode)
-            if self_.agent && cx.session.policy.agent {
+            if self_.agent && CxChat(cx).policy().agent {
                 // the same single control as in the IDE chat; the long form only when there is room beside the status text
                 let mode = self_.mode_label_in(cx);
                 let floor = area.x + side + 150.0 * s;
@@ -3367,7 +3368,7 @@ impl ChatApp {
         } else if self.run.is_some() && self.approval.is_none() {
             let lead = match (self.autopilot, self.ext_choice.clone().flatten()) {
                 // "autopilot · Claude Code · step 3 · row 2 of 7 · ~1.2k tokens · $0.12"
-                (true, Some(id)) => format!("autopilot · {} · {} · ", cx.agents_cfg().agent(&id).map_or(id, |a| a.label()), if self.ap_step.is_empty() { "planning".to_string() } else { self.ap_step.clone() }),
+                (true, Some(id)) => format!("autopilot · {} · {} · ", CxChat(cx).agents_cfg().agent(&id).map_or(id, |a| a.label()), if self.ap_step.is_empty() { "planning".to_string() } else { self.ap_step.clone() }),
                 _ => String::new(),
             };
             // the chip and Stop run stay on the right while a run goes: the line is cut before it reaches them
@@ -3381,7 +3382,7 @@ impl ChatApp {
             // idle: show which model is answering
             let label = match self.ext_footer(cx) {
                 Some(f) => f,
-                None => cx.settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.as_ref().map_or("no model selected (Settings → Models, or sign in to Claude Code)".to_string(), |c| format!("model: {} · {}", c.provider, c.model)),
+                None => CxChat(cx).settings().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.as_ref().map_or("no model selected (Settings → Models, or sign in to Claude Code)".to_string(), |c| format!("model: {} · {}", c.provider, c.model)),
             };
             let mut extra = self.ctx.summary();
             if !self.usage_text().is_empty() {
@@ -3445,11 +3446,11 @@ impl ChatApp {
             let slot = ["Stop run", "Agent: on", "Agent: off"].iter().map(|l| bw(g, l)).fold(0.0f32, f32::max);
             if self.run.is_some() {
                 put_ev(g, "Stop run", ERR, cev(Key::Ctrl('k')), "Stop the assistant (Ctrl+K)", slot);
-            } else if cx.session.policy.agent && self.rec.is_none() {
+            } else if CxChat(cx).policy().agent && self.rec.is_none() {
                 put_ev(g, if self.agent { "Agent: on" } else { "Agent: off" }, if self.agent { rgb(255, 196, 94) } else { MUTED }, cev(Key::Ctrl('g')), "Let the assistant use tools (Ctrl+G)", slot);
             }
             // the chip stays enabled while a run goes: the mode is live (see iyakki_shared::livemode)
-            if self.agent && cx.session.policy.agent && self.rec.is_none() {
+            if self.agent && CxChat(cx).policy().agent && self.rec.is_none() {
                 // ONE control with three plain modes: Ask first, Auto-approve safe, Autopilot (Ctrl+Q cycles them)
                 let mode = self.mode_label_in(cx);
                 let labels = [format!("Approvals: {mode}"), mode.clone()];
@@ -3591,7 +3592,7 @@ impl ChatApp {
             }
             if p.confirm_delete {
                 if let Some(m) = p.items.get(p.sel) {
-                    let files = cx.session_files(&cx.session.user, &m.id);
+                    let files = CxChat(cx).session_files(&m.id);
                     let what = if files > 0 { format!("Delete “{}”, its memory and its folder with {files} file{}?", m.title, if files == 1 { "" } else { "s" }) } else { format!("Delete “{}” and its memory?", m.title) };
                     let t = g.fit(15.0 * s, &what, Face::Bold, pw - 260.0 * s);
                     let by = py0 + ph - 54.0 * s;
@@ -3677,9 +3678,33 @@ mod tests {
         iyakki_shared::hostfiles::set_enabled(false);
     }
 
+    /// `HOME` set for the test and put back afterwards (hold the ENV lock).
+    struct HomeEnv(Option<std::ffi::OsString>);
+    impl HomeEnv {
+        fn set(p: &std::path::Path) -> HomeEnv {
+            let old = std::env::var_os("HOME"); // home-ok: only saved, to be put back; the test sets a temp home of its own (ENV lock held)
+            std::env::set_var("HOME", p);
+            HomeEnv(old)
+        }
+    }
+    impl Drop for HomeEnv {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"), // home-ok: puts the saved state back after the temp home
+            }
+        }
+    }
+
     #[test]
     fn a_picture_on_top_of_the_clipboard_history_is_kept_in_uploads_and_goes_with_the_next_message_and_text_pastes_as_before() {
-        let (mut app, mut cx, _d) = chat_with_answer("chatpastepic");
+        let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
+        let _env = iyakki_testkit::process_lock(iyakki_testkit::names::ENV); // HOME is process-wide
+        let (mut app, mut cx, d) = chat_with_answer("chatpastepic");
+        // the uploads go to the home folder: give the test a home of its own (it once filled the real ~/Uploads, one number per run)
+        let own_home = d.join("own-home");
+        std::fs::create_dir_all(&own_home).unwrap();
+        let _home = HomeEnv::set(&own_home);
         let home = cx.core.file_scope().home_root(&cx.session.user, cx.data_dir());
         cx.session.policy.fs_write = vec![home.display().to_string()];
         crate::ui::clipboard::clear();
@@ -3696,7 +3721,7 @@ mod tests {
         app.handle(&Event::Key(Key::Ctrl('V')), &cx);
         app.handle(&Event::Key(Key::Ctrl('V')), &cx);
         assert_eq!(app.attachments.len(), 2);
-        assert!(app.attachments[0].name == "Pasted-picture-1.png" && app.attachments[1].name == "Pasted-picture-2.png", "no file is replaced: a number is added");
+        assert!(app.attachments[0].name == "Pasted-picture-1.png" && app.attachments[1].name == "Pasted-picture-2.png", "no file is replaced: a number is added ({:?})", app.attachments.iter().map(|a| a.name.clone()).collect::<Vec<_>>());
         let png = std::fs::read(home.join("Uploads").join("Pasted-picture-1.png")).unwrap();
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         app.input.set("what is this?");

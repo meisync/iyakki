@@ -3,6 +3,7 @@
 //! current boot), scrollable, and "I have seen it", which clears the "ended unexpectedly" note on the Overview page.
 
 use super::*;
+use super::system_port::CrashPort;
 use iyakki_core_api::crashlog as cl;
 
 /// How many lines the viewer keeps.
@@ -33,13 +34,13 @@ impl SettingsApp {
     }
 
     /// The note that the last session ended unexpectedly, until "I have seen it" is pressed.
-    pub(super) fn crash_note(&self, cx: &AppCx) -> Option<cl::Unclean> {
-        cx.os.crashlog().read_unclean(&self.crash_dir()).filter(|u| !u.seen)
+    pub(super) fn crash_note(&self, p: &dyn CrashPort) -> Option<cl::Unclean> {
+        p.crashlog().read_unclean(&self.crash_dir()).filter(|u| !u.seen)
     }
 
-    fn crash_target(&self, cx: &AppCx) -> Option<String> {
+    fn crash_target(&self, p: &dyn CrashPort) -> Option<String> {
         let dir = self.crash_dir();
-        let log = cx.os.crashlog();
+        let log = p.crashlog();
         match self.crash.view {
             0 => log.read_unclean(&dir).map(|u| u.file).filter(|f| !f.is_empty() && log.has_file(&dir, f)).or_else(|| log.latest_crash(&dir)),
             1 => Some("kmsg-previous-1.log".to_string()).filter(|f| log.has_file(&dir, f)),
@@ -47,18 +48,18 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn crash_reload(&mut self, cx: &AppCx) {
+    pub(super) fn crash_reload(&mut self, p: &dyn CrashPort) {
         let dir = self.crash_dir();
-        let name = self.crash_target(cx);
-        self.crash.lines = name.as_ref().map(|n| cx.os.crashlog().last_lines(&dir, n, VIEW_LINES)).unwrap_or_default();
+        let name = self.crash_target(p);
+        self.crash.lines = name.as_ref().map(|n| p.crashlog().last_lines(&dir, n, VIEW_LINES)).unwrap_or_default();
         self.crash.name = name.unwrap_or_default();
         self.crash.scroll = self.crash.lines.len().saturating_sub(1);
         self.crash.loaded = true;
     }
 
-    pub(super) fn handle_crash(&mut self, k: &Key, cx: &AppCx) {
+    pub(super) fn handle_crash(&mut self, k: &Key, p: &dyn CrashPort) {
         if !self.crash.loaded {
-            self.crash_reload(cx);
+            self.crash_reload(p);
         }
         let last = self.crash.lines.len().saturating_sub(1);
         let page = 10usize;
@@ -71,37 +72,37 @@ impl SettingsApp {
             Key::End => self.crash.scroll = last,
             Key::Char('p') => {
                 self.crash.view = (self.crash.view + 1) % 3;
-                self.crash_reload(cx);
+                self.crash_reload(p);
             }
-            Key::Char('r') => self.crash_reload(cx),
+            Key::Char('r') => self.crash_reload(p),
             Key::Char('y') => {
-                if self.crash_note(cx).is_some() {
-                    cx.os.crashlog().mark_seen(&self.crash_dir());
-                    cx.audit.record(&cx.session.user, "system.unclean-shutdown.seen", "the note about the session that ended unexpectedly was cleared");
+                if self.crash_note(p).is_some() {
+                    p.crashlog().mark_seen(&self.crash_dir());
+                    p.audit("system.unclean-shutdown.seen", "the note about the session that ended unexpectedly was cleared");
                     self.ok("Cleared. The log file is kept; delete it from the data folder (log) when you no longer need it.");
                 } else {
                     self.ok("There is no note to clear.");
                 }
             }
-            Key::Char('c') => self.crash_copy(cx),
+            Key::Char('c') => self.crash_copy(p),
             _ => {}
         }
     }
 
     /// "Copy to a file in my home": the log the viewer shows goes, as it is, into a new private file in the person's home folder
     /// (administrators; the assistant's `last_session_log_copy` does the same after a yes).
-    fn crash_copy(&mut self, cx: &AppCx) {
-        if !cx.session.policy.manage_settings {
+    fn crash_copy(&mut self, p: &dyn CrashPort) {
+        if !p.is_admin() {
             return self.ok("Only an administrator can copy the log.");
         }
-        let Some(name) = self.crash_target(cx) else {
+        let Some(name) = self.crash_target(p) else {
             return self.ok("There is no kept log to copy for this choice.");
         };
-        let home = cx.core.file_scope().home_root_for_writes(&cx.session.user, cx.data_dir());
-        match cx.os.crashlog().copy_to_folder(&self.crash_dir(), &name, &home, iyakki_clock::now_unix()) {
-            Ok(p) => {
-                cx.audit.record(&cx.session.user, "system.unclean-shutdown.copy", &format!("the kept kernel log {name} was copied to a file in the home folder"));
-                self.ok(format!("Copied to {} (private to you).", p.display()));
+        let home = p.home_for_writes();
+        match p.crashlog().copy_to_folder(&self.crash_dir(), &name, &home, iyakki_clock::now_unix()) {
+            Ok(file) => {
+                p.audit("system.unclean-shutdown.copy", &format!("the kept kernel log {name} was copied to a file in the home folder"));
+                self.ok(format!("Copied to {} (private to you).", file.display()));
             }
             Err(e) => self.ok(format!("Could not copy the log: {e}")),
         }
@@ -111,9 +112,9 @@ impl SettingsApp {
         vec![("I have seen it", ACCENT, 'y'), ("Other boot", TEXT, 'p'), ("Read again", TEXT, 'r'), ("Copy to my home", TEXT, 'c')]
     }
 
-    pub(super) fn render_crash(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+    pub(super) fn render_crash(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn CrashPort) {
         if !self.crash.loaded {
-            self.crash_reload(cx);
+            self.crash_reload(p);
         }
         let mut y = a.y;
         let what = match self.crash.view {
@@ -121,7 +122,7 @@ impl SettingsApp {
             1 => "the boot before this one",
             _ => "this boot",
         };
-        match self.crash_note(cx) {
+        match self.crash_note(p) {
             Some(u) => {
                 let t = g.fit(15.0 * s, &format!("The session that started {} ended unexpectedly.", cl::wall(u.started)), Face::Bold, a.w);
                 g.text(a.x, y, 15.0 * s, crate::fx::AMBER, &t, Face::Bold);

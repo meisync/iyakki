@@ -3,13 +3,7 @@
 
 use std::sync::Arc;
 
-/// A running watcher of the person's pending work: when something the assistant waited for has ended it says so, and gives the turn to start.
-pub trait PendingWaker: Send {
-    /// Something ended and the assistant has not been told (cheap: read every frame).
-    fn ready(&self) -> bool;
-    /// The turn to start now (call only when no run is in progress).
-    fn take(&self) -> Option<iyakki_shared::pending::Wake>;
-}
+pub use iyakki_shared::facets::PendingWaker;
 
 /// Where a chat's own tasks are read from (the jobs are the core's): the chat's task manager, handed over as an opaque handle that only the
 /// real core knows how to read (the manager's type lives in the agent).

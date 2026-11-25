@@ -194,6 +194,7 @@ pub mod audiofmt;
 pub mod hls;
 pub mod radio;
 pub mod radio_recover;
+pub mod routeevents;
 pub mod radio_stations;
 pub mod radiotools;
 #[cfg(test)]
@@ -633,6 +634,7 @@ pub mod archive {
 pub use iyakki_bindelta::bindelta;
 pub use iyakki_archive::xz;
 pub mod player;
+pub mod routepause;
 pub mod clis;
 pub mod clis_sources;
 #[cfg(test)]
@@ -863,4 +865,8 @@ mod lab_tests;
 pub mod camkit;
 #[cfg(test)]
 mod camtools_tests;
+pub mod sessionend_hooks;
+pub mod sessionendtools;
+#[cfg(test)]
+mod sessionend_hooks_tests;
 pub mod storekit;

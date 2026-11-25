@@ -1,0 +1,27 @@
+{
+ "schema": 1,
+ "row": "F-KBD-16",
+ "feature_sha": "611321547e25477e",
+ "title": "Sleep button on the power menu",
+ "clauses": [
+  {
+   "id": "sleep",
+   "text": "the Sleep button and the s key put the computer to sleep, the screen locks, and the password is asked on wake",
+   "machines": [
+    "lenovo",
+    "hp",
+    "macbook-pro"
+   ],
+   "steps": [
+    {
+     "do": "Once a kernel with sleep support is installed, sign in, open the Power menu, choose Sleep (or press s).",
+     "expect": "The computer sleeps and the screen is locked."
+    },
+    {
+     "do": "Wake the computer.",
+     "expect": "The password is asked, and after it the same session comes back without a sign-in from scratch."
+    }
+   ]
+  }
+ ]
+}

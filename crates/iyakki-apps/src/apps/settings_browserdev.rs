@@ -3,13 +3,14 @@
 //! `iyakki_shared::devtools::DevTools`; every change is audited by the key handler in `settings.rs`.
 
 use super::*;
+use super::browser_port::BrowserSettingsPort;
 
 impl SettingsApp {
     /// The section; returns the height it used.
-    pub(super) fn render_browser_devtools(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, cx: &AppCx) -> f32 {
-        let dt = &cx.devtools();
-        let on = dt.enabled(&cx.session.user);
-        let sum = dt.summary(&cx.session.user);
+    pub(super) fn render_browser_devtools(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, p: &dyn BrowserSettingsPort) -> f32 {
+        let dt = &p.devtools();
+        let on = dt.enabled(p.acting_user());
+        let sum = dt.summary(p.acting_user());
         let help = format!(
             "Lets the chat assistant list failed requests, how long the page took to load and the console errors of the pages you have open here, so it can tell you why a page is broken or slow. Addresses are kept without query strings or tokens; no page content, requests or answers are stored, and turning this off forgets what was collected.{}",
             if on { format!(" Now: {} failed request(s), {} console error(s) on the current page.", sum.failed, sum.console_errors) } else { String::new() }

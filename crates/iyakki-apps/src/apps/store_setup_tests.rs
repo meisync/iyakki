@@ -1,5 +1,6 @@
 use iyakki_agent::facets_h::RealServices as _;
 use super::*;
+use crate::apps::store_port::CxPort;
 use iyakki_agent::quickinstall as qi;
 use crate::apps::store::{Section, StoreApp};
 use crate::apps::{App, AppCx};
@@ -10,6 +11,7 @@ fn cx(tag: &str, role: Role) -> AppCx {
 }
 
 fn full_machine() -> Machine {
+    crate::apps::store_port::install_table();
     Machine { model: "MacBookPro14,1".into(), gpus: 1, nvidia: true, amd_rocm: true, ram_mb: 16_000, camera: true, fw: Item::ALL.into_iter().filter(|i| i.fw_def().is_some() || *i == Item::FwHardware).collect(), ..Default::default() }
 }
 
@@ -20,6 +22,7 @@ fn plain_machine() -> Machine {
 
 /// Facts from a fake probe: everything missing except what is listed.
 fn facts(some: &[(Item, Presence)]) -> Facts {
+    crate::apps::store_port::install_table();
     let mut f = Facts::default();
     for it in Item::ALL {
         f.presence.push((it, some.iter().find(|(x, _)| *x == it).map(|(_, p)| p.clone()).unwrap_or(Presence::Missing)));
@@ -32,11 +35,11 @@ fn rig(tag: &str, role: Role, m: Machine, f: Facts) -> (StoreApp, AppCx) {
     let mut a = StoreApp::new(&cx);
     a.setup.set_machine(m);
     a.setup.set_facts(f);
-    a.setup.launch = Some(qi::Launch { exe: "/usr/bin/true".into(), data: cx.data_dir().join("qi") });
+    a.setup.launch = Some(iyakki_tile_api::store_qi::Launch { exe: "/usr/bin/true".into(), data: cx.data_dir().join("qi") });
     a.handle(&Event::Tab(4), &cx);
     assert!((a.section == Section::Setup), "the Setup tab opens by its tab");
     // the first drawing does this; do it now, so what a test sets afterwards (jobs, failed, signed in) is kept
-    a.setup.enter(&cx);
+    a.setup.enter(&CxPort(&cx));
     (a, cx)
 }
 
@@ -74,7 +77,7 @@ fn titles(a: &StoreApp) -> Vec<&'static str> {
 
 const SIZES: [(u32, u32); 6] = [(360, 740), (800, 480), (1280, 720), (1920, 1080), (2560, 1600), (2880, 1800)];
 
-fn job(item: Item, state: iyakki_shared::jobs::State, progress: Option<f32>) -> Job {
+fn job(item: Item, state: iyakki_tile_api::store_qi::JobState, progress: Option<f32>) -> Job {
     Job {
         id: "j1".into(),
         label: format!("Install {}", item.title()),
@@ -157,9 +160,9 @@ fn mixed(tag: &str, role: Role) -> (StoreApp, AppCx) {
         (Item::Ffmpeg, Presence::Installed("version 7.1".into())),
     ]);
     let (mut a, cx) = rig(tag, role, full_machine(), f);
-    a.setup.latest = vec![(Item::ClaudeCode, qi::Latest::Newer("v2.2.0".into()))];
+    a.setup.latest = vec![(Item::ClaudeCode, iyakki_tile_api::store_qi::Latest::Newer("v2.2.0".into()))];
     a.setup.failed = vec![Item::Registry];
-    a.setup.jobs = vec![job(Item::Elasticsearch, iyakki_shared::jobs::State::Running, Some(40.0))];
+    a.setup.jobs = vec![job(Item::Elasticsearch, iyakki_tile_api::store_qi::JobState::Running, Some(40.0))];
     (a, cx)
 }
 
@@ -227,7 +230,7 @@ fn hardware_tiles_are_shown_only_with_the_hardware_and_never_in_cloud_mode() {
 
 #[test]
 fn every_item_has_a_tile_and_each_state_has_its_chip_and_button() {
-    use iyakki_shared::jobs::State;
+    use iyakki_tile_api::store_qi::JobState as State;
     let f = facts(&[
         (Item::Node, Presence::Installed("v26".into())),
         (Item::K3s, Presence::Installed("v1.31".into())),
@@ -407,7 +410,7 @@ fn the_popup_says_what_it_is_size_licence_place_needs_and_memory() {
 
 #[test]
 fn the_popup_status_line_and_the_one_button_for_each_state() {
-    use iyakki_shared::jobs::State;
+    use iyakki_tile_api::store_qi::JobState as State;
     // (facts, what to set, item, status line, primary label)
     let mut cases: Vec<(&str, Vec<(Item, Presence)>, Item, &str, &str)> = vec![
         ("missing", vec![], Item::Registry, "Not installed", "Install"),
@@ -432,7 +435,7 @@ fn the_popup_status_line_and_the_one_button_for_each_state() {
     }
     // an upgrade
     let (mut a, cx) = rig("su-st-up", Role::Admin, full_machine(), facts(&[(Item::DuckDb, Presence::Installed("v1.1.0".into()))]));
-    a.setup.latest = vec![(Item::DuckDb, qi::Latest::Newer("v1.2.0".into()))];
+    a.setup.latest = vec![(Item::DuckDb, iyakki_tile_api::store_qi::Latest::Newer("v1.2.0".into()))];
     a.setup.open_popup(Item::DuckDb);
     let g = draw(&mut a, &cx, 1280, 720);
     let c = a.setup.card(Item::DuckDb);
@@ -449,7 +452,7 @@ fn the_popup_status_line_and_the_one_button_for_each_state() {
     assert!(g.hits.iter().any(|h| h.ev == Event::Tab(PRIMARY + idx(Item::DuckDb)) && h.label == "View log"));
     // signed out coding agent
     let (mut a, cx) = rig("su-st-sign", Role::Admin, full_machine(), facts(&[(Item::ClaudeCode, Presence::Installed("2.1.7".into()))]));
-    a.setup.signin = vec![(Item::ClaudeCode, crate::agent_login::State::SignedOut)];
+    a.setup.signin = vec![(Item::ClaudeCode, iyakki_tile_store::shell::LoginState::SignedOut)];
     a.setup.open_popup(Item::ClaudeCode);
     let g = draw(&mut a, &cx, 1280, 720);
     assert!(labels(&g).contains(&"Sign in".to_string()));
@@ -526,7 +529,7 @@ fn search_filter_and_counts_narrow_the_tiles() {
     key(&mut a, &cx, Key::Char('f'));
     assert_eq!(a.setup.filter, Filter::Updates);
     assert!(a.setup.stops().is_empty(), "no lookup has found a newer version");
-    a.setup.latest = vec![(Item::Node, qi::Latest::Newer("v27".into())), (Item::K3s, qi::Latest::Current("v1".into()))];
+    a.setup.latest = vec![(Item::Node, iyakki_tile_api::store_qi::Latest::Newer("v27".into())), (Item::K3s, iyakki_tile_api::store_qi::Latest::Current("v1".into()))];
     assert_eq!(a.setup.stops(), vec![Item::Node], "only the installed one with a newer version");
     key(&mut a, &cx, Key::Char('f'));
     assert_eq!(a.setup.filter, Filter::All);
@@ -607,7 +610,7 @@ fn install_all_recommended_asks_with_sizes_then_starts_the_jobs() {
     assert!(a.setup.confirm.is_some());
     key(&mut a, &cx, Key::Char('y'));
     assert!(a.setup.confirm.is_none());
-    let items: Vec<Item> = qi::install_jobs(&cx.services.real().jobs, "root").iter().filter_map(qi::item_of).collect();
+    let items: Vec<Item> = qi::install_jobs(&cx.services.real().jobs, "root").iter().filter_map(qi::item_of).map(crate::apps::store_port::item_to_mirror).collect();
     assert!(items.contains(&Item::K3s) && items.contains(&Item::MacFirmware) && items.len() == 2, "{items:?}");
     assert!(a.setup.note.as_ref().is_some_and(|n| n.1 && n.0.contains("2 install step")), "{:?}", a.setup.note);
     let (mut a, cx) = rig("su-all2", Role::Admin, Machine { ram_mb: 8192, ..Default::default() }, facts(&[(Item::K3s, Presence::Installed("v1".into()))]));
@@ -637,7 +640,7 @@ fn install_all_in_this_category_has_the_same_review() {
     assert!(qi::install_jobs(&cx.services.real().jobs, "root").is_empty());
     key(&mut a, &cx, Key::Char('a'));
     key(&mut a, &cx, Key::Enter);
-    let items: Vec<Item> = qi::install_jobs(&cx.services.real().jobs, "root").iter().filter_map(qi::item_of).collect();
+    let items: Vec<Item> = qi::install_jobs(&cx.services.real().jobs, "root").iter().filter_map(qi::item_of).map(crate::apps::store_port::item_to_mirror).collect();
     assert!(items.contains(&Item::K3s) && items.contains(&Item::Elasticsearch) && items.contains(&Item::Registry), "{items:?}");
     // a category with nothing missing: a plain answer
     let (mut b, cxb) = rig("su-cat-all2", Role::Admin, full_machine(), facts(&[(Item::Ffmpeg, Presence::Installed("v7".into())), (Item::FfmpegLibs, Presence::Installed("6.1.5".into())), (Item::BrowserPackage, Presence::Installed("version 1".into())), (Item::YtDlp, Presence::Installed("yt-dlp".into()))]));
@@ -673,7 +676,7 @@ fn buttons_start_the_right_job_and_open_the_right_place() {
     a.handle(&Event::Tab(MORE + idx(Item::LinuxApps)), &cx);
     assert_eq!(App::take_request(&mut a), Some(("brand:linux".into(), String::new())));
     // the log of a running install, and the popup's View log, open the installer list
-    a.setup.jobs = vec![job(Item::Copilot, iyakki_shared::jobs::State::Running, Some(10.0))];
+    a.setup.jobs = vec![job(Item::Copilot, iyakki_tile_api::store_qi::JobState::Running, Some(10.0))];
     primary(&mut a, &cx, Item::Copilot);
     assert_eq!(App::take_request(&mut a), Some(("installs".into(), String::new())));
     a.handle(&Event::Tab(POP_LOG), &cx);
@@ -704,7 +707,7 @@ fn start_and_stop_go_through_the_cluster_supervisor_and_only_for_an_administrato
     assert_eq!(g.hits.iter().find(|h| h.ev == Event::Tab(PRIMARY + idx(Item::K3s))).unwrap().label, "Open");
     // the supervisor answers (nothing is installed by IYAKKI on the made-up data folder): its words come back on the note
     a.handle(&Event::Tab(STOP + idx(Item::K3s)), &cx);
-    a.setup.tick(&cx);
+    a.setup.tick(&CxPort(&cx));
     assert!(a.setup.note.as_ref().is_some_and(|n| !n.1 && n.0.contains("no cluster is installed")), "{:?}", a.setup.note);
     // stopped: Start is the main button
     a.setup.live_k3s = Some(Svc::Stopped);
@@ -813,7 +816,7 @@ fn the_keyboard_walks_the_tiles_opens_the_popup_and_closes_it() {
     assert_eq!((a.setup.cursor, a.setup.filter), before);
     // i presses the main button of the tile, d opens the details, l asks for the installer list, Tab goes to the next section
     key(&mut a, &cx, Key::Char('i'));
-    assert_eq!(qi::install_jobs(&cx.services.real().jobs, "root").iter().filter_map(qi::item_of).collect::<Vec<_>>(), vec![first]);
+    assert_eq!(qi::install_jobs(&cx.services.real().jobs, "root").iter().filter_map(qi::item_of).map(crate::apps::store_port::item_to_mirror).collect::<Vec<_>>(), vec![first]);
     key(&mut a, &cx, Key::Char('l'));
     assert_eq!(App::take_request(&mut a), Some(("installs".into(), String::new())));
     key(&mut a, &cx, Key::Char('d'));
@@ -1161,7 +1164,7 @@ fn the_screen_code_has_no_unwrap_on_geometry() {
 #[test]
 fn coding_agents_offer_sign_in_log_out_and_upgrade_and_runtimes_are_named_in_the_order() {
     let (mut a, cx) = rig("su-agents", Role::Admin, full_machine(), facts(&[(Item::ClaudeCode, Presence::Installed("2.1.7".into())), (Item::Copilot, Presence::Installed("0.0.400".into())), (Item::DuckDb, Presence::Installed("v1.1.0".into()))]));
-    a.setup.signin = vec![(Item::ClaudeCode, crate::agent_login::State::SignedOut), (Item::Copilot, crate::agent_login::State::SignedIn("me@example.test".into()))];
+    a.setup.signin = vec![(Item::ClaudeCode, iyakki_tile_store::shell::LoginState::SignedOut), (Item::Copilot, iyakki_tile_store::shell::LoginState::SignedIn("me@example.test".into()))];
     assert_eq!((a.setup.card(Item::ClaudeCode).act, a.setup.card(Item::ClaudeCode).label.as_str()), (Act::SignIn, "Sign in"));
     let _ = crate::agent_login::take_request();
     primary(&mut a, &cx, Item::ClaudeCode);
@@ -1174,7 +1177,7 @@ fn coding_agents_offer_sign_in_log_out_and_upgrade_and_runtimes_are_named_in_the
     a.handle(&Event::Tab(LOGOUT + idx(Item::Copilot)), &cx);
     assert_eq!(crate::agent_login::take_request(), Some(("copilot", true)));
     // an installed tool with a newer version is offered Upgrade, and Open stays beside it
-    a.setup.latest = vec![(Item::DuckDb, qi::Latest::Newer("v1.2.0".into()))];
+    a.setup.latest = vec![(Item::DuckDb, iyakki_tile_api::store_qi::Latest::Newer("v1.2.0".into()))];
     let c = a.setup.card(Item::DuckDb);
     assert_eq!((c.act, c.label.as_str()), (Act::Update, "Upgrade to 1.2.0"));
     assert!(c.notes.iter().any(|n| n.0.contains("newer version")));
@@ -1184,7 +1187,7 @@ fn coding_agents_offer_sign_in_log_out_and_upgrade_and_runtimes_are_named_in_the
     a.handle(&Event::Tab(PRIMARY + idx(Item::DuckDb)), &cx);
     assert!(qi::install_jobs(&cx.services.real().jobs, "root").iter().any(|j| j.label.starts_with("Upgrade DuckDB")), "an installed item is upgraded, not installed again");
     let mut f = facts(&[]);
-    f.runtimes = vec![(Item::Python, vec!["uv"])];
+    f.runtimes = vec![(Item::Python, vec!["uv".to_string()])];
     a.setup.set_facts(f);
     assert_eq!(a.setup.card(Item::Python).deps.as_deref(), Some("Installs uv first"));
 }
@@ -1249,7 +1252,7 @@ fn camera_files(a: &mut StoreApp, cx: &AppCx, o: Option<iyakki_shared::camfw::Ou
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("part1.xz"), vec![7u8; kept]).unwrap();
     }
-    a.setup.enter(cx);
+    a.setup.enter(&CxPort(cx));
 }
 
 fn done_outcome(installed: bool, headline: &str) -> iyakki_shared::camfw::Outcome {
@@ -1309,7 +1312,7 @@ fn a_firmware_pack_tile_needs_its_hardware_is_hidden_in_cloud_mode_and_says_what
 
 #[test]
 fn the_camera_tile_states_and_the_one_button() {
-    use iyakki_shared::jobs::State;
+    use iyakki_tile_api::store_qi::JobState as State;
     let m = Machine { camera: true, ram_mb: 16_000, ..Default::default() };
     let (mut a, cx) = rig("su-cam4", Role::Admin, m.clone(), facts(&[]));
     let c = a.setup.card(Item::MacCamera);
@@ -1379,7 +1382,7 @@ fn the_camera_tile_deletes_its_kept_download_and_only_for_an_administrator() {
 
 #[test]
 fn the_camera_tile_and_popup_draw_with_details_and_a_progress_bar_at_every_size_and_pane() {
-    use iyakki_shared::jobs::State;
+    use iyakki_tile_api::store_qi::JobState as State;
     for (w, h) in SIZES {
         let (mut a, cx) = rig(&format!("su-cam7-{w}"), Role::Admin, Machine { camera: true, ram_mb: 16_000, ..Default::default() }, facts(&[]));
         camera_files(&mut a, &cx, Some(done_outcome(false, "The firmware could not be built: a part did not match its checksum")), 8_000_000);

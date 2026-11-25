@@ -1,0 +1,24 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha eeb6790bb114b7da; honest subset only: everything not checked is under not-covered.
+row: F-PWR-01
+targets: real
+feature-sha: eeb6790bb114b7da
+doc: the Power page of Settings offers the three power profiles and the sleep switch (read only)
+clause: 1 Settings > Power shows Performance, Balanced and Power saver and Sleep after idle
+human: sleep-wake | Open Settings, Power. Set Sleep after idle to a short time, leave the machine idle, then press a key. Expect: The machine sleeps and wakes with the session intact; the chosen profile is still shown.
+not-covered: the governor and energy preference read back after writing
+not-covered: sleep after idle never happens while an update is written
+not-covered: a real suspend and wake
+not-covered: the lid and power-button actions
+not-covered: the fan switch on a Mac
+needs-hw: a machine with a CPU governor and sleep
+key s
+wait app=Settings
+skip-unless-button Power
+click-sidebar Power
+wait app=Settings page=Power
+shot page
+expect-not-blank
+expect-text Performance
+expect-text Power saver
+expect-text Sleep after idle
+expect-page Power

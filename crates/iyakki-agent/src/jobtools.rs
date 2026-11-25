@@ -21,11 +21,11 @@ use crate::chat::ToolSpec;
 use crate::jobs::{fmt_duration, now_ms, Channel, Cmd, Job, Jobs, Spec, MAX_WAIT_SECS, STOP_GRACE};
 pub use iyakki_shared::jobtools::{PROMPT_RULE};
 
-pub const JOB_TOOLS: [&str; 6] = ["job_start", "job_status", "job_tail", "job_list", "job_wait", "job_stop"];
+pub const JOB_TOOLS: [&str; 7] = ["job_start", "job_status", "job_tail", "job_list", "job_wait", "job_stop", "job_keep"];
 
 
 /// The same advice as a line of an external agent's instructions (Claude Code and the others reach the tools as `mcp__iyakki__*`).
-pub const EXTERNAL_RULE: &str = "For anything you expect to take more than about 30 seconds (SDK or emulator installs, big builds, downloads, long test runs, servers) call mcp__iyakki__job_start instead of running it in a foreground shell: a foreground command dies when this session ends, and the person cannot see it. A job runs detached, shows in the Jobs strip with progress and Log and Stop buttons, and survives this session. Do not poll with sleep or until-loops: use mcp__iyakki__job_wait (up to 60 s) or job_status, read output with job_tail, check job_list before starting the same job again.";
+pub const EXTERNAL_RULE: &str = "For anything you expect to take more than about 30 seconds (SDK or emulator installs, big builds, downloads, long test runs, servers) call mcp__iyakki__job_start instead of running it in a foreground shell: a foreground command dies when this session ends, and the person cannot see it. A job runs detached, shows in the Jobs strip with progress and Log and Stop buttons, and survives this chat; it stops when the person signs out unless job_start was given keep_after_sign_out (or job_keep marks it). Do not poll with sleep or until-loops: use mcp__iyakki__job_wait (up to 60 s) or job_status, read output with job_tail, check job_list before starting the same job again.";
 
 pub fn is_job_tool(n: &str) -> bool {
     JOB_TOOLS.contains(&n)
@@ -141,8 +141,8 @@ impl Tools for JobTools {
         let obj = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
         v.push(spec(
             "job_start",
-            "Start a long-running command as a detached JOB and return at once with its id. Use it for anything that may take more than about 30 seconds (SDK or emulator installs, big builds, downloads, long test runs, servers) instead of a foreground command: the job survives this chat, the session and a restart, its output goes to a log, and the person sees it in the Jobs strip (progress, Log, Stop). `command` is a shell line (pipes and && work), or `argv` is a program with separate arguments (no shell); `label` names it in the strip; `cwd` is the folder (default: the workspace or working folder; it must be inside it). Asks the person first. After starting, call job_wait or job_status, never a polling loop.",
-            obj(json!({"command": {"type": "string"}, "argv": {"type": "array", "items": {"type": "string"}}, "label": {"type": "string"}, "cwd": {"type": "string"}}), &[]),
+            "Start a long-running command as a detached JOB and return at once with its id. Use it for anything that may take more than about 30 seconds (SDK or emulator installs, big builds, downloads, long test runs, servers) instead of a foreground command: the job survives this chat and a restart of the screen, its output goes to a log, it stops when the person signs out unless `keep_after_sign_out` is true, and the person sees it in the Jobs strip (progress, Log, Stop). `command` is a shell line (pipes and && work), or `argv` is a program with separate arguments (no shell); `label` names it in the strip; `cwd` is the folder (default: the workspace or working folder; it must be inside it); `keep_after_sign_out` (default false) lets it go on after the person signs out. Asks the person first. After starting, call job_wait or job_status, never a polling loop.",
+            obj(json!({"command": {"type": "string"}, "argv": {"type": "array", "items": {"type": "string"}}, "label": {"type": "string"}, "cwd": {"type": "string"}, "keep_after_sign_out": {"type": "boolean"}}), &[]),
             Risk::Ask,
             false,
         ));
@@ -156,6 +156,7 @@ impl Tools for JobTools {
             Risk::Safe,
             true,
         ));
+        v.push(spec("job_keep", "Mark a running job to go on after the person signs out (`keep`: true), or take the mark off (`keep`: false). Without the mark a sign-out stops the job. Asks the person first.", obj(json!({"id": {"type": "string"}, "keep": {"type": "boolean"}}), &["id", "keep"]), Risk::Ask, false));
         v.push(spec("job_stop", "Stop a job: TERM to its whole process group, then KILL if it does not end. Asks the person first.", obj(json!({"id": {"type": "string"}}), &["id"]), Risk::Ask, false));
         v
     }
@@ -173,7 +174,19 @@ impl Tools for JobTools {
                 let scope_policy = self.policy.clone();
                 let user = self.user.clone();
                 let j = self.jobs.start(&self.user, &Spec { label, cmd, cwd, workspace: self.ws_name().to_string() }, &move |p: &Path| crate::scope::check_write(&scope_policy, &user, p))?;
-                Ok(format!("Started job {} “{}” (pid {}) in {}.\nIt runs detached: it keeps going if this chat or the session ends, and the person sees it in the Jobs strip with Log and Stop buttons. Do not poll in a loop: call job_wait (up to {MAX_WAIT_SECS} s, returns early when it ends) or job_status; read the output with job_tail. You will also be told when it finishes.", j.id, j.label, j.pid, j.cwd))
+                let keep = args.get("keep_after_sign_out").and_then(Value::as_bool).unwrap_or(false);
+                if keep {
+                    self.jobs.set_keep(&self.user, &j.id, true)?;
+                }
+                let ends = if keep { "It is marked to go on after the person signs out." } else { "It stops when the person signs out (job_keep, or keep_after_sign_out, lets it go on)." };
+                Ok(format!("Started job {} “{}” (pid {}) in {}.\nIt runs detached: it keeps going if this chat ends. {ends} The person sees it in the Jobs strip with Log and Stop buttons. Do not poll in a loop: call job_wait (up to {MAX_WAIT_SECS} s, returns early when it ends) or job_status; read the output with job_tail. You will also be told when it finishes.", j.id, j.label, j.pid, j.cwd))
+            }
+            "job_keep" => {
+                let id = Self::id_arg(args)?;
+                let keep = args.get("keep").and_then(Value::as_bool).ok_or("give `keep`: true to let the job go on after sign-out, false to stop it then")?;
+                let j = self.jobs.get(&self.user, &id)?;
+                self.jobs.set_keep(&self.user, &id, keep)?;
+                Ok(format!("{}\n{}", Self::line_of(&j), if keep { "It is marked to go on after the person signs out." } else { "The mark is off: it stops when the person signs out." }))
             }
             "job_status" => self.status_text(args),
             "job_list" => self.list_text(),
@@ -218,6 +231,7 @@ impl Tools for JobTools {
                 Err(e) => format!("job_start (invalid: {e})"),
             },
             "job_stop" => format!("stop job {}", args.get("id").and_then(Value::as_str).unwrap_or("?")),
+            "job_keep" => format!("{} job {} after sign-out", if args.get("keep").and_then(Value::as_bool).unwrap_or(false) { "keep" } else { "stop at sign-out" }, args.get("id").and_then(Value::as_str).unwrap_or("?")),
             "job_status" | "job_tail" | "job_list" | "job_wait" => format!("{name} {}", args.get("id").and_then(Value::as_str).unwrap_or("")).trim().to_string(),
             _ => self.inner.describe(name, args),
         }

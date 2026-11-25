@@ -1,0 +1,13 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha b6e5f9f8ee6b66a7; honest subset only: everything not checked is under not-covered.
+row: F-UPD-09
+targets: qemu
+profile: data
+feature-sha: b6e5f9f8ee6b66a7
+doc: dev patch with a delta pack: wrong old version refused, applied live after the approval on the screen, removed
+clause: 1 a delta pack against the file on the device is applied live after the approval on the screen and removed again
+clause: 2 a wrong old version is refused in plain words
+not-covered: the 64 MB limit applies to the delta
+not-covered: atomic apply into the patch layer (power loss not simulated)
+not-covered: the program binary stays next-start-only
+not-covered: nothing is sent before the refusal (the transfer is not observed)
+session-check: dev_patch_delta

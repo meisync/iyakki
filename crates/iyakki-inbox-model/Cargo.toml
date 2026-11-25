@@ -1,0 +1,12 @@
+[package]
+name = "iyakki-inbox-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The INBOX's data and rules: each person's notifications and tasks (kinds, priorities, links, snoozing, sorting, caps) and the per-user JSON store, with no agent and no shell. Split out of iyakki-shared so the INBOX tile crate does not pull in the shared crate; iyakki_shared::inbox re-exports every item under the old path."
+
+[dependencies]
+iyakki-sec = { workspace = true }
+iyakki-schema = { workspace = true }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }

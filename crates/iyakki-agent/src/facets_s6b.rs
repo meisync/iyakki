@@ -35,7 +35,11 @@ impl SoundProbeFacet for RealSoundProbe {
     }
     fn player_start(&self, cfg: &iyakki_agent_api::PlayerConfig, file: &str, start: f64, area: (u32, u32)) -> Result<Arc<dyn iyakki_agent_api::MediaPlayer>, String> {
         let c = cfg.clone().downcast::<crate::player::Config>().map_err(|_| "not this machine's player configuration".to_string())?;
-        Ok(Arc::new(crate::player::Player::start((*c).clone(), file, start, area)?))
+        let player = Arc::new(crate::player::Player::start((*c).clone(), file, start, area)?);
+        // remembered weakly, so that the headphones leaving pause it (F-LIFE-14)
+        let p: Arc<dyn crate::routepause::Pausable> = player.clone();
+        crate::routepause::global().add(&p);
+        Ok(player)
     }
     fn system_players(&self) -> Option<Arc<dyn iyakki_shared::voicedesk::Players>> {
         Some(Arc::new(crate::voicedesk::SystemPlayers))

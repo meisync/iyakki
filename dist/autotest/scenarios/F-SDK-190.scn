@@ -1,0 +1,10 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 0c9610195ac4f669; honest subset only: everything not checked is under not-covered.
+row: F-SDK-190
+targets: qemu
+profile: ram
+feature-sha: 0c9610195ac4f669
+doc: an event that happens while SAMPLE is closed waits (Settings, App events counts it) and arrives when SAMPLE opens
+clause: 1 an event that happens while the app is closed waits in its queue (Settings, App events shows the count) and arrives when the app opens
+not-covered: the registration file per person and app written through a temporary file, bad names and files ignored (the restart survival check needs the data profile and is not part of this scenario)
+not-covered: scopes held by built-in apps through the capability table and by installed apps through the approval record
+session-check: app_events_waits_while_away

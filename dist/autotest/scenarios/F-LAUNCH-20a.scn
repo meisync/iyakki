@@ -1,0 +1,16 @@
+# autotest alpha.10 batch F (lane Q8, 2026-11-24); split into sub-row F-LAUNCH-20a on 2026-11-24 (lane SC2): this scenario covers the whole visible clause, the API and rule clauses are F-LAUNCH-20b.
+row: F-LAUNCH-20a
+targets: qemu
+profile: ram
+feature-sha: 586c68b5f5c63046
+doc: Settings, Appearance is the page where the right-hand bar buttons are listed (read only, nothing is changed)
+clause: 1 Settings, Appearance is the page where the right-hand bar buttons are listed
+key s
+wait app=Settings
+skip-unless-button Appearance
+click-sidebar Appearance
+wait app=Settings page="Appearance"
+shot page
+expect-not-blank
+expect-text Appearance
+expect-page Appearance

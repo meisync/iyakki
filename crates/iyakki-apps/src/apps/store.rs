@@ -1,6 +1,6 @@
 //! STORE: find, install, update and remove the things that extend IYAKKI (skills, tools, MCP servers, command-line
 //! tools, themes), with a trust badge on everything and a plain-words review before anything is installed. This file only
-//! draws and handles keys; the catalogs, the trust model, the licences and the installing are `iyakki_agent::store`
+//! draws and handles keys; the catalogs, the trust model, the licences and the installing are the store engine (the agent behind `StoreEngine`)
 //! (docs/STORE.md). Nothing here touches the network on the UI thread: a look at the network and the download of a
 //! package run on a background thread and report back through a slot the drawing polls.
 
@@ -8,19 +8,19 @@ use crate::safeclamp::SafeClamp;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use iyakki_shared::store_catalog::{Fetch, HttpFetch, Loaded, Origin};
-use iyakki_shared::store_catalog::{SourceKind};
-use iyakki_shared::store_install::Review;
-use iyakki_shared::store_install::{Actor, Confirm};
-use iyakki_shared::store_installed::{self as inst, Entry as IEntry, Sort, Status, Type as IType};
-use iyakki_shared::store_lifecycle::{Ctx, Life, Report, UpdatePlan};
-use iyakki_shared::store_organize::Org;
-use iyakki_shared::store_trust::Level;
-use iyakki_shared::store_core::{Filter, Item, PriceFilter, Refresh, State};
-use iyakki_agent_api::StoreApi;
+use iyakki_store_model::store_catalog::{Fetch, HttpFetch, Loaded, Origin};
+use iyakki_store_model::store_catalog::{SourceKind};
+use iyakki_store_model::store_install::Review;
+use iyakki_store_model::store_install::{Actor, Confirm};
+use iyakki_store_model::store_installed::{self as inst, Entry as IEntry, Sort, Status, Type as IType};
+use iyakki_store_model::store_lifecycle::{Ctx, Life, Report, UpdatePlan};
+use iyakki_store_model::store_organize::Org;
+use iyakki_store_model::store_trust::Level;
+use iyakki_store_model::store_core::{Filter, Item, PriceFilter, Refresh, State};
 
 
 use super::chatpic::PicCache;
+use super::store_port::{CxPort, StorePort};
 use super::store_drivers::{self as drv, Out as DOut};
 use super::widgets::{render_confirm, Form, FormEvent};
 use super::{blink, App, AppCx, Flow, ScrollLog};
@@ -77,7 +77,7 @@ enum FormKind {
     /// Look at a private store's key before pinning it (the address form).
     PrivateStore,
     /// A restricted firmware pack of Setup (fwpack.rs): the vendor's licence, "I accept", and a folder or stick for the offline route.
-    FwPack(iyakki_shared::quickinstall::Item),
+    FwPack(iyakki_tile_api::store_qi::Item),
     /// The hardware-firmware item (fwextra.rs): action, the way to get the files, a folder, NVIDIA on its own, the licences.
     FwHardware,
 }
@@ -90,11 +90,11 @@ enum Ask {
     RemovePlan(Box<RemoveUi>),
     DeleteGroup(String, String),
     DeleteTag(String, usize),
-    Remove { kind: String, name: String, scope: iyakki_shared::skills::Scope, title: String },
+    Remove { kind: String, name: String, scope: iyakki_store_model::skills::Scope, title: String },
     RemoveSource(String),
     RemoveInstalled(Box<IEntry>),
     /// Pin this private store's key: the person compares the fingerprint first.
-    PinStore(Box<iyakki_shared::store_core::Probe>, String),
+    PinStore(Box<iyakki_store_model::store_core::Probe>, String),
     /// Restart the machine so a driver picks up the firmware just installed (Setup's "Reboot to finish").
     Reboot,
 }
@@ -122,7 +122,7 @@ struct ReviewView {
 enum Done {
     Refreshed(Refresh),
     Reviewed(Box<Review>, Purpose),
-    Probed(Box<iyakki_shared::store_core::Probe>, String),
+    Probed(Box<iyakki_store_model::store_core::Probe>, String),
     Failed(String),
     /// An update was downloaded and reviewed: show what it would change.
     Planned(Box<UpdatePlan>),
@@ -141,7 +141,7 @@ struct Job {
 pub struct StoreApp {
     section: Section,
     mode: Mode,
-    store: Arc<dyn StoreApi>,
+    store: Arc<dyn iyakki_tile_store::engine::StoreEngine>,
     loaded: Vec<Loaded>,
     items: Vec<Item>,
     /// Every app of every catalog (`items` holds only the chosen store's apps when one is chosen).
@@ -177,9 +177,9 @@ pub struct StoreApp {
     catalog: bool,
     /// The Drivers chip: drivers for this machine (docs/MAC-HARDWARE.md). `drivers_for` replaces what is read (tests).
     drivers: drv::Pane,
-    pub drivers_for: Option<Arc<dyn iyakki_agent_api::StoreDrivers>>,
+    pub drivers_for: Option<Arc<dyn iyakki_tile_store::facts::DriversInstall>>,
     /// The same machine as the core reads it (`cx.os.drivers()`); tests replace it together with `drivers_for`.
-    pub drivers_read_for: Option<Arc<dyn iyakki_core_api::drivers::Drivers>>,
+    pub drivers_read_for: Option<Arc<dyn iyakki_tile_store::drivers::DriversView>>,
     /// The lifecycle of everything installed (update state, pins, kept versions) and what the last look at the network found.
     lives: Vec<Life>,
     ctx: Ctx,
@@ -190,7 +190,7 @@ pub struct StoreApp {
     /// The person's own arrangement (tags, groups, titles) and how the list is grouped.
     org: Org,
     /// The person's own ratings and comments (private, local; see store_rating.rs).
-    rate: iyakki_shared::store_ratings::Ratings,
+    rate: iyakki_store_model::store_ratings::Ratings,
     org_rev: u32,
     iview: View,
     itags: Vec<String>,
@@ -207,7 +207,7 @@ pub struct StoreApp {
 }
 
 /// The dialog that shows a private store's key fingerprint: the person compares it with the one the store's administrator gave.
-fn render_pin_confirm(g: &mut Gfx, area: R, s: f32, p: &iyakki_shared::store_core::Probe, name: &str) {
+fn render_pin_confirm(g: &mut Gfx, area: R, s: f32, p: &iyakki_store_model::store_core::Probe, name: &str) {
     let pn = crate::fx::modal(g, area, s, 640.0 * s, 310.0 * s, ERR, true);
     let (bx, by, bw, bh) = (pn.x, pn.y, pn.w, pn.h);
     let title = g.fit(19.0 * s, &format!("Trust the key of “{}”?", if name.trim().is_empty() { &p.name } else { name }), Face::Bold, bw - 48.0 * s);
@@ -350,16 +350,20 @@ fn price_color(it: &Item) -> [u8; 4] {
     if it.entry.meta.pricing.model.needs_licence() { AMBER } else { OK }
 }
 
-fn store_pref_path(cx: &AppCx) -> std::path::PathBuf {
-    cx.data_dir().join(format!("store-{}.json", super::browser_config::who(cx)))
+fn who(cx: &dyn StorePort) -> String {
+    cx.user().chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect()
+}
+
+fn store_pref_path(cx: &dyn StorePort) -> std::path::PathBuf {
+    cx.data_dir().join(format!("store-{}.json", who(cx)))
 }
 
 /// The store this person last chose in Discover (empty: all of them).
-fn load_store_pick(cx: &AppCx) -> String {
+fn load_store_pick(cx: &dyn StorePort) -> String {
     std::fs::read_to_string(store_pref_path(cx)).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).and_then(|v| v["store"].as_str().map(str::to_string)).filter(|s| s.len() < 40 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')).unwrap_or_default()
 }
 
-fn save_store_pick(cx: &AppCx, pick: &str) {
+fn save_store_pick(cx: &dyn StorePort, pick: &str) {
     let p = store_pref_path(cx);
     let tmp = p.with_extension("tmp");
     if std::fs::write(&tmp, serde_json::json!({ "store": pick }).to_string()).is_ok() {
@@ -367,17 +371,18 @@ fn save_store_pick(cx: &AppCx, pick: &str) {
     }
 }
 
-/// The app store of this install (the agent core always serves it).
-pub(crate) fn store_of(cx: &AppCx) -> Arc<dyn StoreApi> {
-    cx.b4().store().expect("the agent core serves the app store")
-}
+pub(crate) use super::store_port::store_of;
+use super::store_port::store_of_port;
 
 impl StoreApp {
-    pub fn new(cx: &AppCx) -> StoreApp {
+    pub fn new(acx: &AppCx) -> StoreApp {
+        super::store_port::install_table();
+        let port = CxPort(acx);
+        let cx: &dyn StorePort = &port;
         let mut a = StoreApp {
             section: Section::Installed,
             mode: Mode::Browse,
-            store: store_of(cx),
+            store: Arc::new(super::store_port::AgentStore(store_of_port(cx))),
             loaded: vec![],
             items: vec![],
             all_items: vec![],
@@ -414,7 +419,7 @@ impl StoreApp {
             iupdates: false,
             sys_update: String::new(),
             org: Org::default(),
-            rate: iyakki_shared::store_ratings::Ratings::none(),
+            rate: iyakki_store_model::store_ratings::Ratings::none(),
             org_rev: 0,
             iview: View::Flat,
             itags: vec![],
@@ -447,15 +452,16 @@ impl StoreApp {
         self.status.as_ref().map(|s| s.0.as_str())
     }
 
-    fn actor(&self, cx: &AppCx) -> Actor {
-        Actor::from_policy(&cx.session.user, &cx.session.policy)
+    fn actor(&self, cx: &dyn StorePort) -> Actor {
+        Actor::from_policy(&cx.user(), &cx.policy())
     }
 
-    fn reload(&mut self, cx: &AppCx) {
-        self.sys_update = cx.storeapi().update_report()
-            .and_then(|r| r.updates.into_iter().find(|u| u.kind == iyakki_shared::store_updatecheck::Kind::System))
-            .map(|u| format!("System: IYAKKI {} is out (this is {}). Install it from Settings -> System update.", u.to, u.from))
-            .unwrap_or_default();
+    fn reload(&mut self, cx: &dyn StorePort) {
+        self.reload_port(cx);
+    }
+
+    fn reload_port(&mut self, cx: &dyn StorePort) {
+        self.sys_update = cx.facts().system_update_out().map(|(to, from)| format!("System: IYAKKI {to} is out (this is {from}). Install it from Settings -> System update.")).unwrap_or_default();
         self.loaded = self.store.local_catalogs();
         let actor = self.actor(cx);
         self.all_items = self.store.items(&actor, &self.loaded);
@@ -472,7 +478,7 @@ impl StoreApp {
             v
         };
         self.catalog = self.store.catalog_visible();
-        self.lives = self.store.lifecycle(&cx.session.policy, &cx.session.user, &self.loaded, &self.ctx);
+        self.lives = self.store.lifecycle(&cx.policy(), &cx.user(), &self.loaded, &self.ctx);
         self.inst = self.lives.iter().map(|l| l.entry.clone()).collect();
         self.reload_org(cx);
         self.refresh_drivers(cx);
@@ -499,7 +505,7 @@ impl StoreApp {
     }
 
     /// Show the next store (All, then each catalog in turn); remembered for this person.
-    fn cycle_store(&mut self, cx: &AppCx) {
+    fn cycle_store(&mut self, cx: &dyn StorePort) {
         let choices = self.store_choices();
         if choices.is_empty() {
             self.say("There is only one store: add another in Settings (a).", false);
@@ -509,7 +515,7 @@ impl StoreApp {
         self.set_store(cx, choices.get(at).map(|c| c.0.clone()).unwrap_or_default());
     }
 
-    fn set_store(&mut self, cx: &AppCx, id: String) {
+    fn set_store(&mut self, cx: &dyn StorePort, id: String) {
         self.store_pick = id;
         save_store_pick(cx, &self.store_pick);
         self.reload(cx);
@@ -525,7 +531,7 @@ impl StoreApp {
     }
 
     /// On an app that more than one store lists: open the page of the same app as that store describes it.
-    fn next_store_for_app(&mut self, cx: &AppCx) {
+    fn next_store_for_app(&mut self, cx: &dyn StorePort) {
         let Some(it) = self.current().cloned() else { return };
         let others = self.also_in(&it);
         if others.is_empty() {
@@ -546,20 +552,20 @@ impl StoreApp {
 
     /// The licence the browser tile left (`checkout::PENDING_*`): verified like any other (signature, issuer, device, account, expiry,
     /// revocation) and kept only when good; it is removed from the waiting place either way.
-    fn add_pending_licence(&mut self, cx: &AppCx) {
-        use iyakki_shared::store_licencelink::{PENDING_APP, PENDING_KEY};
-        let user = cx.session.user.clone();
-        let Some(text) = cx.core.app_data().get(&user, PENDING_APP, PENDING_KEY) else {
+    fn add_pending_licence(&mut self, cx: &dyn StorePort) {
+        use iyakki_store_model::store_licencelink::{PENDING_APP, PENDING_KEY};
+        let user = cx.user();
+        let Some(text) = cx.facts().pending_licence(&user, PENDING_APP, PENDING_KEY) else {
             self.say("No licence is waiting. When a seller's page hands one over it waits here.", false);
             return;
         };
-        let _ = cx.core.app_data().remove(&user, PENDING_APP, PENDING_KEY);
+        cx.facts().clear_pending_licence(&user, PENDING_APP, PENDING_KEY);
         let a = self.actor(cx);
         let items = self.items.clone();
         let r = self.store.add_license(&a, &text, &|app| items.iter().filter(|i| i.entry.name == app && !i.entry.signer.is_empty()).map(|i| i.entry.signer.clone()).collect());
         match r {
             Ok(tok) => {
-                cx.audit.record(&user, "store.license", &tok.app);
+                cx.record("store.license", &tok.app);
                 self.say(format!("Licence added for {} ({}).", tok.app, tok.describe()), true);
                 self.reload(cx);
             }
@@ -568,9 +574,9 @@ impl StoreApp {
     }
 
     /// Tell the person a licence is waiting (at open and now and then): the key is L.
-    fn note_pending_licence(&mut self, cx: &AppCx) {
-        use iyakki_shared::store_licencelink::{PENDING_APP, PENDING_KEY};
-        if self.status.is_none() && cx.core.app_data().get(&cx.session.user, PENDING_APP, PENDING_KEY).is_some() {
+    fn note_pending_licence(&mut self, cx: &dyn StorePort) {
+        use iyakki_store_model::store_licencelink::{PENDING_APP, PENDING_KEY};
+        if self.status.is_none() && cx.facts().pending_licence(&cx.user(), PENDING_APP, PENDING_KEY).is_some() {
             self.say("A licence from the seller's page is waiting: press L to add it (it is checked first).", true);
             self.redraw = true;
         }
@@ -583,17 +589,17 @@ impl StoreApp {
     // ------------------------------------------------------------------------------------------ what is listed
 
     fn filtered(&self) -> Vec<usize> {
-        let mut base: Vec<usize> = iyakki_shared::store_core::filter(&self.items, &self.filter).iter().filter_map(|i| self.items.iter().position(|x| std::ptr::eq(x, *i))).collect();
+        let mut base: Vec<usize> = iyakki_store_model::store_core::filter(&self.items, &self.filter).iter().filter_map(|i| self.items.iter().position(|x| std::ptr::eq(x, *i))).collect();
         // what the person called things, tagged them and grouped them also finds them
         let words: Vec<String> = self.filter.query.to_lowercase().split_whitespace().map(str::to_string).collect();
         if !words.is_empty() {
             let rest = Filter { query: String::new(), ..self.filter.clone() };
-            for i in iyakki_shared::store_core::filter(&self.items, &rest).iter().filter_map(|i| self.items.iter().position(|x| std::ptr::eq(x, *i))).collect::<Vec<_>>() {
+            for i in iyakki_store_model::store_core::filter(&self.items, &rest).iter().filter_map(|i| self.items.iter().position(|x| std::ptr::eq(x, *i))).collect::<Vec<_>>() {
                 if base.contains(&i) {
                     continue;
                 }
                 let it = &self.items[i];
-                let hay = format!("{} {} {} {}", it.title(), it.entry.name, it.entry.meta.summary, self.org.hay(&iyakki_shared::store_organize::item_key(&it.entry.kind, &it.entry.name))).to_lowercase();
+                let hay = format!("{} {} {} {}", it.title(), it.entry.name, it.entry.meta.summary, self.org.hay(&iyakki_store_model::store_organize::item_key(&it.entry.kind, &it.entry.name))).to_lowercase();
                 if words.iter().all(|w| hay.contains(w)) {
                     base.push(i);
                 }
@@ -601,7 +607,7 @@ impl StoreApp {
         }
         if !self.itags.is_empty() {
             base.retain(|i| {
-                let k = iyakki_shared::store_organize::item_key(&self.items[*i].entry.kind, &self.items[*i].entry.name);
+                let k = iyakki_store_model::store_organize::item_key(&self.items[*i].entry.kind, &self.items[*i].entry.name);
                 self.itags.iter().all(|t| self.org.tags_of(&k).contains(t))
             });
         }
@@ -635,12 +641,12 @@ impl StoreApp {
             return v;
         }
         let mut v = Vec::new();
-        let f: Vec<usize> = iyakki_shared::store_core::featured(&self.items).into_iter().filter_map(pos).take(3).collect();
+        let f: Vec<usize> = iyakki_store_model::store_core::featured(&self.items).into_iter().filter_map(pos).take(3).collect();
         if !f.is_empty() {
             v.push(Row::Head("Featured".into()));
             v.extend(f.into_iter().map(Row::Item));
         }
-        let n: Vec<usize> = iyakki_shared::store_core::newest(&self.items, 4).into_iter().filter_map(pos).collect();
+        let n: Vec<usize> = iyakki_store_model::store_core::newest(&self.items, 4).into_iter().filter_map(pos).collect();
         if !n.is_empty() {
             v.push(Row::Head("New".into()));
             v.extend(n.into_iter().map(Row::Item));
@@ -672,7 +678,7 @@ impl StoreApp {
         match self.section {
             Section::Discover => self.rows().iter().filter(|r| matches!(r, Row::Item(_))).count(),
             Section::Installed => self.ifiltered().len(),
-            Section::Publishers => iyakki_shared::store_core::publishers(&self.items).len(),
+            Section::Publishers => iyakki_store_model::store_core::publishers(&self.items).len(),
             Section::Settings => self.settings_rows(None).len(),
             Section::Setup => self.setup.stops().len(),
         }
@@ -686,8 +692,8 @@ impl StoreApp {
 
     // ------------------------------------------------------------------------------------------ actions
 
-    fn target_scope(&self, cx: &AppCx, kind: &str) -> iyakki_shared::skills::Scope {
-        use iyakki_shared::skills::Scope;
+    fn target_scope(&self, cx: &dyn StorePort, kind: &str) -> iyakki_store_model::skills::Scope {
+        use iyakki_store_model::skills::Scope;
         let a = self.actor(cx);
         if kind == "mcp" || (self.shared && a.can_shared) || !a.can_own {
             Scope::Shared
@@ -696,9 +702,9 @@ impl StoreApp {
         }
     }
 
-    fn scope_of_installed(&self, cx: &AppCx, kind: &str, name: &str) -> iyakki_shared::skills::Scope {
-        use iyakki_shared::skills::Scope;
-        let me = Scope::User(cx.session.user.clone());
+    fn scope_of_installed(&self, cx: &dyn StorePort, kind: &str, name: &str) -> iyakki_store_model::skills::Scope {
+        use iyakki_store_model::skills::Scope;
+        let me = Scope::User(cx.user());
         if self.store.installed_version(kind, name, &me).is_some() || self.store.is_disabled(kind, name, &me) { me } else { Scope::Shared }
     }
 
@@ -706,7 +712,7 @@ impl StoreApp {
         self.loaded.iter().any(|l| l.source == source && matches!(l.origin, Origin::Remote { .. }))
     }
 
-    fn start_review(&mut self, cx: &AppCx, purpose: Purpose) {
+    fn start_review(&mut self, cx: &dyn StorePort, purpose: Purpose) {
         let Some(item) = self.current().cloned() else { return };
         self.start_review_item(cx, item, purpose);
     }
@@ -733,7 +739,7 @@ impl StoreApp {
         }
     }
 
-    fn start_review_item(&mut self, cx: &AppCx, item: Item, purpose: Purpose) {
+    fn start_review_item(&mut self, cx: &dyn StorePort, item: Item, purpose: Purpose) {
         if self.job.is_some() {
             self.say("Wait for the current job to finish.", false);
             return;
@@ -758,8 +764,8 @@ impl StoreApp {
             self.say("The catalog this came from has expired. Check for updates to load a newer one.", false);
             return;
         }
-        let scope = if purpose == Purpose::Update { self.scope_of_installed(cx, &item.entry.kind, &item.entry.name) } else if item.entry.meta.ext_kind == "driver" { iyakki_shared::skills::Scope::Shared } else { self.target_scope(cx, &item.entry.kind) };
-        let (st, _svc, actor, loaded, known) = (self.store.clone(), cx.services.clone(), self.actor(cx), self.loaded.clone(), self.store.known_names(&self.all_items));
+        let scope = if purpose == Purpose::Update { self.scope_of_installed(cx, &item.entry.kind, &item.entry.name) } else if item.entry.meta.ext_kind == "driver" { iyakki_store_model::skills::Scope::Shared } else { self.target_scope(cx, &item.entry.kind) };
+        let (st, actor, loaded, known) = (self.store.clone(), self.actor(cx), self.loaded.clone(), self.store.known_names(&self.all_items));
         if self.is_remote(&item.source) {
             let slot = Arc::new(Mutex::new(None));
             let (out, fetch) = (slot.clone(), self.fetch.clone());
@@ -785,23 +791,21 @@ impl StoreApp {
         self.mode = Mode::Review(Box::new(ReviewView { review: r, scroll: 0, purpose, plan: None }));
     }
 
-    fn start_refresh(&mut self, cx: &AppCx) {
+    fn start_refresh(&mut self, cx: &dyn StorePort) {
         if self.job.is_some() {
             return;
         }
         let slot = Arc::new(Mutex::new(None));
-        let (out, st, svc, fetch) = (slot.clone(), self.store.clone(), cx.services.clone(), self.fetch.clone());
-        let (policy, user) = (cx.session.policy.clone(), cx.session.user.clone());
+        let (out, st, facts, fetch) = (slot.clone(), self.store.clone(), cx.facts(), self.fetch.clone());
+        let (policy, user) = (cx.policy(), cx.user());
         std::thread::spawn(move || {
             let r = st.refresh(fetch.as_ref());
             // and the vendors of the command-line tools (their newest version numbers)
             st.check_cli_latest();
             // the button is the same check as the daily one: keep the report (Store badge, System update line) and raise the one grouped notice
             if policy.manage_settings {
-                let settings = svc.settings().lock().map(|s| s.get().update_check.clone()).unwrap_or_default();
-                let rel = iyakki_shared::relinfo::ReleaseInfo::parse(&std::fs::read_to_string(iyakki_shared::relinfo::RELEASE_FILE).unwrap_or_default());
-                let running = if rel.version.is_empty() { iyakki_shared::relinfo::VERSION.to_string() } else { rel.version };
-                st.update_check_run(&policy, &user, fetch.as_ref(), &settings, &running, &rel.variant);
+                let (settings, running, variant) = facts.update_check_inputs();
+                st.update_check_run(&policy, &user, fetch.as_ref(), &settings, &running, &variant);
             }
             *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(Done::Refreshed(r));
         });
@@ -809,7 +813,7 @@ impl StoreApp {
     }
 
     /// Take the result of a finished background job (called from drawing and from the heartbeat).
-    fn apply_job(&mut self, cx: &AppCx) {
+    fn apply_job(&mut self, cx: &dyn StorePort) {
         let done = match &self.job {
             Some(j) => j.slot.lock().unwrap_or_else(|e| e.into_inner()).take(),
             None => None,
@@ -830,7 +834,7 @@ impl StoreApp {
                     m.push(' ');
                     m.push_str(n);
                 }
-                cx.audit.record(&cx.session.user, "store.check", &format!("{} catalogs", r.loaded.len()));
+                cx.record("store.check", &format!("{} catalogs", r.loaded.len()));
                 self.say(m, r.errors.is_empty());
             }
             Done::Reviewed(r, p) => self.show_review(*r, p),
@@ -860,13 +864,13 @@ impl StoreApp {
         }
     }
 
-    fn do_install(&mut self, cx: &AppCx, rv: &ReviewView) {
+    fn do_install(&mut self, cx: &dyn StorePort, rv: &ReviewView) {
         let a = self.actor(cx);
         match self.store.install(&a, &rv.review, Confirm::all()) {
             Ok(rec) => {
-                cx.audit.record(&cx.session.user, "store.install", &format!("{} {} {} ({}, {})", rec.kind, rec.name, rec.version, rec.level, rec.scope));
-                if let Some(ap) = self.store.approval(&rec.key()).filter(|a| a.app_version == rec.version && !a.grants.is_empty()) {
-                    cx.audit.record(&cx.session.user, "store.approve", &ap.audit_detail());
+                cx.record("store.install", &format!("{} {} {} ({}, {})", rec.kind, rec.name, rec.version, rec.level, rec.scope));
+                if let Some(detail) = self.store.approval_audit(&rec.key(), &rec.version) {
+                    cx.record("store.approve", &detail);
                 }
                 self.say(format!("Installed {} {}.", rec.title, rec.version), true);
                 self.mode = self.back_mode();
@@ -880,11 +884,11 @@ impl StoreApp {
         }
     }
 
-    fn do_remove(&mut self, cx: &AppCx, kind: &str, name: &str, scope: &iyakki_shared::skills::Scope, title: &str) {
+    fn do_remove(&mut self, cx: &dyn StorePort, kind: &str, name: &str, scope: &iyakki_store_model::skills::Scope, title: &str) {
         let a = self.actor(cx);
         match self.store.remove(&a, kind, name, scope) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "store.remove", &format!("{kind} {name}"));
+                cx.record("store.remove", &format!("{kind} {name}"));
                 self.say(format!("Removed {title}."), true);
             }
             Err(e) => self.say(e, false),
@@ -895,7 +899,7 @@ impl StoreApp {
         self.sel[i] = self.sel[i].min(n.saturating_sub(1));
     }
 
-    fn toggle_off(&mut self, cx: &AppCx) {
+    fn toggle_off(&mut self, cx: &dyn StorePort) {
         let Some(it) = self.current().cloned() else { return };
         let a = self.actor(cx);
         let scope = self.scope_of_installed(cx, &it.entry.kind, &it.entry.name);
@@ -908,7 +912,7 @@ impl StoreApp {
         };
         match r {
             Ok(m) => {
-                cx.audit.record(&cx.session.user, "store.toggle", &it.entry.name);
+                cx.record("store.toggle", &it.entry.name);
                 self.say(m, true);
             }
             Err(e) => self.say(e, false),
@@ -925,13 +929,13 @@ impl StoreApp {
         }
     }
 
-    fn can_change_settings(&self, cx: &AppCx) -> bool {
+    fn can_change_settings(&self, cx: &dyn StorePort) -> bool {
         self.actor(cx).admin
     }
 
-    fn read_file(&self, cx: &AppCx, path: &str, max: u64) -> Result<Vec<u8>, String> {
+    fn read_file(&self, cx: &dyn StorePort, path: &str, max: u64) -> Result<Vec<u8>, String> {
         let p = std::path::PathBuf::from(path.trim());
-        cx.core.file_scope().check_read(&cx.session.policy, &cx.session.user, &p)?;
+        cx.check_read(&p)?;
         match std::fs::metadata(&p) {
             Ok(m) if m.is_file() && m.len() <= max => std::fs::read(&p).map_err(|e| e.to_string()),
             Ok(_) => Err(format!("that is not a file of up to {} KiB", max / 1024)),
@@ -939,7 +943,7 @@ impl StoreApp {
         }
     }
 
-    fn settings_rows(&self, cx: Option<&AppCx>) -> Vec<(String, String, Option<Key>, [u8; 4])> {
+    fn settings_rows(&self, cx: Option<&dyn StorePort>) -> Vec<(String, String, Option<Key>, [u8; 4])> {
         let cfg = self.store.config();
         let mut v: Vec<(String, String, Option<Key>, [u8; 4])> = Vec::new();
         v.push(("Built-in catalog".into(), "always there, works offline".into(), None, OK));
@@ -947,23 +951,23 @@ impl StoreApp {
             v.push((format!("{} {}", s.name, if s.enabled { "" } else { "(off)" }).trim().to_string(), format!("{} · {}", if s.kind == SourceKind::Url { "address" } else { "folder or stick" }, s.location), Some(Key::Enter), if s.enabled { TEXT } else { DIM }));
         }
         v.push(("Add a store".into(), "paste a portal link: you see its name, signer and trust before it is enabled (a)".into(), Some(Key::Char('a')), ACCENT));
-        v.push(("Add the official IYAKKI store".into(), if iyakki_shared::store_catalog::OFFICIAL_STORE_URL.is_empty() { "coming soon: the project has not published its store address yet (w)".to_string() } else { "one step; you confirm its key before it is enabled (w)".to_string() }, Some(Key::Char('w')), if iyakki_shared::store_catalog::OFFICIAL_STORE_URL.is_empty() { DIM } else { ACCENT }));
+        v.push(("Add the official IYAKKI store".into(), if iyakki_store_model::store_catalog::OFFICIAL_STORE_URL.is_empty() { "coming soon: the project has not published its store address yet (w)".to_string() } else { "one step; you confirm its key before it is enabled (w)".to_string() }, Some(Key::Char('w')), if iyakki_store_model::store_catalog::OFFICIAL_STORE_URL.is_empty() { DIM } else { ACCENT }));
         v.push(("Add a folder or USB stick".into(), "a folder with catalog.json and packages (f)".into(), Some(Key::Char('f')), ACCENT));
         v.push(("Find USB sticks".into(), "look for stores on mounted sticks (u)".into(), Some(Key::Char('u')), ACCENT));
-        let pinfo = cx.map(|c| c.storeapi().private_store_status(&c.session.user));
-        v.push(("Private store".into(), pinfo.as_ref().map_or_else(|| "your own app store in a cluster".to_string(), iyakki_shared::store_private::status_text), None, if pinfo.as_ref().is_some_and(|i| i.added.is_some()) { OK } else { DIM }));
+        let pinfo = cx.map(|c| c.facts().private_store(&c.user()));
+        v.push(("Private store".into(), pinfo.as_ref().map_or_else(|| "your own app store in a cluster".to_string(), iyakki_store_model::store_private::status_text), None, if pinfo.as_ref().is_some_and(|i| i.added.is_some()) { OK } else { DIM }));
         v.push(("Deploy a private store to k3s…".into(), "pick a cluster, review the plan, approve (p)".into(), Some(Key::Char('p')), ACCENT));
         v.push(("Repair, reset or remove the private store…".into(), "an install that stopped half-way, a lost token, or start over (m)".into(), Some(Key::Char('m')), ACCENT));
         v.push(("Add a private store (check its key)".into(), "its address, then compare the key fingerprint (v)".into(), Some(Key::Char('v')), ACCENT));
         v.push(("Publish here".into(), "make the selected private catalog the default target for publishing (h)".into(), Some(Key::Char('h')), ACCENT));
         v.push(("Show the catalog (coming soon)".into(), if cfg.catalog_enabled { "on: Discover and Publishers are shown, with the built-in catalog (g)".into() } else if !cfg.sources.is_empty() { "on because a catalog is added (g)".into() } else { "off: the store shows only what is installed (g)".into() }, Some(Key::Char('g')), if cfg.catalog_visible() { OK } else { DIM }));
-        let mode = cx.map_or(iyakki_shared::store_updatecheck::Mode::Daily, |c| c.services.settings().lock().map(|s| s.get().update_check.mode).unwrap_or_default());
-        let daily = mode == iyakki_shared::store_updatecheck::Mode::Daily;
+        let mode = cx.map_or(iyakki_store_model::store_updatecheck::Mode::Daily, |c| c.settings().lock().map(|s| s.get().update_check.mode).unwrap_or_default());
+        let daily = mode == iyakki_store_model::store_updatecheck::Mode::Daily;
         v.push(("Daily check for updates".into(), if daily { "on: once a day it asks only the stores and update list address you added, and leaves one notice (o)".to_string() } else { format!("{}: nothing is asked unless you press c (o)", mode.label()) }, Some(Key::Char('o')), if daily { OK } else { DIM }));
         v.push(("Install from a file".into(), "a package (.iyp) from a stick or download (i)".into(), Some(Key::Char('i')), ACCENT));
         v.push(("Add a licence".into(), "for a paid app; a file or what you copied (l)".into(), Some(Key::Char('l')), ACCENT));
         v.push(("Trust a publisher key".into(), "packages signed by it show as Trusted (t)".into(), Some(Key::Char('t')), ACCENT));
-        let svc_keys: Vec<(String, String)> = cx.map(|c| c.services.packages().trusted_keys()).unwrap_or_default();
+        let svc_keys: Vec<(String, String)> = cx.map(|c| c.trusted_keys()).unwrap_or_default();
         for (k, l) in svc_keys {
             v.push((format!("Trusted key: {l}"), format!("{}…", &k[..16.min(k.len())]), None, level_color(Level::Trusted)));
         }
@@ -975,14 +979,14 @@ impl StoreApp {
         }
         let revs = self.store.revocations();
         v.push(("Revocation list".into(), match revs.freshness(self.store.now()) {
-            iyakki_shared::store_revocation::Freshness::Missing => "none loaded yet".to_string(),
-            iyakki_shared::store_revocation::Freshness::Fresh => format!("number {}, recent", revs.serial()),
-            iyakki_shared::store_revocation::Freshness::Old(d) => format!("number {}, {d} days old", revs.serial()),
+            iyakki_store_model::store_revocation::Freshness::Missing => "none loaded yet".to_string(),
+            iyakki_store_model::store_revocation::Freshness::Fresh => format!("number {}, recent", revs.serial()),
+            iyakki_store_model::store_revocation::Freshness::Old(d) => format!("number {}, {d} days old", revs.serial()),
         }, None, DIM));
         v
     }
 
-    fn settings_key(&mut self, cx: &AppCx, k: Key) {
+    fn settings_key(&mut self, cx: &dyn StorePort, k: Key) {
         let admin = self.can_change_settings(cx);
         let need = |s: &mut StoreApp| s.say("Only administrators can change the store's settings.", false);
         match k {
@@ -1014,7 +1018,7 @@ impl StoreApp {
                     need(self);
                     return;
                 }
-                let found = cx.storeapi().stick_stores();
+                let found = cx.facts().stick_stores();
                 let mut added = 0;
                 for d in &found {
                     if self.store.add_source(&self.actor(cx), "USB stick", SourceKind::Folder, &d.display().to_string()).is_ok() {
@@ -1040,7 +1044,7 @@ impl StoreApp {
             }
             Key::Char('v') => {
                 if admin {
-                    let url = cx.storeapi().private_store_status(&cx.session.user).instance.map(|i| i.1).unwrap_or_default();
+                    let url = cx.facts().private_store(&cx.user()).instance.map(|i| i.1).unwrap_or_default();
                     let url = if url.is_empty() { "https://".to_string() } else { url.trim_end_matches("/catalog.json").to_string() };
                     self.mode = Mode::Form(Form::new("Add a private store").text("Name", "", "for example Team store").text("Address", &url, "https://store.example.lan"), FormKind::PrivateStore);
                 } else {
@@ -1054,7 +1058,7 @@ impl StoreApp {
                 }
                 let cfg = self.store.config();
                 let sel = self.sel[Section::Settings as usize];
-                let pinned: Vec<&iyakki_shared::store_catalog::SourceCfg> = cfg.sources.iter().filter(|s| !s.pin.is_empty()).collect();
+                let pinned: Vec<&iyakki_store_model::store_catalog::SourceCfg> = cfg.sources.iter().filter(|s| !s.pin.is_empty()).collect();
                 let pick = if sel >= 1 && sel <= cfg.sources.len() && !cfg.sources[sel - 1].pin.is_empty() { Some(&cfg.sources[sel - 1]) } else if pinned.len() == 1 { Some(pinned[0]) } else { None };
                 match pick {
                     Some(s) => match self.store.set_publish_target(&self.actor(cx), &s.id) {
@@ -1076,11 +1080,10 @@ impl StoreApp {
             }
             Key::Char('o') => {
                 if admin {
-                    use iyakki_shared::store_updatecheck::Mode;
-                    let on = cx.settings().lock().map(|s| s.get().update_check.mode != Mode::Daily).unwrap_or(false);
-                    let saved = cx.settings().lock().map(|mut s| s.update(|s| s.update_check.mode = if on { Mode::Daily } else { Mode::Manual }).is_ok()).unwrap_or(false);
+                    let on = cx.facts().update_check_daily().map(|daily| !daily).unwrap_or(false);
+                    let saved = cx.facts().set_update_check_daily(on);
                     if saved {
-                        cx.audit.record(&cx.session.user, "settings.update_check", if on { "mode=Daily (store)" } else { "mode=Manual (store)" });
+                        cx.record("settings.update_check", if on { "mode=Daily (store)" } else { "mode=Manual (store)" });
                         self.say(if on { "Updates are looked for once a day, only at the stores and update list address you added. You get one notice when something is new." } else { "No automatic checks. Nothing is fetched unless you ask." }, true);
                     } else {
                         self.say("Could not save the setting; try again.", false);
@@ -1152,7 +1155,7 @@ impl StoreApp {
         self.job = Some(Job { label: "Reading the store's key…".into(), slot, progress: None });
     }
 
-    fn submit_form(&mut self, cx: &AppCx, form: &mut Form, kind: &FormKind) -> bool {
+    fn submit_form(&mut self, cx: &dyn StorePort, form: &mut Form, kind: &FormKind) -> bool {
         let a = self.actor(cx);
         let r: Result<String, String> = match kind {
             FormKind::SourceFolder => self.store.add_source(&a, &form.value(0), SourceKind::Folder, &form.value(1)).map(|_| "Folder added.".to_string()),
@@ -1167,8 +1170,8 @@ impl StoreApp {
             }
             FormKind::TrustKey => self.store.trust_key(&a, &form.value(0), &form.value(1)).map(|()| "Publisher key trusted. Packages signed by it show as Trusted.".to_string()),
             FormKind::FromFile => {
-                let scope = if form.choice_idx(1) == 1 { iyakki_shared::skills::Scope::Shared } else { iyakki_shared::skills::Scope::User(cx.session.user.clone()) };
-                match self.read_file(cx, &form.value(0), iyakki_shared::pkg::MAX_EXTENSION_PACKAGE_BYTES as u64) {
+                let scope = if form.choice_idx(1) == 1 { iyakki_store_model::skills::Scope::Shared } else { iyakki_store_model::skills::Scope::User(cx.user()) };
+                match self.read_file(cx, &form.value(0), iyakki_store_model::pkg::MAX_EXTENSION_PACKAGE_BYTES as u64) {
                     Ok(bytes) => {
                         let r = self.store.review_sideload(&a, bytes, scope, &self.store.known_names(&self.all_items));
                         self.show_review(r, Purpose::Install);
@@ -1180,10 +1183,10 @@ impl StoreApp {
             FormKind::DriverFolder(id) => {
                 let d = self.drivers_handle(cx);
                 let dir = std::path::PathBuf::from(form.value(0).trim());
-                match cx.core.file_scope().check_read(&cx.session.policy, &cx.session.user, &dir).and_then(|()| d.folder_package(id, &dir, self.store.now())) {
+                match cx.check_read(&dir).and_then(|()| d.folder_package(id, &dir, self.store.now())) {
                     Ok((text, taken)) => {
                         self.say(format!("Took {} file(s) from the folder: {}", taken.len(), taken.join("; ")), true);
-                        let r = self.store.review_sideload(&a, text.into_bytes(), iyakki_shared::skills::Scope::Shared, &self.store.known_names(&self.all_items));
+                        let r = self.store.review_sideload(&a, text.into_bytes(), iyakki_store_model::skills::Scope::Shared, &self.store.known_names(&self.all_items));
                         self.show_review(r, Purpose::Install);
                         return true;
                     }
@@ -1237,10 +1240,10 @@ impl StoreApp {
                 let d = self.drivers_handle(cx);
                 let path = form.value(0);
                 let accepted = form.choice_idx(1) == 1;
-                match self.read_file(cx, &path, iyakki_agent_api::MAX_DRIVER_FILE).and_then(|b| d.facetime_package(&b, accepted, self.store.now())) {
+                match self.read_file(cx, &path, iyakki_tile_store::facts::MAX_DRIVER_FILE).and_then(|b| d.facetime_package(&b, accepted, self.store.now())) {
                     Ok((text, what)) => {
                         self.say(format!("Extracted {what}."), true);
-                        let r = self.store.review_sideload(&a, text.into_bytes(), iyakki_shared::skills::Scope::Shared, &self.store.known_names(&self.all_items));
+                        let r = self.store.review_sideload(&a, text.into_bytes(), iyakki_store_model::skills::Scope::Shared, &self.store.known_names(&self.all_items));
                         self.show_review(r, Purpose::Install);
                         return true;
                     }
@@ -1253,7 +1256,7 @@ impl StoreApp {
                 text.and_then(|t| {
                     let items = self.items.clone();
                     self.store.add_license(&a, &t, &|app| items.iter().filter(|i| i.entry.name == app && !i.entry.signer.is_empty()).map(|i| i.entry.signer.clone()).collect()).map(|tok| {
-                        cx.audit.record(&cx.session.user, "store.license", &tok.app);
+                        cx.record("store.license", &tok.app);
                         format!("Licence added for {} ({}).", tok.app, tok.describe())
                     })
                 })
@@ -1275,7 +1278,7 @@ impl StoreApp {
 
     // ------------------------------------------------------------------------------------------ keys
 
-    fn key_browse(&mut self, k: &Key, cx: &AppCx) -> Flow {
+    fn key_browse(&mut self, k: &Key, cx: &dyn StorePort) -> Flow {
         let sec = self.section;
         match k {
             Key::Esc => {
@@ -1323,14 +1326,14 @@ impl StoreApp {
                 self.sel[0] = 0;
             }
             Key::Char('g') if sec == Section::Discover => {
-                let cats: Vec<String> = iyakki_shared::store_core::categories(&self.items).into_iter().map(|c| c.0).take(8).collect();
+                let cats: Vec<String> = iyakki_store_model::store_core::categories(&self.items).into_iter().map(|c| c.0).take(8).collect();
                 self.filter.category = match &self.filter.category { None => cats.first().cloned(), Some(c) => cats.iter().position(|x| x == c).and_then(|i| cats.get(i + 1)).cloned() };
                 self.sel[0] = 0;
             }
             Key::Enter => match sec {
                 Section::Discover | Section::Installed => self.open_detail(),
                 Section::Publishers => {
-                    if let Some(p) = iyakki_shared::store_core::publishers(&self.items).get(self.sel[2]) {
+                    if let Some(p) = iyakki_store_model::store_core::publishers(&self.items).get(self.sel[2]) {
                         self.filter = Filter { publisher: Some(p.id.clone()), ..Default::default() };
                         self.section = Section::Discover;
                         self.sel[0] = 0;
@@ -1366,7 +1369,7 @@ impl StoreApp {
         Flow::Stay
     }
 
-    fn ask_remove(&mut self, cx: &AppCx) {
+    fn ask_remove(&mut self, cx: &dyn StorePort) {
         let Some(it) = self.current().cloned() else { return };
         if !it.state.is_installed() {
             self.say("It is not installed.", false);
@@ -1398,7 +1401,7 @@ impl StoreApp {
         self.mode = Mode::Browse;
     }
 
-    fn key_detail(&mut self, k: &Key, cx: &AppCx) -> Flow {
+    fn key_detail(&mut self, k: &Key, cx: &dyn StorePort) -> Flow {
         match k {
             Key::Esc | Key::Left => {
                 self.detail = None;
@@ -1430,7 +1433,7 @@ impl StoreApp {
         Flow::Stay
     }
 
-    fn key_review(&mut self, k: &Key, cx: &AppCx) {
+    fn key_review(&mut self, k: &Key, cx: &dyn StorePort) {
         let Mode::Review(rv) = &mut self.mode else { return };
         match k {
             Key::Esc | Key::Char('n') => {
@@ -1551,24 +1554,26 @@ impl App for StoreApp {
     }
 
     /// Another tile (MCP, CLI, SKILLS) asked for one installed item: `installed:<kind>:<name>`.
-    fn open_item(&mut self, item: &str, cx: &AppCx) {
+    fn open_item(&mut self, item: &str, acx: &AppCx) {
+        let port = CxPort(acx);
+        let cx: &dyn StorePort = &port;
         // the Devices popover's "Driver help": the Drivers chip
         if item == "drivers" {
-            self.handle(&Event::Tab(226), cx);
+            self.handle(&Event::Tab(226), acx);
             return;
         }
         // a stand-in program for the install jobs (tests, the screenshot tool): `launch:<exe>\n<data>`
         if let Some(rest) = item.strip_prefix("launch:") {
             if let Some((exe, data)) = rest.split_once('\n') {
-                self.setup.launch = Some(iyakki_shared::quickinstall::Launch { exe: exe.into(), data: data.into() });
+                self.setup.launch = Some(iyakki_tile_api::store_qi::Launch { exe: exe.into(), data: data.into() });
             }
             return;
         }
         // the Setup tab: `setup` or `setup:<item>`, and a bare Quick install item id (the VOICE tile's "Set up Kokoro")
-        if item == "setup" || item.starts_with("setup:") || iyakki_shared::quickinstall::Item::parse(item).is_some() {
+        if item == "setup" || item.starts_with("setup:") || iyakki_tile_api::store_qi::Item::parse(item).is_some() {
             self.switch(Section::Setup);
             self.setup.enter(cx);
-            if let Some(it) = iyakki_shared::quickinstall::Item::parse(item.strip_prefix("setup:").unwrap_or(item)) {
+            if let Some(it) = iyakki_tile_api::store_qi::Item::parse(item.strip_prefix("setup:").unwrap_or(item)) {
                 self.setup.focus_item(it);
             }
             return;
@@ -1578,7 +1583,7 @@ impl App for StoreApp {
             self.switch(Section::Installed);
             self.reload(cx);
             if !self.iupdates {
-                self.handle(&Event::Tab(manage::TAB_UPDATES), cx);
+                self.handle(&Event::Tab(manage::TAB_UPDATES), acx);
             }
             return;
         }
@@ -1616,7 +1621,9 @@ impl App for StoreApp {
         false
     }
 
-    fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+    fn handle(&mut self, ev: &Event, acx: &AppCx) -> Flow {
+        let port = CxPort(acx);
+        let cx: &dyn StorePort = &port;
         if matches!(ev, Event::Tick) {
             self.apply_job(cx);
             if matches!(self.mode, Mode::Browse) {
@@ -1802,9 +1809,9 @@ impl App for StoreApp {
                         Ask::RemoveInstalled(e) => {
                             let e = (**e).clone();
                             self.mode = self.back_mode();
-                            match self.store.remove_installed(&cx.session.policy, &cx.session.user, &e) {
+                            match self.store.remove_installed(&cx.policy(), &cx.user(), &e) {
                                 Ok(m) => {
-                                    cx.audit.record(&cx.session.user, "store.remove", &format!("{} {}", e.kind, e.name));
+                                    cx.record("store.remove", &format!("{} {}", e.kind, e.name));
                                     self.say(m, true);
                                     self.idetail = None;
                                     self.mode = Mode::Browse;
@@ -1820,7 +1827,7 @@ impl App for StoreApp {
                             self.mode = Mode::Browse;
                             match self.store.pin_probed(&self.actor(cx), &name, &p, &p.fingerprint) {
                                 Ok(_) => {
-                                    cx.audit.record(&cx.session.user, "store.pin", &format!("{} {}", p.url, p.fingerprint));
+                                    cx.record("store.pin", &format!("{} {}", p.url, p.fingerprint));
                                     self.say("Store added with its key pinned. Press c to fetch it, then switch stores with s in Discover.", true);
                                 }
                                 Err(e) => self.say(e, false),
@@ -1985,7 +1992,9 @@ impl App for StoreApp {
         self.key_browse(k, cx)
     }
 
-    fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+    fn render(&mut self, g: &mut Gfx, area: R, s: f32, acx: &AppCx, tick: u64) {
+        let port = CxPort(acx);
+        let cx: &dyn StorePort = &port;
         self.apply_job(cx);
         self.tip = None;
         let x = area.x + 24.0 * s;
@@ -2116,7 +2125,7 @@ impl StoreApp {
         let it = self.items[idx].clone();
         let hot = g.hovered(r);
         fx::row_at(g, r.x, r.y, r.w, r.h, 12.0 * s, selected, hot, ACCENT);
-        let okey = iyakki_shared::store_organize::item_key(&it.entry.kind, &it.entry.name);
+        let okey = iyakki_store_model::store_organize::item_key(&it.entry.kind, &it.entry.name);
         let shown = self.org.display_title(&okey, it.title()).to_string();
         let aliased = shown != it.title();
         g.hit(r, Event::Row(ordinal), &format!("{} {}", shown, it.state.label()));
@@ -2220,7 +2229,7 @@ impl StoreApp {
                     let rr = R::new(body.x + inset, y, body.w - inset, ih);
                     self.item_row(g, rr, s, *idx, ordinal, ordinal == sel_ord);
                     if grouped {
-                        let k = iyakki_shared::store_organize::item_key(&self.items[*idx].entry.kind, &self.items[*idx].entry.name);
+                        let k = iyakki_store_model::store_organize::item_key(&self.items[*idx].entry.kind, &self.items[*idx].entry.name);
                         self.zones.push(Zone { rect: rr, what: manage::ZoneKind::Item { key: k, group: group_now.clone().unwrap_or(None) } });
                         if let Some((_, py)) = drop_at.filter(|(px, py)| rr.contains(*px, *py)) {
                             let ly = if (py as f32) < rr.y + rr.h / 2.0 { rr.y - 2.0 * s } else { rr.y + rr.h + 1.0 * s };
@@ -2319,7 +2328,7 @@ impl StoreApp {
     }
 
     fn render_publishers(&mut self, g: &mut Gfx, body: R, s: f32) {
-        let ps = iyakki_shared::store_core::publishers(&self.items);
+        let ps = iyakki_store_model::store_core::publishers(&self.items);
         if ps.is_empty() {
             fx::empty_state(g, body, s, Icon::Users, "No publishers yet", "Publishers appear when a catalog lists their apps.", ACCENT);
             return;
@@ -2345,7 +2354,7 @@ impl StoreApp {
         }
     }
 
-    fn render_settings(&mut self, g: &mut Gfx, body: R, s: f32, cx: &AppCx) {
+    fn render_settings(&mut self, g: &mut Gfx, body: R, s: f32, cx: &dyn StorePort) {
         let rows = self.settings_rows(Some(cx));
         self.sel[3] = self.sel[3].min(rows.len().saturating_sub(1));
         let rh = 46.0 * s;
@@ -2369,7 +2378,7 @@ impl StoreApp {
         }
     }
 
-    fn rebuild_text(&mut self, it: &Item, cx: &AppCx) {
+    fn rebuild_text(&mut self, it: &Item, cx: &dyn StorePort) {
         let others = self.also_in(it);
         let key = (it.entry.kind.clone(), it.entry.name.clone(), format!("{}|{}|{}", it.entry.version, it.source, others.iter().map(|o| format!("{}={}", o.0, o.2)).collect::<Vec<_>>().join(",")));
         if self.text_for.as_ref() == Some(&key) {
@@ -2378,7 +2387,7 @@ impl StoreApp {
         self.text_for = Some(key);
         self.text.clear();
         let m = &it.entry.meta;
-        let user = &cx.session.user;
+        let user = &cx.user();
         let push = |t: &mut ScrollLog, s: &str, c: [u8; 4]| t.push(s.to_string(), c);
         let para = |t: &mut ScrollLog, text: &str, c: [u8; 4]| {
             for l in text.lines() {
@@ -2394,7 +2403,7 @@ impl StoreApp {
         }
         push(&mut self.text, "", TEXT);
         push(&mut self.text, "WHAT IT CAN DO", ACCENT);
-        let perms: Vec<String> = m.permissions.iter().filter_map(|p| cx.storeapi().permission_words(p, user)).collect();
+        let perms: Vec<String> = m.permissions.iter().filter_map(|p| cx.facts().permission_words(p, user)).collect();
         if perms.is_empty() {
             push(&mut self.text, if it.entry.kind == "skill" { "Nothing: a skill is text the assistant reads. It runs nothing and asks for no access." } else { "No extra access is listed." }, MUTED);
         }
@@ -2430,7 +2439,7 @@ impl StoreApp {
         self.text.scroll = usize::MAX / 4;
     }
 
-    fn render_detail(&mut self, g: &mut Gfx, body: R, s: f32, cx: &AppCx, tick: u64) {
+    fn render_detail(&mut self, g: &mut Gfx, body: R, s: f32, cx: &dyn StorePort, tick: u64) {
         let _ = tick;
         let Some(it) = self.current().cloned() else {
             self.detail = None;
@@ -2646,8 +2655,8 @@ impl StoreApp {
                     }
                 }
                 match &m.state {
-                    iyakki_shared::store_bundle::MemberState::Skip(why) => lines.push((K::Warn, format!("{why}: left out{}", if m.optional { "" } else { " (the install is refused)" }))),
-                    iyakki_shared::store_bundle::MemberState::Install => {
+                    iyakki_store_model::store_bundle::MemberState::Skip(why) => lines.push((K::Warn, format!("{why}: left out{}", if m.optional { "" } else { " (the install is refused)" }))),
+                    iyakki_store_model::store_bundle::MemberState::Install => {
                         for cl in &m.lines {
                             let t = format!("{}{}{}", if plan.is_some() && cl.is_new { "NEW  " } else { "" }, cl.words, if cl.hard_ask { "  (every use still asks you)" } else { "" });
                             for (i, l) in wrap(g, &t).into_iter().enumerate() {
@@ -2775,20 +2784,20 @@ impl StoreApp {
         self.ifiltered().get(self.sel[1]).map(|e| (*e).clone())
     }
 
-    fn drivers_handle(&self, cx: &AppCx) -> Arc<dyn iyakki_agent_api::StoreDrivers> {
-        self.drivers_for.clone().unwrap_or_else(|| cx.storeapi().drivers())
+    fn drivers_handle(&self, cx: &dyn StorePort) -> Arc<dyn iyakki_tile_store::facts::DriversInstall> {
+        self.drivers_for.clone().unwrap_or_else(|| cx.drivers_install())
     }
 
     /// Read the machine again for the Drivers chip (only while it is showing).
-    fn refresh_drivers(&mut self, cx: &AppCx) {
+    fn refresh_drivers(&mut self, cx: &dyn StorePort) {
         if self.ifilter == Some(IType::Driver) {
-            let d = self.drivers_read_for.clone().unwrap_or_else(|| cx.os.drivers());
+            let d = self.drivers_read_for.clone().unwrap_or_else(|| cx.drivers_read());
             self.drivers.refresh(&*d);
         }
     }
 
     /// The Drivers chip's keys and clicks; what it asks for goes through the same forms, reviews and removals as the rest.
-    fn handle_drivers(&mut self, ev: &Event, cx: &AppCx) -> Option<Flow> {
+    fn handle_drivers(&mut self, ev: &Event, cx: &dyn StorePort) -> Option<Flow> {
         let mine = match ev {
             Event::Tab(n) => (drv::BASE..=drv::WHY_REMOVE).contains(n),
             Event::Row(_) | Event::Scroll(_) => true,
@@ -2810,7 +2819,7 @@ impl StoreApp {
                 None => self.say("That driver pack is not in the built-in catalog.", false),
             },
             Some(DOut::InstallFolder(id)) => {
-                let title = iyakki_core_api::drivers::known::by_id(&id).map_or(id.clone(), |k| k.title.to_string());
+                let title = cx.drivers_install().title_of(&id).unwrap_or_else(|| id.clone());
                 self.mode = Mode::Form(Form::new(&format!("{title}: install from a folder or USB stick")).path("Folder", "/mnt/", "/mnt/usb/firmware", crate::filepicker::PathKind::Folder, &[]), FormKind::DriverFolder(id));
             }
             Some(DOut::InstallExtract(id)) => {
@@ -2819,7 +2828,7 @@ impl StoreApp {
                     FormKind::DriverFile(id),
                 );
             }
-            Some(DOut::Remove { id, title }) => self.mode = Mode::Confirm(Ask::Remove { kind: "extension".into(), name: id, scope: iyakki_shared::skills::Scope::Shared, title }),
+            Some(DOut::Remove { id, title }) => self.mode = Mode::Confirm(Ask::Remove { kind: "extension".into(), name: id, scope: iyakki_store_model::skills::Scope::Shared, title }),
         }
         Some(Flow::Stay)
     }
@@ -2833,7 +2842,7 @@ impl StoreApp {
         }
     }
 
-    fn inst_action(&mut self, act: usize, cx: &AppCx) {
+    fn inst_action(&mut self, act: usize, cx: &dyn StorePort) {
         let Some(e) = self.iselected() else {
             if self.on_head.is_some() {
                 self.say("Choose an item first (Down).", false);
@@ -2845,9 +2854,9 @@ impl StoreApp {
                 Some(o) => self.request = Some((o.tile.clone(), o.item.clone())),
                 None => self.say(format!("There is nowhere to open {} from your account.", e.title), false),
             },
-            ACT_TOGGLE => match self.store.toggle_installed(&cx.session.policy, &cx.session.user, &e) {
+            ACT_TOGGLE => match self.store.toggle_installed(&cx.policy(), &cx.user(), &e) {
                 Ok(m) => {
-                    cx.audit.record(&cx.session.user, "store.toggle", &e.name);
+                    cx.record("store.toggle", &e.name);
                     self.say(m, true);
                     self.reload(cx);
                 }
@@ -2857,7 +2866,7 @@ impl StoreApp {
                 if e.removable {
                     self.ask_remove_plan(cx, e);
                 } else {
-                    let r = self.store.remove_installed(&cx.session.policy, &cx.session.user, &e);
+                    let r = self.store.remove_installed(&cx.policy(), &cx.user(), &e);
                     self.say(r.err().unwrap_or_default(), false);
                 }
             }
@@ -2871,7 +2880,7 @@ impl StoreApp {
     }
 
     /// Keys and clicks of the Installed page and of an installed item's page. `None` leaves the event to the shared code.
-    fn handle_installed(&mut self, ev: &Event, cx: &AppCx) -> Option<Flow> {
+    fn handle_installed(&mut self, ev: &Event, cx: &dyn StorePort) -> Option<Flow> {
         let detail = self.idetail.is_some();
         if detail && self.text.handle(ev) {
             return Some(Flow::Stay);
@@ -3051,9 +3060,9 @@ impl StoreApp {
         let (st, st_col) = match (&e.status, &life) {
             (Status::Update(v), Some(l)) if l.pinned.is_some() => (format!("Pinned (update {v})"), MUTED),
             (Status::On, Some(l)) => match &l.check {
-                iyakki_shared::store_lifecycle::Check::SourceGone(_) => ("Source gone".to_string(), AMBER),
-                iyakki_shared::store_lifecycle::Check::Withdrawn(_) => ("Withdrawn".to_string(), AMBER),
-                iyakki_shared::store_lifecycle::Check::Offline(_) => ("Can't check offline".to_string(), MUTED),
+                iyakki_store_model::store_lifecycle::Check::SourceGone(_) => ("Source gone".to_string(), AMBER),
+                iyakki_store_model::store_lifecycle::Check::Withdrawn(_) => ("Withdrawn".to_string(), AMBER),
+                iyakki_store_model::store_lifecycle::Check::Offline(_) => ("Can't check offline".to_string(), MUTED),
                 _ => (e.status.label(), status_color(&e.status)),
             },
             _ => (e.status.label(), status_color(&e.status)),
@@ -3271,7 +3280,7 @@ impl StoreApp {
         }
     }
 
-    fn rebuild_itext(&mut self, e: &IEntry, cx: &AppCx) {
+    fn rebuild_itext(&mut self, e: &IEntry, cx: &dyn StorePort) {
         let sig = self.life_of(&e.key).map(|l| format!("{:?}|{:?}|{:?}|{}|{}", l.check, l.pinned, l.previous, l.history.len(), l.latest.clone().unwrap_or_default())).unwrap_or_default();
         let key = (e.kind.clone(), e.key.clone(), format!("{}|{}|{}", e.version, sig, self.org_rev));
         if self.text_for.as_ref() == Some(&key) {
@@ -3307,7 +3316,7 @@ impl StoreApp {
             push(&mut self.text, &format!("Installed: {}", if e.version == "-" || e.version.is_empty() { "no version number".to_string() } else { e.version.clone() }), TEXT);
             push(&mut self.text, &format!("From: {}", if l.source_name.is_empty() { e.source.clone() } else { l.source_name.clone() }), TEXT);
             match &l.check {
-                iyakki_shared::store_lifecycle::Check::Update => {
+                iyakki_store_model::store_lifecycle::Check::Update => {
                     push(&mut self.text, &format!("Latest: {}  (update available)", l.latest.clone().unwrap_or_default()), OK);
                     if !l.changelog.is_empty() {
                         push(&mut self.text, &format!("What is new: {}", l.changelog), TEXT);
@@ -3326,7 +3335,7 @@ impl StoreApp {
                     if let Some(v) = &l.latest {
                         push(&mut self.text, &format!("Latest: {v}"), TEXT);
                     }
-                    push(&mut self.text, &format!("Status: {} {}", c.label(), c.note()), if matches!(c, iyakki_shared::store_lifecycle::Check::UpToDate) { OK } else { MUTED });
+                    push(&mut self.text, &format!("Status: {} {}", c.label(), c.note()), if matches!(c, iyakki_store_model::store_lifecycle::Check::UpToDate) { OK } else { MUTED });
                 }
             }
             if let Some(p) = &l.pinned {
@@ -3343,7 +3352,7 @@ impl StoreApp {
                     push(&mut self.text, &format!("{} · {}", h.version, h.action), MUTED);
                 }
             }
-            let plan = self.store.plan_remove(&cx.session.user, &self.lives, &l);
+            let plan = self.store.plan_remove(&cx.user(), &self.lives, &l);
             push(&mut self.text, "", TEXT);
             push(&mut self.text, "DATA AND USE", ACCENT);
             if plan.data.is_empty() && plan.vault.is_empty() {
@@ -3374,7 +3383,7 @@ impl StoreApp {
         }
         push(&mut self.text, "", TEXT);
         push(&mut self.text, "DETAILS", ACCENT);
-        let scope = if e.ty == IType::App { "the whole system".to_string() } else if e.scope == iyakki_shared::skills::Scope::Shared { "everyone".into() } else { "only you".into() };
+        let scope = if e.ty == IType::App { "the whole system".to_string() } else if e.scope == iyakki_store_model::skills::Scope::Shared { "everyone".into() } else { "only you".into() };
         for (k, v) in [
             ("Type", e.ty.one().to_string()),
             ("Licence", if e.license.is_empty() { String::new() } else { format!("{}{}", e.license, if permissive(&e.license) { " (permissive)" } else { "" }) }),
@@ -3400,7 +3409,7 @@ impl StoreApp {
         self.text.scroll = usize::MAX / 4;
     }
 
-    fn render_inst_detail(&mut self, g: &mut Gfx, body: R, s: f32, cx: &AppCx) {
+    fn render_inst_detail(&mut self, g: &mut Gfx, body: R, s: f32, cx: &dyn StorePort) {
         let Some(e) = self.iselected() else {
             self.idetail = None;
             self.mode = Mode::Browse;
@@ -3502,10 +3511,10 @@ mod tests {
 
     use super::*;
     use crate::apps::tests::{cx_with_admin_store, services_in, temp_dir, Offline};
-    use iyakki_shared::pkg::{public_key_hex};
+    use iyakki_store_model::pkg::{public_key_hex};
     use iyakki_agent::pkg::{new_signing_key};
-    use iyakki_shared::store_catalog::{sha256_hex, Catalog, Entry};
-    use iyakki_shared::store_manifest::{Meta, PriceModel, Pricing, Publisher};
+    use iyakki_store_model::store_catalog::{sha256_hex, Catalog, Entry};
+    use iyakki_store_model::store_manifest::{Meta, PriceModel, Pricing, Publisher};
     use iyakki_sec::policy::Role;
     use std::collections::HashMap;
 
@@ -3550,7 +3559,7 @@ mod tests {
         assert_eq!(a.dialog_title().as_deref(), Some("Restart this machine now?"));
         a.mode = Mode::Confirm(Ask::DeleteTag("work".into(), 3));
         assert_eq!(a.dialog_title().as_deref(), Some("Delete the tag work?"));
-        a.mode = Mode::Confirm(Ask::Remove { kind: "skill".into(), name: "n".into(), scope: iyakki_shared::skills::Scope::Shared, title: "Notes".into() });
+        a.mode = Mode::Confirm(Ask::Remove { kind: "skill".into(), name: "n".into(), scope: iyakki_store_model::skills::Scope::Shared, title: "Notes".into() });
         assert_eq!(a.dialog_title().as_deref(), Some("Remove Notes?"));
         a.mode = Mode::Detail;
         assert_eq!(a.dialog_title(), None);
@@ -3576,7 +3585,7 @@ mod tests {
     fn wait_job(a: &mut StoreApp, cx: &AppCx) {
         let __wall = std::time::Instant::now();
         while __wall.elapsed() < std::time::Duration::from_secs(30) {
-            a.apply_job(cx);
+            a.apply_job(&CxPort(cx));
             if a.job.is_none() {
                 return;
             }
@@ -3599,7 +3608,7 @@ mod tests {
     /// Show the catalog (Discover and Publishers): off by default.
     fn cat_on(a: &mut StoreApp, cx: &AppCx) {
         a.store.set_catalog_enabled(&Actor::system(), true).unwrap();
-        a.reload(cx);
+        a.reload(&CxPort(cx));
         a.switch(Section::Discover);
     }
 
@@ -3802,12 +3811,12 @@ mod tests {
         }
         key(&mut a, &cx, Key::Esc);
         assert!(matches!(a.mode, Mode::Detail));
-        assert!(cx.skills().get(&iyakki_shared::skills::Scope::User("root".into()), "lang-go").is_none(), "Cancel installs nothing");
+        assert!(cx.skills().get(&iyakki_store_model::skills::Scope::User("root".into()), "lang-go").is_none(), "Cancel installs nothing");
         key(&mut a, &cx, Key::Char('i'));
         key(&mut a, &cx, Key::Char('y'));
         assert!(a.status_text().unwrap().starts_with("Installed"), "{:?}", a.status_text());
         assert_eq!(a.current().unwrap().state, State::Installed);
-        assert!(cx.skills().get(&iyakki_shared::skills::Scope::User("root".into()), "lang-go").is_some());
+        assert!(cx.skills().get(&iyakki_store_model::skills::Scope::User("root".into()), "lang-go").is_some());
         // Installed lists it; it can be turned off and on, and removed after asking
         a.switch(Section::Installed);
         draw(&mut a, &cx, 1280, 720);
@@ -3897,9 +3906,9 @@ mod tests {
         open_page(&mut a, &cx, "lang-c");
         key(&mut a, &cx, Key::Char('i'));
         let Mode::Review(rv) = &a.mode else { panic!("{:?}", a.status_text()) };
-        assert_eq!(rv.review.scope, iyakki_shared::skills::Scope::User("alice".into()));
+        assert_eq!(rv.review.scope, iyakki_store_model::skills::Scope::User("alice".into()));
         key(&mut a, &cx, Key::Char('y'));
-        assert!(cx.skills().get(&iyakki_shared::skills::Scope::User("alice".into()), "lang-c").is_some());
+        assert!(cx.skills().get(&iyakki_store_model::skills::Scope::User("alice".into()), "lang-c").is_some());
         // the sample server is for administrators
         open_page(&mut a, &cx, "iyakki-demo");
         key(&mut a, &cx, Key::Char('i'));
@@ -4031,20 +4040,20 @@ mod tests {
         let d = stick("st-pending-files", &[("late-helper", "1.0.0", &pub_meta("Late helper", paid), &k)]);
         add_folder(&mut a, &cx, &d);
         assert_eq!(a.items.iter().find(|i| i.entry.id == "late-helper").unwrap().state, State::Locked);
-        use iyakki_shared::store_licencelink::{PENDING_APP, PENDING_KEY};
+        use iyakki_store_model::store_licencelink::{PENDING_APP, PENDING_KEY};
         let user = cx.session.user.clone();
         // nothing waiting: said in words
         key(&mut a, &cx, Key::Char('L'));
         assert!(a.status_text().unwrap().contains("No licence is waiting"), "{:?}", a.status_text());
         // a token for another device is not accepted, and does not stay waiting
         let device = iyakki_agent::store::Store::for_services(cx.services.real()).licenses().device_id();
-        let wrong = iyakki_shared::store_license::Token::issue(&k, "late-helper", "acme", "some-other-device", "", "L-1", "", 1, 0);
+        let wrong = iyakki_store_model::store_license::Token::issue(&k, "late-helper", "acme", "some-other-device", "", "L-1", "", 1, 0);
         cx.core.app_data().set(&user, PENDING_APP, PENDING_KEY, &wrong.to_json()).unwrap();
         key(&mut a, &cx, Key::Char('L'));
         assert!(a.status_text().unwrap().contains("not accepted"), "{:?}", a.status_text());
         assert!(cx.core.app_data().get(&user, PENDING_APP, PENDING_KEY).is_none());
         // the right one unlocks the app
-        let right = iyakki_shared::store_license::Token::issue(&k, "late-helper", "acme", &device, "", "L-2", "standard", 1, 0);
+        let right = iyakki_store_model::store_license::Token::issue(&k, "late-helper", "acme", &device, "", "L-2", "standard", 1, 0);
         cx.core.app_data().set(&user, PENDING_APP, PENDING_KEY, &right.to_json()).unwrap();
         key(&mut a, &cx, Key::Char('L'));
         assert!(a.status_text().unwrap().contains("Licence added"), "{:?}", a.status_text());
@@ -4073,9 +4082,9 @@ mod tests {
         // a token for another device is refused in words; the right one unlocks the app
         let device = iyakki_agent::store::Store::for_services(cx.services.real()).licenses().device_id();
         let lic_dir = temp_dir("st-paid-lic");
-        let wrong = iyakki_shared::store_license::Token::issue(&k, "pro-helper", "acme", "some-other-device", "", "L-1", "", 1, 0);
+        let wrong = iyakki_store_model::store_license::Token::issue(&k, "pro-helper", "acme", "some-other-device", "", "L-1", "", 1, 0);
         std::fs::write(lic_dir.join("wrong.json"), wrong.to_json()).unwrap();
-        let right = iyakki_shared::store_license::Token::issue(&k, "pro-helper", "acme", &device, "", "L-2", "standard", 1, 0);
+        let right = iyakki_store_model::store_license::Token::issue(&k, "pro-helper", "acme", &device, "", "L-2", "standard", 1, 0);
         std::fs::write(lic_dir.join("right.json"), right.to_json()).unwrap();
         key(&mut a, &cx, Key::Char('l'));
         assert!(matches!(a.mode, Mode::Form(..)));
@@ -4147,7 +4156,7 @@ mod tests {
         a.switch(Section::Publishers);
         let g = draw(&mut a, &cx, 1280, 720);
         assert!(g.hits.iter().any(|h| h.label == "IYAKKI") && g.hits.iter().any(|h| h.label.starts_with("Official")));
-        let ps = iyakki_shared::store_core::publishers(&a.items);
+        let ps = iyakki_store_model::store_core::publishers(&a.items);
         a.sel[2] = ps.iter().position(|p| p.id == "example-studio").unwrap();
         key(&mut a, &cx, Key::Enter);
         assert_eq!(a.section, Section::Discover);
@@ -4233,16 +4242,16 @@ mod tests {
         let mut a = StoreApp::new(&cx);
         cat_on(&mut a, &cx);
         a.switch(Section::Settings);
-        let rows = a.settings_rows(Some(&cx));
+        let rows = a.settings_rows(Some(&CxPort(&cx)));
         assert!(rows.iter().any(|r| r.0 == "Built-in catalog") && rows.iter().any(|r| r.0 == "Daily check for updates" && r.1.starts_with("on: once a day it asks only the stores")));
         assert!(rows.iter().any(|r| r.0 == "IYAKKI release keys" && r.1.contains("none pinned")), "the real key has not been generated yet");
         let mode = |cx: &AppCx| cx.settings().lock().unwrap().get().update_check.mode;
-        assert_eq!(mode(&cx), iyakki_shared::store_updatecheck::Mode::Daily);
+        assert_eq!(mode(&cx), iyakki_store_model::store_updatecheck::Mode::Daily);
         key(&mut a, &cx, Key::Char('o'));
         assert_eq!(mode(&cx), iyakki_agent::store::updatecheck::Mode::Manual);
-        assert!(a.settings_rows(Some(&cx)).iter().any(|r| r.0 == "Daily check for updates" && r.1.starts_with("only when I press Check now")));
+        assert!(a.settings_rows(Some(&CxPort(&cx))).iter().any(|r| r.0 == "Daily check for updates" && r.1.starts_with("only when I press Check now")));
         key(&mut a, &cx, Key::Char('o'));
-        assert_eq!(mode(&cx), iyakki_shared::store_updatecheck::Mode::Daily);
+        assert_eq!(mode(&cx), iyakki_store_model::store_updatecheck::Mode::Daily);
         // trusting a key shows it in the list and makes its packages Trusted
         let k = new_signing_key().unwrap();
         key(&mut a, &cx, Key::Char('t'));
@@ -4251,7 +4260,7 @@ mod tests {
         typed(&mut a, &cx, "Acme IT");
         key(&mut a, &cx, Key::Enter);
         assert!(a.status_text().unwrap().contains("Trusted"), "{:?}", a.status_text());
-        assert!(a.settings_rows(Some(&cx)).iter().any(|r| r.0 == "Trusted key: Acme IT"));
+        assert!(a.settings_rows(Some(&CxPort(&cx))).iter().any(|r| r.0 == "Trusted key: Acme IT"));
         for (w, h) in SIZES {
             let g = draw(&mut a, &cx, w, h);
             all_inside(&g, w, h, "settings");
@@ -4286,7 +4295,7 @@ mod tests {
     /// A system with one of everything installed, from the real stores: a shipped skill, one written by hand, the sample
     /// server, a server added by hand, a command-line tool, a tool package and a theme installed through the store.
     fn seed(cx: &AppCx) {
-        use iyakki_shared::skills::Scope;
+        use iyakki_store_model::skills::Scope;
         let svc = &cx.services;
         svc.skills().add(Scope::Shared, iyakki_agent::store::builtin::SKILLS[1].1, true, true).unwrap();
         svc.skills().add(Scope::Shared, "---\nname: hand-made\ndescription: written by hand\ntriggers: x\n---\nDo it.\n", true, true).unwrap();
@@ -4362,7 +4371,7 @@ mod tests {
         seed(&cx);
         let mut a = StoreApp::new(&cx);
         let g = draw(&mut a, &cx, 1280, 720);
-        let counts = iyakki_shared::store_installed::counts(&a.inst);
+        let counts = iyakki_store_model::store_installed::counts(&a.inst);
         for (i, label) in ["All", "MCP", "CLI", "Skills", "Apps", "Extensions"].iter().enumerate() {
             assert!(g.hits.iter().any(|h| h.label == format!("{label} {}", counts[i])), "{label} {} in {:?}", counts[i], g.hits.iter().map(|h| &h.label).collect::<Vec<_>>());
         }
@@ -4491,7 +4500,7 @@ mod tests {
     }
 
     fn seed_user(cx: &AppCx) {
-        cx.skills().add(iyakki_shared::skills::Scope::Shared, "---\nname: hand-made\ndescription: x\ntriggers: x\n---\nDo it.\n", true, true).unwrap();
+        cx.skills().add(iyakki_store_model::skills::Scope::Shared, "---\nname: hand-made\ndescription: x\ntriggers: x\n---\nDo it.\n", true, true).unwrap();
     }
 
     #[test]
@@ -4499,7 +4508,7 @@ mod tests {
         let cx = cx("st-inst-act", Role::Admin);
         seed(&cx);
         let mut a = StoreApp::new(&cx);
-        let user_scope = iyakki_shared::skills::Scope::User("root".into());
+        let user_scope = iyakki_store_model::skills::Scope::User("root".into());
         // the theme was installed through the store: it can be turned off and on
         let ord = ordinal(&a, "sunset");
         click_ev(&mut a, &cx, 1280, 720, Event::Tab(1000 + ord * 4 + 1));
@@ -4524,11 +4533,11 @@ mod tests {
             assert!(g.hits.iter().any(|h| h.label == "Remove (y)") && g.hits.iter().any(|h| h.label == "Cancel (Esc)"), "{w}x{h}");
         }
         key(&mut a, &cx, Key::Char('x'));
-        assert!(cx.skills().get(&iyakki_shared::skills::Scope::Shared, "hand-made").is_some());
+        assert!(cx.skills().get(&iyakki_store_model::skills::Scope::Shared, "hand-made").is_some());
         click_ev(&mut a, &cx, 1280, 720, Event::Tab(1000 + ord * 4 + 2));
         key(&mut a, &cx, Key::Char('y'));
         assert!(a.status_text().unwrap().starts_with("Removed"), "{:?}", a.status_text());
-        assert!(cx.skills().get(&iyakki_shared::skills::Scope::Shared, "hand-made").is_none());
+        assert!(cx.skills().get(&iyakki_store_model::skills::Scope::Shared, "hand-made").is_none());
         assert!(!a.inst.iter().any(|e| e.name == "hand-made"));
         // the command-line tool and the server go through their own stores
         for name in ["kubectl", "files"] {
@@ -4590,7 +4599,7 @@ mod tests {
         let cx = cx("st-inst-toggle", Role::Admin);
         let mut a = StoreApp::new(&cx);
         a.switch(Section::Settings);
-        let rows = a.settings_rows(Some(&cx));
+        let rows = a.settings_rows(Some(&CxPort(&cx)));
         assert!(rows.iter().any(|r| r.0 == "Show the catalog (coming soon)" && r.1.starts_with("off")));
         assert!(!a.items.iter().any(|i| i.entry.demo));
         key(&mut a, &cx, Key::Char('g'));
@@ -4645,8 +4654,8 @@ mod tests {
     /// Point the store tile at one made-up machine, for the pack side and for the core's read side.
     fn inject(a: &mut StoreApp, d: iyakki_agent::store::drivers::Drivers) {
         let d = Arc::new(d);
-        a.drivers_for = Some(d.clone());
-        a.drivers_read_for = Some(d);
+        a.drivers_for = Some(Arc::new(crate::apps::store_port::AgentDriversInstall(d.clone())));
+        a.drivers_read_for = Some(Arc::new(crate::apps::store_port::CoreDrivers(d)));
     }
 
     fn pane_row(a: &StoreApp, id: &str) -> usize {
@@ -4721,7 +4730,7 @@ mod tests {
         std::fs::write(stick.join("BCM20702A1-05ac-8289.hcd"), b"HCD").unwrap();
         a.handle(&Event::Tab(226), &cx);
         let bt = pane_row(&a, "mac-bt-broadcom");
-        assert_eq!(a.drivers.rows[bt].status, Some(iyakki_core_api::device_types::driver_packs::Status::FirmwareMissing));
+        assert_eq!(a.drivers.rows[bt].status, Some(iyakki_tile_store::drivers::Status::FirmwareMissing));
         a.handle(&Event::Tab(drv::BASE + bt * 4), &cx);
         assert!(matches!(a.mode, Mode::Form(_, FormKind::DriverFolder(_))), "it asks for the folder");
         for (w, h) in SIZES {
@@ -4804,7 +4813,7 @@ mod tests {
         table.files.lock().unwrap().insert("https://store.example.lan/catalog.json".into(), catalog.into_bytes());
         a.fetch = table.clone();
         a.switch(Section::Settings);
-        let rows = a.settings_rows(Some(&cx));
+        let rows = a.settings_rows(Some(&CxPort(&cx)));
         for l in ["Private store", "Deploy a private store to k3s…", "Repair, reset or remove the private store…", "Add a private store (check its key)", "Publish here"] {
             assert!(rows.iter().any(|r| r.0 == l), "{l}");
         }
@@ -4886,7 +4895,7 @@ mod tests {
         let db = stick("st-two-b", &[("weekly-report", "2.0.0", &pub_meta("Weekly report", Pricing::default()), &k), ("only-in-b", "1.0.0", &pub_meta("Only in B", Pricing::default()), &k)]);
         a.store.add_source(&Actor::system(), "Store A", SourceKind::Folder, &da.display().to_string()).unwrap();
         a.store.add_source(&Actor::system(), "Store B", SourceKind::Folder, &db.display().to_string()).unwrap();
-        a.reload(cx);
+        a.reload(&CxPort(cx));
         a.switch(Section::Discover);
     }
 
@@ -4923,7 +4932,7 @@ mod tests {
         assert_eq!(seen, ["builtin", "src1", "src2", ""]);
         // a click does the same, at every size
         for (w, h) in SIZES {
-            a.set_store(&cx, String::new());
+            a.set_store(&CxPort(&cx), String::new());
             click_ev(&mut a, &cx, w, h, Event::Tab(205));
             click_ev(&mut a, &cx, w, h, Event::Tab(205));
             assert_eq!(pick(&a), "src1", "{w}x{h}");
@@ -4942,7 +4951,7 @@ mod tests {
         assert_eq!(pick(&StoreApp::new(&other)), "");
         // removing the picked store goes back to All
         a.store.remove_source(&Actor::system(), "src1").unwrap();
-        a.reload(&cx);
+        a.reload(&CxPort(&cx));
         assert_eq!(pick(&a), "");
     }
 
@@ -4996,7 +5005,7 @@ mod tests {
         table.files.lock().unwrap().insert("https://portal.example.org/store/catalog.json".into(), catalog.into_bytes());
         a.fetch = table.clone();
         a.switch(Section::Settings);
-        let rows = a.settings_rows(Some(&cx));
+        let rows = a.settings_rows(Some(&CxPort(&cx)));
         assert!(rows.iter().any(|r| r.0 == "Add a store") && rows.iter().any(|r| r.0 == "Add the official IYAKKI store"));
         // a page link ending in / resolves to <link>/catalog.json
         assert_eq!(Store::catalog_url("https://portal.example.org/store/"), "https://portal.example.org/store/catalog.json");
@@ -5047,7 +5056,7 @@ mod tests {
         wait_job(&mut a, &cx);
         assert!(a.status_text().unwrap().contains("starts with https://"), "{:?}", a.status_text());
         // the official store: one step, but its address is not published yet
-        assert!(iyakki_shared::store_catalog::OFFICIAL_STORE_URL.is_empty() && Store::official_store_url().is_none());
+        assert!(iyakki_store_model::store_catalog::OFFICIAL_STORE_URL.is_empty() && Store::official_store_url().is_none());
         key(&mut a, &cx, Key::Char('w'));
         assert!(a.job.is_none() && a.status_text().unwrap().contains("coming soon"), "{:?}", a.status_text());
         assert_eq!(Store::for_services(cx.services.real()).config().sources.len(), 1);
@@ -5061,29 +5070,32 @@ mod tests {
     }
     // ---- restricted firmware packs (fwpack.rs, docs/RESTRICTED-FIRMWARE.md): the licence step, the audit, the offline folder, the restart
 
-    fn fw_rig(tag: &str, role: Role, item: iyakki_shared::quickinstall::Item) -> (StoreApp, AppCx, std::sync::Arc<crate::apps::tests::MockHost>) {
+    fn real_def(item: iyakki_tile_api::store_qi::Item) -> &'static iyakki_shared::fwpack::Def {
+        crate::apps::store_port::item_from_mirror(item).fw_def().unwrap()
+    }
+
+    fn fw_rig(tag: &str, role: Role, item: iyakki_tile_api::store_qi::Item) -> (StoreApp, AppCx, std::sync::Arc<crate::apps::tests::MockHost>) {
         use super::setup::Machine;
-        use iyakki_shared::quickinstall::{Presence};
-        use iyakki_shared::quickinstall::{Facts};
-        use iyakki_agent::quickinstall::{self as qi};
+        use iyakki_tile_api::store_qi::{Presence, Facts};
+        use iyakki_tile_api::store_qi as qm;
         let mut cx = cx(tag, role);
         let host = std::sync::Arc::new(crate::apps::tests::MockHost::default());
         cx.host = host.clone();
         let mut a = StoreApp::new(&cx);
         a.setup.set_machine(Machine { ram_mb: 16_000, fw: vec![item], ..Default::default() });
         let mut f = Facts::default();
-        for it in qi::Item::ALL {
+        for it in qm::Item::ALL {
             f.presence.push((it, Presence::Missing));
         }
         a.setup.set_facts(f);
-        a.setup.launch = Some(qi::Launch { exe: "/usr/bin/true".into(), data: cx.data_dir().join("qi") });
+        a.setup.launch = Some(qm::Launch { exe: "/usr/bin/true".into(), data: cx.data_dir().join("qi") });
         a.handle(&Event::Tab(4), &cx);
-        a.setup.enter(&cx);
+        a.setup.enter(&CxPort(&cx));
         (a, cx, host)
     }
 
-    fn press_tile(a: &mut StoreApp, cx: &AppCx, item: iyakki_shared::quickinstall::Item) {
-        let n = iyakki_shared::quickinstall::Item::ALL.iter().position(|x| *x == item).unwrap();
+    fn press_tile(a: &mut StoreApp, cx: &AppCx, item: iyakki_tile_api::store_qi::Item) {
+        let n = iyakki_tile_api::store_qi::Item::ALL.iter().position(|x| *x == item).unwrap();
         a.setup.open_popup(item);
         a.handle(&Event::Tab(super::setup::PRIMARY + n), cx);
     }
@@ -5097,10 +5109,9 @@ mod tests {
 
     #[test]
     fn a_firmware_tile_asks_for_the_licence_first_nothing_runs_until_i_accept_and_the_acceptance_is_audited() {
-        use iyakki_shared::quickinstall::{Item as QItem};
+        use iyakki_tile_api::store_qi::{Item as QItem};
         use iyakki_agent::quickinstall::{self as qi};
         let item = QItem::FwRealtekNet;
-        let def = item.fw_def().unwrap();
         let (mut a, cx, _host) = fw_rig("st-fw-licence", Role::Admin, item);
         let card = a.setup.card(item);
         assert_eq!(card.label, "Read the licence and install", "{card:?}");
@@ -5108,31 +5119,31 @@ mod tests {
         press_tile(&mut a, &cx, item);
         let (mut form, kind) = take_form(&mut a);
         assert!(matches!(kind, FormKind::FwPack(QItem::FwRealtekNet)) && form.fields.len() == 2, "the licence form opens; nothing has started");
-        assert!(qi::install_jobs(&cx.services.real().jobs, &cx.session.user).is_empty() && iyakki_shared::fwpack::accepted(&cx.data_dir().join("qi"), def).is_none());
+        assert!(qi::install_jobs(&cx.services.real().jobs, &cx.session.user).is_empty() && iyakki_shared::fwpack::accepted(&cx.data_dir().join("qi"), real_def(item)).is_none());
         // "I do not accept" (the default) installs and downloads nothing
-        assert!(!a.submit_form(&cx, &mut form, &kind));
-        assert!(qi::install_jobs(&cx.services.real().jobs, &cx.session.user).is_empty() && iyakki_shared::fwpack::accepted(&cx.data_dir().join("qi"), def).is_none());
+        assert!(!a.submit_form(&CxPort(&cx), &mut form, &kind));
+        assert!(qi::install_jobs(&cx.services.real().jobs, &cx.session.user).is_empty() && iyakki_shared::fwpack::accepted(&cx.data_dir().join("qi"), real_def(item)).is_none());
         assert!(!cx.audit.recent(20).iter().any(|l| l.contains("firmware.accept")), "no acceptance in the audit log");
         // a folder that is not there refuses before anything is recorded
         form.fields[1].choice = 1;
         form.set_value(0, "/no/such/folder");
-        assert!(!a.submit_form(&cx, &mut form, &kind));
-        assert!(iyakki_shared::fwpack::accepted(&cx.data_dir().join("qi"), def).is_none());
+        assert!(!a.submit_form(&CxPort(&cx), &mut form, &kind));
+        assert!(iyakki_shared::fwpack::accepted(&cx.data_dir().join("qi"), real_def(item)).is_none());
         // "I accept": the record, the audit line, and the job
         form.set_value(0, "");
-        assert!(a.submit_form(&cx, &mut form, &kind), "{:?}", a.status_text());
-        let acc = iyakki_shared::fwpack::accepted(&cx.data_dir().join("qi"), def).expect("the acceptance is on the data volume");
+        assert!(a.submit_form(&CxPort(&cx), &mut form, &kind), "{:?}", a.status_text());
+        let acc = iyakki_shared::fwpack::accepted(&cx.data_dir().join("qi"), real_def(item)).expect("the acceptance is on the data volume");
         assert_eq!(acc.by, "root");
         let log = cx.audit.recent(20);
         assert!(log.iter().any(|l| l.contains("firmware.accept") && l.contains("fw-realtek-net") && l.contains("LicenseRef-Realtek-r8169")), "{log:?}");
         assert!(log.iter().any(|l| l.contains("quickinstall.start") && l.contains("fw-realtek-net")), "{log:?}");
-        assert_eq!(qi::install_jobs(&cx.services.real().jobs, &cx.session.user).iter().filter_map(qi::item_of).collect::<Vec<_>>(), vec![item]);
+        assert_eq!(qi::install_jobs(&cx.services.real().jobs, &cx.session.user).iter().filter_map(qi::item_of).map(crate::apps::store_port::item_to_mirror).collect::<Vec<_>>(), vec![item]);
         assert_eq!(cx.audit.verify().is_ok(), true, "the chain is intact");
     }
 
     #[test]
     fn the_hardware_firmware_tile_lists_the_licences_first_and_nothing_runs_or_is_recorded_until_i_accept() {
-        use iyakki_shared::quickinstall::{Item as QItem};
+        use iyakki_tile_api::store_qi::{Item as QItem};
         use iyakki_agent::quickinstall::{self as qi};
         let item = QItem::FwHardware;
         let (mut a, cx, _host) = fw_rig("st-fw-hardware", Role::Admin, item);
@@ -5144,30 +5155,30 @@ mod tests {
         assert!(matches!(kind, FormKind::FwHardware) && form.fields.len() == 5, "the form opens with the action, the way, a folder, NVIDIA on its own and the licences");
         assert!(qi::install_jobs(&cx.services.real().jobs, &cx.session.user).is_empty());
         // "I do not accept" (the default) starts and records nothing
-        assert!(!a.submit_form(&cx, &mut form, &kind));
+        assert!(!a.submit_form(&CxPort(&cx), &mut form, &kind));
         assert!(qi::install_jobs(&cx.services.real().jobs, &cx.session.user).is_empty());
         assert!(!cx.audit.recent(20).iter().any(|l| l.contains("firmware.accept")), "no acceptance in the audit log");
     }
 
     #[test]
     fn the_hardware_accept_and_start_refuses_a_user_and_a_missing_way_and_starts_the_job_with_the_acceptance_recorded_first() {
-        use iyakki_shared::quickinstall::{Item as QItem};
+        use iyakki_tile_api::store_qi::{Item as QItem};
         use iyakki_agent::quickinstall::{self as qi};
         let item = QItem::FwHardware;
         // a user: refused in words, nothing recorded or started
         let (mut u, ucx, _h) = fw_rig("st-fw-hw-user", Role::User, item);
-        let e = u.setup.hardware_accept_and_start(&ucx, "download", None, false).unwrap_err();
+        let e = u.setup.hardware_accept_and_start(&CxPort(&ucx), "download", None, false).unwrap_err();
         assert!(e.contains("administrator") && e.contains("user"), "{e}");
         assert!(qi::install_jobs(&ucx.services.real().jobs, &ucx.session.user).is_empty());
         assert!(!ucx.audit.recent(20).iter().any(|l| l.contains("firmware.accept")));
         // an administrator who chose a way that is not there gets the sentence for that way, and still nothing starts
         let (mut a, cx, _h) = fw_rig("st-fw-hw-admin", Role::Admin, item);
-        assert!(a.setup.hardware_accept_and_start(&cx, "folder", None, false).unwrap_err().contains("Choose the folder"));
+        assert!(a.setup.hardware_accept_and_start(&CxPort(&cx), "folder", None, false).unwrap_err().contains("Choose the folder"));
         let file = temp_dir("st-fw-hw-file").join("not-a-folder");
         std::fs::write(&file, b"x").unwrap();
-        assert!(a.setup.hardware_accept_and_start(&cx, "folder", Some(file.clone()), false).unwrap_err().contains("is not a folder"));
-        assert!(a.setup.hardware_accept_and_start(&cx, "received", None, false).unwrap_err().contains("No files have been received"));
-        assert!(a.setup.hardware_accept_and_start(&cx, "link", None, false).unwrap_err().contains("No cable"));
+        assert!(a.setup.hardware_accept_and_start(&CxPort(&cx), "folder", Some(file.clone()), false).unwrap_err().contains("is not a folder"));
+        assert!(a.setup.hardware_accept_and_start(&CxPort(&cx), "received", None, false).unwrap_err().contains("No files have been received"));
+        assert!(a.setup.hardware_accept_and_start(&CxPort(&cx), "link", None, false).unwrap_err().contains("No cable"));
         assert!(qi::install_jobs(&cx.services.real().jobs, &cx.session.user).is_empty());
         assert!(!cx.audit.recent(20).iter().any(|l| l.contains("firmware.accept")), "a refusal records no acceptance");
         // a request the kernel log made earlier (kept in the data folder) makes a plan: accept records the list, then the job starts
@@ -5175,7 +5186,7 @@ mod tests {
         let reqs = iyakki_shared::fwextra::parse_log("[    7.1] iwlwifi 0000:00:14.3: Direct firmware load for iwlwifi-cc-a0-77.ucode failed with error -2\n", iyakki_shared::fwextra::manifest());
         assert!(!reqs.is_empty(), "the made-up log line names a file of the pinned release");
         iyakki_shared::fwextra::remember(&data, &reqs);
-        let said = a.setup.hardware_accept_and_start(&cx, "download", None, false).expect("a plan exists, the job starts");
+        let said = a.setup.hardware_accept_and_start(&CxPort(&cx), "download", None, false).expect("a plan exists, the job starts");
         assert!(said.starts_with("Started:") && said.contains("downloaded from the upstream linux-firmware"), "{said}");
         let log = cx.audit.recent(20);
         let accepted = log.iter().position(|l| l.contains("firmware.accept")).expect("the acceptance is in the audit log");
@@ -5189,7 +5200,7 @@ mod tests {
 
     #[test]
     fn the_offline_folder_route_starts_the_job_with_from_and_only_administrators_may_install() {
-        use iyakki_shared::quickinstall::{Item as QItem};
+        use iyakki_tile_api::store_qi::{Item as QItem};
         use iyakki_agent::quickinstall::{self as qi};
         let item = QItem::FwBroadcomNet;
         let (mut a, cx, _h) = fw_rig("st-fw-folder", Role::Admin, item);
@@ -5198,7 +5209,7 @@ mod tests {
         let (mut form, kind) = take_form(&mut a);
         form.fields[1].choice = 1;
         form.set_value(0, &stick.display().to_string());
-        assert!(a.submit_form(&cx, &mut form, &kind), "{:?}", a.status_text());
+        assert!(a.submit_form(&CxPort(&cx), &mut form, &kind), "{:?}", a.status_text());
         let jobs = qi::install_jobs(&cx.services.real().jobs, &cx.session.user);
         assert_eq!(jobs.len(), 1);
         assert!(jobs[0].command.contains("quick-install fw-broadcom-net") && jobs[0].command.contains(&format!("--from {}", stick.display())), "{}", jobs[0].command);
@@ -5209,27 +5220,27 @@ mod tests {
         assert!(matches!(b.mode, Mode::Browse), "no form for a role that cannot install");
         assert!(b.setup.note.as_ref().is_some_and(|n| n.0.contains("administrator")), "{:?}", b.setup.note);
         let mut form = Form::new("x").path("Folder", "", "", crate::filepicker::PathKind::Folder, &[]).choice("l", &["no", "yes"], 1);
-        assert!(!b.submit_form(&ucx, &mut form, &FormKind::FwPack(item)));
-        assert!(iyakki_shared::fwpack::accepted(&ucx.data_dir().join("qi"), item.fw_def().unwrap()).is_none(), "nothing was recorded for a user");
+        assert!(!b.submit_form(&CxPort(&ucx), &mut form, &FormKind::FwPack(item)));
+        assert!(iyakki_shared::fwpack::accepted(&ucx.data_dir().join("qi"), real_def(item)).is_none(), "nothing was recorded for a user");
         assert!(qi::install_jobs(&ucx.services.real().jobs, &ucx.session.user).is_empty());
         let _ = std::fs::remove_dir_all(&stick);
     }
 
     #[test]
     fn reboot_to_finish_asks_first_and_restarts_only_after_a_yes() {
-        use iyakki_shared::quickinstall::{Item as QItem};
-        use iyakki_agent::quickinstall::{self as qi};
+        use iyakki_tile_api::store_qi::{Item as QItem};
         let item = QItem::FwQualcommBt;
         let (mut a, cx, host) = fw_rig("st-fw-reboot", Role::Admin, item);
-        let mut f = qi::Facts::default();
-        for it in qi::Item::ALL {
-            f.presence.push((it, if it == item { qi::Presence::Installed("20 files".into()) } else { qi::Presence::Missing }));
+        use iyakki_tile_api::store_qi as qm;
+        let mut f = qm::Facts::default();
+        for it in qm::Item::ALL {
+            f.presence.push((it, if it == item { qm::Presence::Installed("20 files".into()) } else { qm::Presence::Missing }));
         }
         a.setup.set_facts(f);
         let now = iyakki_clock::now_unix();
         // installed, and a restart is wanted: the button says so
         a.setup.uptime = 600;
-        a.setup.fw_outcomes = vec![(item, iyakki_shared::fwpack::Outcome { at: now - 10, installed: true, reboot_needed: true, headline: "Qualcomm Bluetooth firmware installed. Reboot to finish.".into(), ..Default::default() })];
+        a.setup.fw_outcomes = vec![(item, iyakki_tile_api::store_qi::FwOutcome { at: now - 10, installed: true, reboot_needed: true, headline: "Qualcomm Bluetooth firmware installed. Reboot to finish.".into(), ..Default::default() })];
         let card = a.setup.card(item);
         assert_eq!(card.label, "Reboot to finish");
         assert!(card.notes.iter().any(|(n, _)| n.contains("Reboot to finish")));

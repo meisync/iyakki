@@ -1,0 +1,11 @@
+[package]
+name = "iyakki-story-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The pure data and rules of TALES (options, enums, prompt text, story text parsing, sentences and speech pieces, the reading traits, the picture options and the model choice), with no agent and no shell. iyakki_shared::story re-exports every item under the old path (alpha.9 P5, D-P1-01)."
+
+[dependencies]
+iyakki-speechtime = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

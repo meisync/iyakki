@@ -90,6 +90,8 @@ mod tests_realfat;
 #[cfg(test)]
 mod tests_update_safety;
 #[cfg(test)]
+mod tests_update_faults;
+#[cfg(test)]
 mod tests_patch;
 #[cfg(test)]
 mod tests_diag;

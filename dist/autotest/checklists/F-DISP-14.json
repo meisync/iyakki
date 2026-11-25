@@ -1,0 +1,28 @@
+{
+ "schema": 1,
+ "row": "F-DISP-14",
+ "feature_sha": "9e4be1447179a773",
+ "title": "screen resolution choice in Settings, Displays",
+ "clauses": [
+  {
+   "id": "size-keep",
+   "text": "the Displays page lists the sizes the one screen offers, r picks one and y keeps it, Screen features turns to Always on, and the kept size is used after a restart",
+   "machines": [
+    "mac-mini-2018",
+    "macbook-pro",
+    "lenovo",
+    "hp"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Displays (administrators). Press r until a size you have not used is picked, then press y to keep it.",
+     "expect": "The size is kept and Screen features shows Always on."
+    },
+    {
+     "do": "Restart the computer and sign in.",
+     "expect": "The picture comes up at the size kept, and the Keep question appears when the size is changed again in Settings, Displays."
+    }
+   ]
+  }
+ ]
+}

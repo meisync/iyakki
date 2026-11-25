@@ -6,17 +6,17 @@ use std::path::PathBuf;
 
 pub use iyakki_site_apps::*;
 
-use super::AppCx;
+use super::chat_port::UserData;
 
-fn store_path(cx: &AppCx) -> PathBuf {
-    cx.data_dir().join(format!("site-apps-{}.json", super::browser_config::who(cx)))
+fn store_path(cx: &dyn UserData) -> PathBuf {
+    cx.data_root().join(format!("site-apps-{}.json", super::browser_config::who(cx)))
 }
 
-pub fn load(cx: &AppCx) -> Store {
+pub fn load(cx: &dyn UserData) -> Store {
     iyakki_schema::read_plain("site apps", &store_path(cx), iyakki_schema::now_secs()).unwrap_or_default()
 }
 
-pub fn save(cx: &AppCx, s: &Store) {
+pub fn save(cx: &dyn UserData, s: &Store) {
     if let Ok(t) = serde_json::to_string(s) {
         super::browser_config::write_checked("site apps", &store_path(cx), &t);
     }

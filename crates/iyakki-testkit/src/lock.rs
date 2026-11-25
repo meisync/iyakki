@@ -28,6 +28,8 @@ pub mod names {
     pub const AUDIO: &str = "audio-mixer";
     /// A system-clock override (a test that sets a process-wide time source).
     pub const CLOCK: &str = "clock-override";
+    /// The process-wide clipboard (`ui::clipboard`): a test that copies, clears or pastes.
+    pub const CLIPBOARD: &str = "process-clipboard";
     /// The browser's active header rules (`iyakki_agent::browserheaders::activate`): one set per process, read by the transport.
     pub const BROWSER_HEADERS: &str = "browser-header-rules";
 }

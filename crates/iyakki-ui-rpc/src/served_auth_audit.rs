@@ -155,6 +155,9 @@ fn signatures(files: &[(&str, &str)]) -> BTreeMap<(String, String), Vec<(String,
 }
 
 fn covered(tr: &str, method: &str, idx: usize) -> bool {
+    if crate::served_login::ticketed(tr, method).is_some_and(|t| t.approved == idx) {
+        return true; // `approved` is a core-issued ticket (served_login.rs)
+    }
     RULES.iter().filter(|r| r.iface == tr && r.method == method).any(|r| {
         r.claims.iter().any(|c| match c {
             Claim::Policy(i) | Claim::Role(i) | Claim::Admin(i) | Claim::Admins(i) | Claim::Session(i) => *i == idx,
@@ -261,4 +264,20 @@ fn a_rule_only_reaches_the_claims_of_its_own_method_and_every_claim_index_is_in_
         }).chain(r.user).max().unwrap_or(0);
         assert!(max < params.len(), "{}::{}: a rule points at argument {max} but the method has {}", r.iface, r.method, params.len());
     }
+}
+
+#[test]
+fn every_ticketed_call_names_its_approved_argument_and_its_wire_length_matches_the_signature() {
+    let sigs = signatures(SIGS);
+    for t in crate::served_login::TICKETED {
+        let params = sigs.get(&(t.iface.to_string(), t.method.to_string())).unwrap_or_else(|| panic!("{}::{} is not a served method", t.iface, t.method));
+        assert_eq!(params.get(t.approved).map(|p| p.0.as_str()), Some("approved"), "{}::{}: argument {} is not `approved`", t.iface, t.method, t.approved);
+        let wire = params.iter().filter(|(_, ty)| !ty.contains("dyn")).count();
+        assert_eq!(wire, t.wire_args, "{}::{}: the wire carries {wire} arguments", t.iface, t.method);
+    }
+}
+
+#[test]
+fn no_authority_argument_is_left_open_since_the_acting_person_is_bound() {
+    assert!(!ALLOWED.iter().any(|(.., why)| matches!(why, Why::Open(_))), "an Open entry needs an owner decision in docs/development/ALPHA-8-DECISIONS.md");
 }

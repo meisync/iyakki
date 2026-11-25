@@ -12,12 +12,12 @@
 use crate::safeclamp::SafeClamp;
 use std::time::{Duration, Instant};
 
-use crate::apps::jobs_ui::JobsUi;
+use crate::apps::jobs_ui::{JobsCx, JobsUi};
 use crate::apps::AppCx;
 use crate::gfx::{rgb, Face, Gfx};
 use crate::ui::{Event, Key, DIM, ERR, MUTED, OK, R, TEXT};
-use iyakki_shared::jobs::{State};
-use iyakki_shared::jobs::{now_ms, Job};
+use iyakki_shared::jobs::now_ms;
+use iyakki_tile_api::runs::{Job, JobState as State};
 
 /// The indicator's click.
 pub const INDICATOR: usize = 1_300_000;
@@ -103,7 +103,7 @@ impl InstallPop {
         }
         self.polled = Some(Instant::now());
         let before = self.badge();
-        let changed = self.ui.poll(cx, true);
+        let changed = self.ui.poll(&JobsCx(cx), true);
         let _ = self.ui.take_events();
         changed || before != self.badge()
     }
@@ -238,7 +238,7 @@ impl InstallPop {
             Event::Tab(INDICATOR) => return Outcome::Close,
             _ => {}
         }
-        if self.ui.handle(ev, cx) {
+        if self.ui.handle(ev, &JobsCx(cx)) {
             self.poll(cx, true);
             return Outcome::Nothing;
         }
@@ -254,7 +254,7 @@ mod tests {
     use super::*;
 
     fn job(id: &str, state: State, progress: Option<f32>, ended_ms: u64) -> Job {
-        Job { id: id.into(), label: format!("Install {id}"), command: format!("iyakki quick-install {id}"), cwd: "/".into(), owner: "root".into(), workspace: iyakki_shared::quickinstall::WORKSPACE.into(), pid: 1, state, started_ms: 1, ended_ms, progress, last_line: String::new(), last_active_ms: 0, dismissed: false }
+        Job { id: id.into(), label: format!("Install {id}"), command: format!("iyakki quick-install {id}"), state, started_ms: 1, ended_ms, progress, last_line: String::new(), last_active_ms: 0 }
     }
 
     #[test]

@@ -1,0 +1,73 @@
+{
+ "schema": 1,
+ "row": "F-MEDIA-12",
+ "feature_sha": "b983445a25247a0d",
+ "title": "download from video sites with the optional extractor (manual until automated)",
+ "clauses": [
+  {
+   "id": "setup-card",
+   "text": "Store, Setup lists the video-site downloader with its licence text, its size and an Install button.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Open Store, Setup and find the video-site downloader in the Media group.",
+     "expect": "Its licence text and its size (about 3 MB) are shown, with an Install button."
+    }
+   ]
+  },
+  {
+   "id": "install-person",
+   "text": "The program is fetched from the vendor only when the person presses Install, and its file is checked before it is used.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Press Install and wait until the card says it is installed.",
+     "expect": "The card says installed when the download and check finish. If the check fails, the card says so and nothing is marked installed."
+    }
+   ]
+  },
+  {
+   "id": "approval",
+   "text": "A download needs approval, and only public https addresses are used.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant to download a video from a public https video address.",
+     "expect": "An approval card appears before anything runs. A private or local address is refused in words."
+    }
+   ]
+  },
+  {
+   "id": "saved",
+   "text": "A finished download goes to the Videos folder and into MEDIA, and the card says what it is.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Approve the download, wait for it to finish, then open MEDIA.",
+     "expect": "The video is in the Videos folder and listed in MEDIA, and the card says what was downloaded."
+    }
+   ]
+  },
+  {
+   "id": "remove-keeps",
+   "text": "Remove deletes the downloader program and keeps the videos.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "In Store, Setup, choose Remove for the video-site downloader.",
+     "expect": "The program is removed and the videos already downloaded stay in Videos."
+    }
+   ]
+  }
+ ]
+}

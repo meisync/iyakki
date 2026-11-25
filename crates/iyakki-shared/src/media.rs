@@ -174,8 +174,7 @@ impl MediaStore {
     }
 
     pub fn save(&self, s: &Saved) -> Result<(), String> {
-        let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(s).map_err(|e| e.to_string())?).and_then(|_| std::fs::rename(&tmp, &self.path)).map_err(|e| e.to_string())
+        iyakki_schema::write_atomic(&self.path, serde_json::to_string_pretty(s).map_err(|e| e.to_string())?.as_bytes(), 0o600)
     }
 
     pub fn edit<T>(&self, f: impl FnOnce(&mut Saved) -> Result<T, String>) -> Result<T, String> {
@@ -344,7 +343,7 @@ impl MediaStore {
     pub fn write_m3u(&self, name: &str, items: &[String], lib: &Library) -> Result<PathBuf, String> {
         std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
         let p = self.m3u_path(name);
-        std::fs::write(&p, m3u_text(items, lib)).map_err(|e| e.to_string())?;
+        iyakki_schema::write_atomic(&p, m3u_text(items, lib).as_bytes(), 0o644)?;
         Ok(p)
     }
 }

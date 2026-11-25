@@ -228,7 +228,7 @@ puts git's source, and the others', into `legal-info/` automatically (the packag
   it, askpass answers (only the right host and user).
 * `gitkeys_tests.rs`: vault storage (no private key in any file), CLI-tile keys listed, passphrase per session or in the vault, host → key
   with the workspace override, tokens, trust on first use, changed key refused.
-* `gitsite_tests.rs`: https/scp/ssh:// parsing, credentials refused and not echoed, option and `ext::` injection, folder naming and escape
+* `iyakki-git-model` `gitsite_tests.rs`: https/scp/ssh:// parsing, credentials refused and not echoed, option and `ext::` injection, folder naming and escape
   attempts. `projectstate.rs`: repos listed for the assistant.
 * `gitjobs_tests.rs`: jobs two at a time, partial failure and retry, host-key card flow, no key written to disk, no token anywhere, the
   `GIT_SSH_COMMAND`; **real git** with local bare repositories (clone with branch, status ahead/behind/changed, fetch, fast-forward pull,

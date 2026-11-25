@@ -2,20 +2,26 @@
 //! link, a hotspot with a second device, writing a startup disk, ...). The left side lists the scenarios by area with their state and the
 //! machines they apply to; the main canvas shows the chosen one with numbered steps and the expected result under each.
 //!
-//! * The checklists ship read-only in the image (`dist/manual/*.chk`, parsed by `iyakki_shared::manualtest`); the tab asks its port for
-//!   them and never reads a system path itself.
+//! * The checklists ship read-only in the image: the in-house `dist/manual/*.chk` and the runner's `dist/autotest/checklists/<ROW>.json`
+//!   (two parsers of `iyakki_shared::manualtest`, both listed in the left navigation); the tab asks its port for them and never reads a
+//!   system path itself. An example screenshot named by a step (the runner's PNGs) is drawn in the canvas when the port has the file.
 //! * A verdict (Pass, Fail, Cannot test) is the person's own click or key, and it writes the human evidence file
-//!   `manual-tests/human/<ROW>.<clause>.json` into the person's home through the core's file handles (audited, file scope applied).
+//!   `manual-tests/human/<ROW>.<clause>.<machine>.json` (the runner's schema and file name) into the person's home through the core's file handles (audited, file scope applied).
 //!   Skip writes nothing. Export writes everything as one file the team collects; Import merges the files of other machines. This tab only
 //!   ever makes the human level: unit tests, QEMU runs and machine runs are other levels and never come from here.
+//! * The person picks which computer this is once (Mac mini 2014 or 2018, MacBook Pro, Lenovo, HP, T7 SSD, other); the pick is kept in
+//!   `manual-tests/machine.json` through the core's file handles and names the evidence files. It is never guessed from the hardware: until it
+//!   is picked the list is shown and no answer is written. Key k shows the list again.
 //! * Keys: n / p next and previous scenario, 1 Pass, 2 Fail, 3 Cannot test, 4 or s Skip (each answer moves to the next step), Enter next
 //!   step, Up / Down choose a step, t edit the note (Enter or Esc ends it), f only this machine, o only what still needs a person,
 //!   e export, i import, Esc back (to the list on a narrow screen, then to the findings).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use iyakki_shared::manualtest::{self as mt, ChkParser, Filter, Scenario, State, Verdict, Who};
+use iyakki_shared::manualtest::{self as mt, ChkParser, Filter, RunnerParser, Scenario, State, Verdict, Who};
 
+use super::chatpic::PicCache;
 use super::doctor_port::{DoctorPort, PortStore};
 use crate::scrolllist::ScrollList;
 use crate::ui::{Event, Key};
@@ -36,6 +42,10 @@ pub(super) const T_PREV: usize = 3026;
 pub(super) const T_BACKLIST: usize = 3027;
 pub(super) const T_NEXT_STEP: usize = 3028;
 pub(super) const T_DISMISS: usize = 3029;
+/// Opens the list of computers (key k).
+pub(super) const T_PICK: usize = 3030;
+/// The seven computers of the list (`T_KIND + index in `mt::PICK_KINDS``).
+pub(super) const T_KIND: usize = 3040;
 pub(super) const A_NAV: usize = 61_312;
 pub(super) const A_MAIN: usize = 61_313;
 
@@ -53,6 +63,9 @@ pub struct ManualTab {
     pub(super) filter: Filter,
     pub(super) hardware: String,
     pub(super) who: Who,
+    /// The list of computers is on screen (nothing was picked yet, or the person pressed k); the row the cursor is on.
+    pub(super) picking: bool,
+    pub(super) pick_sel: usize,
     pub(super) nav: ScrollList,
     pub(super) main: ScrollList,
     pub(super) msg: Option<(String, bool)>,
@@ -62,6 +75,9 @@ pub struct ManualTab {
     /// Set by the last drawing: the screen was too narrow for both sides.
     pub(super) narrow: bool,
     pub(super) dirty: bool,
+    /// The example screenshots of the chosen scenario by (scenario, step); `None` when the file is not on this computer.
+    pub(super) shots: HashMap<(usize, usize), Option<Arc<Vec<u8>>>>,
+    pub(super) pics: PicCache,
     now: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
 
@@ -75,8 +91,16 @@ pub(super) enum Out {
 
 impl ManualTab {
     pub fn open(port: &dyn DoctorPort, now: Arc<dyn Fn() -> i64 + Send + Sync>) -> ManualTab {
-        let (scenarios, problems) = mt::load_all(&ChkParser, &port.manual_files());
+        let (chk, runner) = (port.manual_files(), port.manual_checklists());
+        let (scenarios, problems) = mt::load_sources(&[(&ChkParser, &chk), (&RunnerParser, &runner)]);
         let n = scenarios.len();
+        // the person's own pick, kept in the home folder through the core's file handles; the machine is never worked out from the hardware
+        let mut who = port.manual_who();
+        if let Some(k) = mt::picked_kind(&PortStore(port)) {
+            who.machine = k;
+        }
+        let picking = who.machine.is_empty();
+        let pick_sel = mt::PICK_KINDS.iter().position(|k| *k == who.machine).unwrap_or(0);
         let mut t = ManualTab {
             verdicts: scenarios.iter().map(|s| vec![None; s.steps.len()]).collect(),
             notes: vec![String::new(); n],
@@ -86,7 +110,9 @@ impl ManualTab {
             step: 0,
             filter: Filter::default(),
             hardware: port.manual_hardware(),
-            who: port.manual_who(),
+            who,
+            picking,
+            pick_sel,
             nav: ScrollList::default(),
             main: ScrollList::default(),
             msg: None,
@@ -94,13 +120,29 @@ impl ManualTab {
             opened: false,
             narrow: false,
             dirty: true,
+            shots: HashMap::new(),
+            pics: PicCache::default(),
             now,
         };
         t.reload(port);
         if let Some(&i) = t.vis().first() {
             t.sel = i;
         }
+        t.ensure_shots(port);
         t
+    }
+
+    /// Fetch the example screenshots of the chosen scenario once (through the port; a file that is not there is remembered as not there).
+    pub(super) fn ensure_shots(&mut self, port: &dyn DoctorPort) {
+        let Some(sc) = self.scenarios.get(self.sel) else { return };
+        for (i, st) in sc.steps.iter().enumerate() {
+            if !st.shot.is_empty() && !self.shots.contains_key(&(self.sel, i)) {
+                if self.shots.len() > 64 {
+                    self.shots.clear();
+                }
+                self.shots.insert((self.sel, i), port.manual_shot(sc.source, &st.shot).map(Arc::new));
+            }
+        }
     }
 
     /// Read the answers kept in the person's home again (after opening, and after an import).
@@ -115,7 +157,7 @@ impl ManualTab {
                 }
             }
             self.verdicts[i] = v;
-            if let Some(e) = ev.iter().filter(|e| e.scenario == sc.id && mt::clean_machine(&e.machine) == mt::clean_machine(&self.who.machine)).max_by_key(|e| e.when) {
+            if let Some(e) = ev.iter().filter(|e| sc.rows.contains(&e.row) && mt::clean_machine(&e.machine) == mt::clean_machine(&self.who.machine) && !e.note.is_empty()).max_by_key(|e| e.when()) {
                 if self.notes[i].is_empty() {
                     self.notes[i] = e.note.clone();
                 }
@@ -189,6 +231,11 @@ impl ManualTab {
         if i >= sc.steps.len() {
             return false;
         }
+        if self.who.machine.is_empty() {
+            self.picking = true;
+            self.fail(mt::PICK_FIRST);
+            return false;
+        }
         if v == Verdict::Skip {
             if self.verdicts[si][i].is_none() {
                 self.verdicts[si][i] = Some(Verdict::Skip);
@@ -225,6 +272,22 @@ impl ManualTab {
             self.ok(format!("Last step {}. The scenario is now: {}. Press n for the next one.", v.label().to_lowercase(), st.label()));
         }
         self.dirty = true;
+    }
+
+    /// Keep the person's pick and file every answer under it from now on. The write goes through the core (the person's own click or key).
+    pub(super) fn pick(&mut self, i: usize, port: &dyn DoctorPort) {
+        let Some(kind) = mt::PICK_KINDS.get(i).copied() else { return };
+        match mt::pick_kind(&PortStore(port), kind) {
+            Ok(()) => {
+                self.who.machine = kind.to_string();
+                self.pick_sel = i;
+                self.picking = false;
+                port.audit("manual.machine", kind);
+                self.reload(port);
+                self.ok(format!("This computer is a {}. The answers are filed under {kind}.", mt::kind_label(kind)));
+            }
+            Err(e) => self.fail(format!("The choice could not be saved: {e}")),
+        }
     }
 
     /// One answer for every step that has none yet (or was skipped).
@@ -268,11 +331,7 @@ impl ManualTab {
     pub(super) fn import(&mut self, port: &dyn DoctorPort) {
         let store = PortStore(port);
         // a stick that DISKS opened sits under media/
-        let mut extra = Vec::new();
-        for f in port.store_folders("media").unwrap_or_default().into_iter().take(4) {
-            extra.push(format!("media/{f}"));
-            extra.push(format!("media/{f}/{}", mt::EXPORT_DIR));
-        }
+        let extra = mt::stick_dirs(&store);
         let r = mt::import(&store, &self.who.machine, &extra);
         port.audit("manual.import", &format!("{} files, {} new, {} newer", r.files, r.added, r.updated));
         self.reload(port);
@@ -297,7 +356,16 @@ impl ManualTab {
     }
 
     pub(super) fn handle(&mut self, ev: &Event, port: &dyn DoctorPort) -> Out {
+        let out = self.handle_event(ev, port);
+        self.ensure_shots(port);
+        out
+    }
+
+    fn handle_event(&mut self, ev: &Event, port: &dyn DoctorPort) -> Out {
         self.dirty = true;
+        if self.picking {
+            return self.handle_pick(ev, port);
+        }
         if self.editing && !self.scenarios.is_empty() {
             match ev {
                 Event::Key(Key::Esc) | Event::Key(Key::Enter) | Event::Tab(T_NOTE) => self.editing = false,
@@ -330,6 +398,7 @@ impl ManualTab {
             Event::Tab(n) if (T_SVERD..T_SVERD + 4).contains(n) => self.answer(VERDICTS[*n - T_SVERD], port),
             Event::Tab(n) if (T_AVERD..T_AVERD + 4).contains(n) => self.answer_all(VERDICTS[*n - T_AVERD], port),
             Event::Tab(T_NOTE) => self.editing = !self.scenarios.is_empty(),
+            Event::Tab(T_PICK) | Event::Key(Key::Char('k')) => self.picking = true,
             Event::Tab(T_EXPORT) | Event::Key(Key::Char('e')) => self.export(port),
             Event::Tab(T_IMPORT) | Event::Key(Key::Char('i')) => self.import(port),
             Event::Tab(T_F_MACHINE) | Event::Key(Key::Char('f')) => self.toggle_filter(true),
@@ -357,6 +426,26 @@ impl ManualTab {
                     self.nav.event(other, A_NAV);
                 }
             }
+        }
+        Out::Stay
+    }
+
+    /// Keys and clicks while the list of computers is shown: Up / Down and Enter, 1 to 7, a click; Esc closes it when a computer is already picked.
+    fn handle_pick(&mut self, ev: &Event, port: &dyn DoctorPort) -> Out {
+        let n = mt::PICK_KINDS.len();
+        match ev {
+            Event::Key(Key::Esc) => {
+                if self.who.machine.is_empty() {
+                    return Out::Leave;
+                }
+                self.picking = false;
+            }
+            Event::Key(Key::Up) => self.pick_sel = self.pick_sel.saturating_sub(1),
+            Event::Key(Key::Down) => self.pick_sel = (self.pick_sel + 1).min(n - 1),
+            Event::Key(Key::Enter) => self.pick(self.pick_sel, port),
+            Event::Key(Key::Char(c)) if c.to_digit(10).is_some_and(|d| (1..=n as u32).contains(&d)) => self.pick((c.to_digit(10).unwrap_or(1) - 1) as usize, port),
+            Event::Tab(t) if (T_KIND..T_KIND + n).contains(t) => self.pick(*t - T_KIND, port),
+            _ => {}
         }
         Out::Stay
     }

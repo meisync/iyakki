@@ -2,5 +2,4 @@
 
 pub use iyakki_core_api::diskmodel::Confirm;
 
-/// How many seconds the screen waits, with a visible countdown the person can cancel, after the last button and before the first write.
-pub const CANCEL_WINDOW_SECS: u64 = 5;
+pub use iyakki_core_api::diskmodel::CANCEL_WINDOW_SECS;

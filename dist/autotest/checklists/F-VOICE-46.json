@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-46",
+  "feature_sha": "b20159f551b4040f",
+  "title": "wake phrase chime, counters and second check (experimental)",
+  "clauses": [
+    {
+      "id": "chime-speak",
+      "text": "A chime plays when the wake phrase is heard",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "With My IYAKKI on, say the phrase.",
+          "expect": "A chime plays when it hears you."
+        }
+      ]
+    },
+    {
+      "id": "confirm-speak",
+      "text": "The second check accepts the phrase only when it is heard clearly",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "Turn on the second check (Settings, Voice, key T). Say the phrase clearly, then say it mumbled or different.",
+          "expect": "The clear phrase wakes it. The mumbled or different phrase is dropped."
+        }
+      ]
+    }
+  ]
+}

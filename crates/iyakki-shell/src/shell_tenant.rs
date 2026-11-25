@@ -728,12 +728,13 @@ impl Shell {
             blit_scaled(g, p, dest);
         }
         let name = sess.name.clone();
+        let notice = sess.notice();
         self.tenants.dest = dest;
         // a status line over the picture when it is not live
         let note = match &status {
             Status::Live => None,
             Status::Connecting => Some(format!("Connecting to {name}")),
-            Status::Reconnecting => Some(format!("{name}: the link dropped, trying again")),
+            Status::Reconnecting => Some(reconnecting_line(&name, notice.as_deref())),
             Status::Refused(why) => Some(format!("{name}: refused ({why})")),
             Status::Closed(why) => Some(format!("{name}: closed ({why}). Close this tenant or sign in again from Cloud")),
         };
@@ -1150,5 +1151,24 @@ impl Shell {
         self.env.audit.record(&user, "cloud.tile.open", &format!("{tenant}/{id}"));
         let app = crate::apps::tile_remote::RemoteTileApp::new(tenant, id, &tile.title, tile.ticks, frames);
         self.screen = Screen::App(Box::new(app), PApp::Browser);
+    }
+}
+
+/// The line over the picture while the link is down: the plain one, or with how long it has been when that is a while (F-LIFE-17).
+pub(crate) fn reconnecting_line(name: &str, notice: Option<&str>) -> String {
+    match notice {
+        Some(n) => format!("{name}: the link dropped; {n}"),
+        None => format!("{name}: the link dropped, trying again"),
+    }
+}
+
+#[cfg(test)]
+mod reconnecting_tests {
+    use super::reconnecting_line;
+
+    #[test]
+    fn the_line_over_the_picture_says_how_long_the_tenant_has_been_away_once_it_is_a_while() {
+        assert_eq!(reconnecting_line("acme", None), "acme: the link dropped, trying again");
+        assert_eq!(reconnecting_line("acme", Some("the tenant has not answered for 3 minutes; still trying every 30 seconds")), "acme: the link dropped; the tenant has not answered for 3 minutes; still trying every 30 seconds");
     }
 }

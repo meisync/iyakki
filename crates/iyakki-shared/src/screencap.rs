@@ -102,6 +102,13 @@ impl ScreenCapture {
         self.lock().grants.remove(user);
     }
 
+    /// The screen part of ending a session or locking the screen (D-SESSION-END): the person's grant goes. Returns whether there was one.
+    pub fn end_capture(&self, user: &str) -> bool {
+        let had = self.granted(user);
+        self.revoke(user);
+        had
+    }
+
     /// The tool side: ask for a picture and wait for the shell.
     pub fn request(&self, user: &str, timeout: Duration) -> Result<Frame, String> {
         if !self.present() {

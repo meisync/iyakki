@@ -70,11 +70,12 @@ fn the_six_tools_are_offered_with_the_right_risks_and_only_to_accounts_that_may_
     let defs = jt.defs();
     let risk = |n: &str| defs.iter().find(|d| d.spec.name == n).unwrap_or_else(|| panic!("{n} missing")).risk;
     assert_eq!((risk("job_start"), risk("job_stop")), (Risk::Ask, Risk::Ask), "starting and stopping ask");
+    assert_eq!(risk("job_keep"), Risk::Ask, "marking a job to outlive the sign-out asks");
     for n in ["job_status", "job_tail", "job_list", "job_wait"] {
         assert_eq!(risk(n), Risk::Safe, "{n}");
     }
     assert!(defs.iter().any(|d| d.spec.name == "now"), "the other tools stay");
-    assert_eq!(JOB_TOOLS.iter().filter(|n| defs.iter().any(|d| &d.spec.name == *n)).count(), 6);
+    assert_eq!(JOB_TOOLS.iter().filter(|n| defs.iter().any(|d| &d.spec.name == *n)).count(), 7);
     // a person who may not run commands gets none, and a forced call is refused
     let mut low = policy_for(&t.work());
     low.cli = CliLevel::Restricted;
@@ -459,4 +460,22 @@ fn in_auto_an_ordinary_job_runs_without_a_card_but_a_destructive_or_outside_comm
     // a job's folder outside the scope is a refusal (no card at all)
     let (r, asked) = via_gate(&gate, &erx, &dtx, "job_start", json!({"command": "true", "cwd": t.0.join("outside").display().to_string()}), Verdict::Approve);
     assert!(!asked && r.unwrap_err().contains("permission denied"));
+}
+
+#[test]
+fn a_job_started_with_keep_after_sign_out_or_marked_later_goes_on_and_the_others_stop_with_the_sign_out() {
+    let t = Tmp::new("keep");
+    let (jt, jobs) = tools(&t, policy_for(&t.work()), None);
+    let a = jt.call("job_start", &json!({"command": "sleep 300", "label": "plain"})).unwrap();
+    assert!(a.contains("stops when the person signs out"), "{a}");
+    let b = jt.call("job_start", &json!({"command": "sleep 300", "label": "kept", "keep_after_sign_out": true})).unwrap();
+    assert!(b.contains("marked to go on after the person signs out"), "{b}");
+    assert!(!jobs.kept("alice", "j1") && jobs.kept("alice", "j2"));
+    assert!(jt.call("job_keep", &json!({"id": "j1"})).is_err(), "keep must be said");
+    let k = jt.call("job_keep", &json!({"id": "j1", "keep": true})).unwrap();
+    assert!(k.contains("go on after") && jobs.kept("alice", "j1"));
+    assert!(jt.call("job_keep", &json!({"id": "j1", "keep": false})).unwrap().contains("mark is off") && !jobs.kept("alice", "j1"));
+    assert!(jt.describe("job_keep", &json!({"id": "j1", "keep": true})).contains("keep job j1"));
+    assert_eq!(jobs.end_session("alice", &|_| true, Duration::from_millis(200)), 1, "the unmarked job stops, the kept one stays");
+    let _ = jobs.stop("alice", "j2", Duration::from_millis(200));
 }

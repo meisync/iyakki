@@ -1,0 +1,25 @@
+{
+ "schema": 1,
+ "row": "F-TCFG-15",
+ "feature_sha": "2bfb9ae866019fdc",
+ "title": "tenant settings page in the browser",
+ "clauses": [
+  {
+   "id": "page",
+   "text": "the tenant settings page shows items with their state badges, the write-only secret boxes and the save gate, and reads well on a browser",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "As a tenant administrator, open the tenant settings page and read the items with their state badges.",
+     "expect": "Each item shows its state (ready, secret missing, vault locked, disabled or invalid) and its source file or api."
+    },
+    {
+     "do": "Open the page on a phone-sized window or a phone.",
+     "expect": "The page reads at phone width with no horizontal scroll. Report anything that does not."
+    }
+   ]
+  }
+ ]
+}

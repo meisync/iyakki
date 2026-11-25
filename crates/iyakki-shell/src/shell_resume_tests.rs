@@ -162,3 +162,71 @@ fn what_an_app_held_is_handed_back_to_it_after_a_restart_and_an_unknown_app_or_a
     tick(&mut sh2, 31);
     assert!(core.resume_fake().items().is_empty());
 }
+
+#[test]
+fn after_a_crash_a_person_who_is_not_put_back_is_told_the_screen_restarted_and_it_is_audited() {
+    // developer mode off: nothing is restored, the notice says what happened
+    let (mut sh, core) = rig("resume-notice", false, false);
+    login(&mut sh, "alice", "alicepass1");
+    tick(&mut sh, 31);
+    let mut sh2 = Shell::new(sh.env.share());
+    sh2.set_core_for_test(core.clone());
+    tick(&mut sh2, 2);
+    assert_eq!(sh2.screen_name(), "login", "not restored");
+    let (text, _, info) = sh2.toast.clone().expect("a notice");
+    assert_eq!(text, UNEXPECTED_END_NOTICE);
+    assert!(info);
+    assert!(sh2.env.audit.recent(40).iter().any(|l| l.contains("shell.restarted")), "audited");
+    // said once: the marker was taken
+    let mut sh3 = Shell::new(sh.env.share());
+    sh3.set_core_for_test(core.clone());
+    tick(&mut sh3, 2);
+    assert!(sh3.toast.is_none(), "no second notice for the same crash");
+}
+
+#[test]
+fn no_notice_after_a_sign_out_a_fresh_boot_or_when_the_person_was_put_back() {
+    // a sign-out is not a crash
+    let (mut sh, core) = rig("resume-notice-out", false, false);
+    login(&mut sh, "alice", "alicepass1");
+    sh.sign_out();
+    let mut sh2 = Shell::new(sh.env.share());
+    sh2.set_core_for_test(core.clone());
+    tick(&mut sh2, 2);
+    assert!(sh2.toast.is_none());
+    // nobody was ever signed in
+    let (mut sh3, _) = rig("resume-notice-none", false, false);
+    tick(&mut sh3, 2);
+    assert!(sh3.toast.is_none());
+    // developer mode puts the person back: the welcome-back words, not the crash notice
+    let (mut sh4, core4) = rig("resume-notice-dev", true, true);
+    login(&mut sh4, "alice", "alicepass1");
+    let mut sh5 = Shell::new(sh4.env.share());
+    sh5.set_core_for_test(core4.clone());
+    tick(&mut sh5, 2);
+    assert_eq!(sh5.session.as_ref().map(|s| s.user.as_str()), Some("alice"));
+    assert!(!sh5.toast.as_ref().is_some_and(|t| t.0 == UNEXPECTED_END_NOTICE));
+}
+
+#[test]
+fn a_drive_pulled_out_while_open_is_reported_to_the_person_through_the_core_and_audited() {
+    use iyakki_core_fake::FakeOs;
+    let (mut sh, _core) = rig("unplug", false, false);
+    login(&mut sh, "alice", "alicepass1");
+    let fake = Arc::new(FakeOs::new());
+    let dir = std::env::temp_dir().join(format!("iyakki-unplug-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    sh.osguard = osguard_impl::OsGuard::over(fake.clone(), &dir);
+    // nothing pulled out: nothing said
+    sh.drives_tick();
+    assert!(sh.toast.is_none());
+    fake.disk_engine_fake().set_unplug(Some("The drive STICK was removed. It was not in use, and its folder is closed.".into()));
+    sh.drives_tick();
+    let (text, _, info) = sh.toast.clone().expect("the person is told");
+    assert!(text.contains("STICK was removed") && !info);
+    // said once
+    sh.toast = None;
+    sh.drives_tick();
+    assert!(sh.toast.is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1,0 +1,19 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 1cc8cae7e85412dd; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-GIT-06
+targets: qemu
+profile: ram
+feature-sha: 1cc8cae7e85412dd
+doc: The GIT tile shows its repository list start (read only)
+clause: 1 The GIT tile opens with the connection selector, the Local clones source and Add connection
+not-covered: the table with name, last change and more per repository
+not-covered: the calm first-run view with a real connection
+not-covered: a connection that answers
+skip-unless-button group Build
+click group Build
+skip-unless-button GIT
+click GIT
+wait text="Local clones|Add connection"
+shot page
+expect-not-blank
+expect-text Local clones
+expect-text Add connection

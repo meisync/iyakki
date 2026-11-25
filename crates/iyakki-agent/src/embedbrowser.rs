@@ -69,7 +69,7 @@ impl BrowserHost for Shared {
     }
     fn set_enabled(&self, user: &str, on: bool) -> Result<(), String> {
         let p = self.switch_path(user).ok_or("that person name is not allowed")?;
-        std::fs::write(&p, serde_json::json!({ "enabled": on }).to_string()).map_err(|e| e.to_string())
+        iyakki_schema::write_atomic(&p, serde_json::json!({ "enabled": on }).to_string().as_bytes(), 0o600)
     }
     fn audit(&self, user: &str, app: &str, event: &str, detail: &str) {
         let line = format!("{app}: {detail}");

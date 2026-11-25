@@ -1,0 +1,38 @@
+{
+ "schema": 1,
+ "row": "F-KBD-11",
+ "feature_sha": "340f2561cdbc44ba",
+ "title": "T2 MacBook keyboard, trackpad and Touch Bar",
+ "clauses": [
+  {
+   "id": "t2-keyboard",
+   "text": "the keyboard types and the trackpad moves the pointer on the T2 Mac",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "Type in a text field, then move one finger on the trackpad and try a tap and a two-finger scroll.",
+     "expect": "Keys are typed and the pointer moves. Report what the tap and the two-finger scroll do, since they were not tried before."
+    }
+   ]
+  },
+  {
+   "id": "touchbar-keys",
+   "text": "the Touch Bar shows its keys after the boot",
+   "machines": [
+    "other"
+   ],
+   "steps": [
+    {
+     "do": "After the computer has booted, look at the Touch Bar strip.",
+     "expect": "The strip shows keys. If it stays blank, restart once: the Touch Bar sometimes configures only on a later try."
+    },
+    {
+     "do": "Tap a key on the strip.",
+     "expect": "The key acts on the tap, and the keyboard backlight is checked as well."
+    }
+   ]
+  }
+ ]
+}

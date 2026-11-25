@@ -14,6 +14,8 @@ struct Inner {
     pty: BTreeMap<(String, String), FakePty>,
     /// What was run, in order: `user: line`.
     pub log: Vec<String>,
+    /// The pod sessions asked for, in order.
+    pub execs: Vec<t::PtyExec>,
 }
 
 struct FakePty {
@@ -38,6 +40,10 @@ fn lk<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl FakeTerminal {
     pub fn log(&self) -> Vec<String> {
         lk(&self.inner).log.clone()
+    }
+    /// The pod sessions asked for (what `kubectl exec` would have been given), in order.
+    pub fn execs(&self) -> Vec<t::PtyExec> {
+        lk(&self.inner).execs.clone()
     }
 }
 
@@ -107,6 +113,14 @@ impl Terminal for FakeTerminal {
         let (id, call) = (format!("p{}", g.next), format!("pc{}", g.next));
         g.pty.insert((user.into(), id.clone()), FakePty { call: Some(call.clone()), typed: String::new(), lines: vec!["fake$ ".into()], size: (cols, rows), seq: 1, back: 0 });
         Ok(PtyOpen { id, approval: TermApproval { call, summary: t::PTY_QUESTION.into() } })
+    }
+
+    fn pty_open_exec(&self, user: &str, app: &str, cols: usize, rows: usize, exec: &t::PtyExec) -> Result<PtyOpen, String> {
+        exec.check()?;
+        let mut o = self.pty_open(user, app, cols, rows)?;
+        o.approval.summary = exec.question();
+        lk(&self.inner).execs.push(exec.clone());
+        Ok(o)
     }
 
     fn pty_decide(&self, user: &str, session: &str, call: &str, approve: bool) -> Result<(), String> {

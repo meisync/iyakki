@@ -1,0 +1,16 @@
+# autotest alpha.10 batch F (lane Q8, 2026-11-24); split into sub-row F-FILE-06a on 2026-11-24 (lane SC2): this scenario covers the whole visible clause, the API and rule clauses are F-FILE-06b.
+row: F-FILE-06a
+targets: qemu
+profile: ram
+feature-sha: 18529bef99593407
+doc: Settings, Remote access has the SFTP server section (read only, nothing is changed)
+clause: 1 Settings, Remote access has the SFTP server section
+key s
+wait app=Settings
+skip-unless-button Remote access
+click-sidebar Remote access
+wait app=Settings page="Remote access"
+shot page
+expect-not-blank
+expect-text SFTP
+expect-page Remote access

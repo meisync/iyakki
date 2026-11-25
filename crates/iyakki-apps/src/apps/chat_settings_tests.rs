@@ -233,7 +233,7 @@ fn ads_and_trackers_tools_show_the_state_change_it_like_the_page_and_refuse_bad_
     use super::super::browser_block as bb;
     let cx = crate::apps::tests::cx_with_admin_store("chatblk1");
     let (e, audits) = env("chatblk1", true);
-    let t = tools(&e, block_entries(&cx, &e));
+    let t = tools(&e, block_entries(&crate::apps::chat_port::CxChat(&cx), &e));
     policy(&t, &["browser_block_status"], &["browser_block_set", "browser_block_download", "browser_block_update", "browser_block_remove", "browser_block_allow"]);
     // nothing downloaded: the status says so and nothing is blocked
     let st = t.call("browser_block_status", &json!({})).unwrap();
@@ -341,7 +341,7 @@ fn known_bad_site_and_certificate_tools_show_change_and_refuse_bad_input() {
     let _turn = bs::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let cx = crate::apps::tests::cx_with_admin_store("chatbad1");
     let (e, audits) = env("chatbad1", true);
-    let t = tools(&e, safe_browsing_entries(&cx, &e));
+    let t = tools(&e, safe_browsing_entries(&crate::apps::chat_port::CxChat(&cx), &e));
     let _ = std::fs::remove_file(bs::list_path(&cx));
     let _pin = bs::Pin::to(&cx);
     policy(&t, &["browser_badsites_status", "browser_certificate_view"], &["browser_badsites_set", "browser_badsites_add", "browser_badsites_remove", "browser_badsites_download"]);

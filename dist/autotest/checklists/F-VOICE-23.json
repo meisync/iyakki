@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-23",
+  "feature_sha": "d1665637e3c32057",
+  "title": "voice recorder tab",
+  "clauses": [
+    {
+      "id": "record-speak",
+      "text": "The RECORD tab records your own voice and plays it back clearly",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "Open the VOICE tile, RECORD tab (F4). Press Record, speak a short sentence for about 10 seconds, press Stop, then play it back.",
+          "expect": "Your voice is clear on playback."
+        }
+      ]
+    }
+  ]
+}

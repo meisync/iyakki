@@ -4,6 +4,7 @@
 //! The same actions are chat tools (`assistant_memory_*`, `assistant_limits_*`), which ask every time.
 
 use super::*;
+use super::apps_port::AssistantPort;
 use iyakki_shared::history::{WorkspaceMemory};
 use iyakki_memx::history::{History};
 use iyakki_shared::settings::ProviderLimits;
@@ -50,42 +51,42 @@ pub(super) fn secs_words(v: u32) -> String {
 }
 
 impl SettingsApp {
-    pub(super) fn asst_rows(&self, cx: &AppCx) -> Vec<Row> {
+    pub(super) fn asst_rows(&self, p: &dyn AssistantPort) -> Vec<Row> {
         let mut rows = vec![Row::Switch];
-        for w in History::workspaces_of(&*cx.kb_source(), &cx.session.user) {
+        for w in History::workspaces_of(&*p.kb_source(), &p.user()) {
             let name = w.name.clone();
             rows.push(Row::Workspace(w));
             if self.asst.open.as_deref() == Some(name.as_str()) {
-                for (chat, entries) in History::sessions_of(&*cx.kb_source(), &cx.session.user, &name) {
+                for (chat, entries) in History::sessions_of(&*p.kb_source(), &p.user(), &name) {
                     rows.push(Row::Chat { workspace: name.clone(), chat, entries });
                 }
             }
         }
-        let presets = iyakki_shared::bundle_members::bundled_agent_presets(cx.data_dir(), &cx.session.user);
+        let presets = iyakki_shared::bundle_members::bundled_agent_presets(&p.data_dir(), &p.user());
         if !presets.is_empty() {
             rows.push(Row::Preset(None));
-            rows.extend(presets.into_iter().map(|p| Row::Preset(Some(p.name))));
+            rows.extend(presets.into_iter().map(|pv| Row::Preset(Some(pv.name))));
         }
         rows.push(Row::Limits(None));
-        for p in Self::providers(cx) {
-            rows.push(Row::Limits(Some(p.id)));
+        for pv in p.settings_get().providers {
+            rows.push(Row::Limits(Some(pv.id)));
         }
-        for r in cx.agent.pendingplus_settings_rows(&iyakki_shared::pending::Settings::default(), 0) {
+        for r in p.pendingplus_settings_rows(&iyakki_shared::pending::Settings::default(), 0) {
             rows.push(Row::Waiting(r.key));
         }
         rows
     }
 
     /// The row of the Waiting settings with this key, as the ledger holds it now.
-    fn asst_waiting_row(cx: &AppCx, key: &str) -> Option<iyakki_shared::pendingplus::Row> {
-        let l = cx.pendingapi();
-        cx.agent.pendingplus_settings_rows(&l.pending_settings(&cx.session.user), l.pending_wakes_left(&cx.session.user)).into_iter().find(|r| r.key == key)
+    fn asst_waiting_row(p: &dyn AssistantPort, key: &str) -> Option<iyakki_shared::pendingplus::Row> {
+        let l = p.pending_ledger();
+        p.pendingplus_settings_rows(&l.pending_settings(&p.user()), l.pending_wakes_left(&p.user())).into_iter().find(|r| r.key == key)
     }
 
     /// Switch or step one Waiting setting: `dir` 0 flips an on/off one, -1 and +1 step a number. Saved, audited, said.
-    fn asst_waiting_change(&mut self, cx: &AppCx, key: &str, dir: i32) {
-        let l = cx.pendingapi();
-        let mut s = l.pending_settings(&cx.session.user);
+    fn asst_waiting_change(&mut self, p: &dyn AssistantPort, key: &str, dir: i32) {
+        let l = p.pending_ledger();
+        let mut s = l.pending_settings(&p.user());
         let value = match key {
             "auto_continue" => if s.auto_continue { "off" } else { "on" }.to_string(),
             "separate_thread" => if s.separate_thread { "off" } else { "on" }.to_string(),
@@ -93,61 +94,58 @@ impl SettingsApp {
             "max_wait_hours" => (i64::try_from(s.max_wait_secs / 3600).unwrap_or(24) + if dir == 0 { 1 } else { i64::from(dir) } * 6).clamp(1, 168).to_string(),
             _ => return,
         };
-        match cx.agent.pendingplus_apply_setting(&mut s, key, &value) {
+        match p.pendingplus_apply_setting(&mut s, key, &value) {
             Ok(()) => {
-                l.pending_set_settings(&cx.session.user, s);
-                cx.audit.record(&cx.session.user, "pending.settings", &format!("{key} {value}"));
+                l.pending_set_settings(&p.user(), s);
+                p.audit("pending.settings", &format!("{key} {value}"));
                 self.ok(format!("Saved: {key} {value}."));
             }
             Err(e) => self.fail(e),
         }
     }
 
-    fn asst_refresh(&mut self, cx: &AppCx) -> Vec<Row> {
-        let rows = self.asst_rows(cx);
+    fn asst_refresh(&mut self, p: &dyn AssistantPort) -> Vec<Row> {
+        let rows = self.asst_rows(p);
         self.asst.cache = rows.clone();
         rows
     }
 
-    fn asst_limits(cx: &AppCx, provider: &Option<String>) -> (u32, u32) {
-        let st = cx.settings().lock().unwrap_or_else(|e| e.into_inner());
+    fn asst_limits(p: &dyn AssistantPort, provider: &Option<String>) -> (u32, u32) {
+        let st = p.settings_get();
         match provider {
-            None => (st.get().think_limit_secs, st.get().silence_limit_secs),
-            Some(p) => st.get().provider_limits.get(p).map_or((0, 0), |l| (l.think_secs, l.silence_secs)),
+            None => (st.think_limit_secs, st.silence_limit_secs),
+            Some(pv) => st.provider_limits.get(pv).map_or((0, 0), |l| (l.think_secs, l.silence_secs)),
         }
     }
 
-    fn asst_set_limits(&mut self, cx: &AppCx, provider: &Option<String>, think: u32, silence: u32) {
-        if !cx.session.policy.manage_settings {
+    fn asst_set_limits(&mut self, p: &dyn AssistantPort, provider: &Option<String>, think: u32, silence: u32) {
+        if !p.is_admin() {
             self.fail("Only an administrator changes how long a model may think or stay silent.");
             return;
         }
-        let r = cx.settings().lock().map(|mut s| {
-            s.update(|s| match provider {
-                None => {
-                    s.think_limit_secs = think;
-                    s.silence_limit_secs = silence;
-                }
-                Some(p) if think == 0 && silence == 0 => {
-                    s.provider_limits.remove(p);
-                }
-                Some(p) => {
-                    s.provider_limits.insert(p.clone(), ProviderLimits { think_secs: think, silence_secs: silence });
-                }
-            })
+        let r = p.settings_update(&mut |s| match provider {
+            None => {
+                s.think_limit_secs = think;
+                s.silence_limit_secs = silence;
+            }
+            Some(pv) if think == 0 && silence == 0 => {
+                s.provider_limits.remove(pv);
+            }
+            Some(pv) => {
+                s.provider_limits.insert(pv.clone(), ProviderLimits { think_secs: think, silence_secs: silence });
+            }
         });
         match r {
-            Ok(Ok(_)) => {
-                cx.audit.record(&cx.session.user, "settings.assistant.limits", &format!("{}: think {} silence {}", provider.as_deref().unwrap_or("all models"), secs_words(think), secs_words(silence)));
+            Ok(()) => {
+                p.audit("settings.assistant.limits", &format!("{}: think {} silence {}", provider.as_deref().unwrap_or("all models"), secs_words(think), secs_words(silence)));
                 self.ok(format!("Saved: {} may think for {} and stay silent for {}.", provider.as_deref().unwrap_or("every model"), secs_words(think), secs_words(silence)));
             }
-            Ok(Err(e)) => self.fail(e.to_string()),
-            Err(_) => self.fail("The settings are busy; try again."),
+            Err(e) => self.fail(e.message()),
         }
     }
 
-    pub(super) fn handle_assistant(&mut self, k: &Key, cx: &AppCx) {
-        let rows = self.asst_refresh(cx);
+    pub(super) fn handle_assistant(&mut self, k: &Key, p: &dyn AssistantPort) {
+        let rows = self.asst_refresh(p);
         let len = rows.len();
         let sel = self.sel().min(len.saturating_sub(1));
         let row = rows.get(sel).cloned();
@@ -160,17 +158,17 @@ impl SettingsApp {
             Key::End => self.move_sel(len as i32, len),
             Key::Enter | Key::Char('o') => match row {
                 Some(Row::Workspace(w)) => self.asst.open = if self.asst.open.as_deref() == Some(w.name.as_str()) { None } else { Some(w.name) },
-                Some(Row::Switch) => self.asst_toggle(cx),
-                Some(Row::Waiting(rk)) => self.asst_waiting_change(cx, rk, 0),
-                Some(Row::Preset(name)) => self.asst_preset_pick(cx, name, pending),
+                Some(Row::Switch) => self.asst_toggle(p),
+                Some(Row::Waiting(rk)) => self.asst_waiting_change(p, rk, 0),
+                Some(Row::Preset(name)) => self.asst_preset_pick(p, name, pending),
                 _ => {}
             },
             Key::Char('-') | Key::Char('+') => {
                 if let Some(Row::Waiting(rk)) = row {
-                    self.asst_waiting_change(cx, rk, if matches!(k, Key::Char('+')) { 1 } else { -1 });
+                    self.asst_waiting_change(p, rk, if matches!(k, Key::Char('+')) { 1 } else { -1 });
                 }
             }
-            Key::Char('h') => self.asst_toggle(cx),
+            Key::Char('h') => self.asst_toggle(p),
             Key::Char('f') => {
                 let (what, key) = match &row {
                     Some(Row::Workspace(w)) => (format!("all {} entries of the workspace {}", w.entries, w.name), 'f'),
@@ -180,19 +178,19 @@ impl SettingsApp {
                         return;
                     }
                 };
-                if pending.as_ref().is_some_and(|p| p.0 == what && p.1 == key) {
-                    self.asst_forget(cx, row);
+                if pending.as_ref().is_some_and(|pv| pv.0 == what && pv.1 == key) {
+                    self.asst_forget(p, row);
                 } else {
                     self.status = Some((format!("This forgets {what} and cannot be undone. Press F again to do it."), false));
                     self.asst.confirm = Some((what, key));
                 }
             }
             Key::Char(c @ ('t' | 'T' | 'q' | 'Q' | '0')) => {
-                let Some(Row::Limits(p)) = row else {
+                let Some(Row::Limits(pv)) = row else {
                     self.fail("Select a line under Stall limits first.");
                     return;
                 };
-                let (t, q) = Self::asst_limits(cx, &p);
+                let (t, q) = Self::asst_limits(p, &pv);
                 let (t, q) = match c {
                     't' => (step_up(t), q),
                     'T' => (step_down(t), q),
@@ -200,47 +198,46 @@ impl SettingsApp {
                     'Q' => (t, step_down(q)),
                     _ => (0, 0),
                 };
-                self.asst_set_limits(cx, &p, t, q);
+                self.asst_set_limits(p, &pv, t, q);
             }
             _ => {}
         }
     }
 
-    fn asst_toggle(&mut self, cx: &AppCx) {
-        let now = cx.settings().lock().map(|s| s.get().no_workspace_history).unwrap_or(false);
-        let r = cx.settings().lock().map(|mut s| s.update(|s| s.no_workspace_history = !now));
+    fn asst_toggle(&mut self, p: &dyn AssistantPort) {
+        let now = p.settings_get().no_workspace_history;
+        let r = p.settings_update(&mut |s| s.no_workspace_history = !now);
         match r {
-            Ok(Ok(_)) => {
-                cx.audit.record(&cx.session.user, "settings.assistant.history", if now { "on" } else { "off" });
+            Ok(()) => {
+                p.audit("settings.assistant.history", if now { "on" } else { "off" });
                 self.ok(if now { "The assistant remembers the work of a workspace again." } else { "The assistant no longer keeps a history of the work of a workspace. What is kept stays until you forget it." });
             }
-            Ok(Err(e)) => self.fail(e.to_string()),
-            Err(_) => self.fail("The settings are busy; try again."),
+            Err(e) => self.fail(e.message()),
         }
     }
 
     /// The card for an assistant preset, then the choice: the first press says what the preset is and what it cannot do, the second (the same
     /// key, on the same row) keeps the choice for this person. Any other key cancels. Audited.
-    fn asst_preset_pick(&mut self, cx: &AppCx, name: Option<String>, pending: Option<(String, char)>) {
-        let (user, data) = (&cx.session.user, cx.data_dir());
+    fn asst_preset_pick(&mut self, p: &dyn AssistantPort, name: Option<String>, pending: Option<(String, char)>) {
+        let (user, data) = (&p.user(), &p.data_dir());
         let what = match &name {
             Some(n) => {
-                let Some(p) = iyakki_shared::bundle_members::bundled_agent_presets(data, user).into_iter().find(|p| &p.name == n) else {
+                let Some(pv) = iyakki_shared::bundle_members::bundled_agent_presets(data, user).into_iter().find(|pv| &pv.name == n) else {
                     self.fail(format!("There is no assistant preset called {n} any more."));
                     return;
                 };
-                format!("use the assistant preset {} ({})", p.name, if p.summary.is_empty() { "no summary".to_string() } else { p.summary })
+                format!("use the assistant preset {} ({})", pv.name, if pv.summary.is_empty() { "no summary".to_string() } else { pv.summary })
             }
             None => "use the assistant as it is, with no preset".to_string(),
         };
-        if pending.as_ref().is_none_or(|p| p.0 != what || p.1 != 'p') {
+        if pending.as_ref().is_none_or(|pv| pv.0 != what || pv.1 != 'p') {
             self.status = Some((format!("This will {what}. A preset is text from a bundle that tells the assistant what to focus on and how to answer; it cannot give it a tool or a permission or skip an approval. Press Enter again to do it; any other key cancels."), false));
             self.asst.confirm = Some((what, 'p'));
             return;
         }
         match iyakki_shared::bundle_members::choose_agent_preset(data, user, name.as_deref()) {
             Ok(()) => {
-                cx.audit.record(user, "settings.assistant.preset", name.as_deref().unwrap_or("none"));
+                p.audit("settings.assistant.preset", name.as_deref().unwrap_or("none"));
                 self.ok(match &name {
                     Some(n) => format!("The assistant now follows the preset {n} in your chats."),
                     None => "The assistant answers as it is, with no preset.".to_string(),
@@ -250,16 +247,16 @@ impl SettingsApp {
         }
     }
 
-    fn asst_forget(&mut self, cx: &AppCx, row: Option<Row>) {
-        let kb = &*cx.kb_source();
+    fn asst_forget(&mut self, p: &dyn AssistantPort, row: Option<Row>) {
+        let kb = &*p.kb_source();
         let (n, what) = match row {
-            Some(Row::Workspace(w)) => (History::forget_workspace_of(kb, &cx.session.user, &w.name), format!("workspace {}", w.name)),
-            Some(Row::Chat { workspace, chat, .. }) => (History::forget_session_of(kb, &cx.session.user, &workspace, &chat), format!("chat {chat} in {workspace}")),
+            Some(Row::Workspace(w)) => (History::forget_workspace_of(kb, &p.user(), &w.name), format!("workspace {}", w.name)),
+            Some(Row::Chat { workspace, chat, .. }) => (History::forget_session_of(kb, &p.user(), &workspace, &chat), format!("chat {chat} in {workspace}")),
             _ => return,
         };
-        cx.audit.record(&cx.session.user, "settings.assistant.forget", &format!("{what}: {n} entries"));
+        p.audit("settings.assistant.forget", &format!("{what}: {n} entries"));
         self.ok(format!("Forgot {n} entries of the {what}."));
-        let len = self.asst_rows(cx).len();
+        let len = self.asst_rows(p).len();
         self.move_sel(0, len);
     }
 
@@ -275,11 +272,11 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn render_assistant(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let rows = self.asst_refresh(cx);
+    pub(super) fn render_assistant(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn AssistantPort) {
+        let rows = self.asst_refresh(p);
         let sel = self.sel().min(rows.len().saturating_sub(1));
-        let admin = cx.session.policy.manage_settings;
-        let remember = !cx.settings().lock().map(|s| s.get().no_workspace_history).unwrap_or(false);
+        let admin = p.is_admin();
+        let remember = !p.settings_get().no_workspace_history;
         let rh = 46.0 * s;
         let mut y = a.y;
         let heading = |g: &mut Gfx, y: &mut f32, t: &str| {
@@ -291,7 +288,7 @@ impl SettingsApp {
         let mut limits_head = false;
         let mut waiting_head = false;
         let mut preset_head = false;
-        let chosen = iyakki_shared::bundle_members::chosen_agent_preset(cx.data_dir(), &cx.session.user).map(|p| p.name);
+        let chosen = iyakki_shared::bundle_members::chosen_agent_preset(&p.data_dir(), &p.user()).map(|pv| pv.name);
         for (i, r) in rows.iter().enumerate() {
             if matches!(r, Row::Preset(_)) && !preset_head {
                 preset_head = true;
@@ -317,16 +314,16 @@ impl SettingsApp {
                 Row::Chat { chat, entries, .. } => (format!("chat {chat}"), format!("{entries} entries"), 22.0 * s),
                 Row::Preset(None) => ("The assistant as it is".to_string(), if chosen.is_none() { "In use: no preset." } else { "No preset. Choose this to stop using one." }.to_string(), 0.0),
                 Row::Preset(Some(n)) => {
-                    let summary = iyakki_shared::bundle_members::bundled_agent_presets(cx.data_dir(), &cx.session.user).into_iter().find(|p| &p.name == n).map(|p| p.summary).unwrap_or_default();
+                    let summary = iyakki_shared::bundle_members::bundled_agent_presets(&p.data_dir(), &p.user()).into_iter().find(|pv| &pv.name == n).map(|pv| pv.summary).unwrap_or_default();
                     (n.clone(), format!("{}{}", if chosen.as_deref() == Some(n.as_str()) { "In use. " } else { "" }, if summary.is_empty() { "From an installed bundle." } else { summary.as_str() }), 0.0)
                 }
-                Row::Waiting(k) => match Self::asst_waiting_row(cx, k) {
+                Row::Waiting(k) => match Self::asst_waiting_row(p, k) {
                     Some(w) => (w.label.to_string(), format!("{}: {}", w.value, w.hint), 0.0),
                     None => ((*k).to_string(), String::new(), 0.0),
                 },
-                Row::Limits(p) => {
-                    let (t, q) = Self::asst_limits(cx, p);
-                    (p.clone().unwrap_or_else(|| "All models".into()), format!("think {} · silent {}{}", secs_words(t), secs_words(q), if p.is_some() && t == 0 && q == 0 { " (follows all models)" } else { "" }), 0.0)
+                Row::Limits(pv) => {
+                    let (t, q) = Self::asst_limits(p, pv);
+                    (pv.clone().unwrap_or_else(|| "All models".into()), format!("think {} · silent {}{}", secs_words(t), secs_words(q), if pv.is_some() && t == 0 && q == 0 { " (follows all models)" } else { "" }), 0.0)
                 }
             };
             let r_rect = R::new(a.x + indent, y, a.w - indent, rh - 4.0 * s);

@@ -1,0 +1,26 @@
+[package]
+name = "iyakki-tile-voice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The VOICE tile (read aloud, dictate, record, My IYAKKI). Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit` and
+# the pure leaf crates named in tests/data/tile_crate_deps.allow, never on the agent or the shared crate; its tests run against a fake
+# `VoicePort`. The shell adapter is `crates/iyakki-apps/src/apps/voice.rs`, the real port `voice_port.rs`. The wake phrase stays
+# experimental, off by default and labelled (docs/development/MY-IYAKKI-PLAN.md).
+
+[features]
+# Test seams the shell's own tests use. Never on in a product build.
+testing = []
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-voice-model = { workspace = true }
+iyakki-story-model = { workspace = true }
+iyakki-speechtime = { workspace = true }
+iyakki-filescope = { workspace = true }
+log.workspace = true
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }
+iyakki-testkit = { path = "../iyakki-testkit" }

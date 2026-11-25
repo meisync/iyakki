@@ -1,0 +1,18 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 04de6e349f1bd6f2; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-CLOUD-09
+targets: qemu
+profile: ram
+feature-sha: 04de6e349f1bd6f2
+doc: Settings, Domains is a page of its own (read only)
+clause: 1 Settings, Domains is a page of its own where domain names and certificates are handled
+not-covered: the route table (host or wildcard, path prefix, service or port, http, https or passthrough)
+not-covered: custom certificates and who may reach a route
+key s
+wait app=Settings
+skip-unless-button Domains
+click-sidebar Domains
+wait app=Settings page="Domains"
+shot page
+expect-not-blank
+expect-text Domains
+expect-page Domains

@@ -1,0 +1,25 @@
+{
+ "schema": 1,
+ "row": "F-SND-15a",
+ "feature_sha": "63035d1f7cfd8a18",
+ "title": "Settings, Sound offers the browser sound switch (manual until automated)",
+ "clauses": [
+  {
+   "id": "switch-shown",
+   "text": "Settings, Sound offers the switch Browser sound through the mixer (experimental).",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Sound and find the row named Browser sound through the mixer (experimental).",
+     "expect": "The row is there with that name. It is off by default. Its words say what is true: it needs the mixer and is for administrators."
+    }
+   ]
+  }
+ ]
+}

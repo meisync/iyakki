@@ -143,22 +143,22 @@ impl Profile {
 const VAULT_NAME: &str = "webform.profile";
 
 /// The profile from the person's vault (empty when none is kept).
-pub fn load(cx: &super::AppCx) -> Result<Profile, String> {
-    let names = cx.vault().user_names(&cx.session.user).map_err(|_| "Your personal vault is locked; sign in again to use saved details.".to_string())?;
+pub fn load(cx: &dyn super::chat_port::UserData) -> Result<Profile, String> {
+    let names = cx.vault_handle().user_names(&cx.acting_user()).map_err(|_| "Your personal vault is locked; sign in again to use saved details.".to_string())?;
     if !names.iter().any(|n| n == VAULT_NAME) {
         return Ok(Profile::default());
     }
-    let text = cx.vault().user_get(&cx.session.user, VAULT_NAME).map_err(|e| e.to_string())?;
+    let text = cx.vault_handle().user_get(&cx.acting_user(), VAULT_NAME).map_err(|e| e.to_string())?;
     serde_json::from_str(&text).map_err(|_| "The saved details could not be read.".to_string())
 }
 
-pub fn save(cx: &super::AppCx, p: &Profile) -> Result<(), String> {
+pub fn save(cx: &dyn super::chat_port::UserData, p: &Profile) -> Result<(), String> {
     if p.is_empty() {
-        let _ = cx.vault().user_delete(&cx.session.user, VAULT_NAME); // nothing kept is fine too
+        let _ = cx.vault_handle().user_delete(&cx.acting_user(), VAULT_NAME); // nothing kept is fine too
         return Ok(());
     }
     let text = serde_json::to_string(p).map_err(|e| e.to_string())?;
-    cx.vault().user_set(&cx.session.user, VAULT_NAME, &text).map_err(|e| e.to_string())
+    cx.vault_handle().user_set(&cx.acting_user(), VAULT_NAME, &text).map_err(|e| e.to_string())
 }
 
 /// Words of a field's name or placeholder: lower case, split at anything that is not a letter or digit, and at a capital

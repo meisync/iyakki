@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "row": "F-ROUTER-40",
+ "feature_sha": "f226e6313ebcb480",
+ "title": "a tool that asks is put to the person as a card while the unattended s",
+ "clauses": [
+  {
+   "id": "router-card",
+   "text": "a tool that asks is put to the person as a card while the unattended step waits",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Run a model-router step that uses a tool that asks.",
+     "expect": "A card appears on the screen naming the tool; the step waits and goes on only after the person answers."
+    }
+   ]
+  }
+ ]
+}

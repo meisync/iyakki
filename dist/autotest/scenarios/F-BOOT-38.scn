@@ -1,0 +1,10 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 47c725787ea457e6; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-BOOT-38
+targets: qemu
+profile: ram
+feature-sha: 47c725787ea457e6
+doc: The image kernel has the Intel VMD driver built in (read only)
+clause: 1 the kernel of the image has the vmd bridge driver registered on the PCI bus (a built-in driver shows under /sys/bus/pci/drivers)
+not-covered: an NVMe disk behind the VMD bridge seen by stage 1 (the guest has no such hardware)
+not-covered: the AHCI switch being only the fallback in docs/HARDWARE.md
+expect-sh ls /sys/bus/pci/drivers ==> \bvmd\b

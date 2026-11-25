@@ -1,0 +1,13 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 96f21b6ab6dcf7f1; honest subset only: everything not checked is under not-covered.
+row: F-SDK-218
+targets: qemu
+profile: ram
+feature-sha: 96f21b6ab6dcf7f1
+doc: Settings, App events, Take its permission away: SAMPLE is told app.permissions
+clause: 1 the person takes a permission away on the App events row in Settings and the app is told (app.permissions)
+not-covered: giving the permission back
+not-covered: the chat tool app_permissions_set (asks)
+not-covered: the narrowing survives a restart
+not-covered: it cannot give more than the core's records hold
+not-covered: the registrations that needed the scope end (not read)
+session-check: app_events_permissions

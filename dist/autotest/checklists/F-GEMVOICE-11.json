@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-GEMVOICE-11",
+  "feature_sha": "ff0c86de2c743cb1",
+  "title": "barge-in (experimental)",
+  "clauses": [
+    {
+      "id": "barge-in-speak",
+      "text": "Speaking over Gemini stops its answer quickly",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "While Gemini is speaking an answer, speak loudly over it.",
+          "expect": "It stops quickly and listens to you."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 6d0b9dfcf03537eb; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-LAB-04
+targets: qemu
+profile: ram
+feature-sha: 6d0b9dfcf03537eb
+doc: LAB, Video tab says plainly that ffmpeg is missing (read only)
+clause: 1 LAB, Video tab says without a dialog that ffmpeg is not installed and offers Open Media tools setup
+not-covered: sampling a video into four to sixteen frames with their times
+not-covered: video generation offered only when a provider lists a video model
+skip-unless-button group Ask & Create
+click group Ask & Create
+skip-unless-button LAB
+click LAB
+wait text="LAB"
+skip-unless-button Video
+click Video
+wait text="VIDEO UNDERSTANDING"
+shot page
+expect-not-blank
+expect-text VIDEO UNDERSTANDING
+expect-text ffmpeg

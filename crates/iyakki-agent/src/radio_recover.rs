@@ -11,6 +11,8 @@
 //!    wrapping at its end. A station reached that way that never starts is skipped without retries.
 //! 4. It never loops: every station that failed in this run is remembered, and when every station of the list has failed the radio
 //!    stops and says so in words. Only a station that then plays for a while ([`STABLE_MS`]) clears that memory.
+//! 5. After that full pass it is parked, not dead (F-LIFE-11, owner decision P-01): it shows the plain message and starts again by
+//!    itself when the network link returns, and meanwhile after 1, then 5, then every 15 minutes ([`ParkWait`], on the injected clock).
 
 use std::time::Duration;
 
@@ -55,6 +57,58 @@ pub enum Step {
     Switch { from: String, to: Station },
     /// Stop; the text is the failure shown to the person.
     GiveUp(String),
+    /// Every station of the list failed in one pass: stop with this text, then start again by itself ([`ParkWait`]).
+    Park(String),
+}
+
+/// The slow retries after a full pass of failing stations: 1, 5 and then every 15 minutes (milliseconds).
+pub const PARK_DELAYS_MS: [u64; 3] = [60_000, 300_000, 900_000];
+
+/// One look at the clock and the link every this long while parked (the real clock sleeps in 20 ms slices inside this).
+pub const PARK_SLICE: Duration = Duration::from_secs(5);
+
+/// Why a parked radio tries again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wake {
+    /// The network link came back (it was down at the last look and is up now).
+    LinkReturned,
+    /// The slow retry time of this round is over.
+    Timer,
+}
+
+/// The waiting of a parked radio, pure: feed it the clock and the link at each look, it says when to try again.
+pub struct ParkWait {
+    round: usize,
+    since_ms: u64,
+    link_was_up: bool,
+}
+
+impl ParkWait {
+    /// Parked at `now_ms`, `round` slow retries already used (0 for the first), `link_up` as seen now.
+    pub fn new(now_ms: u64, round: usize, link_up: bool) -> ParkWait {
+        ParkWait { round, since_ms: now_ms, link_was_up: link_up }
+    }
+    pub fn delay_ms(&self) -> u64 {
+        PARK_DELAYS_MS[self.round.min(PARK_DELAYS_MS.len() - 1)]
+    }
+    /// The words for the status line while parked.
+    pub fn notice(&self, link_up: bool) -> String {
+        let m = self.delay_ms() / 60_000;
+        if link_up {
+            format!("Trying again in {m} minute{}", if m == 1 { "" } else { "s" })
+        } else {
+            "Waiting for the network".into()
+        }
+    }
+    /// One look: `Some` when to start again.
+    pub fn look(&mut self, now_ms: u64, link_up: bool) -> Option<Wake> {
+        let returned = link_up && !self.link_was_up;
+        self.link_was_up = link_up;
+        if returned {
+            return Some(Wake::LinkReturned);
+        }
+        (now_ms.saturating_sub(self.since_ms) >= self.delay_ms()).then_some(Wake::Timer)
+    }
 }
 
 pub struct Recovery {
@@ -121,7 +175,7 @@ impl Recovery {
             return Step::GiveUp(format!("{why}.{tries} There is no list of stations to move on in."));
         };
         if self.list.len() < 2 {
-            return Step::GiveUp(format!("{why}.{tries} There is no other station in the list."));
+            return Step::Park(format!("{why}.{tries} There is no other station in the list, so the radio stopped."));
         }
         for i in 1..self.list.len() {
             let cand = &self.list[(at + i) % self.list.len()];
@@ -132,13 +186,62 @@ impl Recovery {
                 return Step::Switch { from: current.name.clone(), to: cand.clone() };
             }
         }
-        Step::GiveUp(format!("{why}.{tries} Every one of the {} stations in the list failed, so the radio stopped; press play to try again.", self.list.len()))
+        Step::Park(format!("{why}.{tries} Every one of the {} stations in the list failed, so the radio stopped.", self.list.len()))
+    }
+
+    /// The same memory after a parked wait: the list starts over and the first station is no longer "the person's own first start"
+    /// (a station that does not start is skipped without retries, as for one the radio moved to).
+    pub fn after_park(&mut self) {
+        self.failed.clear();
+        self.used = 0;
+        self.attempts = 0;
+        self.switched = true;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_slow_retries_are_one_five_and_then_fifteen_minutes() {
+        for (round, ms) in [(0, 60_000), (1, 300_000), (2, 900_000), (3, 900_000), (9, 900_000)] {
+            let mut w = ParkWait::new(1_000, round, true);
+            assert_eq!(w.delay_ms(), ms);
+            assert_eq!(w.look(1_000 + ms - 1, true), None, "not before the time");
+            assert_eq!(w.look(1_000 + ms, true), Some(Wake::Timer));
+        }
+    }
+
+    #[test]
+    fn a_link_that_comes_back_wakes_at_once_but_one_that_was_always_up_does_not() {
+        let mut w = ParkWait::new(0, 0, false);
+        assert_eq!(w.look(5_000, false), None);
+        assert_eq!(w.look(10_000, true), Some(Wake::LinkReturned));
+        assert_eq!(w.look(15_000, true), None, "still up is not a return");
+        assert_eq!(w.look(20_000, false), None);
+        assert_eq!(w.look(25_000, true), Some(Wake::LinkReturned), "down and up again is another return");
+        let mut up = ParkWait::new(0, 0, true);
+        assert_eq!(up.look(30_000, true), None);
+    }
+
+    #[test]
+    fn the_notice_says_what_it_waits_for() {
+        assert_eq!(ParkWait::new(0, 0, false).notice(false), "Waiting for the network");
+        assert_eq!(ParkWait::new(0, 0, true).notice(true), "Trying again in 1 minute");
+        assert_eq!(ParkWait::new(0, 1, true).notice(true), "Trying again in 5 minutes");
+    }
+
+    #[test]
+    fn a_list_that_failed_once_through_starts_over_after_a_parked_wait() {
+        let mut r = Recovery::new(0, true, &list(&["a", "b"]));
+        assert!(matches!(r.on_end(&st("a"), Some(1), "x"), Step::Switch { .. }));
+        assert!(matches!(r.on_end(&st("b"), None, "x"), Step::Park(_)));
+        r.after_park();
+        // a that does not start now is skipped to b (not shown as the person's own first start), and only then is it parked again
+        assert!(matches!(r.on_end(&st("a"), None, "x"), Step::Switch { .. }));
+        assert!(matches!(r.on_end(&st("b"), None, "x"), Step::Park(_)));
+    }
 
     fn st(n: &str) -> Station {
         Station::new(n, &format!("https://{n}.example.org/live"))
@@ -170,7 +273,7 @@ mod tests {
         assert_eq!(r.on_end(&st("a"), None, "404"), Step::Switch { from: "a".into(), to: st("b") });
         // b never starts: every station has failed once
         match r.on_end(&st("b"), None, "404") {
-            Step::GiveUp(t) => assert!(t.contains("Every one of the 3 stations"), "{t}"),
+            Step::Park(t) => assert!(t.contains("Every one of the 3 stations"), "{t}"),
             other => panic!("{other:?}"),
         }
     }
@@ -194,7 +297,7 @@ mod tests {
             match r.on_end(&cur, Some(1_000), "x") {
                 Step::Retry { .. } => {}
                 Step::Switch { to, .. } => cur = to,
-                Step::GiveUp(_) => break,
+                Step::GiveUp(_) | Step::Park(_) => break,
             }
         }
     }
@@ -208,7 +311,7 @@ mod tests {
             o => panic!("{o:?}"),
         }
         let mut one = Recovery::new(0, true, &list(&["a"]));
-        assert!(matches!(one.on_end(&st("a"), Some(1), "x"), Step::GiveUp(t) if t.contains("no other station")));
+        assert!(matches!(one.on_end(&st("a"), Some(1), "x"), Step::Park(t) if t.contains("no other station")));
         let mut none = Recovery::new(0, true, &[]);
         assert!(matches!(none.on_end(&st("a"), Some(1), "x"), Step::GiveUp(t) if t.contains("no list")));
     }
@@ -298,17 +401,62 @@ mod tests {
         }
     }
 
-    /// Time that only moves when the player waits: every wait is recorded and nothing sleeps.
+    /// Time that only moves when the player waits: every wait is recorded and nothing sleeps. A parked radio's look (`PARK_SLICE`)
+    /// is held until the test grants it, so a test decides when the 5 seconds pass.
     struct Manual {
         clock: ManualClock,
         waits: Mutex<Vec<Duration>>,
+        /// (permits granted and not yet used, looks passed so far, held at a look now)
+        gate: Mutex<(u64, u64, bool)>,
+        cv: std::sync::Condvar,
+    }
+
+    impl Manual {
+        /// Lets `n` looks of the parked radio pass, then waits until it is held at the next one (so everything it did has happened).
+        fn grant(&self, n: u64) {
+            let target = {
+                let mut g = self.gate.lock().unwrap();
+                g.0 += n;
+                g.1 + n
+            };
+            self.cv.notify_all();
+            wait_until(BUDGET, || {
+                let g = self.gate.lock().unwrap();
+                g.1 == target && g.2
+            });
+        }
+        /// Lets `n` looks pass without waiting for the next hold (the radio is expected to leave the parked state).
+        fn release(&self, n: u64) {
+            self.gate.lock().unwrap().0 += n;
+            self.cv.notify_all();
+        }
+        fn wake(&self) {
+            self.cv.notify_all();
+        }
     }
 
     impl RecoverClock for Manual {
         fn now_ms(&self) -> u64 {
             self.clock.now_ms()
         }
-        fn wait(&self, d: Duration, _keep_going: &dyn Fn() -> bool) {
+        fn wait(&self, d: Duration, keep_going: &dyn Fn() -> bool) {
+            if d == PARK_SLICE {
+                let mut g = self.gate.lock().unwrap();
+                g.2 = true;
+                while g.0 == 0 {
+                    if !keep_going() {
+                        g.2 = false;
+                        return;
+                    }
+                    g = self.cv.wait(g).unwrap();
+                }
+                g.0 -= 1;
+                g.1 += 1;
+                g.2 = false;
+                drop(g);
+                self.clock.advance(d);
+                return;
+            }
             self.waits.lock().unwrap().push(d);
             self.clock.advance(d);
         }
@@ -319,19 +467,23 @@ mod tests {
         script: Arc<Script>,
         clock: Arc<Manual>,
         audit: Arc<Mutex<Vec<String>>>,
+        link: Arc<std::sync::atomic::AtomicBool>,
         _route: Box<dyn std::any::Any>,
     }
 
     fn rig(script: Vec<(&str, Vec<Conn>)>, retries: u32, auto: bool) -> Rig {
         let route = crate::mixer::pin_command_route();
         let script = Script::new(script);
-        let clock = Arc::new(Manual { clock: ManualClock::new(1_000), waits: Mutex::new(Vec::new()) });
+        let clock = Arc::new(Manual { clock: ManualClock::new(1_000), waits: Mutex::new(Vec::new()), gate: Mutex::new((0, 0, false)), cv: std::sync::Condvar::new() });
+        let link = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let probe = link.clone();
         let radio = RadioPlayer::default();
         radio.set_streamer(script.clone());
         radio.set_recover_clock(clock.clone());
+        radio.set_link_probe(Arc::new(move || probe.load(std::sync::atomic::Ordering::SeqCst)));
         radio.set_recover_source(Arc::new(move || (retries, auto)));
         radio.set_retry_wait(Duration::from_secs(3));
-        Rig { radio, script, clock, audit: Arc::new(Mutex::new(Vec::new())), _route: Box::new(route) }
+        Rig { radio, script, clock, audit: Arc::new(Mutex::new(Vec::new())), link, _route: Box::new(route) }
     }
 
     impl Rig {
@@ -355,6 +507,7 @@ mod tests {
         }
         fn end(self) {
             self.radio.stop();
+            self.clock.wake();
             self.script.gates.lock().unwrap().clear();
         }
     }
@@ -454,5 +607,57 @@ mod tests {
         assert_eq!(std::fs::metadata(&live_out).unwrap().len(), want, "nothing the radio had decoded was cut off");
         r.end();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_no_network_the_radio_says_so_and_starts_again_when_the_link_returns() {
+        let r = rig(vec![("a", vec![Conn::Play(8), Conn::Hold(8)])], 0, true);
+        r.link.store(false, std::sync::atomic::Ordering::SeqCst);
+        // a plays, drops; the list has no other station: parked
+        r.start("a", &["a"], "tee /dev/null");
+        let why = r.failed();
+        assert!(why.contains("There is no network") && why.contains("starts again by itself when the network returns"), "{why}");
+        assert_eq!(r.radio.notice().as_deref(), Some("Waiting for the network"));
+        r.clock.grant(10);
+        assert_eq!(r.script.asked("a"), 1, "no network: nothing is asked, however long it waits (under the slow retry time)");
+        r.link.store(true, std::sync::atomic::Ordering::SeqCst);
+        r.clock.release(1);
+        r.playing("a");
+        assert_eq!(r.script.asked("a"), 2);
+        r.end();
+    }
+
+    #[test]
+    fn a_parked_radio_tries_again_after_one_then_five_minutes_on_the_injected_clock() {
+        let r = rig(vec![("a", vec![Conn::Play(8), Conn::Refuse, Conn::Hold(8)]), ("b", vec![])], 0, true);
+        r.start("a", &["a", "b"], "tee /dev/null");
+        let why = r.failed();
+        assert!(why.contains("Every one of the 2 stations") && why.contains("tries again by itself"), "{why}");
+        assert_eq!(r.radio.notice().as_deref(), Some("Trying again in 1 minute"));
+        r.clock.grant(11); // 55 seconds
+        assert_eq!((r.script.asked("a"), r.script.asked("b")), (1, 1));
+        r.clock.grant(1); // 60 seconds: the first slow retry; a and b fail again
+        wait_until(BUDGET, || r.script.asked("b") == 2 && r.radio.notice().as_deref() == Some("Trying again in 5 minutes"));
+        assert_eq!(r.script.asked("a"), 2);
+        r.clock.grant(59); // 295 seconds
+        assert_eq!(r.script.asked("a"), 2);
+        r.clock.release(1); // 300 seconds: the second slow retry; a plays again
+        r.playing("a");
+        assert_eq!(r.script.asked("a"), 3);
+        r.end();
+    }
+
+    #[test]
+    fn stopping_a_parked_radio_ends_the_waiting_and_nothing_is_asked_afterwards() {
+        let r = rig(vec![("a", vec![Conn::Play(8)])], 0, true);
+        r.start("a", &["a"], "tee /dev/null");
+        r.failed();
+        r.clock.grant(3);
+        let before = r.script.asked("a");
+        r.radio.stop();
+        r.clock.wake();
+        assert_eq!(r.radio.state(), RadioState::Idle);
+        assert_eq!(r.script.asked("a"), before);
+        r.end();
     }
 }

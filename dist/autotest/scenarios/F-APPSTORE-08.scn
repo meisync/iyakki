@@ -1,0 +1,8 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 217abc66a1ce81c3; honest subset only: everything not checked is under not-covered.
+row: F-APPSTORE-08
+targets: qemu
+profile: ram
+feature-sha: 217abc66a1ce81c3
+doc: the Buy button of a paid app is disabled (payments coming soon)
+human: buy-disabled | Open STORE, a paid app's details page. Expect: The Buy button is disabled and says payments are coming soon; a licence file placed by hand is accepted or refused with a plain reason.
+not-covered: the Buy button of a paid app is disabled (payments coming soon)

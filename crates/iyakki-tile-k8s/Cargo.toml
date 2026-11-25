@@ -1,0 +1,23 @@
+[package]
+name = "iyakki-tile-k8s"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The K8S tile (cluster explorer, cluster switcher, Launch cloud mode). Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit` and
+# on the pure leaf crates named in tests/data/tile_crate_deps.allow (`iyakki-k8s-model`, `iyakki-cluster-model`, `iyakki-sec`), never on the agent or the
+# shared crate. The shell adapter is `crates/iyakki-apps/src/apps/k8s_tile.rs`, the real ports `k8s_port.rs` and `cluster_host.rs`.
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-k8s-model = { workspace = true }
+iyakki-cluster-model = { workspace = true }
+iyakki-sec = { workspace = true }
+serde_json = "1"
+
+[features]
+# test seams (`use_retry`) that the shell's own tests use; never on in a product build
+testing = []
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

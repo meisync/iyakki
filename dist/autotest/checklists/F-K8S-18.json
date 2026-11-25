@@ -1,0 +1,22 @@
+{
+ "schema": 1,
+ "row": "F-K8S-18",
+ "feature_sha": "da31fd494941d08e",
+ "title": "the Dev cluster page of Settings offers Platform services (read only)",
+ "clauses": [
+  {
+   "id": "platform-wizard",
+   "text": "the Dev cluster page of Settings offers Platform services (read only)",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "With a k3s cluster running, open Settings, Dev cluster, Platform services, start Deploy to k3s and walk the wizard to the last page without confirming.",
+     "expect": "Every page fits the window, the cluster choice shows badges and the last page names what would be made.",
+     "runner_did": "Checked the page text first (when run through the runner)"
+    }
+   ]
+  }
+ ]
+}

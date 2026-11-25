@@ -3,11 +3,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelChoice {
-    pub provider: String,
-    pub model: String,
-}
+pub use iyakki_story_model::ModelChoice;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

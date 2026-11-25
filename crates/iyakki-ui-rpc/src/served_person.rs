@@ -225,6 +225,10 @@ impl Served for CoreTerminalObj {
                 let (u, app, cols, rows): (String, String, usize, usize) = de(a)?;
                 ser(&t.pty_open(&u, &app, cols, rows))
             }
+            "pty_open_exec" => {
+                let (u, app, cols, rows, exec): (String, String, usize, usize, iyakki_core_api::terminal::PtyExec) = de(a)?;
+                ser(&t.pty_open_exec(&u, &app, cols, rows, &exec))
+            }
             "pty_decide" => {
                 let (u, s, c, yes): (String, String, String, bool) = de(a)?;
                 ser(&t.pty_decide(&u, &s, &c, yes))
@@ -399,6 +403,9 @@ impl iyakki_core_api::Terminal for RemoteCoreTerminal {
     }
     fn pty_open(&self, user: &str, app: &str, cols: usize, rows: usize) -> Result<PtyOpen, String> {
         self.c("pty_open", json!([user, app, cols, rows]))
+    }
+    fn pty_open_exec(&self, user: &str, app: &str, cols: usize, rows: usize, exec: &iyakki_core_api::terminal::PtyExec) -> Result<PtyOpen, String> {
+        self.c("pty_open_exec", json!([user, app, cols, rows, exec]))
     }
     fn pty_decide(&self, user: &str, session: &str, call: &str, approve: bool) -> Result<(), String> {
         self.c("pty_decide", json!([user, session, call, approve]))

@@ -1,0 +1,24 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha da31fd494941d08e; honest subset only: everything not checked is under not-covered.
+# Pilot result (lane Q7/Q8): PASS on the Clusters page after the sidebar name and the P key were fixed in this file; the row stays at its rung because the list with live state, the actions and the deploy wizard need a real k3s cluster (see not-covered).
+row: F-K8S-18
+targets: qemu real
+profile: ram
+feature-sha: da31fd494941d08e
+doc: the Dev cluster page of Settings offers Platform services (read only)
+clause: 1 Settings > Dev cluster (the sidebar names it Clusters) opens the Platform services panel with the P key
+human: platform-wizard | With a k3s cluster running, open Settings, Dev cluster, Platform services, start Deploy to k3s and walk the wizard to the last page without confirming. Expect: Every page fits the window, the cluster choice shows badges and the last page names what would be made.
+not-covered: the list with live state, Deploy to k3s, Open, Stop, Start, Upgrade, Backup, Remove, Details, Connect
+not-covered: the deploy wizard
+not-covered: the assistant tools
+not-covered: a real k3s cluster (none in a scratch guest)
+key s
+wait app=Settings
+skip-unless-button Clusters
+click-sidebar Clusters
+wait app=Settings page=Clusters
+key P
+wait app=Settings text="Platform services"
+shot page
+expect-not-blank
+expect-text Platform services
+expect-page Clusters

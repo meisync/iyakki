@@ -345,6 +345,7 @@ fn memory_is_said_in_megabytes_or_gigabytes() {
 
 #[test]
 fn start_draw_input_clipboard_resize_and_stop_against_a_fake_sandbox() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     let mut r = rig("lw-full", false, (640, 400));
     assert_eq!(r.app.phase, Phase::Pick);
     assert_eq!(r.app.programs.len(), 1);

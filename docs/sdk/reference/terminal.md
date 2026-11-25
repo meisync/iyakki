@@ -84,6 +84,7 @@ Methods:
 - `pub fn in_screen(&self) -> bool`: Whether a whole session is on screen (or asked for).
 - `pub fn screen_text(&self) -> Option<String>`: The whole session's screen as text (for tests and a screen reader).
 - `pub fn open_screen(&mut self) -> bool`: Ask for a whole session. Nothing starts until the person answers the card.
+- `pub fn open_pod(&mut self, pod: &crate::terminal::PodSession) -> bool`: Ask for a whole session inside a pod (the K8S tile's "Open a terminal"): the same card as a full terminal, naming the pod. Nothing starts until the person answers it.
 - `pub fn leave_screen(&mut self)`
 - `pub fn submit(&mut self, line: &str) -> bool`: Run a line as the person typed it. Returns whether it was sent.
 - `pub fn decide(&mut self, approve: bool)`: The person's answer to the waiting line.
@@ -255,6 +256,37 @@ Variants:
 - `Delete`
 - `F(u8)`
 
+### struct `PodSession`
+
+A pod to open a shell in (F-K8S-26): the whole-session terminal runs `kubectl exec -it` into it. The core checks every part and builds the command
+itself; the app only names the pod. `kubeconfig` and `context` are the cluster's (empty: kubectl's defaults), `container` and `shell` may be empty.
+
+```rust
+pub struct PodSession
+```
+
+Public fields:
+
+- `pub kubeconfig: String`
+- `pub context: String`
+- `pub namespace: String`
+- `pub pod: String`
+- `pub container: String`
+- `pub shell: String`
+
+Methods:
+
+- `pub fn to_item(&self) -> String`: The item text: `pod:` and the six parts, one per line (kubeconfig, context, namespace, pod, container, shell).
+- `pub fn from_item(item: &str) -> Option<PodSession>`: The session an item names (`None`: not a pod item, or the wrong number of parts). The core checks every part again before anything runs.
+
+### const `POD_ITEM`
+
+The prefix of the item another app hands the Terminal to open a pod session ([`PodSession::to_item`]).
+
+```rust
+pub const POD_ITEM: &str =
+```
+
 ### trait `TerminalPort`
 
 ```rust
@@ -268,6 +300,7 @@ Methods:
 - `fn decide(&mut self, call: &str, approve: bool) -> Result<Reply, TermError>`
 - `fn close(&mut self)`
 - `fn screen_open(&mut self, _cols: usize, _rows: usize) -> Result<Question, TermError>  // has a default`: Ask for a session of `cols` x `rows`; the answer is the question the person must answer.
+- `fn screen_open_pod(&mut self, _cols: usize, _rows: usize, _pod: &PodSession) -> Result<Question, TermError>  // has a default`: Ask for a whole session inside a pod (`kubectl exec -it`); the question names the pod. Everything after it is the same as for [`TerminalPort::screen_open`].
 - `fn screen_decide(&mut self, _call: &str, _approve: bool) -> Result<(), TermError>  // has a default`
 - `fn screen_key(&mut self, _key: ScreenKey, _ctrl: bool, _alt: bool) -> Result<(), TermError>  // has a default`
 - `fn screen_text(&mut self, _text: &str) -> Result<(), TermError>  // has a default`
@@ -289,6 +322,7 @@ Public fields:
 
 - `pub screen_log: Vec<String>`: What the whole session received, for tests: keys as `key:...` and text as `text:...`, a resize as `size:CxR`.
 - `pub ran: VecDeque<String>`
+- `pub pods: Vec<PodSession>`: The pod sessions asked for, in order.
 
 Methods:
 

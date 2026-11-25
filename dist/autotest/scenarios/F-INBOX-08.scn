@@ -1,0 +1,12 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 5c2d3315f475900b; honest subset only: everything not checked is under not-covered.
+row: F-INBOX-08
+targets: browser
+feature-sha: 5c2d3315f475900b
+doc: the Notifications page is in the page list of both profiles and loads without a console error
+clause: 1 the Notifications page is in the page list of the cloud and agent-api profiles and the page walk makes no console error
+not-covered: the bell with the unread and approval count, red while an approval waits
+not-covered: kept fresh over the event stream with the polling fallback and a growing retry pause
+not-covered: approvals decided only by the person's own click
+not-covered: filters, mark read, acknowledge, snooze, delete, load older
+not-covered: the four states
+suite: run_pages.py --only pages

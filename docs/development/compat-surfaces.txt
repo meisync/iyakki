@@ -38,9 +38,9 @@ const	MAGIC	crates/iyakki-agent/src/cloudsnapshot.rs	b"IYSNAP1\n"	surface	D on-d
 const	MAGIC	crates/iyakki-agent/src/devmode/patch.rs	b"IYPATCH1"	surface	F developer-mode patch container
 const	MAGIC	crates/iyakki-shared/src/directlink/beacon.rs	"IYAKKI-DEV 1"	surface	C direct link beacon line
 const	MAGIC	crates/iyakki-agent/src/hostengines.rs	b"IYHV\0"	surface	C host engine list framing
-const	MAGIC	crates/iyakki-shared/src/hostvoice.rs	b"IYBV\0"	surface	C host voice list framing
+const	MAGIC	crates/iyakki-voice-model/src/hostvoice.rs	b"IYBV\0"	surface	C host voice list framing
 const	MAGIC	crates/iyakki-memx/src/kb.rs	b"AFKB1"	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
-const	MAGIC	crates/iyakki-shared/src/pkg.rs	"IYAKKI-PKG 1"	surface	E package container header
+const	MAGIC	crates/iyakki-store-model/src/pkg.rs	"IYAKKI-PKG 1"	surface	E package container header
 const	MAGIC	crates/iyakki-agent/src/profilestore.rs	b"IYKBP1\0\0"	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
 const	MAGIC	crates/iyakki-archive/src/xz.rs	[0xFD, b'7', b'z', b'X', b'Z', 0]	not-ours	xz file magic (external format)
 const	MAGIC	crates/iyakki-bindelta/src/bindelta.rs	b"IYBDELT1"	surface	F binary delta magic of component updates
@@ -52,7 +52,7 @@ const	MAGIC	crates/iyakki-volcrypt/src/header.rs	b"IYAKVOL1"	surface	D on-disk f
 const	MAGIC	crates/iyakki-wake/src/weights.rs	b"IYWK"	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
 const	MAGIC	crates/iyakki-zram/src/mkswap.rs	b"SWAPSPACE2"	not-ours	Linux swap magic (external format)
 const	MANIFEST_VERSION	crates/iyakki-core-api/src/bundle.rs	1	surface	E bundle manifest_version (bundles, owned by the bundle work); fixture owed by that work
-const	MAX_SCHEMA_BYTES	crates/iyakki-shared/src/wtool.rs	8 * 1024	not-ours	a size limit
+const	MAX_SCHEMA_BYTES	crates/iyakki-store-model/src/wtool.rs	8 * 1024	not-ours	a size limit
 const	MAX_VERSION	crates/iyakki-qr/src/qr.rs	40	not-ours	QR code symbol size limit
 const	MAX_VERSION	crates/iyakki-qr/src/qr_decode.rs	10	not-ours	QR code symbol size limit
 const	MIN_PROTOCOL_VERSION	crates/iyakki-core-api/src/client.rs	1	surface	C oldest client session protocol still answered; same transcript
@@ -67,12 +67,12 @@ const	SCAN_VERSION	crates/iyakki-agent/src/macfw.rs	2	surface	D on-disk format n
 const	SCHEMA	crates/iyakki-agent/src/dlmanifest.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
 const	SNAPSHOT_VERSION	crates/iyakki-webview/src/ext.rs	1	surface	C extension snapshot; bytes in tests/compat/alpha2/extension-snapshot.hex
 const	STORE_VERSION	crates/iyakki-shared/src/ragtools.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
-const	T_VERSION_MENU	crates/iyakki-apps/src/apps/story.rs	4	not-ours	menu item numbers of the story tile
-const	T_VERSION_PICK	crates/iyakki-apps/src/apps/story.rs	500; // + version number (1 is the first)	not-ours	menu item numbers of the story tile
+const	T_VERSION_MENU	crates/iyakki-tile-tales/src/lib.rs	4	not-ours	menu item numbers of the story tile
+const	T_VERSION_PICK	crates/iyakki-tile-tales/src/lib.rs	500; // + version number (1 is the first)	not-ours	menu item numbers of the story tile
 const	VERSION	crates/iyakki-dash/src/model.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
 const	VERSION	crates/iyakki-agent/src/flows/channel_switch.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
 const	VERSION	crates/iyakki-shared/src/flows_channel_policy.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
-const	VERSION	crates/iyakki-shared/src/inbox.rs	2	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	VERSION	crates/iyakki-inbox-model/src/lib.rs	2	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
 const	VERSION	crates/iyakki-agent/src/quickinstall_gitea.rs	"1.24.5"	not-ours	version of the Gitea we install
 const	VERSION	crates/iyakki-shared/src/relinfo.rs	env!("CARGO_PKG_VERSION")	not-ours	the release version, not an interface
 const	VERSION	crates/iyakki-agent/src/store/builtin.rs	"1.0.0"	not-ours	version of the built-in store entries seeded by the code, see store notes
@@ -102,7 +102,7 @@ spec	flow	crates/iyakki-flow/src/store.rs	1	surface	D JSON store with an iyakki-
 spec	flow assist	crates/iyakki-flow/src/assist_store.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
 spec	model options	crates/iyakki-shared/src/modelopts.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
 spec	network devices	crates/iyakki-shared/src/devwatch.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
-spec	package ratings	crates/iyakki-shared/src/store_ratings.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
+spec	package ratings	crates/iyakki-store-model/src/store_ratings.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
 spec	paired devices	crates/iyakki-agent/src/devmode/client.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
 spec	settings	crates/iyakki-shared/src/settings.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
 manual	vault file v	crates/iyakki-shared/src/vault.rs	File { v: 1,	surface	D vault file header (binary-ish JSON envelope with v); fixture in tests/fixtures/upgrade/alpha1/vault
@@ -143,4 +143,5 @@ const	FILES_FACET_VERSION	crates/iyakki-core-api/src/files.rs	2	surface	A embedd
 const	TERMINAL_FACET_VERSION	crates/iyakki-core-api/src/terminal.rs	1	surface	A embedded terminal facet (F-SDK-102): sessions of the command line, approvals through the core; additive changes only
 const	OS_MAGIC	crates/iyakki-connect/src/devkey.rs	"iyakki-connect-os-v1"	surface	D connect device key held in the OS key store (opt-in): one line `iyakki-connect-os-v1 <account> <public key hex>`, no secret; a newer word is refused as not a device key file; no fixture yet (opt-in, alpha.7)
 const	BUNDLE_SCHEMA	crates/iyakki-shared/src/manualtest.rs	"iyakki.human-evidence-bundle.1"	surface	D exported bundle of human test evidence (manual tests tab): schema word checked on import, a bundle with another word is skipped; fixture owed (tests/compat release folder at the next cut)
-const	EVIDENCE_SCHEMA	crates/iyakki-shared/src/manualtest.rs	"iyakki.human-evidence.1"	surface	D one item of human test evidence (manual tests tab): schema word checked on read, an item with another word is not accepted; fixture owed (tests/compat release folder at the next cut)
+const	EVIDENCE_SCHEMA	crates/iyakki-shared/src/manualtest.rs	1	surface	D one item of human test evidence (manual tests tab): schema number (the runner's dist/autotest/humanschema.py schema) checked on read, an item with another word is not accepted; fixture owed (tests/compat release folder at the next cut)
+const	LEGACY_EVIDENCE_SCHEMA	crates/iyakki-shared/src/manualtest.rs	"iyakki.human-evidence.1"	surface	D the first layout of human test evidence (manual tests tab, written by alpha.7): still read, never written; fixture owed (tests/compat release folder at the next cut)

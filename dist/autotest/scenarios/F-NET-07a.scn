@@ -1,0 +1,16 @@
+# autotest alpha.10 batch F (lane Q8, 2026-11-24); split into sub-row F-NET-07a on 2026-11-24 (lane SC2): this scenario covers the whole visible clause, the API and rule clauses are F-NET-07b.
+row: F-NET-07a
+targets: qemu
+profile: ram
+feature-sha: 2bbe937761c0d486
+doc: Settings, Network (administrators) is a page of its own (read only, nothing is changed)
+clause: 1 Settings, Network (administrators) is a page of its own
+key s
+wait app=Settings
+skip-unless-button Network
+click-sidebar Network
+wait app=Settings page="Network"
+shot page
+expect-not-blank
+expect-text Network
+expect-page Network

@@ -77,6 +77,7 @@ How a tool is built: `crates/iyakki-agent/src/settingstools.rs` is the frame (`E
 
 Sign-out is a power-menu action (`shell_signout.rs`, not edited in this slice): a `sign_out` tool needs a request file that the shell takes, as `lock_screen` does. It is listed in `chat-reachability-exempt.txt` as a todo for the owner of that file.
 
+* Sign-out report (not a Settings page): `session_end_report` (free; read only: what ends at sign-out, a change of sound owner and a lock; D-SESSION-END).
 * Data science toolkit (Store, Setup; not a Settings page): `datasci_status` (free), `datasci_verify` (ask; administrators) and `python_run` (ask every time, the whole script on the card; no network, a time limit of 60 s by default and 300 at most). Installing and upgrading are Setup buttons with the licence text first. Covered.
 
 ## The PDF output switch

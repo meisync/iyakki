@@ -93,34 +93,7 @@ pub trait ServicesB6 {
     }
 }
 
-/// A sound sink that plays nothing (a core without sound).
-pub struct NoSink;
-impl iyakki_shared::story::Sink for NoSink {
-    fn play(&self, _wav: &[u8]) -> Result<Box<dyn iyakki_shared::story::Playing>, String> {
-        Err(UNAVAILABLE_B6.into())
-    }
-}
-
-/// Speech of this install: the sound a recording plays through, and the assistant that revises a dictated text (the real one is
-/// `iyakki_agent::facets_b6::SpeechKitReal`).
-pub trait SpeechKit: Send + Sync {
-    /// Plays WAV bytes of a recording through the one way sound reaches the speaker (the mixer, or the play command of Settings -> Voice).
-    fn recording_sink(&self) -> Arc<dyn iyakki_shared::story::Sink> {
-        Arc::new(NoSink)
-    }
-    /// The model a revision would use and whether it may be used now.
-    fn revise_target(&self, _ctx: &iyakki_shared::revise::Context) -> iyakki_shared::dictfix::Target {
-        iyakki_shared::dictfix::Target::NoModel
-    }
-    /// Revise `text` with the person's chat model (blocks up to the revise timeout: call it from a worker thread).
-    fn revise(&self, text: &str, _kind: &iyakki_shared::revise::Kind, _ctx: &iyakki_shared::revise::Context) -> iyakki_shared::revise::Proposal {
-        iyakki_shared::revise::Proposal::kept(text, UNAVAILABLE_B6)
-    }
-}
-
-/// The fake: no sound, no model.
-pub struct NoSpeechKit;
-impl SpeechKit for NoSpeechKit {}
+pub use iyakki_shared::facets::{NoSink, NoSpeechKit, SpeechKit};
 
 /// The deploy and registry steps (the real one is `iyakki_agent::facets_b6::DeployKitReal`): what the K8S panel and Settings -> Dev cluster
 /// run against the person's cluster after the plan (pure, in `iyakki_shared::regsetup`) was shown and approved.

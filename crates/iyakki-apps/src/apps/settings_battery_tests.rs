@@ -149,3 +149,38 @@ fn the_page_draws_at_six_sizes_and_says_why_when_there_is_no_driver() {
     a.go_to(Tab::Overview);
     assert!(!a.tabs.contains(&Tab::Battery));
 }
+
+// ---- the switches on a fake port (the settings, the audit log and the administrator switch are in memory) ----
+
+mod on_a_fake_port {
+    use super::*;
+    use crate::apps::settings_port::{FakeSettingsPort, SettingsDataPort};
+
+    fn app() -> SettingsApp {
+        let cx = admin("bat-fake");
+        SettingsApp::new(&cx)
+    }
+
+    #[test]
+    fn the_switches_save_into_the_fake_settings_and_are_audited() {
+        let p = FakeSettingsPort::new(true);
+        let mut a = app();
+        a.handle_battery(&Key::Char('p'), &p);
+        a.handle_battery(&Key::Char('w'), &p);
+        a.handle_battery(&Key::Char('s'), &p);
+        let c = p.settings_get().battery;
+        assert!(!c.show_percent() && !c.warnings() && !c.shutdown_at_critical(), "{c:?}");
+        let lines: Vec<String> = p.audited().into_iter().map(|(k, d)| format!("{k} {d}")).collect();
+        assert_eq!(lines, ["settings.battery hide_percent=true", "settings.battery no_warnings=true", "settings.battery no_shutdown=true"]);
+    }
+
+    #[test]
+    fn the_shutdown_switch_is_for_administrators_only() {
+        let p = FakeSettingsPort::new(false);
+        let mut a = app();
+        a.handle_battery(&Key::Char('s'), &p);
+        assert!(p.settings_get().battery.shutdown_at_critical());
+        a.handle_battery(&Key::Char('p'), &p);
+        assert!(!p.settings_get().battery.show_percent(), "the other two are everyone's own");
+    }
+}

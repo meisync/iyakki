@@ -1,0 +1,19 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha be71aae1dceab0cc; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-LAB-01
+targets: qemu
+profile: ram
+feature-sha: be71aae1dceab0cc
+doc: LAB shows its tabs (read only)
+clause: 1 The LAB tile opens with its tabs for pictures, vision and video
+not-covered: each tab getting only the models that fit it, with where they run
+not-covered: a model that cannot take pictures being refused before anything is sent
+not-covered: the history
+skip-unless-button group Ask & Create
+click group Ask & Create
+skip-unless-button LAB
+click LAB
+wait text="LAB"
+shot page
+expect-not-blank
+expect-text Vision
+expect-text Video

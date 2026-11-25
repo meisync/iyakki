@@ -440,6 +440,49 @@ fn several_tunnels_run_at_once_with_their_own_state() {
 // ------------------------------------------------------------------ reconnecting
 
 #[test]
+fn when_the_network_returns_a_tunnel_waiting_out_its_pause_tries_at_once_and_starts_its_pauses_over() {
+    let r = ready("route-return");
+    let t = r.add("Docs", 8080, true);
+    r.m.tick(1000);
+    r.m.tick(1000);
+    assert!(matches!(r.m.status(&t.id).state, State::Connected { .. }));
+    // an outage: the tunnel fails again and again, the pause grows
+    let mut now = 1010;
+    r.runner.drop_all("Timeout, server 192.0.2.1 not responding.");
+    r.m.tick(now);
+    for _ in 0..6 {
+        now = r.m.status(&t.id).retry_at.unwrap();
+        r.runner.plan(Plan::Fail("Connection timed out".into()));
+        r.m.tick(now);
+        r.m.tick(now);
+    }
+    let s = r.m.status(&t.id);
+    assert!(s.attempts >= 6 && s.retry_at.unwrap() - now >= 64, "a long pause: {s:?}");
+    // the network is back: the pause is cancelled and the count starts over
+    assert_eq!(r.m.network_returned(), 1);
+    let s = r.m.status(&t.id);
+    assert_eq!((s.retry_at, s.attempts), (None, 0));
+    r.m.tick(now + 1);
+    r.m.tick(now + 1);
+    assert!(matches!(r.m.status(&t.id).state, State::Connected { .. }), "it connected at the very next step, not after the pause");
+    // nothing waits any more
+    assert_eq!(r.m.network_returned(), 0);
+}
+
+#[test]
+fn a_tunnel_that_needs_the_person_is_left_alone_when_the_network_returns() {
+    let r = ready("route-return-hard");
+    let t = r.add("Docs", 8080, true);
+    r.runner.plan(Plan::Fail("Permission denied (publickey).".into()));
+    r.m.tick(100);
+    r.m.tick(100);
+    assert!(r.m.status(&t.id).needs_you);
+    assert_eq!(r.m.network_returned(), 0);
+    let s = r.m.status(&t.id);
+    assert!(s.needs_you && s.fault == Some(Fault::PermissionDenied), "still asking for the person: {s:?}");
+}
+
+#[test]
 fn a_dropped_connection_comes_back_after_a_growing_pause() {
     let r = ready("backoff");
     let t = r.add("Docs", 8080, true);

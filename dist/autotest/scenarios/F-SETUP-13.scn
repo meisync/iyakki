@@ -1,0 +1,20 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 59760ac3adb196b0; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-SETUP-13
+targets: qemu
+profile: ram
+feature-sha: 59760ac3adb196b0
+doc: Store, Setup lists Gitea (versioning for your work) (read only, nothing is installed)
+clause: 1 Store, Setup lists the item Gitea (versioning for your work)
+not-covered: the job calling Platform services Gitea build
+not-covered: the install needing k3s and the password hand-off
+skip-unless-button group Devices & System
+click group Devices & System
+skip-unless-button STORE
+click STORE
+wait text="Setup"
+skip-unless-button Setup
+click Setup
+wait text="This machine"
+shot page
+expect-not-blank
+expect-text Gitea

@@ -349,6 +349,7 @@ fn the_field_checks_the_code_before_sending_cleans_it_and_a_refusal_keeps_the_di
 
 #[test]
 fn the_clipboard_is_offered_in_one_tap_only_for_code_like_text_and_nothing_is_filled_in_alone() {
+    let _clip = iyakki_testkit::process_lock(iyakki_testkit::names::CLIPBOARD); // the clipboard is one per process
     let (cx, d, _tools) = setup_picky("alog10");
     let home = d.join("home");
     std::fs::create_dir_all(&home).unwrap();

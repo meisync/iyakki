@@ -1,57 +1,9 @@
-//! The kubeconfig profiles held in a vault entry (`devcluster-vault-<user>.json`), moved out of `iyakki_agent::kubeprofiles` (F-SPLIT-03).
+//! The kubeconfig profiles held in a vault entry (`devcluster-vault-<user>.json`): the data and file rules live in `iyakki-cluster-model` (alpha.8 E7).
+
+pub use iyakki_cluster_model::profiles::*;
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
-pub fn is_vault_ref(s: &str) -> bool {
-    s.starts_with("vault:") || s.starts_with("uvault:")
-}
-
-/// A named kubeconfig held in a vault entry, kept per person (`devcluster-vault-<user>.json`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VaultProfile {
-    pub name: String,
-    /// `uvault:<entry>` or `vault:<entry>`.
-    pub reference: String,
-}
-
-fn vault_path(dir: &Path, user: &str) -> PathBuf {
-    let safe: String = user.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-    dir.join(format!("devcluster-vault-{safe}.json"))
-}
-
-pub fn vault_load(dir: &Path, user: &str) -> Vec<VaultProfile> {
-    std::fs::read_to_string(vault_path(dir, user)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
-}
-
-pub fn vault_save(dir: &Path, user: &str, v: &[VaultProfile]) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    std::fs::write(vault_path(dir, user), serde_json::to_string_pretty(v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
-}
-
-/// Add (or replace) a profile. The entry name is checked; the secret itself is never read here.
-pub fn vault_add(dir: &Path, user: &str, name: &str, reference: &str) -> Result<(), String> {
-    let name = name.trim();
-    if name.is_empty() || name.chars().count() > 40 || !name.chars().all(|c| c.is_ascii_alphanumeric() || " -_.".contains(c)) {
-        return Err("a profile name is letters, digits, spaces and - _ . (up to 40)".into());
-    }
-    let entry = reference.trim().strip_prefix("uvault:").or_else(|| reference.trim().strip_prefix("vault:")).unwrap_or(reference.trim());
-    if !crate::vault::valid_secret_name(entry) {
-        return Err("a vault entry name is lowercase letters, digits, . _ - (up to 64)".into());
-    }
-    let reference = if reference.trim().starts_with("vault:") { format!("vault:{entry}") } else { format!("uvault:{entry}") };
-    let mut v = vault_load(dir, user);
-    v.retain(|p| p.name != name);
-    v.push(VaultProfile { name: name.into(), reference });
-    vault_save(dir, user, &v)
-}
-
-pub fn vault_remove(dir: &Path, user: &str, name: &str) -> Result<(), String> {
-    let mut v = vault_load(dir, user);
-    v.retain(|p| p.name != name);
-    vault_save(dir, user, &v)
-}
 
 // ---- merged from iyakki-agent (F-SPLIT-03) ----
 // Cloud mode (docs/K3S-DEV.md, phase 5): clusters that are not a file on disk.

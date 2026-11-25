@@ -1,7 +1,8 @@
 //! The K8S tile's explorer code against the REAL kubectl and the real cluster of this machine, inside a throwaway namespace this
 //! test creates and deletes itself. Only that namespace is read or written. Skipped (passes with a note) when no cluster answers.
 
-use super::*;
+use crate::k8s::*;
+use crate::k8sexp::*;
 use std::io::Write;
 use std::process::{Command, Stdio};
 

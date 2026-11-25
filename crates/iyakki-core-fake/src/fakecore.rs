@@ -149,9 +149,15 @@ pub struct FakeResume {
     who: Mutex<Option<String>>,
     apps: Mutex<Vec<String>>,
     items: Mutex<Vec<(String, String)>>,
+    /// somebody is signed in and no sign-out came (the marker of F-LIFE-16)
+    open: std::sync::atomic::AtomicBool,
 }
 
 impl FakeResume {
+    /// The shell "died" without a sign-out: the marker stays for the next `take_unexpected_end`.
+    pub fn set_open_for_test(&self, on: bool) {
+        self.open.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
     pub fn set_switch_for_test(&self, on: bool) {
         self.switch.store(on, std::sync::atomic::Ordering::SeqCst);
     }
@@ -178,13 +184,18 @@ impl SessionResume for FakeResume {
         }
         Ok(())
     }
+    fn take_unexpected_end(&self) -> bool {
+        self.open.swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
     fn remember(&self, user: &str) {
+        self.open.store(true, std::sync::atomic::Ordering::SeqCst);
         *lk(&self.who) = self.allowed().then(|| user.to_string());
     }
     fn who(&self) -> Option<String> {
         if self.allowed() { lk(&self.who).clone() } else { None }
     }
     fn forget(&self) {
+        self.open.store(false, std::sync::atomic::Ordering::SeqCst);
         *lk(&self.who) = None;
         lk(&self.apps).clear();
     }

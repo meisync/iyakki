@@ -355,3 +355,25 @@ fn an_installed_store_registers_itself_as_a_read_only_dash_source_with_vault_ref
     assert_eq!(objstore::remove_source(&dir, "admin", &SEAWEEDFS), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn both_stores_installed_one_after_the_other_in_one_cluster_keep_separate_objects_keys_and_sources_and_removing_one_leaves_the_other() {
+    let mut f = Fake { k3s: true, ..Default::default() };
+    run_step(Item::SeaweedFs, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap();
+    run_step(Item::RustFs, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap();
+    // the namespace is applied by both (idempotent), each store has its own secret, object set and rollout
+    for e in objstore::ENGINES {
+        assert!(f.calls.contains(&format!("secret {}-s3", e.name)) && f.calls.contains(&format!("apply {}", e.name)) && f.calls.contains(&format!("rollout iyakki-objects/{}", e.name)), "{}", e.name);
+    }
+    let (m0, m1) = (&f.manifests[1], &f.manifests[3]);
+    assert!(!m0.contains("rustfs") && !m1.contains("seaweedfs"), "no manifest names the other store");
+    assert_eq!(f.marks.len(), 2, "two markers, one per store");
+    assert_eq!(f.sources.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["s3-seaweedfs", "s3-rustfs"]);
+    assert_ne!(f.sources[0].values["url"], f.sources[1].values["url"]);
+    // the person removes one, keeping its data: only its own objects are touched
+    let mut r = Rm::default();
+    objstore::remove(&SEAWEEDFS, &mut r, false).unwrap();
+    assert!(r.kube.iter().all(|k| !k.contains("rustfs")) && r.vault.is_empty() && r.unmarked == [Item::SeaweedFs]);
+    // the bucket for the young store is made by its first client, never by a command run in its image
+    assert!(f.execs.iter().all(|x| !x.contains("rustfs")), "{:?}", f.execs);
+}

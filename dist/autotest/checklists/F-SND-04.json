@@ -1,0 +1,169 @@
+{
+ "schema": 1,
+ "row": "F-SND-04",
+ "feature_sha": "6538306ed456ad87",
+ "title": "master volume, late sound cards and the MacBook sound fix (manual until automated)",
+ "clauses": [
+  {
+   "id": "master-one",
+   "text": "One master volume: the volume keys, mute, Settings and the sound popover all change the same level, applied once.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Turn the volume up and down with the volume keys, press mute and unmute, then change the volume on Settings, Sound and in the sound popover.",
+     "expect": "Each change moves the one volume you hear, at once. Mute shows at once in every place. No change is doubled: the level is the same whichever control you use."
+    },
+    {
+     "do": "Start a radio station and move the volume again.",
+     "expect": "The radio's bars follow the same level and the sound follows the bars."
+    }
+   ]
+  },
+  {
+   "id": "volume-steps",
+   "text": "The steps are usable: the software volume runs from -51 dB to 0 dB, and one 5 percent step is about 2.5 dB.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "While a test sound or a radio station plays, press volume up one step at a time from about 10 percent to 100 percent.",
+     "expect": "Each step is a small, even change with no jump. At 100 percent the sound is full, not quieter than the Settings value."
+    }
+   ]
+  },
+  {
+   "id": "late-card",
+   "text": "A sound output that appears late is written, switched to and announced as Sound output ready, and a playing radio restarts on it.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Cold boot the machine. As soon as you can sign in, start a radio station and keep it playing while the built-in speakers come up (on the MacBook Pro 14,1 they start about 11 seconds after boot).",
+     "expect": "When the output comes up, the words Sound output ready appear on screen, and the radio restarts and carries on through the speakers."
+    }
+   ]
+  },
+  {
+   "id": "starting-wait",
+   "text": "On a CS8409 MacBook that shows only HDMI at first, Settings says waiting for the sound card (the built-in speakers of this Mac start up slowly) for at most 30 seconds.",
+   "machines": [
+    "macbook-pro"
+   ],
+   "steps": [
+    {
+     "do": "Cold boot the MacBook Pro and open Settings, Sound straight after you sign in.",
+     "expect": "The page shows the waiting text for at most 30 seconds, then shows the built-in speakers as the output and the waiting text is gone."
+    }
+   ]
+  },
+  {
+   "id": "busy-card",
+   "text": "A busy sound card is said with the program that holds it, and retried until it is free.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "While another program holds the sound card (a program that is playing sound through it), start a radio station or a test sound.",
+     "expect": "The sound says the card is busy and names the program that holds it. When that program lets go, the sound starts by itself."
+    }
+   ]
+  },
+  {
+   "id": "macbook-levels",
+   "text": "On the MacBook Pro 14,1 the sound is at normal loudness, the stereo test is heard in both ears, and the radio is about as loud as the chime (before the fix it was 48 dB too quiet).",
+   "machines": [
+    "macbook-pro"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Sound, Advanced and press Stereo test.",
+     "expect": "A test sound plays from the left and right speakers at normal loudness, not very quiet."
+    },
+    {
+     "do": "Play a radio station, then a chime or notification sound, and compare their loudness with the stereo test.",
+     "expect": "The radio is not very quiet, and it is about as loud as the chime. If it is still quieter, say which one in the note."
+    }
+   ]
+  },
+  {
+   "id": "hardware-check",
+   "text": "Each card has a volume choice (Automatic, Hardware or Software) and a self-check: two quiet tones at 100 percent and 12 percent, and the person says whether the second was quieter; the answer is stored.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Sound, Advanced, choose the volume for this card (Automatic, Hardware or Software), then run the hardware check.",
+     "expect": "Two quiet tones play. The second is quieter than the first. The page asks whether the second was quieter: answer as you hear it."
+    },
+    {
+     "do": "Reopen the page and look at the choice and the answer.",
+     "expect": "The choice and the answer are still there."
+    }
+   ]
+  },
+  {
+   "id": "boost",
+   "text": "An optional per-card Boost of up to +12 dB (it may distort) is under Settings, Sound, Advanced.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Set the Boost for this card to a small value, then play a radio station or the stereo test.",
+     "expect": "The page says Boost plus the chosen dB, Loud sound may distort. The next sound is louder. At a high Boost, say whether it crackles or distorts."
+    },
+    {
+     "do": "Set the Boost back to off.",
+     "expect": "The page says Boost off and the sound returns to its normal level."
+    }
+   ]
+  },
+  {
+   "id": "advanced-rows",
+   "text": "Advanced has the Stereo test and, for four-channel chains, the Channel walk.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Sound, Advanced on a two-channel card, then on a four-channel card if you have one.",
+     "expect": "The Stereo test is there. The Channel walk is offered on the four-channel card only."
+    }
+   ]
+  }
+ ]
+}

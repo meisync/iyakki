@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-17",
+  "feature_sha": "1a1c31483a76c437",
+  "title": "VOICE tile READ ALOUD and remote voices",
+  "clauses": [
+    {
+      "id": "remote-consent",
+      "text": "A person decides whether text may go to a remote voice server",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "Settings, Voice: choose a voice on a remote server (not this computer). In the VOICE tile READ ALOUD, paste some text and press Play. Answer the card first with No.",
+          "expect": "Nothing is sent while the card says No. Then choose Yes and the answer is kept for the next time."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+[package]
+name = "iyakki-git-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The data and the read-only engine of the GIT tile as a leaf crate: git host addresses (gitsite), the connections and the host API client (gitconn), the repository browser (gitbrowse), the plain data of the git jobs (gitjobs), the vault and audit traits (keys) and an RFC 3339 time parse (isotime); iyakki-shared re-exports the old paths."
+
+[dependencies]
+iyakki-clock = { workspace = true }
+iyakki-sec = { workspace = true }
+iyakki-sshfs = { workspace = true }
+iyakki-credguard = { workspace = true }
+iyakki-k8s-model = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = "1"
+log = { workspace = true }
+iyakki-web = { workspace = true }
+sha2 = "0.10"

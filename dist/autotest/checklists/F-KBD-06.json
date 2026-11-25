@@ -1,0 +1,52 @@
+{
+ "schema": 1,
+ "row": "F-KBD-06",
+ "feature_sha": "47ae1b77200b4242",
+ "title": "Settings, Keyboard page for administrators",
+ "clauses": [
+  {
+   "id": "page",
+   "text": "Settings, Keyboard (administrators) shows Function keys mode, ISO layout, Option/Command swap, key repeat, detected controls with their test buttons, the last special keys and the table of recognised keys",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Keyboard as an administrator and read the page from top to bottom.",
+     "expect": "Each named row is there: Function keys mode, ISO layout, Option/Command swap, key repeat delay and rate, the detected controls with Test screen, Test keyboard light and Test sound, the last special keys and the table of recognised keys."
+    },
+    {
+     "do": "Sign out, sign in again and open the same page.",
+     "expect": "The choices made earlier are still set."
+    }
+   ]
+  },
+  {
+   "id": "key-repeat",
+   "text": "the key repeat delay and rate change how fast a held key repeats",
+   "machines": [
+    "mac-mini-2018"
+   ],
+   "steps": [
+    {
+     "do": "Change the repeat delay to a shorter value, then hold a letter key in a text field.",
+     "expect": "The letter repeats after the shorter delay. Change the rate and hold the key again: the repeat speed changes."
+    }
+   ]
+  },
+  {
+   "id": "fn-and-swap",
+   "text": "Function keys mode and Option/Command swap change what the Apple keyboard sends",
+   "machines": [
+    "mac-mini-2018",
+    "macbook-pro"
+   ],
+   "steps": [
+    {
+     "do": "On an Apple keyboard, set Function keys mode to F-keys first, press F1 in a text field, then set it to media keys first and press F1 again.",
+     "expect": "With F-keys first F1 is typed; with media keys first the key sends its media action. Option/Command swap, when changed, swaps the two keys in a text field."
+    }
+   ]
+  }
+ ]
+}

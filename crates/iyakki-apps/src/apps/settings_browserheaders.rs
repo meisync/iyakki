@@ -5,8 +5,8 @@
 
 use iyakki_shared::browserheaders::{HeaderRule};
 
-use super::super::browser_headers as store_of;
 use super::*;
+use super::browser_port::BrowserSettingsPort;
 
 /// What the sub-page keeps between frames.
 #[derive(Default)]
@@ -33,22 +33,22 @@ impl SettingsApp {
         self.tab() == Tab::Browser && self.bh.open
     }
 
-    pub(super) fn bh_len(&self, cx: &AppCx) -> usize {
-        store_of::store(cx).list().len()
+    pub(super) fn bh_len(&self, p: &dyn BrowserSettingsPort) -> usize {
+        p.header_store().list().len()
     }
 
     pub(super) fn bh_buttons(&self) -> Vec<Btn> {
         vec![("Add", ACCENT, 'a'), ("Edit", TEXT, 'e'), ("Enable / Disable", TEXT, 'x'), ("Delete", ERR, 'd'), ("Back", TEXT, 'b')]
     }
 
-    fn bh_rule(&self, cx: &AppCx) -> Option<HeaderRule> {
-        let rules = store_of::store(cx).list();
+    fn bh_rule(&self, p: &dyn BrowserSettingsPort) -> Option<HeaderRule> {
+        let rules = p.header_store().list();
         let sel = self.sel[self.tab].min(rules.len().saturating_sub(1));
         rules.into_iter().nth(sel)
     }
 
     /// Keys of the sub-page (and `H` on the Browser page). True when the key was used.
-    pub(super) fn handle_browser_headers(&mut self, k: &Key, cx: &AppCx) -> bool {
+    pub(super) fn handle_browser_headers(&mut self, k: &Key, p: &dyn BrowserSettingsPort) -> bool {
         if !self.bh.open {
             if matches!(k, Key::Char('H')) {
                 self.bh.open = true;
@@ -57,9 +57,9 @@ impl SettingsApp {
             }
             return false;
         }
-        let store = store_of::store(cx);
+        let store = p.header_store();
         let len = store.list().len();
-        let row = self.bh_rule(cx);
+        let row = self.bh_rule(p);
         match k {
             Key::Esc | Key::Char('b') => self.bh.open = false,
             Key::Up => self.move_sel(-1, len),
@@ -74,9 +74,9 @@ impl SettingsApp {
                     let on = !r.enabled;
                     match store.set_enabled(&r.id, on) {
                         Ok(r) => {
-                            store_of::refresh(cx);
+                            p.header_refresh();
                             let what = format!("Custom header rule \u{201C}{}\u{201D}: {}.", r.name, if on { "on" } else { "off" });
-                            cx.audit.record(&cx.session.user, "settings.browser.headers", &what);
+                            p.audit("settings.browser.headers", &what);
                             self.ok(if on { format!("{} is on: {} is sent to the sites in its filter.", r.name, r.header) } else { format!("{} is off: kept, but nothing is sent.", r.name) });
                         }
                         Err(e) => self.fail(e),
@@ -109,8 +109,8 @@ impl SettingsApp {
         self.open_form(FormKind::BrowserHeader(BhForm::Edit(edit.map(|r| r.id))), f);
     }
 
-    pub(super) fn bh_submit(&mut self, cx: &AppCx, kind: &BhForm, form: &mut Form) -> Result<String, String> {
-        let store = store_of::store(cx);
+    pub(super) fn bh_submit(&mut self, p: &dyn BrowserSettingsPort, kind: &BhForm, form: &mut Form) -> Result<String, String> {
+        let store = p.header_store();
         let BhForm::Edit(id) = kind;
         let old = id.as_ref().and_then(|i| store.list().into_iter().find(|r| r.id == *i));
         if id.is_some() && old.is_none() {
@@ -132,27 +132,27 @@ impl SettingsApp {
             (Some(o), false) => store.update(&o.id, rule, Some(&value))?,
             (None, _) => store.add(rule, &value)?,
         };
-        store_of::refresh(cx);
+        p.header_refresh();
         // names only: never the value
-        cx.audit.record(&cx.session.user, "settings.browser.headers", &format!("Custom header rule \u{201C}{}\u{201D} saved ({})", saved.name, saved.header));
+        p.audit("settings.browser.headers", &format!("Custom header rule \u{201C}{}\u{201D} saved ({})", saved.name, saved.header));
         Ok(format!("{} saved. {} is sent over https to the sites in its filter.", saved.name, saved.header))
     }
 
-    pub(super) fn bh_delete(&mut self, cx: &AppCx, id: &str) {
-        match store_of::store(cx).delete(id) {
+    pub(super) fn bh_delete(&mut self, p: &dyn BrowserSettingsPort, id: &str) {
+        match p.header_store().delete(id) {
             Ok(r) => {
-                store_of::refresh(cx);
-                cx.audit.record(&cx.session.user, "settings.browser.headers", &format!("Custom header rule \u{201C}{}\u{201D} deleted", r.name));
+                p.header_refresh();
+                p.audit("settings.browser.headers", &format!("Custom header rule \u{201C}{}\u{201D} deleted", r.name));
                 self.ok(format!("Deleted {}.", r.name));
-                let len = self.bh_len(cx);
+                let len = self.bh_len(p);
                 self.sel[self.tab] = self.sel[self.tab].min(len.saturating_sub(1));
             }
             Err(e) => self.fail(e),
         }
     }
 
-    pub(super) fn render_browser_headers(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let rules = store_of::store(cx).list();
+    pub(super) fn render_browser_headers(&mut self, g: &mut Gfx, a: R, s: f32, p: &dyn BrowserSettingsPort) {
+        let rules = p.header_store().list();
         let mut y = a.y;
         super::sshtun_page::intro(g, a, s, &mut y, &["Send a header with requests to chosen sites: a token for an internal page, a test header for a staging site. It goes only to addresses that match the filter, over https (plain http only to this computer or a private address), and never follows a redirect to another site.", "The value is kept in your vault and shown as asterisks. The reader and the built-in engine send them. The full web engine is sent the same rules too (experimental, not yet proven on a real device); a rule with a path pattern or an address range is used by the built-in engine only."], "Send a header to chosen sites, over https. The value stays in your vault.", if rules.is_empty() { 40.0 * s } else { 74.0 * s + 60.0 * s + 16.0 * s });
         if rules.is_empty() {

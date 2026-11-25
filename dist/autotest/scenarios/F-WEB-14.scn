@@ -1,0 +1,19 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha 9617e25890fcfbe6; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-WEB-14
+targets: qemu
+profile: ram
+feature-sha: 9617e25890fcfbe6
+doc: Settings, Remote access offers the switch that serves this desktop to browsers (read only)
+clause: 1 Settings, Remote access offers Serve this desktop to browsers, the switch of the listener
+not-covered: off by default and port 8443 unless chosen
+not-covered: HTTPS only and the watcher thread that follows the setting every two seconds
+not-covered: a persisted setting across a restart
+key s
+wait app=Settings
+skip-unless-button Remote access
+click-sidebar Remote access
+wait app=Settings page="Remote access"
+shot page
+expect-not-blank
+expect-text Serve this desktop to browsers
+expect-page Remote access

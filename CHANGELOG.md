@@ -10,9 +10,17 @@ listed in [KNOWN-ISSUES.md](KNOWN-ISSUES.md); an item below is not a promise tha
 
 ## [Unreleased]
 
-## [0.1.0-alpha.7-dev] - development
+## [0.1.0-alpha.10-dev] - development
 
-Opened from the alpha.6 tag. Plan: [ALPHA-7-PLAN](docs/development/ALPHA-7-PLAN.md).
+Opened from the alpha.8 tag with the alpha.9 branch folded in (alpha.9 is not cut on its own, owner order 2026-11-21). Schedule: [ALPHA-8-TO-12-SCHEDULE](docs/development/ALPHA-8-TO-12-SCHEDULE.md). Beta gates: [BETA-GOAL](docs/development/BETA-GOAL.md).
+
+## [0.1.0-alpha.8] - 2026-11-21
+
+Small apps are tile crates (Disks, Dash, Learn, Checkup, Mesh), the Doctor Manual tests tab and the autotest runner share one checklist and evidence format, and gate fixes. Implementation 99.6 percent, test 67.1 percent. The full account is [RELEASE-NOTES-0.1.0-alpha.8.md](RELEASE-NOTES-0.1.0-alpha.8.md).
+
+## [0.1.0-alpha.7] - 2026-11-21
+
+The UI/OS split is complete in code (`iyakki-ui --socket`, the UI socket and its security document), Flows, Store tile apps, sound and power are served by the core, more kernel work moved into `iyakki-core-local`, the UI SDK got `dock.open`, accessibility state, pinch and the Edit and Cli apps, the browser got GPU switches and hardware video decode by default, and testing got an evidence-based runner and a Manual tests tab in the Doctor app. Implementation 99.6 percent, test 67.1 percent. The full account is [RELEASE-NOTES-0.1.0-alpha.7.md](RELEASE-NOTES-0.1.0-alpha.7.md).
 
 ## [0.1.0-alpha.6] - 2026-11-18
 

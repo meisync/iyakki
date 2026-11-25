@@ -1,0 +1,9 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha ca6d9ec9f3bcb5c4; honest subset only: everything not checked is under not-covered.
+row: F-CLI-07
+targets: qemu
+profile: ram
+feature-sha: ca6d9ec9f3bcb5c4
+doc: the Connections tab of the CLI tile connects to a saved host and asks first for a new host key
+human: cli-connect | Open the CLI tile, Connections, add a host of your own, press Connect. Expect: A new host key is shown and asked about first; after yes the default command runs; the tab lists names only.
+not-covered: the Connections tab of the CLI tile connects to a saved host and asks first for a new host key
+needs-hw: a real server to connect to

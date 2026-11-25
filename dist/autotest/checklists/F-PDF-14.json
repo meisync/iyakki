@@ -1,0 +1,60 @@
+{
+ "schema": 1,
+ "row": "F-PDF-14",
+ "feature_sha": "7c882960ee51d688",
+ "title": "pdf_create offer and the writes-PDFs switch (manual until automated)",
+ "clauses": [
+  {
+   "id": "default-offer",
+   "text": "By default the assistant can offer pdf_create, and it asks first.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant to make a PDF of a short note.",
+     "expect": "It asks first with an approval card before it creates the PDF."
+    }
+   ]
+  },
+  {
+   "id": "switch-shows",
+   "text": "The switch is a key on Settings, Models (P) and Settings, Agents (p), and a model or agent that writes PDFs shows the writes PDFs chip.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "As an administrator, open Settings, Models, press P on a model. Then open Settings, Agents and press p on an agent.",
+     "expect": "The model or agent shows the writes PDFs chip. Turn the switch back off and check the chip is gone."
+    }
+   ]
+  },
+  {
+   "id": "chat-tools",
+   "text": "pdf_output_status answers at once; pdf_output_set asks every time and is for administrators.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "Ask the assistant what the PDF output setting is, then ask it to turn the writes-PDFs setting on.",
+     "expect": "The status comes back at once. The change shows an approval card each time, and a person who is not an administrator is refused."
+    }
+   ]
+  },
+  {
+   "id": "effect",
+   "text": "With the switch on, the assistant no longer offers pdf_create for that model or agent, and the other PDF tools stay.",
+   "machines": [
+    "any"
+   ],
+   "steps": [
+    {
+     "do": "With the switch on for the chat model, ask the assistant for a PDF.",
+     "expect": "No pdf_create approval card appears. The other PDF tools still work."
+    }
+   ]
+  }
+ ]
+}

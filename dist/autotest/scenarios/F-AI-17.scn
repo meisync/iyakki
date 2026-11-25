@@ -1,0 +1,8 @@
+# autotest alpha.8 wave 2 (2026-11-21). Written against the Feature text with sha 5347678f01ec3b29; honest subset only: everything not checked is under not-covered.
+row: F-AI-17
+targets: qemu
+profile: ram
+feature-sha: 5347678f01ec3b29
+doc: a background job shows real progress only and a quiet job is a still amber spinner
+human: job-spinner | Start a long Quick install in the Jobs strip and watch it, then start one that prints nothing. Expect: A percentage only when the output gives one; the silent job shows a still amber spinner with how long it has been quiet.
+not-covered: a background job shows real progress only and a quiet job is a still amber spinner

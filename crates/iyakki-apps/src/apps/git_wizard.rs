@@ -1154,14 +1154,8 @@ fn blank_report(c: &Connection) -> TestReport {
     TestReport::blank(c)
 }
 
-/// The dot of a connection in a list: green after a good test, red after a failed one, grey when not tested.
-pub fn dot_color(c: &Connection) -> [u8; 4] {
-    match &c.last_test {
-        Some(t) if t.ok => OK,
-        Some(_) => ERR,
-        None => DIM,
-    }
-}
+/// The dot of a connection in a list: green after a good test, red after a failed one, grey when not tested (the tile crate draws the same dot).
+pub use iyakki_tile_git::git_tile_ui::dot_of as dot_color;
 
 /// Starts the existing Quick install item "Gitea" (it keeps existing volumes and hands the token to the vault). Returns the plain line.
 pub fn start_quick_install_gitea(cx: &super::AppCx) -> Result<String, String> {

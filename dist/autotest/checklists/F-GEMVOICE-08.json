@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-GEMVOICE-08",
+  "feature_sha": "7ec119208208eca7",
+  "title": "Gemini shell: Mic button and Done talking (experimental)",
+  "clauses": [
+    {
+      "id": "mic-button-talk",
+      "text": "The Mic button starts a session and Done talking ends your turn",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "Use the Mic button at the bottom right to start a session, speak, then press Done talking.",
+          "expect": "The reply is spoken back. Super+V starts the same session."
+        }
+      ]
+    }
+  ]
+}

@@ -6,6 +6,9 @@
 //! accounts and writes the core's reading over the claim. A name the core does not know is refused and the call never runs. What the UI
 //! sent in those places is never read by anything.
 //!
+//! Since alpha.8 (SEC3, `served_login.rs`) the account the call names is also held to the account signed in on the connection, the shared-scope
+//! flags come from that account, and `approved` is a core-issued one-time ticket.
+//!
 //! The table is the one reviewed list. `served_auth_audit.rs` (tests) walks every served method and fails when a method takes an
 //! authority-carrying argument that is neither in this table nor in the reviewed allow-list, so a new method cannot reopen the hole.
 
@@ -94,7 +97,9 @@ pub(crate) const RULES: &[Rule] = &[
 pub(crate) enum Why {
     /// The argument is the thing asked for, not a right: the target role of a new account, a skill scope, a chat session.
     Data(&'static str),
-    /// A known gap recorded in `docs/development/ALPHA-7-DECISIONS.md`.
+    /// A known gap recorded in `docs/development/ALPHA-7-DECISIONS.md` (none since alpha.8 SEC3; the variant stays so a new gap is listed
+    /// in the open, never silently).
+    #[allow(dead_code)]
     Open(&'static str),
 }
 
@@ -106,21 +111,6 @@ pub(crate) const ALLOWED: &[(&str, &str, &str, Why)] = &[
     ("SessionApi", "save", "s", Why::Data("a chat session (the history), not an account session")),
     ("SessionApi", "remember_turn", "s", Why::Data("a chat session (the history), not an account session")),
     ("FlowsRuns", "decide", "approved", Why::Data("the person's answer to a pending approval (yes or no); who answers is the account, `by` is replaced in the guard of served_flows.rs")),
-    ("SkillApi", "add", "can_shared", Why::Open("the shared scope names no person, so a UI can claim the right; the personal scope is vouched (D-SEC1-SHARED)")),
-    ("SkillApi", "remove", "can_shared", Why::Open("as SkillApi::add (D-SEC1-SHARED)")),
-    ("PackageApi", "install", "can_shared", Why::Open("as SkillApi::add (D-SEC1-SHARED)")),
-    ("PackageApi", "remove", "can_shared", Why::Open("as SkillApi::add (D-SEC1-SHARED)")),
-    ("PackageApi", "install", "approved", Why::Open("the card the person tapped is the UI's word; the core still checks the plan it made (D-SEC1-APPROVED)")),
-    ("PlatformApi", "apply", "approved", Why::Open("the card the person tapped is the UI's word; the core still checks the plan it made (D-SEC1-APPROVED)")),
-    ("PlatformApi", "apply_with", "approved", Why::Open("the card the person tapped is the UI's word; the core still checks the plan it made (D-SEC1-APPROVED)")),
-    ("PlatformApi", "backup", "approved", Why::Open("the card the person tapped is the UI's word; the core still checks the plan it made (D-SEC1-APPROVED)")),
-    ("PlatformApi", "connect", "approved", Why::Open("the card the person tapped is the UI's word; the core still checks the plan it made (D-SEC1-APPROVED)")),
-    ("PlatformApi", "connect_existing", "approved", Why::Open("the card the person tapped is the UI's word; the core still checks the plan it made (D-SEC1-APPROVED)")),
-    ("PlatformApi", "create_pull_request", "approved", Why::Open("the card the person tapped is the UI's word; the core still checks the plan it made (D-SEC1-APPROVED)")),
-    ("PlatformApi", "power", "approved", Why::Open("the card the person tapped is the UI's word; the core still checks the plan it made (D-SEC1-APPROVED)")),
-    ("PlatformApi", "push", "approved", Why::Open("the card the person tapped is the UI's word; the core still checks the plan it made (D-SEC1-APPROVED)")),
-    ("PlatformApi", "remove", "approved", Why::Open("the card the person tapped is the UI's word; the core still checks the plan it made (D-SEC1-APPROVED)")),
-    ("PlatformApi", "upgrade", "approved", Why::Open("the card the person tapped is the UI's word; the core still checks the plan it made (D-SEC1-APPROVED)")),
 ];
 
 impl Registry<'_> {

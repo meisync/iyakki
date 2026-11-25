@@ -13,6 +13,10 @@ use std::sync::Arc;
 /// A tenant's desktop as the shell sees it.
 pub trait RemoteDesktop: Send {
     fn status(&self) -> Status;
+    /// A line while the link has been down a long time ("the tenant has not answered for 3 minutes; still trying ..."), F-LIFE-17.
+    fn notice(&self) -> Option<String> {
+        None
+    }
     /// Changes whenever the picture does.
     fn generation(&self) -> u64;
     fn picture(&self) -> Option<Picture>;
@@ -111,6 +115,9 @@ impl RemoteDesktop for ClientDesktop {
     fn status(&self) -> Status {
         self.c.status()
     }
+    fn notice(&self) -> Option<String> {
+        self.c.notice()
+    }
     fn generation(&self) -> u64 {
         self.c.generation()
     }
@@ -204,6 +211,9 @@ impl Session {
     }
     pub fn status(&self) -> Status {
         self.desktop.status()
+    }
+    pub fn notice(&self) -> Option<String> {
+        self.desktop.notice()
     }
     pub fn dot(&self) -> Dot {
         dot_of(&self.desktop.status())

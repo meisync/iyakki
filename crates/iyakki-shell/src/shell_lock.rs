@@ -60,6 +60,8 @@ impl Shell {
         let user = s.user.clone();
         self.env.audit.record(&user, "lock", why);
         self.tell_apps_session(&user, "locked");
+        // microphone, camera and screen capture stop with the lock; playback goes on (D-SESSION-END)
+        self.end_session(&user, iyakki_shared::sessionend::Why::Lock, false);
         let vault_was_open = self.env.vault().user_vault_unlocked(&user);
         self.env.services.lock_user_vault(&user);
         // an encrypted home folder closes with the screen when the person chose that (F-STORE-05)

@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-voice-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The pure VOICE model a tile may name, with no agent and no shell: the speech types and rules (engines, settings, host engines, browser voice, WAV helpers) re-exported by iyakki_shared::{voice, hostvoice, hostengines, audioout}, the dictation word corrector's types (dictfix) and the revision kit (revise), re-exported by iyakki_shared::{dictfix, revise} (alpha.10 Q3 and Q4, D-S2-01 option a)."
+
+[dependencies]
+iyakki-story-model = { workspace = true }
+iyakki-speechtime = { workspace = true }
+iyakki-chat-model = { workspace = true }
+iyakki-sec = { workspace = true }
+iyakki-wordtime = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

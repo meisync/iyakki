@@ -16,6 +16,8 @@ if [ "${1:-}" = "--retire" ]; then
   exit 0
 fi
 dir=$(cd "${1:?worktree dir}" && pwd); shift
+# guard (2026-11-24): a first argument that is not a worktree directory made rsync copy "/" to the host; refuse anything without a Cargo.toml
+[ -n "$dir" ] && [ "$dir" != / ] && [ -f "$dir/Cargo.toml" ] || { echo "rcargo: the first argument must be a worktree directory (usage: rcargo WORKTREE_DIR CARGO_ARGS...), got: ${1:-}" >&2; exit 2; }
 name=$(basename "$dir")
 remote=$DISK/src/$name
 target=$DISK/target/$name

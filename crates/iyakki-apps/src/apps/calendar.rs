@@ -90,6 +90,54 @@ impl api::CalendarSource for ShellCalendar<'_> {
     }
 }
 
+/// The same over an owned store and zone, for a port that hands the tile a calendar to keep for a call (the INBOX's date parsing and add-to-calendar).
+pub struct OwnedCalendar {
+    pub store: std::sync::Arc<dyn iyakki_agent_api::CalendarApi>,
+    pub zone: Zone,
+}
+
+impl OwnedCalendar {
+    fn view(&self) -> ShellCalendar<'_> {
+        ShellCalendar { store: &*self.store, zone: &self.zone }
+    }
+}
+
+impl api::CalendarSource for OwnedCalendar {
+    fn local(&self, unix: i64) -> api::Local {
+        self.view().local(unix)
+    }
+    fn local_to_unix(&self, y: i64, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> i64 {
+        self.view().local_to_unix(y, m, d, hh, mm, ss)
+    }
+    fn events_in(&self, user: &str, from: i64, to: i64) -> Vec<api::Occurrence> {
+        self.view().events_in(user, from, to)
+    }
+    fn alarms_in(&self, user: &str, from: i64, to: i64) -> Vec<api::AlarmOccurrence> {
+        self.view().alarms_in(user, from, to)
+    }
+    fn add_event(&self, user: &str, title: &str, start: i64, minutes: u32, all_day: bool, repeat: api::Repeat, notes: &str, by: &str, remind: Option<u32>) -> Result<api::Added, String> {
+        self.view().add_event(user, title, start, minutes, all_day, repeat, notes, by, remind)
+    }
+    fn remove_event(&self, user: &str, id: &str) -> Result<(), String> {
+        self.view().remove_event(user, id)
+    }
+    fn alarms(&self, user: &str) -> Vec<api::Alarm> {
+        self.view().alarms(user)
+    }
+    fn add_alarm(&self, user: &str, label: &str, hour: u32, minute: u32, days: u8, now: i64, by: &str) -> Result<api::Alarm, String> {
+        self.view().add_alarm(user, label, hour, minute, days, now, by)
+    }
+    fn remove_alarm(&self, user: &str, id: &str) -> Result<(), String> {
+        self.view().remove_alarm(user, id)
+    }
+    fn set_alarm_enabled(&self, user: &str, id: &str, on: bool, now: i64) -> Result<(), String> {
+        self.view().set_alarm_enabled(user, id, on, now)
+    }
+    fn next_alarm(&self, user: &str, now: i64) -> Option<api::AlarmOccurrence> {
+        self.view().next_alarm(user, now)
+    }
+}
+
 /// The shell's audit log behind the tile's sink.
 pub struct ShellAudit<'a>(pub &'a dyn iyakki_agent_api::AuditApi);
 

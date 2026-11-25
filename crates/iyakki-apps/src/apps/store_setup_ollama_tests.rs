@@ -3,10 +3,18 @@
 //! where they are"; the review card before anything starts; a move that is too large is not started; the choice reaches the job; the
 //! pod's numbers on the popups; the memory warning in the review; everything at four sizes. Fakes only: no cluster, no network.
 use super::*;
+use crate::apps::store_port::CxPort;
 use crate::apps::store::{Section, StoreApp};
 use crate::apps::{App, AppCx};
-use iyakki_agent::quickinstall::ollama_cluster as oc;
+use iyakki_tile_api::store_qi::ollama_cluster as oc;
 use iyakki_sec::policy::Role;
+
+fn take_mode(data: &std::path::Path) -> Option<oc::Mode> {
+    iyakki_shared::quickinstall::ollama_cluster::take_mode(data).map(|m| match m {
+        iyakki_shared::quickinstall::ollama_cluster::Mode::Move => oc::Mode::Move,
+        iyakki_shared::quickinstall::ollama_cluster::Mode::Fresh => oc::Mode::Fresh,
+    })
+}
 
 const FOUR: [(u32, u32); 4] = [(1280, 720), (1920, 1080), (1024, 600), (800, 480)];
 const GB: u64 = 1 << 30;
@@ -30,7 +38,7 @@ fn rig(tag: &str, role: Role, ollama: Presence, host_bytes: u64) -> (StoreApp, A
     a.setup.launch = Some(qi::Launch { exe: "/usr/bin/true".into(), data: cx.data_dir().join("qi") });
     a.handle(&Event::Tab(4), &cx);
     assert!(a.section == Section::Setup);
-    a.setup.enter(&cx);
+    a.setup.enter(&CxPort(&cx));
     (a, cx)
 }
 
@@ -77,7 +85,7 @@ fn a_host_ollama_is_shown_as_such_with_the_two_ways_into_the_cluster_for_adminis
     let (mut u, cx) = rig("ol-user", Role::User, Presence::Installed(HOST.into()), 5 * GB);
     u.setup.open_popup(Item::Ollama);
     assert!(!u.setup.popup_button_list(Item::Ollama).iter().any(|(l, _)| l.starts_with("Move")));
-    u.setup.ollama_review(oc::Mode::Move, &cx);
+    u.setup.ollama_review(oc::Mode::Move, &CxPort(&cx));
     assert!(u.setup.confirm.is_none() && u.setup.note.as_ref().is_some_and(|n| !n.1 && n.0.contains("administrator")));
 }
 
@@ -90,10 +98,10 @@ fn the_move_review_comes_first_and_the_confirm_leaves_the_choice_for_the_job() {
     assert_eq!(c.title, oc::MOVE_TITLE);
     let text = c.review.join("\n");
     assert!(text.contains("5.0 GB") && text.contains("nothing is deleted from the host") && text.contains("only then is it stopped") && text.contains("MIT") && text.contains("There is room"), "{text}");
-    assert_eq!(oc::take_mode(cx.data_dir()), None, "nothing is recorded before the person confirms");
+    assert_eq!(take_mode(cx.data_dir()), None, "nothing is recorded before the person confirms");
     a.handle(&Event::Tab(CONFIRM_YES), &cx);
     assert!(a.setup.confirm.is_none());
-    assert_eq!(oc::take_mode(cx.data_dir()), Some(oc::Mode::Move));
+    assert_eq!(take_mode(cx.data_dir()), Some(oc::Mode::Move));
 }
 
 #[test]
@@ -105,7 +113,7 @@ fn start_fresh_says_the_host_models_stay_and_leaves_that_choice() {
     assert_eq!(c.title, oc::FRESH_TITLE);
     assert!(c.review.join("\n").contains("not touched and not copied"));
     a.handle(&Event::Tab(CONFIRM_YES), &cx);
-    assert_eq!(oc::take_mode(cx.data_dir()), Some(oc::Mode::Fresh));
+    assert_eq!(take_mode(cx.data_dir()), Some(oc::Mode::Fresh));
 }
 
 #[test]
@@ -119,7 +127,7 @@ fn a_move_that_is_too_large_shows_why_and_starts_nothing() {
     a.handle(&Event::Tab(CONFIRM_YES), &cx);
     assert!(a.setup.confirm.is_some(), "the card stays");
     assert!(a.setup.note.as_ref().is_some_and(|n| !n.1 && n.0.contains("Start fresh")));
-    assert_eq!(oc::take_mode(cx.data_dir()), None, "no choice is recorded and no job started");
+    assert_eq!(take_mode(cx.data_dir()), None, "no choice is recorded and no job started");
 }
 
 #[test]

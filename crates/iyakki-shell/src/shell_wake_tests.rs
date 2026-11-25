@@ -164,6 +164,30 @@ fn signing_out_stops_the_listener() {
 }
 
 #[test]
+fn a_real_sign_out_closes_the_listener_through_the_registry_and_audits_it() {
+    let (mut sh, _g, mic, _t) = setup("wk-endreg");
+    put_model(&sh);
+    opt_in(&sh);
+    assert!(until(&mut sh, |s| s.wake.sign));
+    assert!(mic.0.lock().unwrap().open);
+    sh.sign_out();
+    assert!(!mic.0.lock().unwrap().open, "the microphone is closed when sign-out returns, not on a later beat");
+    assert!(!sh.wake.sign);
+    assert!(audit_text(&sh).contains("\"session.end\",\"detail\":\"wake-listener\""), "{}", audit_text(&sh));
+}
+
+#[test]
+fn a_lock_leaves_the_listener_to_its_own_pause() {
+    let (mut sh, _g, mic, _t) = setup("wk-lockreg");
+    put_model(&sh);
+    opt_in(&sh);
+    assert!(until(&mut sh, |s| s.wake.sign));
+    let rep = sh.end_session("root", iyakki_shared::sessionend::Why::Lock, false);
+    assert!(!rep.stopped.iter().any(|n| n == "wake-listener"), "{:?}", rep.stopped);
+    assert!(mic.0.lock().unwrap().open);
+}
+
+#[test]
 fn a_detection_opens_the_voice_tile_and_asks_for_the_session_once() {
     let (mut sh, _g, mic, _t) = setup("wk-detect");
     put_model(&sh);

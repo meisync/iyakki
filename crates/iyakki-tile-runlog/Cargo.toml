@@ -1,0 +1,17 @@
+[package]
+name = "iyakki-tile-runlog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The RUNS tile (what your agents did, read step by step) and the Jobs strip and list shared with the chat. Rule
+# (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit` and `iyakki-tile-api` only, never on the agent or the shared
+# crate; the shell hands it the run store and the jobs through `RunsPort` and `JobsPort` (fakes in tests). Not `iyakki-tile-runs`: that
+# name is the web page's wasm tile (F-WEB-55).
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-tile-api = { path = "../iyakki-tile-api" }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

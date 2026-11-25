@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-SND-02",
+  "feature_sha": "2d6dddb51f37d463",
+  "title": "a monitor plugged in is picked up as the output",
+  "clauses": [
+    {
+      "id": "monitor-cable",
+      "text": "A real HDMI or DP monitor is plugged in and unplugged on the machine and the sound output follows it (automatic)",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "Unplug the monitor's HDMI or DP cable from the machine, wait about 5 seconds, then plug it back in. Keep Settings, Sound open on the screen.",
+          "expect": "The Sound page changes its output to the monitor when it is plugged in and away from it when it is not, or shows no output with a reason. The sound check itself is recorded by the rig."
+        }
+      ]
+    }
+  ]
+}

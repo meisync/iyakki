@@ -1,0 +1,18 @@
+# autotest alpha.10 batch G (lane SC2, 2026-11-24). Written against the Feature text with sha ab42d066a0a217a9; honest subset only: what a screen or the guest shows is under clause, everything else under not-covered.
+row: F-FLEET-10
+targets: qemu
+profile: ram
+feature-sha: ab42d066a0a217a9
+doc: Settings, Fleet (experimental) carries the TLS channel and member address controls (read only)
+clause: 1 Settings, Fleet (experimental) is the page where the fleet's TLS channel and member addresses are set
+not-covered: members that cannot be reached directly and the relay of F-CORE-17
+not-covered: the controls themselves (no member, no second computer)
+key s
+wait app=Settings
+skip-unless-button Fleet (experimental)
+click-sidebar Fleet (experimental)
+wait app=Settings page="Fleet (experimental)"
+shot page
+expect-not-blank
+expect-text Fleet
+expect-page Fleet (experimental)

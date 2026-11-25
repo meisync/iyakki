@@ -1,0 +1,11 @@
+# autotest alpha.10 (2026-11-24), lane LDR2. Written against the Feature text with sha 2d2691ba1c6a2e26; honest subset only.
+row: F-UPD-31
+targets: qemu
+profile: ram
+feature-sha: 2d2691ba1c6a2e26
+doc: fault injection of a system update on the loader's layout, started by the real loader under OVMF
+clause: 1 the REAL update engine leaves the FAT boot volume in the state a power cut leaves, and the real loader starts the machine until it falls back by itself: the set and the counted starts are the expected ones and the kernel starts every time
+not-covered: a power cut on real hardware (checklist F-UPD-30)
+not-covered: the shell confirming a good start in the started guest
+not-covered: the Secure Boot chain
+host-script: dist/qemu/update-faults-test.py --loader

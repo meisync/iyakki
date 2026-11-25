@@ -4,16 +4,17 @@
 //! screen. The switch (key b) is the first row of the section.
 
 use super::*;
+use super::browser_port::BrowserSettingsPort;
 use super::super::browser_block as bb;
 
 const KEYS_HINT: &str = "Ads and trackers: b switches blocking, l downloads EasyList and EasyPrivacy, u adds a list address, o a list file, v adds uBlock filters, n updates, r removes the lists.";
 
 impl SettingsApp {
     /// The section; returns the height it used.
-    pub(super) fn render_browser_block(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, cx: &AppCx) -> f32 {
-        let store = bb::store(cx);
+    pub(super) fn render_browser_block(&mut self, g: &mut Gfx, a: R, y0: f32, s: f32, p: &dyn BrowserSettingsPort) -> f32 {
+        let store = bb::store(p);
         let lists = store.list();
-        let c = bb::load(cx);
+        let c = bb::load(p);
         let rows = lists.len().min(3);
         let row_h = 64.0 * s;
         let need = 28.0 + 80.0 + (rows.max(1) as f32) * 70.0 + 56.0 + 24.0;
@@ -78,28 +79,28 @@ impl SettingsApp {
     }
 
     /// Keys of the section; true when `k` was one of them.
-    pub(super) fn handle_browser_block(&mut self, k: &Key, cx: &AppCx) -> bool {
+    pub(super) fn handle_browser_block(&mut self, k: &Key, p: &dyn BrowserSettingsPort) -> bool {
         match k {
             Key::Char('b') => {
-                let mut c = bb::load(cx);
+                let mut c = bb::load(p);
                 c.enabled = !c.enabled;
-                bb::save(cx, &c);
-                bb::apply(cx);
+                bb::save(p, &c);
+                bb::apply(p);
                 let what = format!("Block ads and trackers: {}.", if c.enabled { "on" } else { "off" });
-                cx.audit.record(&cx.session.user, "settings.browser", &what);
+                p.audit("settings.browser", &what);
                 self.ok(what);
                 true
             }
             Key::Char('l') => {
-                let _ = self.start_block_job(cx, bb::Job::DownloadStandard, "Downloading EasyList and EasyPrivacy from easylist.to…");
+                let _ = self.start_block_job(p, bb::Job::DownloadStandard, "Downloading EasyList and EasyPrivacy from easylist.to…");
                 true
             }
             Key::Char('v') => {
-                let _ = self.start_block_job(cx, bb::Job::AddKnown("ublock-filters".into()), "Downloading uBlock filters from raw.githubusercontent.com…");
+                let _ = self.start_block_job(p, bb::Job::AddKnown("ublock-filters".into()), "Downloading uBlock filters from raw.githubusercontent.com…");
                 true
             }
             Key::Char('n') => {
-                let _ = self.start_block_job(cx, bb::Job::UpdateAll, "Updating the lists…");
+                let _ = self.start_block_job(p, bb::Job::UpdateAll, "Updating the lists…");
                 true
             }
             Key::Char('u') => {
@@ -113,14 +114,14 @@ impl SettingsApp {
                 true
             }
             Key::Char('r') => {
-                let store = bb::store(cx);
+                let store = bb::store(p);
                 let n = store.list().len();
                 for m in store.list() {
                     store.remove(&m.id);
                 }
                 bb::forget_loaded();
-                bb::apply(cx);
-                cx.audit.record(&cx.session.user, "settings.browser", "Removed the filter lists");
+                bb::apply(p);
+                p.audit("settings.browser", "Removed the filter lists");
                 self.ok(if n == 0 { "There were no lists.".to_string() } else { format!("Removed {n} list{}.", if n == 1 { "" } else { "s" }) });
                 true
             }
@@ -128,10 +129,10 @@ impl SettingsApp {
         }
     }
 
-    fn start_block_job(&mut self, cx: &AppCx, job: bb::Job, started: &str) -> bool {
+    fn start_block_job(&mut self, p: &dyn BrowserSettingsPort, job: bb::Job, started: &str) -> bool {
         let what = format!("Filter lists: {started}");
-        cx.audit.record(&cx.session.user, "settings.browser", &what);
-        if bb::start_job(bb::lists_dir(cx), bb::source(cx), job) {
+        p.audit("settings.browser", &what);
+        if bb::start_job(bb::lists_dir(p), bb::source(p), job) {
             self.ok(started.to_string());
             true
         } else {
@@ -141,7 +142,7 @@ impl SettingsApp {
     }
 
     /// A form of this section was sent: the message, or the reason it was refused.
-    pub(super) fn submit_block_form(&mut self, kind: &FormKind, form: &Form, cx: &AppCx) -> Result<String, String> {
+    pub(super) fn submit_block_form(&mut self, kind: &FormKind, form: &Form, p: &dyn BrowserSettingsPort) -> Result<String, String> {
         match kind {
             FormKind::BlockListUrl => {
                 let u = form.value(0);
@@ -149,23 +150,23 @@ impl SettingsApp {
                 if !(u.starts_with("https://") || u.starts_with("http://")) {
                     return Err("The address must start with https://".into());
                 }
-                if self.start_block_job(cx, bb::Job::AddUrl(u), "Downloading the list…") {
+                if self.start_block_job(p, bb::Job::AddUrl(u), "Downloading the list…") {
                     Ok("Downloading the list…".into())
                 } else {
                     Err("A list job is already running.".into())
                 }
             }
             FormKind::BlockListFile => {
-                let p = form.value(0);
-                let p = p.trim();
-                if p.is_empty() {
+                let file = form.value(0);
+                let file = file.trim();
+                if file.is_empty() {
                     return Err("Choose a file.".into());
                 }
-                let path = std::path::PathBuf::from(p);
+                let path = std::path::PathBuf::from(file);
                 if !path.is_file() {
                     return Err("That file does not exist.".into());
                 }
-                if self.start_block_job(cx, bb::Job::AddFile(path), "Reading the list file…") {
+                if self.start_block_job(p, bb::Job::AddFile(path), "Reading the list file…") {
                     Ok("Reading the list file…".into())
                 } else {
                     Err("A list job is already running.".into())

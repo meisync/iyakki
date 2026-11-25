@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-VOICE-35",
+  "feature_sha": "6bf6bfde862ced34",
+  "title": "My IYAKKI wake phrase (experimental)",
+  "clauses": [
+    {
+      "id": "phrase-speak",
+      "text": "Saying My IYAKKI starts Talk, and the red sign shows while the microphone is open",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "Settings, Voice: press M to turn My IYAKKI on (a model must be in the data folder). Sign in and say 'My IYAKKI' from about 1 to 3 metres several times, and also say ordinary sentences.",
+          "expect": "A red sign shows on every screen while the microphone is open. Talk starts when the phrase is said. A click on the sign switches it off."
+        }
+      ]
+    }
+  ]
+}

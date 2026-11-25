@@ -1,0 +1,25 @@
+{
+ "schema": 1,
+ "row": "F-MEDIA-02",
+ "feature_sha": "ada5a6a86ad87075",
+ "title": "DLNA media server for shared folders",
+ "clauses": [
+  {
+   "id": "dlna-player",
+   "text": "The media server shows the person's shared media to a DLNA player on the same network, and a file plays there.",
+   "machines": [
+    "mac-mini-2014",
+    "mac-mini-2018",
+    "macbook-pro",
+    "lenovo",
+    "hp"
+   ],
+   "steps": [
+    {
+     "do": "Make a shared folder with audio or video in it (Settings, Shares, Files-mode share). On the Shares page press m (Media server) and agree to the card. On a TV or media app on the same network, look for the IYAKKI server and open a file.",
+     "expect": "The IYAKKI server is listed in the player, the shared folder's files are listed, and the file plays. Files outside the shared folder are not listed."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "row": "F-SND-20",
+  "feature_sha": "68b0898fe62931c4",
+  "title": "built-in T2 microphone (experimental switch)",
+  "clauses": [
+    {
+      "id": "t2-mic-speak",
+      "text": "The T2 built-in microphone records your own speech clearly once the experimental switch is on",
+      "machines": [
+        "mac-mini-2018",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "Read the risk card first (Settings, Sound, Microphone, Enter). Only switch it on if you can power the Mac off if it freezes. Then speak a sentence close to the Mac and play it back in the VOICE tile, RECORD tab.",
+          "expect": "Your speech is recorded and plays back clearly at a normal level, with no freeze."
+        }
+      ]
+    }
+  ]
+}

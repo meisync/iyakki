@@ -1,0 +1,13 @@
+[package]
+name = "iyakki-querybox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A small multi-line text box (queries, expressions, flow code): the text engine of the editor and a plain monospace drawing of it. Shared by the DASH and FLOWS tile crates; no files, no dialogs."
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-edit = { workspace = true }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

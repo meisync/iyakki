@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "row": "F-GEMVOICE-10",
+  "feature_sha": "fa2e7e30045b1406",
+  "title": "Gemini's own voice (experimental)",
+  "clauses": [
+    {
+      "id": "gemini-voice",
+      "text": "The answer is spoken in Gemini's voice, and the speaker question appears when another program holds the speaker",
+      "machines": [
+        "mac-mini-2018",
+        "mac-mini-2014",
+        "lenovo",
+        "hp",
+        "macbook-pro"
+      ],
+      "steps": [
+        {
+          "do": "Settings, Gemini voice: set who speaks to gemini. Start a session and ask a question. Then start another sound program and see what asks.",
+          "expect": "The answer sounds natural in Gemini's voice. A card asks Allow or Deny when another program holds the speaker. Allow stops that program."
+        }
+      ]
+    }
+  ]
+}

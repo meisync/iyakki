@@ -1,0 +1,110 @@
+{
+ "schema": 1,
+ "row": "F-SND-09",
+ "feature_sha": "aff01cb2f7b692a1",
+ "title": "mixer: several sounds at once, ducking, no gaps (manual until automated)",
+ "clauses": [
+  {
+   "id": "mix-two",
+   "text": "Two sounds play together (a radio and a notification or chime) and both are heard, without the sum distorting.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Start a radio station, then play a chime or notification sound while it plays.",
+     "expect": "Both are heard together. Neither is cut off, and the sum is not harsh or crackling."
+    }
+   ]
+  },
+  {
+   "id": "duck",
+   "text": "A notification ducks the media: the radio or music fades down with the notification and fades back up after it.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Keep a radio station or a music file playing and trigger a notification sound.",
+     "expect": "The media fades down while the notification plays and fades back up after it. It does not jump."
+    }
+   ]
+  },
+  {
+   "id": "long-play",
+   "text": "Long playback has no clicks, gaps or drop-outs.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Play a music file or a radio station for about two minutes with another window in front.",
+     "expect": "The sound is continuous: no clicks, gaps or repeated bits. Note where any gap happens."
+    }
+   ]
+  },
+  {
+   "id": "rate",
+   "text": "A 44.1 kHz file is resampled to the card's 48 kHz and keeps its pitch and speed.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Play a 44.1 kHz music file, then a 48 kHz one, one after the other.",
+     "expect": "Both sound natural, at the pitch and speed they should have, with no crackle at the change."
+    }
+   ]
+  },
+  {
+   "id": "restart",
+   "text": "The sound card is opened only while something plays and recovers after it was busy.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Stop all sound and wait about ten seconds, then start a radio station again.",
+     "expect": "The sound starts normally without a long delay."
+    }
+   ]
+  },
+  {
+   "id": "shutdown",
+   "text": "Closing the player ends its sounds at once; nothing keeps playing after it is closed.",
+   "machines": [
+    "mac-mini-2018",
+    "lenovo",
+    "macbook-pro",
+    "hp",
+    "mac-mini-2014"
+   ],
+   "steps": [
+    {
+     "do": "Start a radio station, then sign out.",
+     "expect": "The sound stops at once and nothing continues after sign-out."
+    }
+   ]
+  }
+ ]
+}

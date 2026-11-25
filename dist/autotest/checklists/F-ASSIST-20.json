@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "row": "F-ASSIST-20",
+  "feature_sha": "c1c1aa7dd8a576ee",
+  "title": "done needs proof",
+  "clauses": [
+    {
+      "id": "refuse-done",
+      "text": "A row cannot be set to done without a passed test or a verified check",
+      "machines": [
+        "any"
+      ],
+      "steps": [
+        {
+          "do": "Ask the assistant to mark a row done without running a test.",
+          "expect": "The row stays as it was and the answer says done needs a passed test or a verified check."
+        }
+      ]
+    }
+  ]
+}

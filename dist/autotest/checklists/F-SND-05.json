@@ -1,0 +1,38 @@
+{
+ "schema": 1,
+ "row": "F-SND-05",
+ "feature_sha": "7c242323059418e5",
+ "title": "T2 MacBook sound: radio and TALES on the hardware path (manual until automated)",
+ "clauses": [
+  {
+   "id": "t2-plays",
+   "text": "On the T2 MacBook the radio and TALES play through the volume on the hardware path, audibly and without stopping.",
+   "machines": [
+    "macbook-pro"
+   ],
+   "steps": [
+    {
+     "do": "Open Settings, Sound and press Test sound, or Stereo test under Advanced.",
+     "expect": "Sound plays from the speakers in both ears."
+    },
+    {
+     "do": "Start a radio station, then a TALES reading.",
+     "expect": "Both play from the speakers at the same level as the test sound and keep playing without stopping and restarting."
+    }
+   ]
+  },
+  {
+   "id": "radio-words",
+   "text": "When a player refuses to start, the radio quotes the player's own complaint in words instead of only pointing to Settings, Voice.",
+   "machines": [
+    "macbook-pro"
+   ],
+   "steps": [
+    {
+     "do": "If a station will not start on this Mac, read the message the radio shows.",
+     "expect": "The message quotes what the player said, for example that it could not install its parameters. It does not only say to open Settings, Voice. If the station plays, write that nothing needed saying."
+    }
+   ]
+  }
+ ]
+}

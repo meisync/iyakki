@@ -6,11 +6,10 @@
 //! * Public keys are pasted as one `ssh-ed25519 ...` line (a private key or a password is refused by the form, as it is for the tool).
 //! * Every change is audited as `sftp.*` with the person's name (no key text, no password).
 
-use std::sync::Arc;
 
 use super::*;
+use crate::apps::settings::network_port::NetworkSettingsPort;
 use iyakki_shared::sftp::{EXPIRIES};
-use iyakki_agent_api::{SftpServer};
 use iyakki_shared::sftp;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,28 +25,9 @@ pub(crate) enum SftpForm {
     RemoveKey,
 }
 
-/// The shared SFTP server of this process, with the shell's own accounts as the login check (the same wiring the assistant's tool uses).
-pub(crate) fn sftp_for(cx: &AppCx) -> Arc<dyn SftpServer> {
-    #[cfg(any(test, feature = "testing"))]
-    if let Some(s) = TEST_SFTP.with(|t| t.borrow().clone()) {
-        return s;
-    }
-    let audit = cx.audit.clone();
-    let (s1, s2) = (cx.store.clone(), cx.store.clone());
-    let login: iyakki_agent_api::SftpLogin = Arc::new(move |n, p| s1.lock().unwrap_or_else(|e| e.into_inner()).authenticate(n, p).map(|s| s.policy).map_err(|e| e.to_string()));
-    let lookup: iyakki_agent_api::SftpLookup = Arc::new(move |n| {
-        let mut s = s2.lock().unwrap_or_else(|e| e.into_inner());
-        s.refresh();
-        s.get(n).map(|u| u.policy())
-    });
-    cx.services.sftp_server(cx.data_dir(), login, lookup, Arc::new(move |e, d| audit.record("sftp", e, d)))
-}
-
 #[cfg(any(test, feature = "testing"))]
-thread_local! {
-    /// A server with a fake firewall for one test thread (the real one would touch the machine's firewall).
-    pub(crate) static TEST_SFTP: std::cell::RefCell<Option<Arc<dyn SftpServer>>> = const { std::cell::RefCell::new(None) };
-}
+#[allow(unused_imports)]
+pub(crate) use crate::apps::settings::network_port::TEST_SFTP;
 
 fn expiry_words(secs: u64) -> String {
     if secs == 0 { "until you stop it".into() } else { format!("for {}", EXPIRIES.iter().find(|(_, s)| *s == secs).map_or(format!("{secs} s"), |(l, _)| l.to_string())) }
@@ -86,10 +66,10 @@ impl SettingsApp {
     }
 
     /// The lines of the SFTP part of the page (state, accounts with their key fingerprints, host key).
-    pub(crate) fn sftp_lines(&self, cx: &AppCx, lines: &mut Vec<(String, f32, [u8; 4], Face)>) {
-        let st = sftp_for(cx).status();
+    pub(crate) fn sftp_lines(&self, p: &dyn NetworkSettingsPort, lines: &mut Vec<(String, f32, [u8; 4], Face)>) {
+        let st = p.sftp_server().status();
         lines.push(("SFTP file server".into(), 14.0, TEXT, Face::Bold));
-        for (i, l) in cx.services.sftp_status_lines(cx.data_dir()).into_iter().take(2).enumerate() {
+        for (i, l) in p.sftp_status_lines().into_iter().take(2).enumerate() {
             lines.push((l, 13.0, if i == 0 { TEXT } else { MUTED }, Face::Sans));
         }
         lines.push((format!("Stops by itself {}. Port {}.", expiry_words(st.config.expiry_secs), st.config.port), 13.0, MUTED, Face::Sans));
@@ -133,20 +113,20 @@ impl SettingsApp {
     }
 
     /// Keys of the SFTP part; true when the key was one of ours.
-    pub(super) fn sftp_key(&mut self, k: &Key, cx: &AppCx) -> bool {
+    pub(super) fn sftp_key(&mut self, k: &Key, p: &dyn NetworkSettingsPort) -> bool {
         let Key::Char(c) = k else { return false };
         if !matches!(c, 'F' | 'U' | 'W' | 'K' | 'R' | 'T' | 'C') {
             return false;
         }
-        if !self.admin(cx) {
+        if !self.admin(p) {
             return true;
         }
-        let sftp = sftp_for(cx);
+        let sftp = p.sftp_server();
         let cfg = sftp.config();
         match c {
             'F' => {
                 if sftp.status().running {
-                    sftp.disable(&cx.session.user);
+                    sftp.disable(p.acting_user());
                     self.ok("The SFTP server is stopped and its firewall opening is closed.");
                 } else if let Some(p) = sftp.problem() {
                     self.fail(format!("Not started: {p}."));
@@ -161,7 +141,7 @@ impl SettingsApp {
                         Ok(())
                     }) {
                         Ok(_) => {
-                            cx.audit.record(&cx.session.user, "sftp.password_login", "off");
+                            p.audit("sftp.password_login", "off");
                             self.ok("SFTP logins with an account password are off: keys only.");
                         }
                         Err(e) => self.fail(e),
@@ -175,9 +155,9 @@ impl SettingsApp {
             'U' => self.open_form(FormKind::Sftp(SftpForm::Accounts), Form::new("Accounts that may log in to SFTP").text("Accounts", &cfg.users.join(", "), "names separated by commas; empty: nobody")),
             'K' => self.open_form(
                 FormKind::Sftp(SftpForm::AddKey),
-                Form::new("Add a public key for SFTP").text("Account", cfg.users.first().map_or(&cx.session.user, |u| u), "an account name").text("Public key", "", "one line: ssh-ed25519 AAAA... comment. Never a private key."),
+                Form::new("Add a public key for SFTP").text("Account", cfg.users.first().map_or(p.acting_user(), |u| u), "an account name").text("Public key", "", "one line: ssh-ed25519 AAAA... comment. Never a private key."),
             ),
-            'R' => self.open_form(FormKind::Sftp(SftpForm::RemoveKey), Form::new("Remove an SFTP key").text("Account", cfg.users.first().map_or(&cx.session.user, |u| u), "an account name").text("Fingerprint", "", "SHA256:... as listed on this page")),
+            'R' => self.open_form(FormKind::Sftp(SftpForm::RemoveKey), Form::new("Remove an SFTP key").text("Account", cfg.users.first().map_or(p.acting_user(), |u| u), "an account name").text("Fingerprint", "", "SHA256:... as listed on this page")),
             'T' => {
                 let i = EXPIRIES.iter().position(|(_, s)| *s == cfg.expiry_secs).map_or(0, |i| (i + 1) % EXPIRIES.len());
                 let secs = EXPIRIES[i].1;
@@ -186,7 +166,7 @@ impl SettingsApp {
                     Ok(())
                 }) {
                     Ok(_) => {
-                        cx.audit.record(&cx.session.user, "sftp.expiry", &secs.to_string());
+                        p.audit("sftp.expiry", &secs.to_string());
                         self.ok(format!("The SFTP server will stop by itself {} (counted from the next start).", expiry_words(secs)));
                     }
                     Err(e) => self.fail(e),
@@ -205,13 +185,13 @@ impl SettingsApp {
         true
     }
 
-    pub(in crate::apps) fn sftp_confirm(&mut self, cx: &AppCx, act: SftpAct) {
-        if !self.admin(cx) {
+    pub(in crate::apps) fn sftp_confirm(&mut self, p: &dyn NetworkSettingsPort, act: SftpAct) {
+        if !self.admin(p) {
             return;
         }
-        let sftp = sftp_for(cx);
+        let sftp = p.sftp_server();
         match act {
-            SftpAct::Start => match sftp.enable(&cx.session.user) {
+            SftpAct::Start => match sftp.enable(p.acting_user()) {
                 Ok(st) => self.ok(format!("The SFTP server is on at port {}{}.", st.port, if st.until == 0 { String::new() } else { " and stops by itself".into() })),
                 Err(e) => self.fail(e),
             },
@@ -220,7 +200,7 @@ impl SettingsApp {
                 Ok(())
             }) {
                 Ok(_) => {
-                    cx.audit.record(&cx.session.user, "sftp.password_login", "on");
+                    p.audit("sftp.password_login", "on");
                     self.ok("SFTP logins with an account password are allowed, besides keys.");
                 }
                 Err(e) => self.fail(e),
@@ -228,11 +208,11 @@ impl SettingsApp {
         }
     }
 
-    pub(in crate::apps) fn sftp_submit(&mut self, cx: &AppCx, k: &SftpForm, form: &mut Form) -> Result<String, String> {
-        if !self.admin(cx) {
+    pub(in crate::apps) fn sftp_submit(&mut self, p: &dyn NetworkSettingsPort, k: &SftpForm, form: &mut Form) -> Result<String, String> {
+        if !self.admin(p) {
             return Err("Only administrators can change the SFTP server.".into());
         }
-        let sftp = sftp_for(cx);
+        let sftp = p.sftp_server();
         let plain = |s: &str| !(s.contains("PRIVATE KEY") || s.contains("-----BEGIN") || s.len() > 700);
         match k {
             SftpForm::Accounts => {
@@ -241,7 +221,7 @@ impl SettingsApp {
                     c.users = users;
                     Ok(())
                 })?;
-                cx.audit.record(&cx.session.user, "sftp.users", &c.users.join(","));
+                p.audit("sftp.users", &c.users.join(","));
                 Ok(if c.users.is_empty() { "Nobody may log in to SFTP now.".into() } else { format!("SFTP accounts allowed: {}.", c.users.join(", ")) })
             }
             SftpForm::AddKey => {
@@ -253,7 +233,7 @@ impl SettingsApp {
                     return Err("The account must be a name: lower-case letters, digits, - and _.".into());
                 }
                 let fp = sftp.add_key(&user, &line)?;
-                cx.audit.record(&cx.session.user, "sftp.key_add", &format!("{user} {fp}"));
+                p.audit("sftp.key_add", &format!("{user} {fp}"));
                 Ok(format!("Key {fp} added for {user}."))
             }
             SftpForm::RemoveKey => {
@@ -262,7 +242,7 @@ impl SettingsApp {
                     return Err("The account must be a name: lower-case letters, digits, - and _.".into());
                 }
                 sftp.remove_key(&user, &fp)?;
-                cx.audit.record(&cx.session.user, "sftp.key_remove", &format!("{user} {}", fp.trim()));
+                p.audit("sftp.key_remove", &format!("{user} {}", fp.trim()));
                 Ok(format!("Key removed for {user}."))
             }
         }

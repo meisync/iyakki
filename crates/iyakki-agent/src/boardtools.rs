@@ -1232,7 +1232,7 @@ impl Tools for ProjectTools {
 
     fn approved_always(&self, name: &str) -> bool {
         // writes to a cluster are approved one at a time; "always" lasts for reads and the other tools only
-        !matches!(name, "k8s_apply" | "k8s_delete" | "k8s_rollout_restart" | "k8s_port_forward" | "deploy_load" | "k8s_stop_env" | "k8s_teardown" | "k8s_registry_cleanup" | "platform_deploy" | "platform_upgrade" | "platform_remove") && self.inner.approved_always(name)
+        !matches!(name, "k8s_apply" | "k8s_delete" | "k8s_rollout_restart" | "k8s_port_forward" | "k8s_exec_terminal" | "deploy_load" | "k8s_stop_env" | "k8s_teardown" | "k8s_registry_cleanup" | "platform_deploy" | "platform_upgrade" | "platform_remove") && self.inner.approved_always(name)
     }
 
     /// A session grant for a cluster tool covers that cluster and namespace only, and never a remote or production cluster.
